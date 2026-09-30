@@ -535,6 +535,8 @@ jobs:
           pair_symbols = {"_mrk_wrapping_pair_abi", "_mrk_wrapping_pair_frame_bytes", "_mrk_wrapping_pair_acl_frame_bytes",
                           "_mrk_wrapping_pair_new", "_mrk_wrapping_pair_step", "_mrk_wrapping_pair_free"}
           fixture_symbols |= pair_symbols
+          reader_phase_symbols = {"_mrk_wrapping_reader_phase_account", "_mrk_wrapping_reader_phase_open",
+                                  "_mrk_wrapping_reader_phase_write", "_mrk_wrapping_reader_phase_close"}
           creator_identifier = "dev.mobile-release-kit.qualification.wrapping.creator"
           reader_identifier = "dev.mobile-release-kit.qualification.wrapping.reader"
           case_names = ("Selector", "HelperShapes", "AddBaseline", "LookupBaseline", "DuplicateBaseline", "MissingOther",
@@ -1072,12 +1074,188 @@ jobs:
                       or pair["readerNativeAdmitted"] is not True or pair["ackEntered"] is not False):
                   raise ValueError("pair-ack-before-reader-finality-or-late")
 
+          def reader_phase_registration():
+              # Registered before preparation/GO; raw header/FDs/errors never enter receipts.
+              row = {key: False for key in ("openEntered", "openReturned", "acquired", "writeEntered", "writeReturned",
+                  "syncEntered", "syncReturned", "initialized", "finishEntered", "writerSettled", "readEntered", "readReturned",
+                  "removeEntered", "removeReturned", "absenceObserved", "closeEntered", "closeReturned", "closed", "retired")}
+              row.update(role="reader-phase", fileBytes=2176, writtenBytes=0,
+                         projection={"state": "unavailable", "events": [], "historyOnly": True, "currentCallKnown": False})
+              return {"fd": None, "pin": None, "parentPin": None, "header": None, "record": row, "errors": []}
+
+          def reader_phase_identity(value):
+              return (value.st_dev & 0xffffffff, value.st_ino, value.st_mode, value.st_uid, value.st_gid)
+
+          def reader_phase_header(root, parent, original):
+              identities = [reader_phase_identity(value) for value in (root, parent, original)]
+              for i, identity in enumerate(identities):
+                  if (any(type(v) is not int or not 0 <= v < 1 << 64 for v in identity)
+                          or identity[1] == 0 or identity[2] != (0o100600 if i == 2 else 0o040700)
+                          or not 0 < identity[3] < 1 << 32 or not 0 <= identity[4] < 1 << 32
+                          or identity[3:] != identities[0][3:]):
+                      raise ValueError("pair-reader-phase-header-binding")
+              return b"MRKQDG01" + b"".join(struct.pack("<5Q", *identity) for identity in identities)
+
+          def reader_phase_bound(cell, parent_fd):
+              if cell["fd"] is None or cell["pin"] is None or cell["parentPin"] is None:
+                  raise ValueError("pair-reader-phase-original-unbound")
+              if not pair_directory_same(os.fstat(parent_fd), cell["parentPin"]):
+                  raise ValueError("pair-reader-phase-parent-changed")
+              actual = os.fstat(cell["fd"])
+              named = os.stat("wrapping-reader-phase.bin", dir_fd=parent_fd, follow_symlinks=False)
+              if (sig(actual) != sig(named) or sig(actual)[:6] != sig(cell["pin"])[:6]
+                      or actual.st_mode != 0o100600 or actual.st_nlink != 1 or not 0 <= actual.st_size <= 2176):
+                  raise ValueError("pair-reader-phase-original-changed")
+              return actual
+
+          def reader_phase_prepare(cell, parent_fd, root_pin, check_time):
+              row = cell["record"]
+              if row["openEntered"]: raise ValueError("pair-reader-phase-single-preparation")
+              check_time()
+              cell["parentPin"] = os.fstat(parent_fd)
+              row["openEntered"] = True
+              try:
+                  cell["fd"] = os.open("wrapping-reader-phase.bin",
+                      os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=parent_fd)
+              except OSError:
+                  # A returned OS refusal acquired no FD. An interruption remains Unknown.
+                  row["openReturned"] = True
+                  raise
+              row["openReturned"] = True; row["acquired"] = True
+              cell["pin"] = os.fstat(cell["fd"])
+              pin = reader_phase_bound(cell, parent_fd)
+              if (pin.st_size != 0 or (pin.st_uid, pin.st_gid) != (os.getuid(), os.getgid())
+                      or os.getuid() == 0 or os.getuid() != os.geteuid() or os.getgid() != os.getegid()):
+                  raise ValueError("pair-reader-phase-ordinary-original")
+              header = reader_phase_header(root_pin, cell["parentPin"], pin); cell["header"] = header
+              data = header + bytes(2048)
+              check_time(); row["writeEntered"] = True
+              written = os.write(cell["fd"], data); row["writeReturned"] = True; row["writtenBytes"] = written
+              if written != 2176: raise ValueError("pair-reader-phase-initial-write")
+              check_time(); row["syncEntered"] = True
+              os.fsync(cell["fd"]); row["syncReturned"] = True
+              before = reader_phase_bound(cell, parent_fd)
+              check_time()
+              readback = os.pread(cell["fd"], 2176, 0)
+              check_time()
+              eof = os.pread(cell["fd"], 1, 2176)
+              if readback != data or eof or sig(reader_phase_bound(cell, parent_fd)) != sig(before):
+                  raise ValueError("pair-reader-phase-initial-readback")
+              check_time(); row["initialized"] = True
+
+          def reader_phase_projection(data, header):
+              if type(data) is not bytes or len(data) != 2176 or type(header) is not bytes or len(header) != 128 or header[:8] != b"MRKQDG01" or data[:128] != header:
+                  raise ValueError("pair-reader-phase-snapshot-shape")
+              coarse = ("diagnostic-opened", "control-reserve-before", "control-reserve-returned", "control-initialize-before",
+                  "control-initialize-returned", "ready-read-before", "ready-read-returned", "peer-construct-before",
+                  "peer-construct-returned", "peer-run-before", "peer-run-returned", "control-finish-before",
+                  "control-finish-returned", "report-build-before", "report-build-returned", "stdout-lock-before",
+                  "stdout-lock-returned", "stdout-write-before", "stdout-write-returned", "stdout-flush-before",
+                  "stdout-flush-returned", "reader-run-returned", "panic-observed", "diagnostic-close-before")
+              phases = ("entry", "account", "path", "open", "get-path", "get-status", "query", "trusted", "access",
+                  "add", "lookup", "parent", "validate", "release", "delivery", "return", "namespace", "filesystem", "acl", "uuid", "fd-release")
+              checkpoints = ("before-call", "after-call", "before-release", "before-delivery")
+              events, seen = [], set()
+              state = "empty"
+              for slot in range(128):
+                  at = 128 + slot * 16; record = data[at:at + 16]
+                  if record == bytes(16):
+                      if any(data[at:]): state = "partial"
+                      break
+                  magic, sequence, event, guard = struct.unpack("<4I", record)
+                  if (magic != 0x31514744 or sequence != slot + 1 or guard != (0x4d524b31 ^ sequence ^ event)
+                          or event in seen or not (1 <= event <= 24 or 65 <= event <= 148)):
+                      state = "partial"; break
+                  seen.add(event)
+                  events.append(coarse[event - 1] if event <= 24
+                                else "native:" + phases[(event - 65) // 4] + ":" + checkpoints[(event - 65) % 4])
+                  state = "prefix"
+              return {"state": state, "events": events, "historyOnly": True, "currentCallKnown": False}
+
+          def reader_phase_writer_settled(original):
+              row, result, error = original["record"], original["result"], original["error"]
+              if row["entered"] is False:
+                  return row["returned"] is False and result is None and error is None
+              if row["entered"] is not True: return False
+              if error is None:
+                  return (row["returned"] is True and type(result) is subprocess.CompletedProcess
+                          and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
+                          and len(result.stdout) + len(result.stderr) <= 256 * 1024)
+              if row["returned"] is not False or result is not None or not isinstance(error, owner.ProcessError): return False
+              pending, seen = [error], set()
+              while pending:
+                  current = pending.pop()
+                  if id(current) in seen: continue
+                  if len(seen) >= 64: return False
+                  seen.add(id(current))
+                  if isinstance(current, owner.ProcessInterrupted): return False
+                  if isinstance(current, owner.ProcessError):
+                      if getattr(current, "contained", None) is not True or getattr(current, "cleanup_complete", None) is not True:
+                          return False
+                  for cause in (current.__context__, current.__cause__):
+                      if cause is not None: pending.append(cause)
+              return True
+
+          def reader_phase_collect(cell, parent_fd, original, check_time):
+              row, errors = cell["record"], cell["errors"]
+              if row["finishEntered"]: return errors
+              row["finishEntered"] = True
+              row["writerSettled"] = reader_phase_writer_settled(original)
+              if not row["writerSettled"]: return errors  # No snapshot, unlink or close while writer custody is uncertain.
+              if cell["fd"] is None:
+                  row["retired"] = not row["openEntered"] or row["openReturned"] and not row["acquired"]
+                  return errors
+              try:
+                  check_time()  # Original drain endpoint, independent of the already-latched owner failure.
+                  before = reader_phase_bound(cell, parent_fd)
+                  if row["initialized"]:
+                      check_time()
+                      row["readEntered"] = True
+                      data = os.pread(cell["fd"], 2176, 0)
+                      eof = os.pread(cell["fd"], 1, 2176)
+                      row["readReturned"] = True
+                      if eof or sig(reader_phase_bound(cell, parent_fd)) != sig(before):
+                          raise ValueError("pair-reader-phase-snapshot-changed")
+                      check_time()
+                      row["projection"] = reader_phase_projection(data, cell["header"])
+                      if row["projection"]["state"] == "partial":
+                          errors.append(ValueError("pair-reader-phase-incomplete-history"))
+                  elif original["record"]["entered"] is not False:
+                      raise ValueError("pair-reader-phase-uninitialized-writer")
+                  # Partial parent initialization still owns this exact bounded sibling.
+                  # Header/read failures above preserve the name; independent close still runs.
+                  if sig(reader_phase_bound(cell, parent_fd)) != sig(before):
+                      raise ValueError("pair-reader-phase-preremoval-changed")
+                  check_time()
+                  row["removeEntered"] = True
+                  os.unlink("wrapping-reader-phase.bin", dir_fd=parent_fd); row["removeReturned"] = True
+                  try: os.stat("wrapping-reader-phase.bin", dir_fd=parent_fd, follow_symlinks=False)
+                  except FileNotFoundError: row["absenceObserved"] = True
+                  else: raise ValueError("pair-reader-phase-name-still-present")
+                  check_time()
+              except BaseException as error:
+                  errors.append(error)
+              finally:
+                  if not row["closeEntered"]:
+                      fd, cell["fd"] = cell["fd"], None
+                      cell["consumedFd"] = fd; row["closeEntered"] = True
+                      try:
+                          os.close(fd); row["closeReturned"] = True; row["closed"] = True
+                      except BaseException as error: errors.append(error)
+              # Close is unconditional once admitted above; a late close is still failure,
+              # never permission to retry that original or renew the aggregate endpoint.
+              try: check_time()
+              except BaseException as error: errors.append(error)
+              row["retired"] = row["removeReturned"] and row["absenceObserved"] and row["closed"]
+              return errors
+
+
           def pair_finality(pair):
               return (pair["aborted"] is False and not pair["errors"] and pair.get("ackResult") == 0 and type(pair.get("ackResult")) is int
                   and pair.get("ackErrno") == 0 and type(pair.get("ackErrno")) is int
                   and all(pair.get(key) is True for key in ("startAttempted", "startReturned", "joinAttempted", "joinReturned", "joined", "joinedBeforeDrain",
                       "readyAdmitted", "readerOwnerReturned", "readerNativeAdmitted", "creatorNativeAdmitted", "ackEntered", "ackReturned",
-                      "ackMayHavePublished", "ackPublished", "controlRetired", "controlOriginalsClosed")))
+                      "ackMayHavePublished", "ackPublished", "controlRetired", "controlOriginalsClosed", "readerPhaseRetired")))
 
           def admit_peer_case(value, reader, frame_bytes):
               exact_keys(value, "nativeReturned verified retainedNativeBytes frameRetired scopedValuePresent selection comparison raw")
@@ -1338,7 +1516,7 @@ jobs:
                       "startAttempted": False, "startReturned": False, "joinAttempted": False, "joinReturned": False, "joined": False,
                       "readyAdmitted": False, "readerOwnerReturned": False, "readerNativeAdmitted": False, "creatorNativeAdmitted": False,
                       "ackEntered": False, "ackReturned": False, "ackMayHavePublished": False, "ackPublished": False,
-                      "controlRetired": False, "aborted": False, "passed": False, "errors": [], "controlCalls": [],
+                      "controlRetired": False, "readerPhaseRetired": False, "aborted": False, "passed": False, "errors": [], "controlCalls": [],
                       "prelaunch": {"phase": "setup", "predicate": None, "returned": False, "firstFailure": None},
                       "directoryLinks": {"initial": None, "held": None, "named": None}}
               receipt["pair"] = pair
@@ -1353,13 +1531,15 @@ jobs:
                   "acquired": False, "closeEntered": False, "closeReturned": False, "closed": False}}
                   for role in ("parent", "root", "request-write", "request", "ready", "reader-settled.next", "reader-settled")]
               pair["controlCalls"] = [cell["record"] for cell in resources]
+              phase_original = reader_phase_registration()
+              pair["readerPhase"] = phase_original["record"]
               reader_record = {"role": "wrapping-peer-reader", "argv": [str(reader["path"])], "timeoutSeconds": None,
                                "outputBound": 256 * 1024, "entered": False, "returned": False, "ownerCallPhase": "registered",
                                "dispatched": None, "contained": None, "cleanupComplete": None,
                                "ownerFailureCategory": None, "ownerAttemptElapsedSeconds": None}
               reader_original = {"record": reader_record, "result": None, "error": None}
               receipt["calls"].append(reader_record)
-              pair_original = {"pairWorker": holder, "pairReader": reader_original, "pairResources": resources, "pairErrors": original_errors, "thread": None}
+              pair_original = {"pairWorker": holder, "pairReader": reader_original, "pairResources": resources, "readerPhase": phase_original, "pairErrors": original_errors, "thread": None}
               originals.append(pair_original)
               parent_fd, root_fd, root_pin, nonce, root_identity = None, None, None, None, None
               cells = {}
@@ -1372,6 +1552,9 @@ jobs:
               def check_time(endpoint):
                   mark("deadline")
                   if abort.is_set() or time.monotonic() >= endpoint: raise ValueError("pair-forward-admission-spent")
+              def reader_phase_check_time():
+                  # Failure is already latched; only the original drain endpoint gates diagnostics.
+                  if time.monotonic() >= drain_end: raise ValueError("pair-reader-phase-drain-spent")
               def resource(role, acquire):
                   mark("control-registration")
                   matching = [cell for cell in resources if cell["record"]["role"] == role]
@@ -1476,6 +1659,9 @@ jobs:
                   mark("binary-digest", "binary-admission")
                   for original in (creator, reader):
                       if file_digest(original) != original["sha256"]: raise ValueError("pair-prelaunch-binary-changed")
+                  # One registered fixed sibling, outside the exact control namespace.
+                  reader_phase_prepare(phase_original, parent_fd, root_pin, lambda: check_time(launch_end))
+                  check_time(launch_end)
                   mark("worker-create", "worker-prepare")
                   argv = [str(creator["path"]), "--exact", creator_entry, "--test-threads=1", "--color=never", "--format=pretty", "--nocapture"]
                   worker = threading.Thread(target=creator_worker, args=(holder, lock, abort, argv, control, launch_end, drain_end), daemon=False)
@@ -1582,6 +1768,12 @@ jobs:
                           publish("wrapping-creator.report.json", (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
                           admit_native_report(result, creator_entry); pair["creatorNativeAdmitted"] = True
                       except BaseException as error: fail(error)
+                  # Read only after this original reader writer is proved settled.
+                  # Collect failures without replacing its owner exception or calls.
+                  try:
+                      for error in reader_phase_collect(phase_original, parent_fd, reader_original, reader_phase_check_time): fail(error)
+                  except BaseException as error: fail(error)
+                  pair["readerPhaseRetired"] = phase_original["record"]["retired"]
                   try:
                       if (not original_errors and not abort.is_set() and pair["joined"] and pair["readerNativeAdmitted"]
                               and pair["creatorNativeAdmitted"] and pair["ackPublished"]):
@@ -1609,6 +1801,9 @@ jobs:
                       cell["record"]["openReturned"] and cell["record"]["acquired"] and cell["record"]["closed"] for cell in resources)
                   pair["worker"] = {key: holder[key] for key in ("bodyEntered", "bodyReturned", "ownerEntered", "ownerReturned", "guardInstalled", "guardActivated", "guardRestored", "guardChecked", "guardState")}
                   pair["worker"]["timeoutSeconds"] = holder.get("timeoutSeconds")
+                  # The old retirement/close tail cannot turn late completion into pair success.
+                  try: reader_phase_check_time()
+                  except BaseException as error: fail(error)
                   pair["aborted"] = abort.is_set()
                   pair["errors"] = [type(error).__name__ for error in original_errors]
                   pair["passed"] = pair_finality(pair)
@@ -1766,6 +1961,12 @@ jobs:
                       observed = symbols & fixture_symbols
                       if observed != (fixture_symbols if role == "qualification" else set()):
                           raise ValueError("wrapping-native-cfg-exclusion")
+                      observed_phase = symbols & reader_phase_symbols
+                      # Reader-only functions may be dead-stripped from the qualification test binary.
+                      # They must exist in its native archive and never in ordinary profiles.
+                      if ((role != "qualification" and observed_phase)
+                              or (cell["role"] == "qualification-archive" and observed_phase != reader_phase_symbols)):
+                          raise ValueError("pair-reader-phase-symbol-profile")
                       if file_digest(cell) != cell["sha256"]: raise ValueError("wrapping-post-symbol-artifact-changed")
                       variant["fixtureSymbols"].append(sorted(observed))
                       variant["artifacts"].append({"role": cell["role"], "path": str(cell["path"].relative_to(work)),
@@ -1785,13 +1986,13 @@ jobs:
                       result, row = invoke("reader-binary-symbols", ["/usr/bin/nm", "-gU", str(reader_path)], environ=native_env, cwd=work, timeout=30, limit=2 * 1024 * 1024)
                       if result.returncode != 0 or result.stderr: raise ValueError("pair-reader-symbol-original")
                       symbols = {line.split()[-1] for line in result.stdout.decode("ascii", "strict").splitlines() if line.split()}
-                      if not pair_symbols <= symbols or file_digest(reader_binary) != reader_binary["sha256"]:
+                      if not (pair_symbols | reader_phase_symbols) <= symbols or file_digest(reader_binary) != reader_binary["sha256"]:
                           raise ValueError("pair-reader-private-symbol-binding")
                       if sig(reader_binary["before"])[:2] == sig(qualification_binary["before"])[:2]: raise ValueError("pair-distinct-file-originals")
                       for identity, cell in zip(receipt["codeIdentities"], (qualification_binary, reader_binary)):
                           identity["fileSha256"] = cell["sha256"]
                       distinct_code_identities(*receipt["codeIdentities"])
-                      receipt["readerArtifact"] = {"sha256": reader_binary["sha256"], "identity": sig(reader_binary["before"]), "profile": reader_artifact["profile"], "pairSymbols": sorted(pair_symbols)}
+                      receipt["readerArtifact"] = {"sha256": reader_binary["sha256"], "identity": sig(reader_binary["before"]), "profile": reader_artifact["profile"], "pairSymbols": sorted(pair_symbols), "readerPhaseSymbols": sorted(reader_phase_symbols)}
               if qualification_binary is None or reader_binary is None or len(receipt["variants"]) != 3: raise ValueError("wrapping-no-admitted-binary")
               # Exactly three predeclared originals share ONE compiled binary.
               # Each entry starts its own original45s cutoff; each90s enclosure

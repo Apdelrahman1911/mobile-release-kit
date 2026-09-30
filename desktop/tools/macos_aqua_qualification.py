@@ -192,6 +192,7 @@ ACCESSIBILITY_ERRORS = frozenset((
 ACCESSIBILITY_AX_FAILURE_OPERATIONS = (
     "set-messaging-timeout", "copy-attribute-value", "get-attribute-value-count", "copy-attribute-values",
     "copy-action-names", "is-attribute-settable", "set-attribute-value", "perform-action",
+    "copy-multiple-attribute-values",
 )
 ACCESSIBILITY_AX_FAILURE_ATTRIBUTES = (
     None, "Parent", "Role", "Identifier", "Title", "Value", "Enabled",
@@ -201,7 +202,7 @@ ACCESSIBILITY_AX_FAILURE_PAIRS = frozenset(
     (ACCESSIBILITY_AX_FAILURE_OPERATIONS[operation - 1], ACCESSIBILITY_AX_FAILURE_ATTRIBUTES[attribute])
     for operation, attributes in (
         (1, (0,)), (2, range(1, 7)), (3, range(7, 12)), (4, range(7, 12)),
-        (5, (0,)), (6, (10, 11)), (7, (10, 11)), (8, (0,)),
+        (5, (0,)), (6, (10, 11)), (7, (10, 11)), (8, (0,)), (9, (0,)),
     )
     for attribute in attributes
 )

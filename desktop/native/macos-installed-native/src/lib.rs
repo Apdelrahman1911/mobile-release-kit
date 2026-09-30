@@ -957,9 +957,10 @@ mod observation {
         pub operation: &'static str,
         pub attribute: Option<&'static str>,
     }
-    const AX_FAILURE_OPERATIONS: [&str; 8] = [
+    const AX_FAILURE_OPERATIONS: [&str; 9] = [
         "set-messaging-timeout", "copy-attribute-value", "get-attribute-value-count", "copy-attribute-values",
         "copy-action-names", "is-attribute-settable", "set-attribute-value", "perform-action",
+        "copy-multiple-attribute-values",
     ];
     const AX_FAILURE_ATTRIBUTES: [Option<&str>; 12] = [
         None, Some("Parent"), Some("Role"), Some("Identifier"), Some("Title"), Some("Value"), Some("Enabled"),
@@ -971,7 +972,7 @@ mod observation {
         }
         if !(-25214..=-25200).contains(&w.ax_error)
             || !matches!((w.ax_failure_operation, w.ax_failure_attribute),
-                (1 | 5 | 8, 0) | (2, 1..=6) | (3 | 4, 7..=11) | (6 | 7, 10 | 11)) { return None; }
+                (1 | 5 | 8 | 9, 0) | (2, 1..=6) | (3 | 4, 7..=11) | (6 | 7, 10 | 11)) { return None; }
         Some(Some(AxFailure {
             operation: *AX_FAILURE_OPERATIONS.get(w.ax_failure_operation.checked_sub(1)? as usize)?,
             attribute: *AX_FAILURE_ATTRIBUTES.get(w.ax_failure_attribute as usize)?,
@@ -1497,7 +1498,7 @@ mod observation {
     }
     fn ax_failure_data_check() -> bool {
         // Inert closed-decoder DATA, never a native AX return or action receipt.
-        let pairs: [(u32, u32, &str, Option<&str>); 23] = [
+        let pairs: [(u32, u32, &str, Option<&str>); 24] = [
             (1, 0, "set-messaging-timeout", None),
             (2, 1, "copy-attribute-value", Some("Parent")),
             (2, 2, "copy-attribute-value", Some("Role")),
@@ -1521,9 +1522,10 @@ mod observation {
             (7, 10, "set-attribute-value", Some("SelectedChildren")),
             (7, 11, "set-attribute-value", Some("SelectedRows")),
             (8, 0, "perform-action", None),
+            (9, 0, "copy-multiple-attribute-values", None),
         ];
         let mut admitted_pairs = 0;
-        for operation in (0u32..=9).chain([u32::MAX]) {
+        for operation in (0u32..=10).chain([u32::MAX]) {
             for attribute in (0u32..=12).chain([u32::MAX]) {
                 let pair = pairs.iter().find(|p| p.0 == operation && p.1 == attribute);
                 if pair.is_some() { admitted_pairs += 1; }
@@ -1539,7 +1541,7 @@ mod observation {
                 }
             }
         }
-        admitted_pairs == 23 && ax_failure_return(OpenWire::default()) == Some(None)
+        admitted_pairs == 24 && ax_failure_return(OpenWire::default()) == Some(None)
     }
     fn semantic_data_check() -> bool {
         // Inert decoder/timeout DATA only: never manufacture a native return.

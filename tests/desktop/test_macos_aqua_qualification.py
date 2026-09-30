@@ -1063,6 +1063,7 @@ class AquaDataTests(unittest.TestCase):
         operations = (
             "set-messaging-timeout", "copy-attribute-value", "get-attribute-value-count", "copy-attribute-values",
             "copy-action-names", "is-attribute-settable", "set-attribute-value", "perform-action",
+            "copy-multiple-attribute-values",
         )
         attributes = (None, "Parent", "Role", "Identifier", "Title", "Value", "Enabled",
                       "Windows", "Children", "Rows", "SelectedChildren", "SelectedRows")
@@ -1070,10 +1071,10 @@ class AquaDataTests(unittest.TestCase):
             (operations[0], (None,)), (operations[1], attributes[1:7]),
             (operations[2], attributes[7:]), (operations[3], attributes[7:]),
             (operations[4], (None,)), (operations[5], attributes[10:]),
-            (operations[6], attributes[10:]), (operations[7], (None,)),
+            (operations[6], attributes[10:]), (operations[7], (None,)), (operations[8], (None,)),
         )
         pairs = frozenset((operation, attribute) for operation, allowed in by_operation for attribute in allowed)
-        self.assertEqual(len(pairs), 23)
+        self.assertEqual(len(pairs), 24)
         self.assertEqual(M.ACCESSIBILITY_AX_FAILURE_OPERATIONS, operations)
         self.assertEqual(M.ACCESSIBILITY_AX_FAILURE_ATTRIBUTES, attributes)
         self.assertEqual(M.ACCESSIBILITY_AX_FAILURE_PAIRS, pairs)
@@ -1092,7 +1093,7 @@ class AquaDataTests(unittest.TestCase):
                         action = accessibility_context_data()["accessibility"]
                         action["promptButton"] = sample
                         self.assertFalse(M._accessibility_succeeded(action))
-        # Every bounded pairing is checked against the independent23-pair table,
+        # Every bounded pairing is checked against the independent24-pair table,
         # including well-typed but forbidden pairs and unknown or non-string tags.
         for operation in (*operations, "none", "INERT_PRIVATE", None, True, 1, []):
             for attribute in (*attributes, "INERT_PRIVATE", False, 1, [], {}):
@@ -1156,13 +1157,13 @@ class AquaDataTests(unittest.TestCase):
         observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
         operation_names = ("NONE", "SET_MESSAGING_TIMEOUT", "COPY_ATTRIBUTE_VALUE", "GET_ATTRIBUTE_VALUE_COUNT",
                            "COPY_ATTRIBUTE_VALUES", "COPY_ACTION_NAMES", "IS_ATTRIBUTE_SETTABLE",
-                           "SET_ATTRIBUTE_VALUE", "PERFORM_ACTION")
+                           "SET_ATTRIBUTE_VALUE", "PERFORM_ACTION", "COPY_MULTIPLE_ATTRIBUTE_VALUES")
         attribute_names = ("NONE", "PARENT", "ROLE", "IDENTIFIER", "TITLE", "VALUE", "ENABLED", "WINDOWS",
                            "CHILDREN", "ROWS", "SELECTED_CHILDREN", "SELECTED_ROWS")
         for prefix, names in (("MRK_AX_OP_", operation_names), ("MRK_AX_ATTR_", attribute_names)):
             actual = M.re.findall(r"\b(" + prefix + r"[A-Z_]+) = ([0-9]+)", native)
             self.assertEqual(actual, [(prefix + name, str(code)) for code, name in enumerate(names)])
-        operations = rust.split("const AX_FAILURE_OPERATIONS: [&str; 8] = [", 1)[1].split("];", 1)[0]
+        operations = rust.split("const AX_FAILURE_OPERATIONS: [&str; 9] = [", 1)[1].split("];", 1)[0]
         attributes = rust.split("const AX_FAILURE_ATTRIBUTES: [Option<&str>; 12] = [", 1)[1].split("];", 1)[0]
         self.assertEqual(tuple(M.re.findall(r'"([^"]+)"', operations)), M.ACCESSIBILITY_AX_FAILURE_OPERATIONS)
         self.assertEqual((None, *M.re.findall(r'Some\("([^"]+)"\)', attributes)), M.ACCESSIBILITY_AX_FAILURE_ATTRIBUTES)
@@ -1227,6 +1228,12 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(deadline, dict(empty, error=8))
         self.assertFalse(scalar_status(deadline, -25204, 2, 2, 11))
         self.assertEqual(deadline, dict(error=8, ax_error=-25204, ax_failure_operation=2, ax_failure_attribute=2))
+        batch = dict(empty, error=8)
+        self.assertFalse(scalar_status(batch, -25204, 9, 0, 11))
+        batch_first = dict(error=8, ax_error=-25204, ax_failure_operation=9, ax_failure_attribute=0)
+        self.assertEqual(batch, batch_first)
+        self.assertFalse(scalar_status(batch, -25202, 2, 1, 10))
+        self.assertEqual(batch, batch_first)  # Never invent a component attribute for the earlier batch.
         copy = native.split("static CFTypeRef mrk_ax_copy(", 1)[1].split("static CFArrayRef mrk_ax_array(", 1)[0]
         absent_line = "BOOL absent = optional && !slot->value && (status == kAXErrorNoValue || status == kAXErrorAttributeUnsupported);"
         self.assertIn(absent_line, copy)
@@ -1262,6 +1269,8 @@ class AquaDataTests(unittest.TestCase):
             "AXUIElementCopyAttributeValue(element, attribute, &slot->value)",
             "AXUIElementGetAttributeValueCount(element, attribute, &expected)",
             "AXUIElementCopyAttributeValues(element, attribute, 0, limit + 1, &slot->array)",
+            "AXUIElementCopyMultipleAttributeValues(element, s->selection_attributes,\n"
+            "        kAXCopyMultipleAttributeOptionStopOnError, &slot->array)",
             "AXUIElementCopyActionNames(button, &slot->array)",
             "AXUIElementIsAttributeSettable(container, attribute, &settable)",
             "AXUIElementSetAttributeValue(container, attribute, selected->array)",
@@ -1273,14 +1282,15 @@ class AquaDataTests(unittest.TestCase):
             "mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUE, attribute_code)",
             "mrk_ax_status(s, count_status, MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT, attribute_code)",
             "mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUES, attribute_code)",
+            "mrk_ax_status(s, status, MRK_AX_OP_COPY_MULTIPLE_ATTRIBUTE_VALUES, MRK_AX_ATTR_NONE)",
             "mrk_ax_status(s, status, MRK_AX_OP_COPY_ACTION_NAMES, MRK_AX_ATTR_NONE)",
             "mrk_ax_status(s, status, MRK_AX_OP_IS_ATTRIBUTE_SETTABLE, attribute_code)",
             "mrk_ax_status(s, status, MRK_AX_OP_SET_ATTRIBUTE_VALUE, attribute_code)",
             "mrk_ax_status(s, status, MRK_AX_OP_PERFORM_ACTION, MRK_AX_ATTR_NONE)",
         ])
-        for helper, count in (("mrk_ax_copy", 11), ("mrk_ax_array", 6), ("mrk_ax_equal_attribute", 9),
-                              ("mrk_ax_selection_label", 3)):
-            self.assertEqual(len(expressions(helper)), count)  # Includes exactly one unchanged-use helper definition.
+        for helper, count in (("mrk_ax_copy", 11), ("mrk_ax_array", 6), ("mrk_ax_equal_attribute", 8),
+                              ("mrk_ax_selection_pair", 2), ("mrk_ax_selection_label", 3)):
+            self.assertEqual(len(expressions(helper)), count)  # One definition and only these closed uses.
         for call, count in (
             ("mrk_ax_copy(s, element, attribute, NO, attribute_code)", 1),
             ("mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO, MRK_AX_ATTR_WINDOWS)", 1),
@@ -1297,7 +1307,7 @@ class AquaDataTests(unittest.TestCase):
             ("mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt, MRK_AX_ATTR_TITLE)", 1),
             ("mrk_ax_copy(s, button, kAXEnabledAttribute, NO, MRK_AX_ATTR_ENABLED)", 1),
             ("mrk_ax_copy(s, p->nodes[at], attribute, optional, attribute_code)", 1),
-            ("mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]], MRK_AX_ATTR_PARENT)", 1),
+            ("mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])", 1),
             ("mrk_ax_selection_label(s, p, at, kAXValueAttribute, NO, expected, MRK_AX_ATTR_VALUE)", 1),
             ("mrk_ax_selection_label(s, p, at, kAXTitleAttribute, YES, expected, MRK_AX_ATTR_TITLE)", 1),
             ("mrk_ax_equal_attribute(s, p->nodes[at], kAXParentAttribute, at ? p->nodes[p->parents[at]] : parent, MRK_AX_ATTR_PARENT)", 1),
@@ -1319,7 +1329,7 @@ class AquaDataTests(unittest.TestCase):
         decoder = rust.split("fn ax_failure_return(", 1)[1].split("/// Finite actual AX/CF DATA", 1)[0]
         self.assertIn("if w.ax_error == 0", decoder)
         self.assertIn("(w.ax_failure_operation == 0 && w.ax_failure_attribute == 0).then_some(None)", decoder)
-        self.assertIn("(1 | 5 | 8, 0) | (2, 1..=6) | (3 | 4, 7..=11) | (6 | 7, 10 | 11)", decoder)
+        self.assertIn("(1 | 5 | 8 | 9, 0) | (2, 1..=6) | (3 | 4, 7..=11) | (6 | 7, 10 | 11)", decoder)
         self.assertIn("ax_failure: ax_failure_return(w)?", rust)
         self.assertIn("self.ax_error == 0 && self.ax_failure.is_none()", rust)
         self.assertIn("|| !ax_failure_data_check()", rust)
@@ -2517,7 +2527,42 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("timeout.seconds <= 0", timeout)
         self.assertIn("timeout.required_ns > 100000000", timeout)
         self.assertLess(timeout.index("AXUIElementSetMessagingTimeout"), timeout.index("mrk_ax_admit(s, timeout.required_ns"))
+        reuse_gate = timeout.split("BOOL reuse = ", 1)[1].split(";", 1)[0]
+        self.assertEqual(reuse_gate,
+                         "s->result.selection_mode == 1 && s->timeout_element == element\n"
+                         "        && s->installed_timeout.required_ns && s->installed_timeout.required_ns <= timeout.required_ns")
+        self.assertLess(timeout.index("mrk_ax_admit(s, 0, 0, &timeout)"), timeout.index("BOOL reuse"))
+        self.assertLess(timeout.index("timeout.required_ns != (uint64_t)ceil"), timeout.index("BOOL reuse"))
+        reuse_start = timeout.index("if (reuse) timeout = s->installed_timeout;")
+        common_admission = timeout.index("BOOL admitted = mrk_ax_admit(s, timeout.required_ns, 0, NULL);")
+        refresh = timeout[reuse_start:timeout.index("    // BOTH paths")]
+        self.assertIn("else {\n        s->timeout_element = NULL; s->installed_timeout = (MRKOpenTimeout){0};", refresh)
+        self.assertLess(refresh.index("s->timeout_element = NULL"), refresh.index("AXUIElementSetMessagingTimeout"))
+        self.assertLess(refresh.index("s->result.calls++"), refresh.index("AXUIElementSetMessagingTimeout"))
+        self.assertIn("if (installed && s->result.selection_mode == 1) {\n"
+                      "            s->timeout_element = element; s->installed_timeout = timeout;", refresh)
+        self.assertNotIn("return ", refresh)  # Neither reuse nor refresh can bypass the common fresh permit.
+        self.assertLess(timeout.index("    // BOTH paths"), common_admission)
+        self.assertEqual(timeout.count("mrk_ax_admit("), 2)
+        self.assertEqual(timeout.count("s->result.calls++"), 1)
+        self.assertIn("return installed && admitted;", timeout)
+        for forbidden in ("CFEqual(", "while (", "for (", "AXUIElementCreateSystemWide"):
+            self.assertNotIn(forbidden, timeout)
+        # Truth table for the exact source-bound scalar predicate, not an AX
+        # endpoint, setter result, clock observation, native call or permit.
+        for selection_mode, same_pointer, cached_ns, allowance_ns, expected in (
+            (0, True, 10, 10, False), (1, True, 10, 10, True),
+            (1, False, 10, 10, False), (1, True, 0, 10, False),
+            (1, True, 11, 10, False), (1, True, 9, 10, True),
+            (2, True, 10, 10, False), (1, True, 1, 0, False),
+        ):
+            with self.subTest(selection_mode=selection_mode, same_pointer=same_pointer,
+                              cached_ns=cached_ns, allowance_ns=allowance_ns):
+                actual = bool(selection_mode == 1 and same_pointer and cached_ns and cached_ns <= allowance_ns)
+                self.assertIs(actual, expected)
         entry = native.split("void mrk_observation_prompt_press(", 1)[1]
+        borrowed_clear = "s->selection_attributes = NULL; s->timeout_element = NULL; s->installed_timeout = (MRKOpenTimeout){0};"
+        self.assertLess(entry.index(borrowed_clear), entry.index("s->result.owned = s->count;"))
         self.assertIn("if (pthread_main_np())", entry)
         self.assertIn("enum { MRK_PROMPT_ORIGINALS = 9 };", native)
         self.assertIn("static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS]", native)
@@ -4961,6 +5006,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             "unsigned parents[MRK_SELECT_NODES], depths[MRK_SELECT_NODES], roles[MRK_SELECT_NODES], entries[MRK_SELECT_NODES];",
             "BOOL matches[MRK_SELECT_NODES]; unsigned candidate, label;",
             "MRKSelectionPass selection;",
+            "CFArrayRef selection_attributes;", "AXUIElementRef timeout_element;", "MRKOpenTimeout installed_timeout;",
             "static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];",
             "_Static_assert(sizeof(mrk_prompt_originals) <= 64u * 1024u,",
         ):
@@ -4983,6 +5029,28 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                          ["queued =", "queued++"])
         for recycled in ("--queued", "memmove(", "memset(", "p->nodes[at] = NULL", "% MRK_SELECT_NODES"):
             self.assertNotIn(recycled, roster)
+        pair = native.split("static CFTypeRef mrk_ax_selection_pair(", 1)[1].split("static BOOL mrk_ax_projection(", 1)[0]
+        self.assertIn("if (!s->selection_attributes) {", pair)
+        self.assertEqual(pair.count("CFArrayCreate("), 1)
+        self.assertEqual(pair.count("mrk_ax_slot(s)"), 2)  # One fixed attribute array; one original result per node.
+        self.assertEqual(pair.count("s->result.calls++"), 1)
+        self.assertEqual(pair.count("AXUIElementCopyMultipleAttributeValues("), 1)
+        # Algebra for successful nonroot nodes with one still-fitting timeout.
+        # No tree shape, native timing, partial result or actual receipt is invented.
+        for labels, counted, copied, old_calls, paired_calls, old_slots, paired_slots in (
+            (0, 0, 0, 4, 2, 2, 1), (1, 0, 0, 6, 3, 3, 2),
+            (0, 1, 0, 6, 3, 2, 1), (0, 1, 1, 8, 4, 3, 2),
+            (1, 1, 0, 8, 4, 3, 2), (1, 1, 1, 10, 5, 4, 3),
+        ):
+            self.assertEqual(old_calls, 2 * (2 + labels + counted + copied))
+            self.assertEqual(paired_calls, 1 + (1 + labels + counted + copied))
+            self.assertEqual(old_slots, 2 + labels + copied)
+            self.assertEqual(paired_slots, 1 + labels + copied)
+            self.assertEqual(old_calls - 2 * (1 + labels + counted + copied), 2)
+        # The fixed request array adds one original slot, not one per node.
+        # Selection plus every later control/proof/Press operation shares512:
+        # nothing may reset the counter to make the unfinished graph/tail fit.
+        self.assertNotRegex(native, r"s->result\.calls\s*(?:=(?!=)|-=|--)")
         decoder = rust.split("fn selection_limit_return(", 1)[1].split("/// The actual selecting", 1)[0]
         labels = M.re.findall(r'"([a-z-]+)"', decoder.split("predicate: *[", 1)[1].split("]", 1)[0])
         self.assertEqual(tuple(labels), M.ACCESSIBILITY_SELECTION_LIMITS)
@@ -5008,7 +5076,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("p->candidate = entry; p->label = at; p->label_attribute = attribute", label)
         roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
         for condition in ("other != at && p->nodes[other] && CFEqual(node, p->nodes[other])",
-                          "mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]], MRK_AX_ATTR_PARENT)",
+                          "mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])",
                           "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE", "kind == MRK_SELECT_LIST",
                           "rows ? kind != MRK_SELECT_ROW", "kind == MRK_ROLE_SHEET || kind == MRK_ROLE_GROUP",
                           "kind == MRK_ROLE_SPLIT_GROUP", "kind == MRK_ROLE_SCROLL_AREA", "kind == MRK_ROLE_BROWSER",
@@ -5020,6 +5088,32 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertIn(condition, roster)
         self.assertLess(roster.index("for (unsigned at = 0; at < queued; ++at)"), roster.index("s->result.selection_checks |= 1u"))
         self.assertLess(roster.index("s->result.selection_checks |= 1u"), roster.index("s->result.selection_matches != 1"))
+        pair = native.split("static CFTypeRef mrk_ax_selection_pair(", 1)[1].split("static BOOL mrk_ax_projection(", 1)[0]
+        self.assertIn("const void *names[] = { kAXParentAttribute, kAXRoleAttribute };", pair)
+        self.assertIn("CFArrayCreate(NULL, names, 2, &kCFTypeArrayCallBacks)", pair)
+        self.assertLess(pair.index("MRKPromptOwned *attributes = mrk_ax_slot(s)"), pair.index("CFArrayCreate("))
+        self.assertLess(pair.index("mrk_ax_type(s, attributes->value, CFArrayGetTypeID())"),
+                        pair.index("s->selection_attributes = attributes->array"))
+        batch_call = "AXUIElementCopyMultipleAttributeValues(element, s->selection_attributes,\n" \
+                     "        kAXCopyMultipleAttributeOptionStopOnError, &slot->array)"
+        self.assertEqual(pair.count(batch_call), 1)
+        self.assertLess(pair.index("MRKPromptOwned *slot = mrk_ax_slot(s)"), pair.index(batch_call))
+        self.assertLess(pair.index("mrk_ax_before(s, element)"), pair.index("s->result.calls++"))
+        self.assertLess(pair.index("s->result.calls++"), pair.index(batch_call))
+        self.assertLess(pair.index(batch_call), pair.index("mrk_ax_status(s, status, MRK_AX_OP_COPY_MULTIPLE_ATTRIBUTE_VALUES, MRK_AX_ATTR_NONE)"))
+        self.assertLess(pair.index(batch_call), pair.index("admitted = mrk_ax_admit(s, 0, 0, NULL)"))
+        self.assertIn("if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;", pair)
+        self.assertIn("if (CFArrayGetCount(slot->array) != 2) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }", pair)
+        self.assertLess(pair.index("CFArrayGetCount(slot->array) != 2"), pair.index("CFArrayGetValueAtIndex(slot->array, 0)"))
+        self.assertLess(pair.index("mrk_ax_type(s, parent, s->elementType)"), pair.index("CFEqual(parent, expected_parent)"))
+        self.assertIn("if (!CFEqual(parent, expected_parent)) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }", pair)
+        self.assertLess(pair.index("CFEqual(parent, expected_parent)"), pair.index("CFArrayGetValueAtIndex(slot->array, 1)"))
+        self.assertIn("return mrk_ax_type(s, role, CFStringGetTypeID()) ? role : NULL;", pair)
+        for forbidden in ("mrk_ax_copy(", "mrk_ax_array(", "AXValueGet", "CFRelease(", "while (", "for (",
+                          "kAXTitleAttribute", "kAXValueAttribute", "kAXChildrenAttribute", "kAXRowsAttribute"):
+            self.assertNotIn(forbidden, pair)
+        self.assertIn("CFTypeRef role = at ? mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])\n"
+                      "            : mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);", roster)
         for effect in ("AXUIElementSetAttributeValue", "AXUIElementPerformAction"):
             self.assertNotIn(effect, label + roster)
         write = native.split("static BOOL mrk_ax_select_entry(", 1)[1].split("static void mrk_ax_open(", 1)[0]
@@ -6085,7 +6179,9 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
                  "acknowledge_admitted", "pair_finality", "admit_peer_case", "admit_controls", "public_reader_report",
                  "admit_reader_report", "signature_identity", "distinct_code_identities", "sig",
                  "pair_directory_same", "pair_prelaunch_mark", "pair_prelaunch_failure",
-                 "reader_owner_failure_facts", "reader_owner_elapsed"}
+                 "reader_owner_failure_facts", "reader_owner_elapsed",
+                 "reader_phase_registration", "reader_phase_identity", "reader_phase_header", "reader_phase_bound",
+                 "reader_phase_prepare", "reader_phase_projection", "reader_phase_writer_settled", "reader_phase_collect"}
         if include_worker: names.add("creator_worker")
         if include_pair: names.add("run_creator_reader")
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
@@ -6372,7 +6468,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
             changed = dict(grant); changed[key] = not changed[key]
             with self.assertRaises(ValueError): f["acknowledge_admitted"](changed, 20.0, 35.0)
         with self.assertRaises(ValueError): f["acknowledge_admitted"](grant, 35.0, 35.0)
-        required = "startAttempted startReturned joinAttempted joinReturned joined joinedBeforeDrain readyAdmitted readerOwnerReturned readerNativeAdmitted creatorNativeAdmitted ackEntered ackReturned ackMayHavePublished ackPublished controlRetired controlOriginalsClosed".split()
+        required = "startAttempted startReturned joinAttempted joinReturned joined joinedBeforeDrain readyAdmitted readerOwnerReturned readerNativeAdmitted creatorNativeAdmitted ackEntered ackReturned ackMayHavePublished ackPublished controlRetired controlOriginalsClosed readerPhaseRetired".split()
         settled = dict.fromkeys(required, True); settled.update(aborted=False, errors=[], ackResult=0, ackErrno=0)
         self.assertTrue(f["pair_finality"](settled))
         for key in required:
@@ -6836,6 +6932,191 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
                               " ".join(consumer.split()))
                 self.assertNotIn("||", consumer)
 
+    def phase_model(self, fault=None):
+        # Fixed inert filesystem DATA; no descriptor, file, process or clock is opened.
+        f = self.functions()
+        def meta(inode, mode, size=0):
+            return SimpleNamespace(st_dev=7, st_ino=inode, st_mode=mode, st_uid=UID, st_gid=GID,
+                st_nlink=1 if mode == 0o100600 else 2, st_size=size, st_mtime_ns=100, st_ctime_ns=100)
+        parent, root = meta(30, 0o040700), meta(31, 0o040700)
+        model = {"present": fault == "collision", "bytes": b"unrelated-inert-original" if fault == "collision" else b"",
+                 "replacement": False, "fileStats": 0, "checks": 0, "collecting": False, "collectionReads": 0, "closeDone": False}
+        calls = []
+        def fstat(fd):
+            calls.append(("fstat", fd))
+            if fd == 10: return parent
+            self.assertEqual(fd, 7); model["fileStats"] += 1
+            if fault == "first-stat" and model["fileStats"] == 1: raise OSError("INERT_PRIVATE_STAT")
+            return meta(32, 0o100600, len(model["bytes"]))
+        def named(leaf, *, dir_fd, follow_symlinks):
+            calls.append(("stat", leaf)); self.assertEqual((leaf, dir_fd, follow_symlinks), ("wrapping-reader-phase.bin", 10, False))
+            if not model["present"]: raise FileNotFoundError()
+            return meta(33 if model["replacement"] else 32, 0o100600, len(model["bytes"]))
+        def open_file(leaf, flags, mode, *, dir_fd):
+            calls.append(("open", leaf)); self.assertEqual((leaf, flags, mode, dir_fd), ("wrapping-reader-phase.bin", 63, 0o600, 10))
+            if model["present"]: raise FileExistsError("INERT_PRIVATE_COLLISION")
+            model["present"] = True; return 7
+        def write(fd, data):
+            calls.append(("write", fd)); self.assertEqual(fd, 7)
+            length = 127 if fault == "short-write" else len(data)
+            model["bytes"] = data[:length]; return length
+        def sync(fd):
+            calls.append(("sync", fd))
+            if fault == "sync": raise OSError("INERT_PRIVATE_SYNC")
+        def read(fd, size, offset):
+            calls.append(("read", size, offset)); self.assertEqual(fd, 7)
+            if model["collecting"]: model["collectionReads"] += 1
+            return model["bytes"][offset:offset + size]
+        def unlink(leaf, *, dir_fd):
+            calls.append(("unlink", leaf)); self.assertEqual((leaf, dir_fd), ("wrapping-reader-phase.bin", 10))
+            model["present"] = False
+        def close(fd):
+            calls.append(("close", fd)); self.assertEqual(fd, 7); model["closeDone"] = True
+            if fault == "close": raise OSError("INERT_PRIVATE_CLOSE")
+        def check():
+            model["checks"] += 1
+            if fault == "deadline-after-write" and model["checks"] == 3:
+                raise ValueError("INERT_ORIGINAL_CUTOFF")
+        def collection_check():
+            model["collecting"] = True; calls.append(("collection-clock",))
+            if (fault == "collect-before-read" or fault == "collect-after-read" and model["collectionReads"] >= 2
+                    or fault == "collect-after-close" and model["closeDone"]):
+                raise ValueError("INERT_ORIGINAL_DRAIN_CUTOFF")
+        f["phase_collect_check"] = collection_check
+        f["os"] = SimpleNamespace(fstat=fstat, stat=named, open=open_file, write=write, fsync=sync, pread=read, unlink=unlink, close=close,
+            getuid=lambda: UID, geteuid=lambda: UID, getgid=lambda: GID, getegid=lambda: GID,
+            O_RDWR=1, O_CREAT=2, O_EXCL=4, O_NOFOLLOW=8, O_NONBLOCK=16, O_CLOEXEC=32)
+        f["owner"] = SimpleNamespace(ProcessError=type("ProcessError", (Exception,), {}),
+                                    ProcessInterrupted=type("ProcessInterrupted", (KeyboardInterrupt,), {}))
+        original = {"record": {"entered": False, "returned": False}, "result": None, "error": None}
+        return f, f["reader_phase_registration"](), root, original, model, calls, check
+
+    def test_reader_phase_codec_keeps_only_valid_unique_history_without_private_bytes(self):
+        import struct
+        f, cell, root, original, model, calls, check = self.phase_model()
+        f["reader_phase_prepare"](cell, 10, root, check)
+        header = cell["header"]; decode = f["reader_phase_projection"]
+        self.assertEqual(len(header), 128); self.assertEqual(len(model["bytes"]), 2176)
+        self.assertEqual(decode(model["bytes"], header), {"state": "empty", "events": [], "historyOnly": True, "currentCallKnown": False})
+        def record(slot, event):
+            return struct.pack("<4I", 0x31514744, slot, event, 0x4d524b31 ^ slot ^ event)
+        first = record(1, 1); second = record(2, 77)  # Exact source code: phase4/open BeforeCall, NOT API entered.
+        valid = header + first + second + bytes(2048 - 32)
+        expected = {"state": "prefix", "events": ["diagnostic-opened", "native:open:before-call"],
+                    "historyOnly": True, "currentCallKnown": False}
+        self.assertEqual(decode(valid, header), expected)
+        # Truncation anywhere in one final record preserves only the preceding record.
+        for length in (1, 4, 8, 12, 15):
+            raw = header + first + second[:length] + bytes(2048 - 16 - length)
+            self.assertEqual(decode(raw, header), dict(expected, state="partial", events=["diagnostic-opened"]))
+        for tail in (record(2, 1), record(3, 77), record(2, 64), record(2, 149), b"INERT_PRIVATE!!!" + b"X"):
+            raw = header + first + tail + bytes(2048 - 16 - len(tail))
+            actual = decode(raw, header)
+            self.assertEqual(actual, dict(expected, state="partial", events=["diagnostic-opened"]))
+            self.assertNotIn("INERT_PRIVATE", json.dumps(actual))
+        gap = header + first + bytes(16) + record(3, 77) + bytes(2048 - 48)
+        self.assertEqual(decode(gap, header)["state"], "partial")
+        for data, pin in ((valid[:-1], header), (valid + b"x", header), (bytearray(valid), header),
+                          (valid, b"x" + header[1:]), (b"x" * 2176, b"x" * 128)):
+            with self.assertRaises(ValueError): decode(data, pin)
+        # Explicit cleanup of model resources only; this test creates no real output.
+        self.assertEqual(f["reader_phase_collect"](cell, 10, original, f["phase_collect_check"]), [])
+        self.assertTrue(cell["record"]["retired"])
+
+    def test_reader_phase_partial_preparation_collision_and_close_failures_keep_original_custody(self):
+        for fault in ("collision", "first-stat", "short-write", "sync", "deadline-after-write", "close",
+                      "collect-before-read", "collect-after-read", "collect-after-close"):
+            with self.subTest(fault=fault):
+                f, cell, root, original, model, calls, check = self.phase_model(fault)
+                if fault in ("close", "collect-before-read", "collect-after-read", "collect-after-close"):
+                    f["reader_phase_prepare"](cell, 10, root, check)
+                else:
+                    with self.assertRaises((OSError, ValueError)): f["reader_phase_prepare"](cell, 10, root, check)
+                collect_start = len(calls)
+                errors = f["reader_phase_collect"](cell, 10, original, f["phase_collect_check"])
+                before = list(calls)
+                self.assertIs(f["reader_phase_collect"](cell, 10, original, f["phase_collect_check"]), errors)
+                self.assertEqual(calls, before)  # No repeat read/unlink/close.
+                self.assertEqual(sum(c[0] == "close" for c in calls), int(fault != "collision"))
+                if fault == "collision":
+                    self.assertEqual(model["bytes"], b"unrelated-inert-original")
+                    self.assertTrue(model["present"]); self.assertFalse(cell["record"]["acquired"])
+                    self.assertFalse(any(c[0] in ("write", "read", "unlink", "close") for c in calls))
+                elif fault in ("first-stat", "collect-before-read", "collect-after-read"):
+                    self.assertTrue(model["present"]); self.assertTrue(cell["record"]["closed"])
+                    self.assertFalse(cell["record"]["retired"]); self.assertTrue(errors)
+                else:
+                    self.assertFalse(model["present"])
+                    self.assertEqual(cell["record"]["retired"], fault != "close")
+                if fault.startswith("collect-"):
+                    self.assertTrue(errors); self.assertTrue(all(type(e) is ValueError for e in errors))
+                    self.assertTrue(cell["record"]["closed"]); self.assertIsNone(cell["fd"])
+                    self.assertEqual(model["collectionReads"], 0 if fault == "collect-before-read" else 2)
+                    self.assertEqual(cell["record"]["retired"], fault == "collect-after-close")
+                    if fault == "collect-before-read":
+                        self.assertFalse(any(c[0] in ("fstat", "stat", "read", "unlink") for c in calls[collect_start:]))
+                if fault == "close":
+                    self.assertEqual([type(e) for e in errors], [OSError])
+                    self.assertFalse(cell["record"]["closed"]); self.assertIsNone(cell["fd"])
+                self.assertNotIn("INERT_PRIVATE", json.dumps(cell["record"]))
+
+    def test_reader_phase_writer_finality_refuses_any_unknown_or_conflicting_lifetime(self):
+        f, cell, root, original, model, calls, check = self.phase_model()
+        settle = f["reader_phase_writer_settled"]; owner = f["owner"]
+        self.assertTrue(settle(original))  # No writer was ever attempted.
+        original["record"]["returned"] = True; self.assertFalse(settle(original))
+        original["record"]["returned"] = False
+        original["record"]["entered"] = True
+        self.assertFalse(settle(original))
+        error = owner.ProcessError("INERT_PRIVATE_TIMEOUT"); error.contained = error.cleanup_complete = True
+        original["error"] = error
+        self.assertTrue(settle(original))
+        original["record"]["returned"] = True; self.assertFalse(settle(original))
+        original["record"]["returned"] = False
+        for field in ("contained", "cleanup_complete"):
+            for value in (False, None, 1, "true"):
+                setattr(error, field, value); self.assertFalse(settle(original))
+            setattr(error, field, True)
+        conflict = owner.ProcessError("INERT_PRIVATE_CLEANUP"); conflict.contained = True; conflict.cleanup_complete = False
+        error.__cause__ = conflict; self.assertFalse(settle(original))
+        error.__cause__ = owner.ProcessInterrupted("INERT_PRIVATE_INTERRUPT"); self.assertFalse(settle(original))
+        error.__cause__ = None
+        alien = ValueError("owned command exceeded its original deadline"); alien.contained = alien.cleanup_complete = True
+        original["error"] = alien; self.assertFalse(settle(original))
+        original["error"] = None; original["record"]["returned"] = True
+        original["result"] = CompletedProcess(["inert"], 101, b"", b"")
+        self.assertTrue(settle(original))  # Failed command can have settled writer custody.
+        original["result"] = CompletedProcess(["inert"], False, b"", b""); self.assertFalse(settle(original))
+
+    def test_reader_phase_collection_preserves_owner_error_refuses_replacement_and_never_reads_live_writer(self):
+        import struct
+        for condition in ("unknown", "replacement", "partial", "settled"):
+            with self.subTest(condition=condition):
+                f, cell, root, original, model, calls, check = self.phase_model()
+                f["reader_phase_prepare"](cell, 10, root, check)
+                error = f["owner"].ProcessError("INERT_PRIVATE_TIMEOUT")
+                error.contained = True; error.cleanup_complete = condition != "unknown"
+                original["record"]["entered"] = True; original["error"] = error
+                record = struct.pack("<4I", 0x31514744, 1, 1, 0x4d524b31 ^ 1 ^ 1)
+                model["bytes"] = cell["header"] + record + (b"private tail!!!x" if condition == "partial" else bytes(16)) + bytes(2016)
+                model["replacement"] = condition == "replacement"
+                start = len(calls)
+                errors = f["reader_phase_collect"](cell, 10, original, f["phase_collect_check"])
+                self.assertIs(original["error"], error); self.assertIsNone(original["result"])
+                later = calls[start:]
+                if condition == "unknown":
+                    self.assertEqual(later, []); self.assertEqual(cell["fd"], 7); self.assertFalse(cell["record"]["retired"])
+                elif condition == "replacement":
+                    self.assertFalse(any(c[0] in ("read", "unlink") for c in later))
+                    self.assertTrue(model["present"]); self.assertTrue(cell["record"]["closed"]); self.assertTrue(errors)
+                else:
+                    self.assertFalse(model["present"]); self.assertTrue(cell["record"]["retired"])
+                    self.assertEqual(cell["record"]["projection"]["state"], "partial" if condition == "partial" else "prefix")
+                    self.assertEqual(bool(errors), condition == "partial")
+                self.assertFalse(cell["record"]["projection"]["currentCallKnown"])
+                self.assertNotIn("private", json.dumps(cell["record"]))
+
+
     def test_source_fixed_profile_barrier_charges_and_no_candidate_reader(self):
         root = PATH.parents[2]; native = root / "desktop/native/macos-installed-native"
         fixture = (native / "src/wrapping_keychain_fixture.rs").read_text()
@@ -6881,6 +7162,59 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
             self.assertEqual(upload.count("${{ steps.work.outputs.root }}/" + leaf), 1)
         for forbidden in ("wrapping-pair-control", "reader-settled", "*.json", ".keychain", "wrapping-reader.stdout", "wrapping-reader.stderr"):
             self.assertNotIn(forbidden, upload)
+
+        # Diagnostic history uses the same clocks and a fixed sibling, not the
+        # control records, user inputs, a new owner, or public raw output.
+        self.assertIn("READER_PHASE_BYTES: usize = 2176", pair)
+        self.assertIn("READER_CHARGE_LIMIT: usize = 512 * 1024", pair)
+        self.assertIn("size_of::<ManuallyDrop<Self>>()", pair)
+        self.assertIn("phase: ReaderPhase", pair)
+        phase = pair.split("impl ReaderPhase {", 1)[1].split("struct Reader {", 1)[0]
+        self.assertIn("self.fds.iter_mut().rev()", phase)
+        self.assertIn("self.initialized && !self.failed && closed", phase)
+        self.assertIn('b"MRKQDG01"', phase)
+        self.assertIn("self.bytes[128..].iter().any", phase)
+        self.assertIn("self.fds[role].file = Some(ManuallyDrop::new", phase)
+        marker = phase.split("    fn marker(", 1)[1].split("    fn native(", 1)[0]
+        self.assertLess(marker.index("self.seen |= bit"), marker.index("mrk_wrapping_reader_phase_write"))
+        self.assertTrue(marker.rstrip().endswith("clock.admit()\n    }"))  # Fresh after IO, not a saved Continue.
+        consume = pair.split("impl PhaseFd {", 1)[1].split("struct ReaderPhase {", 1)[0]
+        self.assertLess(consume.index("self.file.take()"), consume.index("mrk_wrapping_reader_phase_close(fd)"))
+        self.assertEqual(consume.count("mrk_wrapping_reader_phase_close(fd)"), 1)
+        self.assertIn("reader.phase_panic.is_none()", pair)
+        actual = pair.split("impl Reader {", 1)[1].split("    fn build_report", 1)[0]
+        self.assertLess(actual.index("self.original = Some(actual)"), actual.index("phase.marker(11, clock)"))
+        shim = control.split("// Qualification-only fixed diagnostic sibling.", 1)[1]
+        self.assertIn('openat(parent, "wrapping-reader-phase.bin", O_RDWR | flags)', shim)
+        self.assertIn("O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC", shim)
+        self.assertEqual(shim.count("return pwrite("), 1)
+        self.assertEqual(shim.count("return close(fd)"), 1)
+        for forbidden in ("O_CREAT", "O_TRUNC", "getenv(", "setenv(", "fsync(", "while (", "for ("):
+            self.assertNotIn(forbidden, shim)
+        self.assertIn("started + 5, started + 20, started + 35, started + 100", body)
+        self.assertIn("owner_budget(reader_started, forward_end, 15)", body)
+        pair_body = body.split("          def run_creator_reader(creator, reader):", 1)[1]
+        self.assertLess(pair_body.index("phase_original = reader_phase_registration()"), pair_body.index("worker.start()"))
+        self.assertLess(pair_body.index("pair-prelaunch-binary-changed"), pair_body.index("reader_phase_prepare("))
+        self.assertLess(pair_body.index("reader_phase_prepare("), pair_body.index("threading.Thread("))
+        self.assertLess(pair_body.index("worker.join("), pair_body.index("reader_phase_collect("))
+        self.assertIn('pair["readerPhaseRetired"] = phase_original["record"]["retired"]', pair_body)
+        self.assertNotIn("wrapping-reader-phase.bin", upload)
+        collect = body.split("          def reader_phase_collect(", 1)[1].split("          def pair_finality(", 1)[0]
+        self.assertLess(collect.index("os.close(fd)"), collect.rindex("check_time()"))
+        drain = pair_body.split("              def reader_phase_check_time():", 1)[1].split("              def resource(", 1)[0]
+        self.assertIn("time.monotonic() >= drain_end", drain)
+        self.assertNotIn("abort.is_set()", drain)  # Settled failed owner still gets diagnostics inside its unchanged drain.
+        self.assertIn("reader_phase_collect(phase_original, parent_fd, reader_original, reader_phase_check_time)", pair_body)
+        tail = pair_body.split('pair["worker"]["timeoutSeconds"] = holder.get("timeoutSeconds")', 1)[1]
+        self.assertLess(tail.index("reader_phase_check_time()"), tail.index('pair["aborted"] = abort.is_set()'))
+        self.assertLess(tail.index('except BaseException as error: fail(error)'), tail.index('pair["errors"] = '))
+        self.assertLess(tail.index('pair["errors"] = '), tail.index('pair["passed"] = pair_finality(pair)'))
+        for name in ("account", "open", "write", "close"):
+            self.assertIn('"_mrk_wrapping_reader_phase_' + name + '"', body)
+        self.assertIn('role != "qualification" and observed_phase', body)
+        self.assertIn('cell["role"] == "qualification-archive" and observed_phase != reader_phase_symbols', body)
+        self.assertIn('not (pair_symbols | reader_phase_symbols) <= symbols', body)
 
 
 class PrivateCodecWorkflowDataTests(unittest.TestCase):

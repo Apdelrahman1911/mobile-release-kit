@@ -887,7 +887,8 @@ enum { MRK_ROLE_NOT_READ, MRK_ROLE_SHEET, MRK_ROLE_GROUP, MRK_ROLE_SPLIT_GROUP, 
 // Closed first-fault diagnostics only; these scalar tags never authorize an AX call.
 enum { MRK_AX_OP_NONE = 0, MRK_AX_OP_SET_MESSAGING_TIMEOUT = 1, MRK_AX_OP_COPY_ATTRIBUTE_VALUE = 2,
     MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT = 3, MRK_AX_OP_COPY_ATTRIBUTE_VALUES = 4, MRK_AX_OP_COPY_ACTION_NAMES = 5,
-    MRK_AX_OP_IS_ATTRIBUTE_SETTABLE = 6, MRK_AX_OP_SET_ATTRIBUTE_VALUE = 7, MRK_AX_OP_PERFORM_ACTION = 8 };
+    MRK_AX_OP_IS_ATTRIBUTE_SETTABLE = 6, MRK_AX_OP_SET_ATTRIBUTE_VALUE = 7, MRK_AX_OP_PERFORM_ACTION = 8,
+    MRK_AX_OP_COPY_MULTIPLE_ATTRIBUTE_VALUES = 9 };
 enum { MRK_AX_ATTR_NONE = 0, MRK_AX_ATTR_PARENT = 1, MRK_AX_ATTR_ROLE = 2, MRK_AX_ATTR_IDENTIFIER = 3,
     MRK_AX_ATTR_TITLE = 4, MRK_AX_ATTR_VALUE = 5, MRK_AX_ATTR_ENABLED = 6, MRK_AX_ATTR_WINDOWS = 7,
     MRK_AX_ATTR_CHILDREN = 8, MRK_AX_ATTR_ROWS = 9, MRK_AX_ATTR_SELECTED_CHILDREN = 10, MRK_AX_ATTR_SELECTED_ROWS = 11 };
@@ -1262,6 +1263,9 @@ typedef struct {
     BOOL cleanupKnown;
     MRKSelectionPass selection; // Original chain retained even on uncertain return.
     unsigned selection_queued; // Same original loop's bounded queue, not another AX observation.
+    CFArrayRef selection_attributes; // Borrowed from this original's registered CF slot.
+    AXUIElementRef timeout_element; // Exact retained pointer, not CFEqual or proof authority.
+    MRKOpenTimeout installed_timeout; // Known setter result only; every call still re-admits.
 } MRKPrompt;
 // At most eight different genuine panels, one registered worker at a time.
 // Every original ledger remains retained for process lifetime, never reused.
@@ -1352,10 +1356,22 @@ static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
         || timeout.required_ns == 0 || timeout.required_ns > 100000000
         || timeout.required_ns != (uint64_t)ceil((double)timeout.seconds * 1000000000.0))
         return mrk_ax_fail(s, MRK_OPEN_INPUT);
-    s->result.calls++;
-    BOOL installed = mrk_ax_status(s, AXUIElementSetMessagingTimeout(element, timeout.seconds), MRK_AX_OP_SET_MESSAGING_TIMEOUT, MRK_AX_ATTR_NONE);
-    // Same endpoint after the setter; never give the upcoming call more time
-    // than remains. The callback is atomic/clock-only, with no owner lock.
+    // Only this selecting original may reuse its exact pointer's known timeout.
+    // Equal-but-distinct AX objects do not share a per-object messaging timeout.
+    BOOL reuse = s->result.selection_mode == 1 && s->timeout_element == element
+        && s->installed_timeout.required_ns && s->installed_timeout.required_ns <= timeout.required_ns;
+    BOOL installed = YES;
+    if (reuse) timeout = s->installed_timeout;
+    else {
+        s->timeout_element = NULL; s->installed_timeout = (MRKOpenTimeout){0};
+        s->result.calls++;
+        installed = mrk_ax_status(s, AXUIElementSetMessagingTimeout(element, timeout.seconds), MRK_AX_OP_SET_MESSAGING_TIMEOUT, MRK_AX_ATTR_NONE);
+        if (installed && s->result.selection_mode == 1) {
+            s->timeout_element = element; s->installed_timeout = timeout;
+        }
+    }
+    // BOTH paths freshly admit the installed allowance immediately before the
+    // operation. Reuse is never a cached permit or an extension of the endpoint.
     BOOL admitted = mrk_ax_admit(s, timeout.required_ns, 0, NULL);
     return installed && admitted;
 }
@@ -1411,6 +1427,30 @@ static BOOL mrk_ax_equal_attribute(MRKPrompt *s, AXUIElementRef element, CFStrin
     CFTypeRef actual = mrk_ax_copy(s, element, attribute, NO, attribute_code);
     if (!actual || !mrk_ax_type(s, actual, CFGetTypeID(expected))) return NO;
     return CFEqual(actual, expected) ? YES : mrk_ax_fail(s, MRK_OPEN_CHANGED);
+}
+static CFTypeRef mrk_ax_selection_pair(MRKPrompt *s, AXUIElementRef element, AXUIElementRef expected_parent) {
+    if (!s->selection_attributes) {
+        MRKPromptOwned *attributes = mrk_ax_slot(s); if (!attributes) return NULL;
+        const void *names[] = { kAXParentAttribute, kAXRoleAttribute };
+        attributes->array = CFArrayCreate(NULL, names, 2, &kCFTypeArrayCallBacks);
+        if (!mrk_ax_type(s, attributes->value, CFArrayGetTypeID())) return NULL;
+        s->selection_attributes = attributes->array;
+    }
+    MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
+    s->result.calls++;
+    AXError status = AXUIElementCopyMultipleAttributeValues(element, s->selection_attributes,
+        kAXCopyMultipleAttributeOptionStopOnError, &slot->array);
+    BOOL copied = mrk_ax_status(s, status, MRK_AX_OP_COPY_MULTIPLE_ATTRIBUTE_VALUES, MRK_AX_ATTR_NONE),
+        admitted = mrk_ax_admit(s, 0, 0, NULL);
+    // The archived public SDK contract permits partial/error/CFNull positions.
+    // StopOnError never authorizes them: retain every out-slot and reject it.
+    if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
+    if (CFArrayGetCount(slot->array) != 2) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
+    CFTypeRef parent = CFArrayGetValueAtIndex(slot->array, 0);
+    if (!mrk_ax_type(s, parent, s->elementType)) return NULL;
+    if (!CFEqual(parent, expected_parent)) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }
+    CFTypeRef role = CFArrayGetValueAtIndex(slot->array, 1);
+    return mrk_ax_type(s, role, CFStringGetTypeID()) ? role : NULL;
 }
 static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef parent_text, CFStringRef panel_text,
     AXUIElementRef *parent, AXUIElementRef *sheet) {
@@ -1592,8 +1632,8 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
         if (!mrk_ax_type(s, node, s->elementType)) return NO;
         for (unsigned other = 0; other < queued; ++other)
             if (other != at && p->nodes[other] && CFEqual(node, p->nodes[other])) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
-        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]], MRK_AX_ATTR_PARENT)) return NO;
-        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
+        CFTypeRef role = at ? mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])
+            : mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
         // Roles outside the small button grammar keep a separate selector meaning.
         unsigned kind = p->roles[at] = s->result.selection_last_role = mrk_ax_selection_role(role);
@@ -1776,6 +1816,7 @@ void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, c
     s->cleanupKnown = YES; s->result.site = MRK_OPEN_ENTRY; s->result.selection_mode = selection;
     @try { mrk_ax_open(s, parent, panel, prompt, target); }
     @catch (NSException *e) { (void)e; mrk_ax_fail(s, MRK_OPEN_EXCEPTION); s->cleanupKnown = NO; }
+    s->selection_attributes = NULL; s->timeout_element = NULL; s->installed_timeout = (MRKOpenTimeout){0};
     s->result.owned = s->count; // Reserved original slots, NOT a fabricated CFRelease count.
     if (s->cleanupKnown) {
         for (unsigned left = s->count; left; --left) {

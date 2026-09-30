@@ -314,18 +314,169 @@ impl ReaderClock {
         if self.poisoned { Admission::Unknown } else if self.late { Admission::Cutoff } else { Admission::Continue }
     }
 }
+
+// One qualification-only diagnostic original, outside the exact control namespace.
+// Records are deduplicated observed history, never the currently executing API.
+const READER_PHASE_BYTES: usize = 2176;
+const READER_PHASE_MAGIC: u32 = 0x31514744;
+const READER_PHASE_GUARD: u32 = 0x4d524b31;
+unsafe extern "C" {
+    fn mrk_wrapping_reader_phase_account() -> u64;
+    fn mrk_wrapping_reader_phase_open(role: u32, parent: i32) -> i32;
+    fn mrk_wrapping_reader_phase_write(fd: i32, record: *const u8, slot: u32) -> i64;
+    fn mrk_wrapping_reader_phase_close(fd: i32) -> i32;
+}
+struct PhaseFd {
+    file: Option<ManuallyDrop<std::fs::File>>, open_entered: bool, open_returned: bool,
+    close_entered: bool, close_returned: bool, closed: bool, consumed: Option<i32>,
+}
+impl PhaseFd {
+    fn empty() -> Self { Self { file: None, open_entered: false, open_returned: false,
+        close_entered: false, close_returned: false, closed: false, consumed: None } }
+    fn file(&self) -> Option<&std::fs::File> { self.file.as_ref().map(|f| &**f) }
+    fn fd(&self) -> Option<i32> { self.file().map(std::os::fd::AsRawFd::as_raw_fd) }
+    fn close(&mut self) -> bool {
+        if self.close_entered { return self.closed; }
+        if let Some(file) = self.file.take() {
+            use std::os::fd::IntoRawFd;
+            let fd = ManuallyDrop::into_inner(file).into_raw_fd();
+            self.consumed = Some(fd); self.close_entered = true;
+            let rc = unsafe { mrk_wrapping_reader_phase_close(fd) };
+            self.close_returned = true; self.closed = rc == 0; self.closed
+        } else { !self.open_entered || self.open_returned }
+    }
+}
+struct ReaderPhase {
+    fds: [PhaseFd; 3], bytes: [u8; READER_PHASE_BYTES], pin: Option<std::fs::Metadata>,
+    initialized: bool, failed: bool, seen: u128, writes: u32, finish_spent: bool,
+}
+impl ReaderPhase {
+    fn empty() -> Self { Self { fds: [PhaseFd::empty(), PhaseFd::empty(), PhaseFd::empty()],
+        bytes: [0; READER_PHASE_BYTES], pin: None, initialized: false, failed: false,
+        seen: 0, writes: 0, finish_spent: false } }
+    fn identity(m: &std::fs::Metadata) -> [u64; 5] {
+        use std::os::unix::fs::MetadataExt;
+        [u64::from(m.dev() as u32), m.ino(), u64::from(m.mode()), u64::from(m.uid()), u64::from(m.gid())]
+    }
+    fn same(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        Self::identity(a) == Self::identity(b) && a.dev() == b.dev() && a.nlink() == b.nlink()
+            && a.len() == b.len() && a.mtime() == b.mtime() && a.mtime_nsec() == b.mtime_nsec()
+            && a.ctime() == b.ctime() && a.ctime_nsec() == b.ctime_nsec()
+    }
+    fn open(&mut self, role: usize, parent: i32, clock: &mut ReaderClock) -> bool {
+        use std::os::fd::FromRawFd;
+        if self.fds[role].open_entered || clock.admit() != Admission::Continue { return false; }
+        self.fds[role].open_entered = true;
+        let fd = unsafe { mrk_wrapping_reader_phase_open(role as u32, parent) };
+        self.fds[role].open_returned = true;
+        if fd < 0 { return false; }
+        // The returned original enters its registered slot before any validation.
+        self.fds[role].file = Some(ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) }));
+        clock.admit() == Admission::Continue
+    }
+    fn initialize(&mut self, clock: &mut ReaderClock) -> bool {
+        let ok = self.prepare(clock);
+        self.initialized = ok; self.failed |= !ok; ok
+    }
+    fn prepare(&mut self, clock: &mut ReaderClock) -> bool {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        if clock.admit() != Admission::Continue { return false; }
+        let account = unsafe { mrk_wrapping_reader_phase_account() };
+        if account == u64::MAX || !self.open(0, -1, clock) { return false; }
+        let Some(root_fd) = self.fds[0].fd() else { return false; };
+        if !self.open(1, root_fd, clock) { return false; }
+        let Some(parent_fd) = self.fds[1].fd() else { return false; };
+        if !self.open(2, parent_fd, clock) { return false; }
+        let mut identities = [[0u64; 5]; 3];
+        for (i, identity) in identities.iter_mut().enumerate() {
+            if clock.admit() != Admission::Continue { return false; }
+            let Some(file) = self.fds[i].file() else { return false; };
+            let Ok(metadata) = file.metadata() else { return false; };
+            *identity = Self::identity(&metadata);
+            let mode = if i == 2 { 0o100600 } else { 0o040700 };
+            if identity[2] != mode || identity[3] != account >> 32
+                || identity[4] != (account & 0xffff_ffff) { return false; }
+            if i == 2 {
+                if metadata.nlink() != 1 || metadata.len() != READER_PHASE_BYTES as u64 { return false; }
+                self.pin = Some(metadata);
+            }
+        }
+        if clock.admit() != Admission::Continue { return false; }
+        let Some(file) = self.fds[2].file() else { return false; };
+        if file.read_at(&mut self.bytes, 0).ok() != Some(READER_PHASE_BYTES) { return false; }
+        if clock.admit() != Admission::Continue { return false; }
+        let mut eof = [0u8; 1];
+        if file.read_at(&mut eof, READER_PHASE_BYTES as u64).ok() != Some(0) { return false; }
+        let Ok(after) = file.metadata() else { return false; };
+        if !self.pin.as_ref().is_some_and(|pin| Self::same(pin, &after))
+            || &self.bytes[..8] != b"MRKQDG01" || self.bytes[128..].iter().any(|v| *v != 0) { return false; }
+        for (i, identity) in identities.iter().enumerate() {
+            for (field, value) in identity.iter().enumerate() {
+                if u64_at(&self.bytes, 8 + i * 40 + field * 8) != *value { return false; }
+            }
+            let Some(file) = self.fds[i].file() else { return false; };
+            let Ok(now) = file.metadata() else { return false; };
+            if Self::identity(&now) != *identity { return false; }
+        }
+        clock.admit() == Admission::Continue
+    }
+    fn marker(&mut self, event: u32, clock: &mut ReaderClock) -> Admission {
+        // Never return a pre-IO Continue. Cutoff revokes diagnostic IO, not the
+        // existing native originals' independent BeforeRelease admission.
+        if clock.admit() == Admission::Continue && self.initialized && !self.failed && !self.finish_spent {
+            let index = match event { 1..=24 => event - 1, 65..=148 => 24 + event - 65,
+                _ => { self.failed = true; return clock.admit(); } };
+            let bit = 1u128 << index;
+            if self.seen & bit == 0 {
+                self.seen |= bit;
+                if self.writes >= 128 { self.failed = true; return clock.admit(); }
+                let slot = self.writes; self.writes += 1;
+                let mut record = [0u8; 16];
+                for (i, value) in [READER_PHASE_MAGIC, slot + 1, event, READER_PHASE_GUARD ^ (slot + 1) ^ event].iter().enumerate() {
+                    record[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                let result = self.fds[2].fd().map(|fd| unsafe {
+                    mrk_wrapping_reader_phase_write(fd, record.as_ptr(), slot)
+                });
+                if result != Some(16) { self.failed = true; }
+            }
+        }
+        clock.admit()
+    }
+    fn native(&mut self, checkpoint: Checkpoint, facts: &Facts, clock: &mut ReaderClock) -> Admission {
+        let cp = match checkpoint { Checkpoint::BeforeCall => 0, Checkpoint::AfterCall => 1,
+            Checkpoint::BeforeRelease => 2, Checkpoint::BeforeDelivery => 3 };
+        if let Some(phase @ 1..=21) = facts.phase() { self.marker(65 + (phase - 1) * 4 + cp, clock) }
+        else { self.failed = true; clock.admit() }
+    }
+    fn finish(&mut self, clock: &mut ReaderClock) -> bool {
+        if self.finish_spent { return false; }
+        self.marker(24, clock); self.finish_spent = true;
+        // Independent consuming pass includes partially admitted opens/header.
+        let mut closed = true;
+        for original in self.fds.iter_mut().rev() {
+            closed &= original.close();
+            closed &= (!original.open_entered || original.open_returned)
+                && (!original.close_entered || original.close_returned && original.closed && original.consumed.is_some());
+        }
+        self.initialized && !self.failed && closed
+    }
+}
+
+
 struct Reader {
-    clock: ReaderClock, controls: ControlBook, peer: Option<PeerLookup>, original: Option<CaseReturn>, refused: Option<Refused>,
+    clock: ReaderClock, phase: ReaderPhase, controls: ControlBook, peer: Option<PeerLookup>, original: Option<CaseReturn>, refused: Option<Refused>,
     charged: usize, adapter_bytes: usize, registered: bool, run_entered: bool, run_returned: bool, completed: bool,
     output: String, report_built: bool, write_entered: bool, flush_entered: bool,
     write_original: Option<io::Result<()>>, flush_original: Option<io::Result<()>>,
-    panic: Option<Box<dyn Any + Send>>, report_panic: Option<Box<dyn Any + Send>>,
+    panic: Option<Box<dyn Any + Send>>, report_panic: Option<Box<dyn Any + Send>>, phase_panic: Option<Box<dyn Any + Send>>,
 }
 impl Reader {
-    fn empty(entry: Instant) -> Self { Self { clock: ReaderClock::new(entry), controls: ControlBook::empty(), peer: None, original: None, refused: None,
+    fn empty(entry: Instant) -> Self { Self { clock: ReaderClock::new(entry), phase: ReaderPhase::empty(), controls: ControlBook::empty(), peer: None, original: None, refused: None,
         charged: 0, adapter_bytes: 0, registered: false, run_entered: false, run_returned: false, completed: false,
         output: String::new(), report_built: false, write_entered: false, flush_entered: false, write_original: None,
-        flush_original: None, panic: None, report_panic: None } }
+        flush_original: None, panic: None, report_panic: None, phase_panic: None } }
     fn run(&mut self) -> bool {
         if self.clock.admit() != Admission::Continue || self.output.try_reserve_exact(PUBLIC_OUTPUT_LIMIT).is_err() { return false; }
         let Some((book, acl)) = native_control_charge() else { return false; };
@@ -334,26 +485,41 @@ impl Reader {
             .try_fold(0usize, usize::checked_add) else { return false; }; self.charged = charge;
         if charge > READER_CHARGE_LIMIT || self.clock.admit() != Admission::Continue { return false; }
         self.registered = true;
-        if !self.controls.reserve(2, book, acl) { return false; }
-        let clock = &mut self.clock;
-        if !self.controls.initialize(&mut |_| clock.admit()) { return false; }
-        let Some(ready) = self.controls.read_ready(&mut |_| clock.admit()) else { return false; };
-        if clock.admit() != Admission::Continue { return false; }
+        if !self.phase.initialize(&mut self.clock) || self.phase.marker(1, &mut self.clock) != Admission::Continue { return false; }
+        if self.phase.marker(2, &mut self.clock) != Admission::Continue { return false; }
+        let reserved = self.controls.reserve(2, book, acl);
+        if self.phase.marker(3, &mut self.clock) != Admission::Continue || !reserved { return false; }
+        let clock = &mut self.clock; let phase = &mut self.phase;
+        if phase.marker(4, clock) != Admission::Continue { return false; }
+        let initialized = self.controls.initialize(&mut |_| clock.admit());
+        if phase.marker(5, clock) != Admission::Continue || !initialized { return false; }
+        if phase.marker(6, clock) != Admission::Continue { return false; }
+        let ready = self.controls.read_ready(&mut |_| clock.admit());
+        if phase.marker(7, clock) != Admission::Continue { return false; }
+        let Some(ready) = ready else { return false; };
+        if phase.marker(8, clock) != Admission::Continue { return false; }
         match PeerLookup::reader(ready.token, ready.context, ready.pin) {
-            Ok(peer) => self.peer = Some(peer), Err(refused) => { self.refused = Some(refused); return false; }
+            Ok(peer) => self.peer = Some(peer), Err(refused) => self.refused = Some(refused),
         }
+        if phase.marker(9, clock) != Admission::Continue || self.refused.is_some() { return false; }
+        if phase.marker(10, clock) != Admission::Continue { return false; }
         let Some(peer) = self.peer.as_mut() else { return false; };
-        // One lookup, no candidate route even on unexpected success. Retain the
-        // entire actual return before inspecting it; no Missing repair or retry.
-        match unsafe { peer.run(&mut |_, _| clock.admit()) } {
-            Ok(actual) => self.original = Some(actual), Err(refused) => { self.refused = Some(refused); return false; }
+        // Retain the entire actual return before diagnostics or inspection. No
+        // candidate route on unexpected success, Missing repair, or retry.
+        match unsafe { peer.run(&mut |checkpoint, facts| phase.native(checkpoint, facts, clock)) } {
+            Ok(actual) => self.original = Some(actual), Err(refused) => self.refused = Some(refused),
         }
-        self.original.as_ref().is_some_and(reader_denied) && clock.admit() == Admission::Continue
+        let admitted = phase.marker(11, clock) == Admission::Continue;
+        self.refused.is_none() && self.original.as_ref().is_some_and(reader_denied) && admitted
     }
     fn finish_controls(&mut self) -> bool {
         let clock = &mut self.clock;
-        self.controls.finish(&mut |_| clock.admit()) && clock.admit() == Admission::Continue
+        self.phase.marker(12, clock);
+        let settled = self.controls.finish(&mut |_| clock.admit());
+        self.phase.marker(13, clock);
+        settled && clock.admit() == Admission::Continue
     }
+
     fn build_report(&mut self) -> fmt::Result {
         self.output.clear(); let out = &mut Bounded { value: &mut self.output };
         write!(out, "MRK_WRAPPING_PEER_RESULT={{\"schemaVersion\":1,\"scope\":\"wrapping-other-executable-reader\",\"provisional\":true,\"outerFinalityRequired\":true,\"cutoffSeconds\":10,\"adapterInvocationBound\":1,\"runEntered\":{},\"runReturned\":{},\"completed\":{},\"originalSlotRetained\":true,\"registered\":{},\"chargedBytes\":{},\"chargeLimit\":{},\"adapterFrameBytes\":{},\"deadlineObserved\":{},\"poisoned\":{},\"clockChecks\":{},\"callbackOrCallerPanic\":{},\"lookupStarted\":{},\"lookupRefused\":{},\"denialAccepted\":{},\"controls\":",
@@ -365,14 +531,21 @@ impl Reader {
         out.write_str(",\"globalWindowSurveillance\":false,\"shippingIdentityQualified\":false}\n")
     }
     fn write_report(&mut self) {
-        let mut stdout = io::stdout().lock(); self.write_entered = true;
+        self.phase.marker(16, &mut self.clock);
+        let mut stdout = io::stdout().lock();
+        self.phase.marker(17, &mut self.clock); self.write_entered = true;
         let fallback = b"MRK_WRAPPING_PEER_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-other-executable-reader\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n";
         let bytes = if self.report_built { self.output.as_bytes() } else { fallback };
+        self.phase.marker(18, &mut self.clock);
         self.write_original = Some(IoWrite::write_all(&mut stdout, bytes));
+        self.phase.marker(19, &mut self.clock);
         if matches!(self.write_original.as_ref(), Some(Ok(()))) {
+            self.phase.marker(20, &mut self.clock);
             self.flush_entered = true; self.flush_original = Some(IoWrite::flush(&mut stdout));
+            self.phase.marker(21, &mut self.clock);
         }
     }
+
 }
 struct Bounded<'a> { value: &'a mut String }
 impl FmtWrite for Bounded<'_> {
@@ -394,8 +567,8 @@ pub fn reader_entry() {
     ORIGINAL.store(pointer, Ordering::Release);
     let reader = unsafe { &mut **pointer }; reader.run_entered = true;
     match catch_unwind(AssertUnwindSafe(|| reader.run())) {
-        Ok(ok) => { reader.run_returned = true; reader.completed = ok; },
-        Err(payload) => { reader.panic = Some(payload); reader.clock.poisoned = true; }
+        Ok(ok) => { reader.run_returned = true; reader.completed = ok; reader.phase.marker(22, &mut reader.clock); },
+        Err(payload) => { reader.panic = Some(payload); reader.clock.poisoned = true; reader.phase.marker(23, &mut reader.clock); }
     }
     // Known control originals get their one independent close pass on failure;
     // unknowns are retained. This never repairs/edits/deletes the native fixture.
@@ -404,11 +577,23 @@ pub fn reader_entry() {
         Err(payload) => { reader.report_panic = Some(payload); reader.completed = false; reader.clock.poisoned = true; }
     }
     if reader.report_panic.is_none() {
-        match catch_unwind(AssertUnwindSafe(|| { reader.report_built = reader.build_report().is_ok(); reader.write_report(); })) {
+        match catch_unwind(AssertUnwindSafe(|| {
+            reader.phase.marker(14, &mut reader.clock);
+            reader.report_built = reader.build_report().is_ok();
+            reader.phase.marker(15, &mut reader.clock);
+            reader.write_report();
+        })) {
             Ok(()) => {}, Err(payload) => { reader.report_panic = Some(payload); reader.clock.poisoned = true; }
         }
     }
-    let complete = reader.completed && reader.run_returned && reader.panic.is_none() && reader.report_panic.is_none()
+    // The emitted report is provisional: actual exit0 also requires every new
+    // diagnostic original's consuming close, including partial initialization.
+    match catch_unwind(AssertUnwindSafe(|| reader.phase.finish(&mut reader.clock))) {
+        Ok(settled) => reader.completed &= settled,
+        Err(payload) => { reader.phase_panic = Some(payload); reader.completed = false; reader.clock.poisoned = true; }
+    }
+
+    let complete = reader.completed && reader.run_returned && reader.panic.is_none() && reader.report_panic.is_none() && reader.phase_panic.is_none()
         && reader.report_built && reader.write_entered && reader.flush_entered
         && matches!(reader.write_original.as_ref(), Some(Ok(()))) && matches!(reader.flush_original.as_ref(), Some(Ok(())))
         && reader.clock.admit() == Admission::Continue;

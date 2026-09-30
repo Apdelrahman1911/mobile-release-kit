@@ -1274,3 +1274,25 @@ uint32_t mrk_wrapping_pair_free(void *frame) {
     mrk_w_wipe(p->ns, sizeof(*p->ns)); free(p->ns); p->ns = NULL;
     mrk_w_wipe(p, sizeof(*p)); free(p); return 1;
 }
+
+// Qualification-only fixed diagnostic sibling. No caller-supplied path, creation,
+// truncation, environment selector, Keychain call or implicit close/retry.
+uint64_t mrk_wrapping_reader_phase_account(void) {
+    uid_t uid = getuid(); gid_t gid = getgid();
+    if (!uid || uid != geteuid() || gid != getegid()) return UINT64_MAX;
+    return (uint64_t)uid << 32 | (uint64_t)gid;
+}
+int32_t mrk_wrapping_reader_phase_open(uint32_t role, int32_t parent) {
+    int flags = O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC;
+    if (role == 0 && parent == -1) return open(".", O_RDONLY | O_DIRECTORY | flags);
+    if (role == 1 && parent >= 0) return openat(parent, "..", O_RDONLY | O_DIRECTORY | flags);
+    if (role == 2 && parent >= 0) return openat(parent, "wrapping-reader-phase.bin", O_RDWR | flags);
+    errno = EINVAL; return -1;
+}
+int64_t mrk_wrapping_reader_phase_write(int32_t fd, const uint8_t *record, uint32_t slot) {
+    if (fd < 0 || !record || slot >= 128) { errno = EINVAL; return -1; }
+    return pwrite(fd, record, 16, 128 + (off_t)slot * 16); // One original call, no EINTR/partial retry.
+}
+int32_t mrk_wrapping_reader_phase_close(int32_t fd) {
+    return close(fd); // Consumed in Rust before entry. One original close; NEVER retry.
+}
