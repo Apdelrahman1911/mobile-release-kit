@@ -13083,10 +13083,19 @@ def windows_installed_helper_metadata(context: dict) -> dict:
     return windows_installed_app_graph(value, lock, source=source, root=root, publication=True)
 
 
-def windows_installed_fixed_normal_features(graph: dict) -> dict:
+def windows_installed_fixed_normal_features(graph: dict, *, notes_source: bool = False) -> dict:
     """Source-locked Windows normal target/host units; never a Cargo resolver."""
     packages, nodes = graph["packages"], graph["nodes"]
     registry = "registry+https://github.com/rust-lang/crates.io-index"
+    notes_root = graph.get("rootId")
+    require(type(notes_source) is bool and (not notes_source or graph.get("role") == "app"
+            and graph.get("publication") is False and type(notes_root) is str
+            and notes_root == graph.get("appId") == graph.get("localIds", {}).get("mobile-release-kit-desktop")
+            and notes_root in packages and notes_root in nodes
+            and packages[notes_root].get("name") == "mobile-release-kit-desktop"
+            and packages[notes_root].get("version") == "0.1.0" and packages[notes_root].get("source") is None
+            and nodes[notes_root].get("features") == ["windows-metadata-images-loader", "windows-required-notes-loader"]),
+            "Windows fixed normal Notes-source opt-in differs")
 
     def package(name, version, *, local=False):
         found = [key for key in nodes if packages[key]["name"] == name]
@@ -13140,6 +13149,15 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         "derive": [], "extra-traits": [], "full": [], "parsing": [], "printing": ["dep:quote"],
         "proc-macro": ["proc-macro2/proc-macro", "quote?/proc-macro"],
     }
+    syn_parents = (
+        ("serde_derive", "1.0.228", "^2.0.81", False,
+         ["clone-impls", "derive", "parsing", "printing", "proc-macro"]),
+        ("tokio-macros", "2.6.1", "^2.0", True, ["full"]),
+        ("der_derive", "0.7.3", "^2", True, ["extra-traits"]),
+    )
+    if notes_source:
+        # This current Notes-only macro requests full, not metadata visit-mut.
+        syn_parents += (("curve25519-dalek-derive", "0.1.1", "^2.0.27", True, ["full"]),)
     contracts = (
         ("typenum", "1.20.1", {}, (
             ("crypto-common", "0.1.7", "^1.14", True, []),
@@ -13147,11 +13165,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         ("tokio", "1.48.0", tokio_definitions, (
             ("mobile-release-kit-desktop", "0.1.0", "=1.48.0", True,
              ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]),)),
-        ("syn", "2.0.119", syn_definitions, (
-            ("serde_derive", "1.0.228", "^2.0.81", False,
-             ["clone-impls", "derive", "parsing", "printing", "proc-macro"]),
-            ("tokio-macros", "2.6.1", "^2.0", True, ["full"]),
-            ("der_derive", "0.7.3", "^2", True, ["extra-traits"]))),
+        ("syn", "2.0.119", syn_definitions, syn_parents),
         ("serde", "1.0.228", {
             "default": ["std"], "derive": ["serde_derive"],
             "serde_derive": ["dep:serde_derive"], "std": ["serde_core/std"],

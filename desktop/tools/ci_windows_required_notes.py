@@ -50,7 +50,13 @@ WINDOWS_INSTALLED_APP = base.WINDOWS_INSTALLED_APP
 WINDOWS_INSTALLED_CRATE = base.WINDOWS_INSTALLED_CRATE
 WINDOWS_INSTALLED_APP_LOCK_LOCALS = base.WINDOWS_INSTALLED_APP_LOCK_LOCALS
 WINDOWS_INSTALLED_APP_LOCALS = base.WINDOWS_INSTALLED_APP_LOCALS
-WINDOWS_INSTALLED_APP_DIRECT_ROLES = base.WINDOWS_INSTALLED_APP_DIRECT_ROLES
+WINDOWS_INSTALLED_APP_DIRECT_ROLES = {
+    ("base64", "0.22.1"), ("cms", "0.2.3"), ("crypto_box", "0.9.1"),
+    ("curve25519-dalek", "4.1.3"), ("der", "0.7.10"), ("getrandom", "0.3.4"),
+    ("mrk-windows-installed-native", "0.1.0"), ("pkcs12", "0.1.0"), ("plist", "1.10.1"),
+    ("quick-xml", "0.42.0"), ("rand_chacha", "0.3.1"), ("serde", "1.0.228"),
+    ("serde_json", "1.0.145"), ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("zeroize", "1.9.0"),
+}
 NOT_VERIFIED = (
     "compiled-notes-shipping-admission", "ordinary-native-handle-or-NTFS-qualification",
     "unmocked-bootstrap-or-child-execution", "DLL-installation-or-loading",
@@ -603,6 +609,247 @@ def small_unit_features(graph: dict) -> dict:
     return base.windows_installed_platform_unit_features(graph, {key: sorted(value) for key, value in expected.items()})
 
 
+def app_direct_roles(packages: dict, nodes: dict, app: str) -> None:
+    """Current Notes-only declarations; do not widen the installed readers."""
+    observed = {(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
+    missing, unexpected = sorted(WINDOWS_INSTALLED_APP_DIRECT_ROLES - observed), sorted(observed - WINDOWS_INSTALLED_APP_DIRECT_ROLES)
+    require(not missing and not unexpected,
+            "Windows app selected direct dependencies differ; missing=" + repr(missing)[:1536]
+            + "; unexpected=" + repr(unexpected[:16])[:1536] + "; unexpectedCount=" + str(len(unexpected)))
+    declarations = packages[app]["dependencies"]
+    for name, version, defaults, features in (
+            ("base64", "0.22.1", False, []),
+            ("crypto_box", "0.9.1", False, ["seal", "salsa20", "rand_core"]),
+            ("curve25519-dalek", "4.1.3", False, ["zeroize"]),
+            ("rand_chacha", "0.3.1", False, []),
+            ("zeroize", "1.9.0", False, ["alloc"]),
+            ("sha2", "0.10.9", True, [])):
+        kinds = (None, "build") if name == "sha2" else (None,)
+        expected = [{"name": name, "source": REGISTRY, "req": "=" + version, "kind": kind, "rename": None,
+                     "optional": False, "uses_default_features": defaults, "features": features,
+                     "target": None, "registry": None} for kind in kinds]
+        actual = [dep for dep in declarations if dep.get("name") == name]
+        require(len(actual) == len(expected)
+                and all(sum(same_compile_json(dep, wanted) for dep in actual) == 1 for wanted in expected),
+                "Notes current direct declaration differs: " + name)
+        incoming = [edge for edge in nodes[app]["deps"] if packages[edge["pkg"]]["name"] == name]
+        expected_kinds = [{"kind": kind, "target": None} for kind in kinds]
+        require(len(incoming) == 1 and packages[incoming[0]["pkg"]]["version"] == version
+                and packages[incoming[0]["pkg"]].get("source") == REGISTRY
+                and incoming[0]["name"] == name.replace("-", "_")
+                and len(incoming[0]["dep_kinds"]) == len(expected_kinds)
+                and all(sum(same_compile_json(kind, wanted) for kind in incoming[0]["dep_kinds"]) == 1
+                        for wanted in expected_kinds), "Notes current direct edge kinds differ: " + name)
+
+
+def app_unit_features(graph: dict) -> tuple[dict, dict]:
+    """Fixed Notes normal/host contracts, not a resolver or metadata-union grant."""
+    packages, nodes = graph["packages"], graph["nodes"]
+    app_direct_roles(packages, nodes, graph["rootId"])
+    expected = {key: node["features"] for key, node in nodes.items()}
+    expected.update(base.windows_installed_fixed_normal_features(graph, notes_source=True))
+    versions = {
+        "sha2": "0.10.9", "cfg-if": "1.0.5", "cpufeatures": "0.2.17", "digest": "0.10.7",
+        "block-buffer": "0.10.4", "crypto-common": "0.1.7", "generic-array": "0.14.7",
+        "typenum": "1.20.1", "version_check": "0.9.5",
+    }
+
+    def package(name, version):
+        found = [key for key in nodes if packages[key]["name"] == name]
+        require(len(found) == 1, "Notes fixed SHA2 package is missing/ambiguous: " + name)
+        key = found[0]
+        require(packages[key]["version"] == version and packages[key].get("source") == REGISTRY,
+                "Notes fixed SHA2 package version/source differs: " + name)
+        return key
+
+    def library(key):
+        value = packages[key]
+        primary = [target for target in value["targets"] if target.get("kind") in (["lib"], ["proc-macro"])]
+        require(len(primary) == 1 and primary[0]["kind"] == ["lib"] and primary[0].get("crate_types") == ["lib"]
+                and primary[0].get("name") == value["name"].replace("-", "_")
+                and primary[0].get("src_path") == str(Path(value["manifest_path"]).parent / "src/lib.rs"),
+                "Notes fixed SHA2 source library role differs: " + value["name"])
+
+    ids = {name: package(name, version) for name, version in versions.items()}
+    host = {
+        "sha2": ["default", "std"], "cfg-if": [], "cpufeatures": [],
+        "digest": ["alloc", "block-buffer", "core-api", "default", "std"], "block-buffer": [],
+        "crypto-common": ["std"], "generic-array": ["more_lengths"], "typenum": [], "version_check": [],
+    }
+    normal = {**host,
+        "digest": ["alloc", "block-buffer", "core-api", "default", "mac", "std", "subtle"],
+        "crypto-common": ["rand_core", "std"], "generic-array": ["more_lengths", "zeroize"],
+    }
+    definitions = {
+        "sha2": {"default": ["std"], "std": ["digest/std"]},
+        "digest": {"alloc": [], "block-buffer": ["dep:block-buffer"], "core-api": ["block-buffer"],
+                   "default": ["core-api"], "mac": ["subtle"], "std": ["alloc", "crypto-common/std"],
+                   "subtle": ["dep:subtle"]},
+        "crypto-common": {"rand_core": ["dep:rand_core"], "std": []},
+        "generic-array": {"more_lengths": [], "zeroize": ["dep:zeroize"]},
+    }
+    for name, key in ids.items():
+        library(key)
+        value, mapping = packages[key], packages[key]["features"]
+        require(type(mapping) is dict and len(mapping) <= 512
+                and all(type(feature) is str and re.fullmatch(r"[A-Za-z0-9_+\-]{1,128}", feature) for feature in mapping)
+                and all(same_compile_json(mapping.get(feature), refs) for feature, refs in definitions.get(name, {}).items())
+                and ("default" in normal[name] or "default" not in mapping)
+                and set(normal[name]) <= set(nodes[key]["features"]),
+                "Notes fixed SHA2 feature definitions/metadata differ: " + name)
+        scripts = [target for target in value["targets"] if target.get("kind") == ["custom-build"]]
+        require((not scripts if name != "generic-array" else len(scripts) == 1
+                 and scripts[0].get("crate_types") == ["bin"] and scripts[0].get("name") == "build-script-build"
+                 and scripts[0].get("src_path") == str(Path(value["manifest_path"]).parent / "build.rs")),
+                "Notes fixed SHA2 build-script source role differs: " + name)
+        expected[key] = normal[name]
+
+    # Complete active declarations in this fixed cohort. The three named
+    # optional edges are target-only: host features above do not activate them.
+    cpu_target = 'cfg(any(target_arch = "aarch64", target_arch = "x86_64", target_arch = "x86"))'
+    edges = {
+        "sha2": (("cfg-if", "1.0.5", "^1.0", None, None, False, True, []),
+                 ("digest", "0.10.7", "^0.10.7", None, None, False, True, []),
+                 ("cpufeatures", "0.2.17", "^0.2", None, cpu_target, False, True, [])),
+        "digest": (("block-buffer", "0.10.4", "^0.10", None, None, True, True, []),
+                   ("crypto-common", "0.1.7", "^0.1.3", None, None, False, True, []),
+                   ("subtle", "2.6.1", "^2.4", None, None, True, False, [])),
+        "block-buffer": (("generic-array", "0.14.7", "^0.14", None, None, False, True, []),),
+        "crypto-common": (("generic-array", "0.14.7", "=0.14.7", None, None, False, True, ["more_lengths"]),
+                          ("rand_core", "0.6.4", "^0.6", None, None, True, True, []),
+                          ("typenum", "1.20.1", "^1.14", None, None, False, True, [])),
+        "generic-array": (("typenum", "1.20.1", "^1.12", None, None, False, True, []),
+                          ("zeroize", "1.9.0", "^1", None, None, True, False, []),
+                          ("version_check", "0.9.5", "^0.9", "build", None, False, True, [])),
+    }
+
+    def declaration(parent, child_name, child_version, requirement, kind, target, optional, defaults, features):
+        child = package(child_name, child_version)
+        wanted = {"name": child_name, "source": REGISTRY, "req": requirement, "kind": kind, "rename": None,
+                  "optional": optional, "uses_default_features": defaults, "features": features,
+                  "target": target, "registry": None}
+        matches = [dep for dep in packages[parent].get("dependencies", [])
+                   if dep.get("name") == child_name and dep.get("kind") == kind and dep.get("target") == target]
+        incoming = [edge for edge in nodes[parent]["deps"] if edge["pkg"] == child]
+        require(len(matches) == 1 and same_compile_json(matches[0], wanted)
+                and len(incoming) == 1 and incoming[0]["name"] == child_name.replace("-", "_")
+                and same_compile_json(incoming[0]["dep_kinds"], [{"kind": kind, "target": target}]),
+                "Notes fixed SHA2 active declaration/edge differs: " + packages[parent]["name"] + "/" + child_name)
+        return child
+
+    for name, key in ids.items():
+        children = {declaration(key, *spec) for spec in edges.get(name, ())}
+        require(len(nodes[key]["deps"]) == len(children)
+                and set(nodes[key]["dependencies"]) == children,
+                "Notes fixed SHA2 active outgoing cohort differs: " + name)
+
+    # Bind the three target-only feature causes, not just their metadata names.
+    causes = {
+        "digest": (("sha2", "0.10.9", "^0.10.7", False, True, []),
+                   ("blake2", "0.10.6", "^0.10.3", False, True, ["mac"])),
+        "crypto-common": (("aead", "0.5.2", "^0.1.4", False, True, []),
+                          ("cipher", "0.4.4", "^0.1.6", False, True, []),
+                          ("digest", "0.10.7", "^0.1.3", False, True, []),
+                          ("universal-hash", "0.5.1", "^0.1.6", False, True, [])),
+        "generic-array": (("aead", "0.5.2", "^0.14", False, False, []),
+                          ("block-buffer", "0.10.4", "^0.14", False, True, []),
+                          ("crypto-common", "0.1.7", "=0.14.7", False, True, ["more_lengths"]),
+                          ("crypto_secretbox", "0.1.1", "^0.14.7", False, False, ["zeroize"]),
+                          ("inout", "0.1.4", "^0.14", False, True, [])),
+    }
+    parent_definitions = {
+        "aead": {"alloc": [], "rand_core": ["crypto-common/rand_core"]},
+        "blake2": {}, "cipher": {"zeroize": ["dep:zeroize"]},
+        "crypto_secretbox": {"salsa20": ["dep:salsa20"]}, "inout": {}, "universal-hash": {},
+    }
+    for child_name, parents in causes.items():
+        child = ids[child_name]
+        incoming = [(key, edge) for key, node in nodes.items() for edge in node["deps"] if edge["pkg"] == child]
+        wanted = set()
+        for name, version, requirement, optional, defaults, features in parents:
+            parent = package(name, version)
+            library(parent)
+            declaration(parent, child_name, versions[child_name], requirement, None, None, optional, defaults, features)
+            wanted.add(parent)
+            if name in parent_definitions:
+                mapping, definitions_for_parent = packages[parent]["features"], parent_definitions[name]
+                require(nodes[parent]["features"] == sorted(definitions_for_parent)
+                        and all(same_compile_json(mapping.get(feature), refs) for feature, refs in definitions_for_parent.items()),
+                        "Notes target-only SHA2 parent feature cause differs: " + name)
+        require(len(incoming) == len(wanted) and {key for key, _ in incoming} == wanted,
+                "Notes fixed SHA2 incoming parent cohort differs: " + child_name)
+
+    build_edges = [(packages[key]["name"], packages[key]["version"],
+                          packages[edge["pkg"]]["name"], packages[edge["pkg"]]["version"], kind["target"])
+                         for key, node in nodes.items() for edge in node["deps"] for kind in edge["dep_kinds"]
+                         if kind["kind"] == "build"]
+    require(sorted(build_edges, key=repr) == [
+        ("curve25519-dalek", "4.1.3", "rustc_version", "0.4.1", None),
+        ("generic-array", "0.14.7", "version_check", "0.9.5", None),
+        ("mobile-release-kit-desktop", "0.1.0", "sha2", "0.10.9", None),
+    ], "Notes fixed host build edge cohort differs")
+    expected = base.windows_installed_platform_unit_features(graph, expected)
+    return expected, {ids[name]: features for name, features in host.items()}
+
+
+def compiler_unit_context(package: dict, target: dict, filenames: list, features: object,
+                          normal: list, host: list | None, *, target_root: Path) -> str:
+    """DATA-only role selection; never touch a compiler output during parsing."""
+    context, wanted = "single", normal
+    if host is not None:
+        if target["kind"] == ["lib"]:
+            places = {"host": target_root / "debug/deps",
+                      "target": target_root / TARGET / "debug/deps"}
+            matches = [name for name, directory in places.items()
+                       if filenames and all(Path(path).parent == directory for path in filenames)]
+            require(len(matches) == 1 and (package["name"] != "version_check" or matches[0] == "host"),
+                    "Notes SHA2 library output has no exact unmixed unit context")
+            context = matches[0]
+            wanted = host if context == "host" else normal
+        else:
+            require(package["name"] == "generic-array" and target["kind"] == ["custom-build"],
+                    "Notes SHA2 unit has an unreviewed target kind")
+            variants = {"host": host, "target": normal}
+            matches = [name for name, selected in variants.items() if same_compile_json(features, selected)]
+            require(len(matches) == 1, "Notes generic-array build has no exact owner feature variant")
+            context, wanted = matches[0], variants[matches[0]]
+            require(filenames and all(Path(path).parent.parent == target_root / "debug/build"
+                    and re.fullmatch(r"generic-array-[0-9a-f]{16}", Path(path).parent.name)
+                    for path in filenames), "Notes generic-array compiler output left its host build namespace")
+    require(same_compile_json(features, wanted),
+            "Notes compiler unit features differ: " + package["name"] + "/" + context
+            + "; expected=" + repr(wanted)[:1024] + "; observed=" + repr(features)[:1024])
+    return context
+
+
+def build_script_context(package: dict, out_dir: str, *, target_root: Path, split: bool) -> str:
+    if not split:
+        return "single"
+    path = Path(out_dir)
+    matches = [name for name, directory in (
+        ("host", target_root / "debug/build"),
+        ("target", target_root / TARGET / "debug/build"))
+        if path.name == "out" and path.parent.parent == directory
+        and re.fullmatch(r"generic-array-[0-9a-f]{16}", path.parent.name)]
+    require(package["name"] == "generic-array" and len(matches) == 1,
+            "Notes generic-array execution has no exact owner out_dir context")
+    return matches[0]
+
+
+def admit_script_event(scripts: set, executions: set, key: str, context: str, *, compiled: bool) -> None:
+    """Only a role admitted by compiler_unit_context may create a script key."""
+    require(type(compiled) is bool and context in {"single", "host", "target"},
+            "Notes build-script event context differs")
+    unit = (key, context)
+    if compiled:
+        require(unit not in scripts, "Notes build script became a duplicate unit variant")
+        scripts.add(unit)
+    else:
+        require(unit in scripts and unit not in executions,
+                "Notes build-script execution is unmatched or duplicated for its unit variant")
+        executions.add(unit)
+
+
 def app_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
     native_declared = manifest_features(source)
     publication = False  # No publisher role or selector exists in this driver.
@@ -734,9 +981,7 @@ def app_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
             seen.add(current)
             pending.extend(nodes[current]["dependencies"])
     require(seen == set(nodes), "Windows app has a disconnected active compiler node")
-    root_dependencies = {(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
-    require(root_dependencies == WINDOWS_INSTALLED_APP_DIRECT_ROLES,
-            "Windows app selected direct dependencies differ")
+    app_direct_roles(packages, nodes, app)
     require({(packages[key]["name"], packages[key]["version"]) for key in nodes[local["mrk-windows-installed-native"]]["dependencies"]}
             == {("sha2", "0.10.9"), ("windows-sys", "0.61.2")}, "Windows app native dependency differs")
     return {"packages": packages, "nodes": nodes, "appId": app, "localIds": local, "publication": publication,
@@ -844,12 +1089,12 @@ def artifact(context: dict, role: str) -> dict:
     root, source = Path(context["root"]), Path(context["source"])
     spec, graph = ROLES[role], metadata(context, role)
     packages, nodes = graph["packages"], graph["nodes"]
-    expected_features = (base.windows_installed_app_unit_features(graph) if role == "app" else small_unit_features(graph))
+    expected_features, host_features = (app_unit_features(graph) if role == "app" else (small_unit_features(graph), {}))
     target_root = root / "target" / role
     messages = root / (role + "-compile.jsonl")
     raw = read(messages, 16 << 20)
     require(raw and raw.endswith(b"\n"), "Notes original compiler stream is incomplete")
-    found, finished, scripts, normal_native = None, False, set(), 0
+    found, finished, scripts, executions, normal_native = None, False, set(), set(), 0
     for line in raw.splitlines():
         require(not finished, "Notes compiler stream continues after its original finish")
         row = base.bounded_json(line, 2 << 20)
@@ -866,11 +1111,14 @@ def artifact(context: dict, role: str) -> dict:
         package = packages[key]
         if reason == "build-script-executed":
             declared = [target for target in package["targets"] if target.get("kind") == ["custom-build"]]
-            require(len(declared) == 1 and key in scripts and type(row.get("out_dir")) is str
+            require(len(declared) == 1 and type(row.get("out_dir")) is str
                     and Path(row["out_dir"]).is_absolute() and Path(row["out_dir"]).is_relative_to(target_root)
                     and Path(row["out_dir"]) != target_root
                     and not any(part in {".", ".."} for part in re.split(r"[\\/]", row["out_dir"])),
                     "Notes build-script event lacks its actual admitted compiled unit")
+            unit_context = build_script_context(package, row["out_dir"], target_root=target_root,
+                split=key in host_features and package["name"] == "generic-array")
+            admit_script_event(scripts, executions, key, unit_context, compiled=False)
             continue
         target = row.get("target")
         allowed_root_kind = list(spec[4])
@@ -882,7 +1130,7 @@ def artifact(context: dict, role: str) -> dict:
         if reason == "compiler-message":
             continue
         profile = row.get("profile")
-        require(row.get("features") == expected_features[key] and row.get("manifest_path") == package["manifest_path"]
+        require(row.get("manifest_path") == package["manifest_path"]
                 and type(profile) is dict and type(profile.get("test")) is bool
                 and type(row.get("fresh")) is bool, "Notes compiler unit features/source/profile differ")
         filenames = row.get("filenames")
@@ -890,9 +1138,11 @@ def artifact(context: dict, role: str) -> dict:
                 and Path(name).is_absolute() and Path(name).is_relative_to(target_root)
                 and not any(part in {".", ".."} for part in re.split(r"[\\/]", name)) for name in filenames),
                 "Notes compiled unit output left the original role target")
+        unit_context = compiler_unit_context(package, target, filenames, row.get("features"), expected_features[key],
+                                             host_features.get(key), target_root=target_root)
         if target["kind"] == ["custom-build"]:
-            require(profile["test"] is False and key not in scripts, "Notes build script became a test/duplicate unit")
-            scripts.add(key)
+            require(profile["test"] is False, "Notes build script became a test unit")
+            admit_script_event(scripts, executions, key, unit_context, compiled=True)
         elif key != graph["rootId"]:
             require(profile["test"] is False, "Notes dependency became an unselected test unit")
         if key == graph["localIds"]["mrk-windows-installed-native"] and role != "native":
@@ -1050,7 +1300,7 @@ def phase(name: str) -> None:
             graph = metadata(current, role)
             results[role]["activePackages"] = sorted(graph["nodes"])
             # Admit the exact normal/build feature units before any compiler.
-            base.windows_installed_app_unit_features(graph) if role == "app" else small_unit_features(graph)
+            app_unit_features(graph) if role == "app" else small_unit_features(graph)
         facts = {"roles": results, "compilerTools": record(root / "compiler-tools.json", 256 << 10)}
     elif name == "compile":
         compiler, environment = compiler_identity(current, select=True)
