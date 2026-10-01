@@ -901,13 +901,27 @@ typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_exami
     uint32_t selection_limit, selection_limit_cap, selection_limit_queued, selection_limit_children;
     int64_t selection_limit_observed;
     uint32_t ax_failure_operation, ax_failure_attribute;
+    // Diagnostic-only roster observations: zero version is unentered, not an observed empty roster.
+    uint32_t selection_summary_version, selection_table_roles, selection_outline_roles, selection_list_roles,
+        selection_entry_roots, selection_title_present, selection_title_absent, selection_value_present,
+        selection_outside_entry_role_mask;
 } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 112 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 152 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
 _Static_assert(sizeof(CFIndex) == sizeof(int64_t) && offsetof(MRKOpenResult, selection_limit_observed) == 96,
     "lossless original selection count ABI");
 _Static_assert(offsetof(MRKOpenResult, ax_failure_operation) == 104 && offsetof(MRKOpenResult, ax_failure_attribute) == 108,
     "fixed first AX-fault diagnostic ABI");
+_Static_assert(offsetof(MRKOpenResult, selection_summary_version) == 112
+    && offsetof(MRKOpenResult, selection_table_roles) == 116
+    && offsetof(MRKOpenResult, selection_outline_roles) == 120
+    && offsetof(MRKOpenResult, selection_list_roles) == 124
+    && offsetof(MRKOpenResult, selection_entry_roots) == 128
+    && offsetof(MRKOpenResult, selection_title_present) == 132
+    && offsetof(MRKOpenResult, selection_title_absent) == 136
+    && offsetof(MRKOpenResult, selection_value_present) == 140
+    && offsetof(MRKOpenResult, selection_outside_entry_role_mask) == 144,
+    "fixed selection projection summary ABI");
 typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
 typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
 typedef int (*MRKOpenRecheckCall)(void *, int);
@@ -1617,10 +1631,16 @@ static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned a
     CFStringRef attribute, BOOL optional, CFStringRef expected, uint32_t attribute_code) {
     CFTypeRef value = mrk_ax_copy(s, p->nodes[at], attribute, optional, attribute_code);
     if (s->result.error) return NO;
-    if (!value) return optional;
+    if (!value) {
+        if (optional) s->result.selection_title_absent++;
+        return optional;
+    }
     if (!mrk_ax_type(s, value, CFStringGetTypeID())) return NO;
     CFIndex length = CFStringGetLength(value);
     if (length > 512) return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_LABEL, length, 512, 0);
+    // Count only the already-returned, typed and bounded string; never its bytes.
+    if (optional) s->result.selection_title_present++;
+    else s->result.selection_value_present++;
     if (CFEqual(value, expected)) {
         unsigned entry = p->entries[at];
         if (!entry) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
@@ -1635,6 +1655,7 @@ static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned a
 static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRef expected) {
     MRKSelectionPass *p = &s->selection; p->nodes[0] = sheet; unsigned queued = 1;
     s->result.site = MRK_OPEN_SELECTION_PROJECTION;
+    s->result.selection_summary_version = 1u;
     for (unsigned at = 0; at < queued; ++at) {
         s->selection_queued = queued;
         AXUIElementRef node = p->nodes[at];
@@ -1649,6 +1670,10 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
         // Roles outside the small button grammar keep a separate selector meaning.
         unsigned kind = p->roles[at] = s->result.selection_last_role = mrk_ax_selection_role(role);
         if (!at && kind != MRK_ROLE_SHEET) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+        // Typed observed roles, including a role later refused by the entry grammar.
+        if (kind == MRK_ROLE_TABLE) s->result.selection_table_roles++;
+        else if (kind == MRK_ROLE_OUTLINE) s->result.selection_outline_roles++;
+        else if (kind == MRK_SELECT_LIST) s->result.selection_list_roles++;
         unsigned entry = p->entries[at];
         if (entry) {
             if (entry == at) {
@@ -1657,6 +1682,7 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
                 if (rows ? kind != MRK_SELECT_ROW : container != MRK_SELECT_LIST
                     || !(kind == MRK_SELECT_ROW || kind == MRK_SELECT_CELL || kind == MRK_ROLE_GROUP
                         || kind == MRK_SELECT_IMAGE || kind == MRK_SELECT_TEXT)) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+                s->result.selection_entry_roots++;
             } else if (!(kind == MRK_ROLE_GROUP || kind == MRK_SELECT_CELL || kind == MRK_SELECT_IMAGE
                 || kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD)) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
             if (kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD) {
@@ -1670,6 +1696,8 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
             || kind == MRK_ROLE_SCROLL_AREA || kind == MRK_ROLE_BROWSER || kind == MRK_SELECT_COLUMN);
         if (!entry && !rows && !list && !structural) {
             if (kind == MRK_SELECT_ROW || kind == MRK_SELECT_CELL) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+            // Closed role bits only: Button, opaque, Image, StaticText, TextField.
+            s->result.selection_outside_entry_role_mask |= 1u << kind;
             continue; // Toolbar/nonselectable leaves are outside this fixed projection.
         }
         CFArrayRef children = mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute,

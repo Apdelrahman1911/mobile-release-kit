@@ -1028,7 +1028,9 @@ def expected_result(binding, case):
                     "selectionParentProof": parent, "selectionParentPrompt": True,
                     "selection": {"checks": dict.fromkeys(ACCESSIBILITY_SELECTION_CHECKS, True),
                         "attempted": True, "returned": True, "selected": True, "nodes": 12, "matches": 1,
-                        "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4, "limit": None}}
+                        "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4, "limit": None,
+                        "projectionSummary": {"tableRoles": 1, "outlineRoles": 0, "listRoles": 0, "entryRoots": 2,
+                            "titlePresent": 0, "titleAbsent": 2, "valuePresent": 2, "outsideEntryRoleMask": 0}}}
                 row["selectionInput"]["promptButton"].update(calls=221, cfSlots=120, cfSlotsRetired=120)
                 row["selectionBinding"] = {**value["native"]["projectOpenBinding"],
                     "mechanism": "selection-parent-original-sheet-v3", "id": identifier, "kind": "version-source",
@@ -1509,11 +1511,35 @@ def _accessibility_selection_limit(value, selection, button, site, error):
     return value
 
 
+def _accessibility_selection_projection_summary(value, selection, site):
+    """Closed existing-roster scalars only; present labels do not prove target presence."""
+    label = "accessibility-selection-data"
+    if value is None:
+        need(not any(selection["checks"].values()) and not selection["attempted"] and not selection["returned"]
+             and selection["selected"] is None and selection["nodes"] == selection["matches"] == selection["depth"] == 0
+             and selection["attribute"] == selection["lastRole"] == "not-read" and selection["limit"] is None
+             and site not in ACCESSIBILITY_SELECTION_SITES - {"selection-parent-proof"}, label)
+        return None
+    counts = ("tableRoles", "outlineRoles", "listRoles", "entryRoots", "titlePresent", "titleAbsent", "valuePresent")
+    need(type(value) is dict and set(value) == {*counts, "outsideEntryRoleMask"}, label)
+    need(all(type(value[key]) is int and 0 <= value[key] <= selection["nodes"] for key in counts), label)
+    roles = sum(value[key] for key in counts[:3])
+    labels = sum(value[key] for key in counts[4:])
+    mask = value["outsideEntryRoleMask"]
+    need(roles <= selection["nodes"] and labels <= selection["nodes"]
+         and (value["entryRoots"] == 0 or roles > 0) and (labels == 0 or value["entryRoots"] > 0)
+         and selection["matches"] <= value["entryRoots"]
+         and selection["matches"] <= value["titlePresent"] + value["valuePresent"]
+         and type(mask) is int and mask >= 0 and mask & ~0x1c210 == 0
+         and (mask == 0 or selection["nodes"] > 0), label)
+    return value
+
+
 def _accessibility_selection(value, button, site, error):
     """Actual selector scalars, never a filename, URL, or substitute Open proof."""
     label = "accessibility-selection-data"
     need(type(value) is dict and set(value) == {"checks", "attempted", "returned", "selected",
-                                               "nodes", "matches", "attribute", "lastRole", "depth", "limit"}, label)
+                                               "nodes", "matches", "attribute", "lastRole", "depth", "limit", "projectionSummary"}, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
          and all(type(v) is bool for v in checks.values()), label)
@@ -1536,6 +1562,7 @@ def _accessibility_selection(value, button, site, error):
     need(not checks["singletonOriginalEntryReadback"] or value["selected"] is True, label)
     need(value["selected"] is not False or button is not None and button["axError"] != 0, label)
     _accessibility_selection_limit(value["limit"], value, button, site, error)
+    _accessibility_selection_projection_summary(value["projectionSummary"], value, site)
     return value
 
 
@@ -1683,7 +1710,8 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
                 selector_ready = _selection_succeeded(selection)
                 started = (any(selection["checks"].values()) or selection["nodes"] != 0 or selection["matches"] != 0
                     or selection["lastRole"] != "not-read" or selection["depth"] != 0
-                    or selection["attempted"] or selection["returned"] or selection["selected"] is not None or selection["limit"] is not None)
+                    or selection["attempted"] or selection["returned"] or selection["selected"] is not None or selection["limit"] is not None
+                    or selection["projectionSummary"] is not None)
                 need(not started or parent_ready and button["calls"] > 0 and button["cfSlots"] > 0
                      and button["checks"]["parentBound"] and button["checks"]["sheetBound"], label)
                 need(not any(button["checks"][key] for key in ACCESSIBILITY_BUTTON_CHECKS[2:]) or selector_ready, label)

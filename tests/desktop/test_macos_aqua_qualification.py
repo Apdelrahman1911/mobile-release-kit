@@ -1170,9 +1170,12 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(attributes.count("None"), 1)
         self.assertIn("uint32_t ax_failure_operation, ax_failure_attribute;", native)
         self.assertIn("selection_limit_observed: i64, ax_failure_operation: u32, ax_failure_attribute: u32", rust)
-        self.assertIn("sizeof(MRKOpenResult) == 112 && sizeof(MRKOpenRecheck) == 48", native)
-        self.assertIn("std::mem::size_of::<OpenWire>() != 112", rust)
-        for field, offset in (("selection_limit_observed", 96), ("ax_failure_operation", 104), ("ax_failure_attribute", 108)):
+        self.assertIn("sizeof(MRKOpenResult) == 152 && sizeof(MRKOpenRecheck) == 48", native)
+        self.assertIn("std::mem::size_of::<OpenWire>() != 152", rust)
+        for field, offset in (("selection_limit_observed", 96), ("ax_failure_operation", 104), ("ax_failure_attribute", 108),
+                              ("selection_summary_version", 112), ("selection_table_roles", 116), ("selection_outline_roles", 120),
+                              ("selection_list_roles", 124), ("selection_entry_roots", 128), ("selection_title_present", 132),
+                              ("selection_title_absent", 136), ("selection_value_present", 140), ("selection_outside_entry_role_mask", 144)):
             self.assertIn(f"offsetof(MRKOpenResult, {field}) == {offset}", native)
             self.assertIn(f"std::mem::offset_of!(OpenWire, {field}) != {offset}", rust)
         self.assertIn("std::mem::size_of::<RecheckWire>() != 48", rust)
@@ -2624,9 +2627,9 @@ class AquaDataTests(unittest.TestCase):
                            ("Browser", "BROWSER"), ("Table", "TABLE"), ("Outline", "OUTLINE"), ("ScrollArea", "SCROLL_AREA")):
             self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_ROLE_{code};", roles)
         self.assertIn("return MRK_ROLE_OPAQUE;", roles)
-        self.assertTrue("sizeof(MRKOpenResult) == 112 && sizeof(MRKOpenRecheck) == 48" in native,
-                        "native selection/Open wire112B and unchanged recheck48B")
-        self.assertTrue("std::mem::size_of::<OpenWire>() != 112" in rust, "Rust selection/Open wire must be112B")
+        self.assertTrue("sizeof(MRKOpenResult) == 152 && sizeof(MRKOpenRecheck) == 48" in native,
+                        "native selection/Open wire152B and unchanged recheck48B")
+        self.assertTrue("std::mem::size_of::<OpenWire>() != 152" in rust, "Rust selection/Open wire must be152B")
         self.assertIn("offsetof(MRKOpenResult, selection_limit_observed) == 96", native)
         self.assertIn("std::mem::offset_of!(OpenWire, selection_limit_observed) != 96", rust)
         for field, offset in (("ax_failure_operation", 104), ("ax_failure_attribute", 108)):
@@ -2649,7 +2652,11 @@ class AquaDataTests(unittest.TestCase):
                       "            || w.selection_checks != 0 || w.selection_flags != 0 || w.selection_nodes != 0 || w.selection_matches != 0\n"
                       "            || w.selection_attribute != 0 || w.selection_last_role != 0 || w.selection_depth != 0 || w.site > 19\n"
                       "            || w.selection_limit != 0 || w.selection_limit_cap != 0 || w.selection_limit_queued != 0\n"
-                      "            || w.selection_limit_children != 0 || w.selection_limit_observed != 0) { return None; }")
+                      "            || w.selection_limit_children != 0 || w.selection_limit_observed != 0\n"
+                      "            || w.selection_summary_version != 0 || w.selection_table_roles != 0 || w.selection_outline_roles != 0\n"
+                      "            || w.selection_list_roles != 0 || w.selection_entry_roots != 0 || w.selection_title_present != 0\n"
+                      "            || w.selection_title_absent != 0 || w.selection_value_present != 0\n"
+                      "            || w.selection_outside_entry_role_mask != 0) { return None; }")
         choose_limits = "let (calls, slots) = prompt_limits(selecting);"
         self.assertEqual(wire.count(choose_limits), 1)
         self.assertLess(wire.index(mode_guard) + len(mode_guard), wire.index(choose_limits))
@@ -4815,6 +4822,40 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             with self.assertRaises(M.Refused):
                 M.parse_result(captured(bad), b"", BINDING, case)
 
+        # Current diagnostic DATA is required and closed, never filled from this
+        # comparison fixture. Different valid counts are retained verbatim.
+        baseline = M.expected_result(BINDING, case)
+        selection = baseline["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]["selection"]
+        summary = selection["projectionSummary"]
+        counts = ("tableRoles", "outlineRoles", "listRoles", "entryRoots", "titlePresent", "titleAbsent", "valuePresent")
+        self.assertEqual(set(summary), {*counts, "outsideEntryRoleMask"})
+        changed = deepcopy(baseline)
+        changed["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]["selection"]["projectionSummary"] = {
+            "tableRoles": 1, "outlineRoles": 1, "listRoles": 0, "entryRoots": 3,
+            "titlePresent": 2, "titleAbsent": 1, "valuePresent": 1, "outsideEntryRoleMask": 0x1c210}
+        self.assertEqual(M.parse_result(captured(changed), b"", BINDING, case), changed)
+        malformed = [None, {}, [], True, {**summary, "version": 1}, {**summary, "extra": 0},
+            {**summary, "tableRoles": 0}, {**summary, "entryRoots": 0}, {**summary, "valuePresent": 0},
+            {**summary, "tableRoles": 5, "outlineRoles": 4, "listRoles": 4},
+            {**summary, "titlePresent": 9, "titleAbsent": 2, "valuePresent": 2}]
+        for key in summary:
+            missing = dict(summary); del missing[key]; malformed.append(missing)
+        for key in counts:
+            for invalid in (True, -1, 13, 1.0, 1 << 32):
+                malformed.append({**summary, key: invalid})
+        for invalid in (True, -1, 0.0, 1, 1 << 12, 1 << 13, 1 << 17, 1 << 32):
+            malformed.append({**summary, "outsideEntryRoleMask": invalid})
+        for index, invalid in enumerate(malformed):
+            with self.subTest(summary=index):
+                bad = deepcopy(baseline)
+                bad["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]["selection"]["projectionSummary"] = invalid
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+        bad = deepcopy(baseline)
+        del bad["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]["selection"]["projectionSummary"]
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(bad), b"", BINDING, case)
+
     def test_typed_selection_failures_retain_actual_stage_data_without_open_authority(self):
         # Inert decoded scalars only, not AppKit/AX execution or a native receipt.
         case, step = "project-fields", "ProjectFields(Native(0))"
@@ -4865,7 +4906,8 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             sample["promptButton"].update(calls=44, cfSlots=22, cfSlotsRetired=22, axError=-25204,
                 axFailure={"operation": "copy-attribute-value", "attribute": attribute})
             sample["selection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False),
-                nodes=2, matches=0, lastRole="not-read", depth=2)
+                nodes=2, matches=0, lastRole="not-read", depth=2,
+                projectionSummary={**dict.fromkeys(sample["selection"]["projectionSummary"], 0), "tableRoles": 1})
             self.assertIsNone(sample["selection"]["limit"])
             self.assertIsNone(sample["initialOriginalProof"])
             self.assertIsNone(sample["originalProof"])
@@ -4878,7 +4920,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             site="directory", error="ineligible", checks=dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, None))
         sample["selectionParentProof"]["checks"].update(eligible=True, attached=True, directory=False)
         sample["selection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False), nodes=0, matches=0,
-                                   lastRole="not-read", depth=0)
+                                   lastRole="not-read", depth=0, projectionSummary=None)
         sample["promptButton"].update(checks=dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False), calls=0,
                                       lastRole="not-read", cfSlots=0, cfSlotsRetired=0)
         failures.append(("selection-parent-refused", parent_refused))
@@ -4898,6 +4940,25 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         sample.update(error="custody", state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False)
         sample["promptButton"].update(cleanupReturned=False, cfSlotsRetired=0)
         failures.append(("readback-custody-unknown", unknown))
+        # These are alternative inert roster observations, not recovered facts.
+        # Present labels with zero matches still do not prove target representation.
+        empty_summary = dict.fromkeys(frame["accessibility"]["selection"]["projectionSummary"], 0)
+        for label, role, depth, summary in (
+            ("summary-no-container", "TextField", 2, {**empty_summary, "outsideEntryRoleMask": 0x1c210}),
+            ("summary-container-no-entry", "Table", 2, {**empty_summary, "tableRoles": 1}),
+            ("summary-entry-title-absent", "Row", 2, {**empty_summary, "tableRoles": 1, "entryRoots": 1, "titleAbsent": 1}),
+            ("summary-entry-title-present", "Row", 2, {**empty_summary, "tableRoles": 1, "entryRoots": 1, "titlePresent": 1}),
+            ("summary-entry-value-present", "StaticText", 3,
+                {**empty_summary, "tableRoles": 1, "entryRoots": 1, "titleAbsent": 1, "valuePresent": 1}),
+        ):
+            failed = deepcopy(frame)
+            failed["accessibility"]["selection"].update(lastRole=role, depth=depth, projectionSummary=summary)
+            failures.append((label, failed))
+        entered_zero = deepcopy(frame); sample = entered_zero["accessibility"]
+        sample.update(error="deadline", expired=True, timely=False)
+        sample["selection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False),
+            nodes=0, matches=0, lastRole="not-read", depth=0, projectionSummary=dict(empty_summary))
+        failures.append(("entered-zero-summary-before-first-role", entered_zero))
         for label, failed in failures:
             with self.subTest(stage=label):
                 wire = marker + context_row(failed)
@@ -4916,11 +4977,20 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             lambda s: s["selection"].update(depth=0),
             lambda s: s["selection"].update(selected=True, returned=True),
             lambda s: s["selection"].update(attribute="SelectedRows"),
+            lambda s: s["selection"].update(projectionSummary=None),
+            lambda s: s["selection"].pop("projectionSummary"),
         ):
             bad = deepcopy(frame); mutation(bad["accessibility"])
             expected = deepcopy(bad); expected["accessibility"] = None
             self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
         bad = deepcopy(parent_refused); bad["accessibility"]["error"] = "unsupported"
+        expected = deepcopy(bad); expected["accessibility"] = None
+        self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
+        bad = deepcopy(entered_zero); bad["accessibility"]["selection"]["projectionSummary"] = None
+        expected = deepcopy(bad); expected["accessibility"] = None
+        self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
+        bad = deepcopy(failures[2][1])  # Existing distinct-entry-collision DATA.
+        bad["accessibility"]["selection"]["projectionSummary"]["entryRoots"] = 1
         expected = deepcopy(bad); expected["accessibility"] = None
         self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
         # Old kind4 inputs remain readable as historical failure DATA only.
@@ -5123,6 +5193,56 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("w.selection_limit_queued <= w.selection_nodes", decoder)
         self.assertIn("(21..=25).contains(&w.site) && w.error == 7", decoder)
         self.assertIn('"limit":p.limit.map(|r| json!({"predicate":r.predicate,"observed":r.observed,"cap":r.cap,"queued":r.queued,"children":r.children}))', observer)
+
+        # Summary counters annotate only existing admitted observations. They
+        # add no AX/CF calls, traversal, label bytes or selection authority.
+        self.assertLess(roster.index("s->result.selection_summary_version = 1u;"),
+                        roster.index("for (unsigned at = 0; at < queued; ++at)"))
+        self.assertLess(roster.index("if (!at && kind != MRK_ROLE_SHEET)"),
+                        roster.index("s->result.selection_table_roles++;"))
+        for role, counter in (("MRK_ROLE_TABLE", "table_roles"), ("MRK_ROLE_OUTLINE", "outline_roles"), ("MRK_SELECT_LIST", "list_roles")):
+            self.assertIn(f"if (kind == {role}) s->result.selection_{counter}++;", roster)
+        entry = roster.split("if (entry == at) {", 1)[1].split("} else if", 1)[0]
+        self.assertLess(entry.index("return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);"),
+                        entry.index("s->result.selection_entry_roots++;"))
+        self.assertLess(label.index("if (s->result.error) return NO;"), label.index("if (!value) {"))
+        absent = label.split("if (!value) {", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(absent.strip(), "if (optional) s->result.selection_title_absent++;\n        return optional;")
+        for counter in ("title_present", "value_present"):
+            self.assertLess(label.index("mrk_ax_type(s, value, CFStringGetTypeID())"), label.index(f"s->result.selection_{counter}++"))
+            self.assertLess(label.index("if (length > 512)"), label.index(f"s->result.selection_{counter}++"))
+            self.assertLess(label.index(f"s->result.selection_{counter}++"), label.index("CFEqual(value, expected)"))
+        for counter in ("table_roles", "outline_roles", "list_roles", "entry_roots", "title_present", "title_absent", "value_present"):
+            self.assertEqual((label + roster).count(f"s->result.selection_{counter}++"), 1)
+        self.assertEqual(label.count("mrk_ax_copy("), 1)
+        self.assertEqual(label.count("CFStringGetLength("), 1)
+        self.assertEqual(label.count("CFEqual("), 1)
+        cutoff = roster.split("if (!entry && !rows && !list && !structural) {", 1)[1].split("\n        }", 1)[0]
+        self.assertLess(cutoff.index("if (kind == MRK_SELECT_ROW || kind == MRK_SELECT_CELL) return"),
+                        cutoff.index("s->result.selection_outside_entry_role_mask |= 1u << kind;"))
+        self.assertLess(cutoff.index("s->result.selection_outside_entry_role_mask |= 1u << kind;"), cutoff.index("continue;"))
+        self.assertEqual(roster.count("s->result.selection_outside_entry_role_mask |="), 1)
+        self.assertEqual(sum(1 << M.ACCESSIBILITY_SELECTION_ROLES.index(role)
+                            for role in ("Button", "opaque", "Image", "StaticText", "TextField")), 0x1c210)
+        summary_decoder = rust.split("fn selection_projection_summary_return(", 1)[1].split("/// The actual selecting", 1)[0]
+        self.assertIn("w.selection_summary_version == 0", summary_decoder)
+        self.assertIn("w.selection_summary_version != 1", summary_decoder)
+        self.assertIn("w.selection_outside_entry_role_mask & !0x1c210 != 0", summary_decoder)
+        self.assertLess(summary_decoder.index("counts.iter().any(|&n| n > w.selection_nodes)"), summary_decoder.index("let roles ="))
+        self.assertIn("w.selection_matches > w.selection_entry_roots", summary_decoder)
+        self.assertIn("w.selection_matches > w.selection_title_present + w.selection_value_present", summary_decoder)
+        matching = rust.split("impl VersionSourceSelection {", 1)[1].split("fn selection_return(", 1)[0]
+        self.assertNotIn("projection_summary", matching)
+        opening = rust.split("impl OpenReport {", 1)[1].split("fn open_return(", 1)[0]
+        self.assertNotIn("projection_summary", opening)
+        qualification = PATH.read_text()
+        success = qualification.split("def _selection_succeeded(", 1)[1].split("def _accessibility_selection_limit(", 1)[0]
+        self.assertNotIn("projectionSummary", success)
+        self.assertIn('or selection["projectionSummary"] is not None', qualification)
+        observed = observer.split("fn selection_value(", 1)[1].split("fn prompt_button_value(", 1)[0]
+        fields = observed.split('"projectionSummary":p.projection_summary.map(|r| json!({', 1)[1].split("}))", 1)[0]
+        self.assertEqual(set(M.re.findall(r'"([A-Za-z]+)":', fields)),
+            {"tableRoles", "outlineRoles", "listRoles", "entryRoots", "titlePresent", "titleAbsent", "valuePresent", "outsideEntryRoleMask"})
 
     def test_typed_selection_source_keeps_one_bounded_input_and_both_full_url_proofs(self):
         root = PATH.parents[1]

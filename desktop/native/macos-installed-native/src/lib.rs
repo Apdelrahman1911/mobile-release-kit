@@ -252,7 +252,7 @@ impl Panel {
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
     OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, AxFailure, CompletionSelection, CompletionReturn, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
-    OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, VersionSourceNamePreparation, VersionSourceParentReady, VersionSourceSelectionReady, VersionSourceSelection, SelectionLimit, installed_original_window,
+    OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, VersionSourceNamePreparation, VersionSourceParentReady, VersionSourceSelectionReady, VersionSourceSelection, SelectionLimit, SelectionProjectionSummary, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
@@ -914,7 +914,10 @@ mod observation {
         selection_mode: u32, selection_checks: u32, selection_flags: u32, selection_nodes: u32,
         selection_matches: u32, selection_attribute: u32, selection_last_role: u32, selection_depth: u32,
         selection_limit: u32, selection_limit_cap: u32, selection_limit_queued: u32, selection_limit_children: u32,
-        selection_limit_observed: i64, ax_failure_operation: u32, ax_failure_attribute: u32 }
+        selection_limit_observed: i64, ax_failure_operation: u32, ax_failure_attribute: u32,
+        selection_summary_version: u32, selection_table_roles: u32, selection_outline_roles: u32, selection_list_roles: u32,
+        selection_entry_roots: u32, selection_title_present: u32, selection_title_absent: u32, selection_value_present: u32,
+        selection_outside_entry_role_mask: u32 }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct RecheckWire { known: u32, error: u32, prompt: u32, proof: IdentityProofWire }
@@ -1054,12 +1057,47 @@ mod observation {
             children: (children != 0).then_some(children),
         }))
     }
+    /// Bounded observations from the one existing roster, never labels or selection authority.
+    /// Role counts mean typed observed roles, not successfully traversed containers.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SelectionProjectionSummary {
+        pub table_roles: u32, pub outline_roles: u32, pub list_roles: u32, pub entry_roots: u32,
+        pub title_present: u32, pub title_absent: u32, pub value_present: u32, pub outside_entry_role_mask: u32,
+    }
+    fn selection_projection_summary_return(w: OpenWire) -> Option<Option<SelectionProjectionSummary>> {
+        let counts = [w.selection_table_roles, w.selection_outline_roles, w.selection_list_roles, w.selection_entry_roots,
+            w.selection_title_present, w.selection_title_absent, w.selection_value_present];
+        if w.selection_summary_version == 0 {
+            if counts.iter().any(|&n| n != 0) || w.selection_outside_entry_role_mask != 0
+                || w.selection_checks != 0 || w.selection_flags != 0 || w.selection_nodes != 0 || w.selection_matches != 0
+                || w.selection_attribute != 0 || w.selection_last_role != 0 || w.selection_depth != 0
+                || w.selection_limit != 0 || (21..=25).contains(&w.site) { return None; }
+            return Some(None);
+        }
+        if w.selection_summary_version != 1 || w.selection_mode != 1 || w.selection_nodes >= SELECT_NODES
+            || counts.iter().any(|&n| n > w.selection_nodes) { return None; }
+        // These additions cannot overflow: every summand is already below256.
+        let roles = w.selection_table_roles + w.selection_outline_roles + w.selection_list_roles;
+        let labels = w.selection_title_present + w.selection_title_absent + w.selection_value_present;
+        if roles > w.selection_nodes || labels > w.selection_nodes
+            || w.selection_entry_roots != 0 && roles == 0 || labels != 0 && w.selection_entry_roots == 0
+            || w.selection_matches > w.selection_entry_roots
+            || w.selection_matches > w.selection_title_present + w.selection_value_present
+            || w.selection_outside_entry_role_mask & !0x1c210 != 0
+            || w.selection_outside_entry_role_mask != 0 && w.selection_nodes == 0 { return None; }
+        Some(Some(SelectionProjectionSummary {
+            table_roles: w.selection_table_roles, outline_roles: w.selection_outline_roles, list_roles: w.selection_list_roles,
+            entry_roots: w.selection_entry_roots, title_present: w.selection_title_present,
+            title_absent: w.selection_title_absent, value_present: w.selection_value_present,
+            outside_entry_role_mask: w.selection_outside_entry_role_mask,
+        }))
+    }
     /// The actual selecting operation's closed DATA; neither labels nor file identity.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct VersionSourceSelection {
         pub checks: [bool; 5], pub attempted: bool, pub returned: bool, pub selected: Option<bool>,
         pub nodes: u32, pub matches: u32, pub attribute: &'static str, pub last_role: &'static str, pub depth: u32,
-        pub limit: Option<SelectionLimit>,
+        pub limit: Option<SelectionLimit>, pub projection_summary: Option<SelectionProjectionSummary>,
     }
     impl VersionSourceSelection {
         pub fn matched(self) -> bool {
@@ -1087,7 +1125,7 @@ mod observation {
             attribute: *["not-read", "SelectedRows", "SelectedChildren"].get(w.selection_attribute as usize)?,
             last_role: *["not-read", "Sheet", "Group", "SplitGroup", "Button", "Browser", "Table", "Outline", "ScrollArea", "opaque",
                 "Column", "List", "Row", "Cell", "Image", "StaticText", "TextField"].get(w.selection_last_role as usize)?,
-            depth: w.selection_depth, limit: selection_limit_return(w)?,
+            depth: w.selection_depth, limit: selection_limit_return(w)?, projection_summary: selection_projection_summary_return(w)?,
         })
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1118,7 +1156,11 @@ mod observation {
             || w.selection_checks != 0 || w.selection_flags != 0 || w.selection_nodes != 0 || w.selection_matches != 0
             || w.selection_attribute != 0 || w.selection_last_role != 0 || w.selection_depth != 0 || w.site > 19
             || w.selection_limit != 0 || w.selection_limit_cap != 0 || w.selection_limit_queued != 0
-            || w.selection_limit_children != 0 || w.selection_limit_observed != 0) { return None; }
+            || w.selection_limit_children != 0 || w.selection_limit_observed != 0
+            || w.selection_summary_version != 0 || w.selection_table_roles != 0 || w.selection_outline_roles != 0
+            || w.selection_list_roles != 0 || w.selection_entry_roots != 0 || w.selection_title_present != 0
+            || w.selection_title_absent != 0 || w.selection_value_present != 0
+            || w.selection_outside_entry_role_mask != 0) { return None; }
         // Only the already-bound original mode chooses the whole-call envelope.
         let (calls, slots) = prompt_limits(selecting);
         // Control completion bits form a prefix over the eligible projection,
@@ -1173,7 +1215,7 @@ mod observation {
         if selecting {
             let selection_started = w.selection_checks != 0 || w.selection_flags != 0 || w.selection_nodes != 0
                 || w.selection_matches != 0 || w.selection_attribute != 0 || w.selection_last_role != 0 || w.selection_depth != 0
-                || w.selection_limit != 0;
+                || w.selection_limit != 0 || w.selection_summary_version != 0;
             if selection_started && (w.checks & 3 != 3 || w.calls == 0 || w.owned == 0)
                 || rechecks[1].is_some() && !selector_complete
                 || w.checks > 3 && !selector_complete { return None; }
@@ -1377,7 +1419,8 @@ mod observation {
             else { return false; };
         let refused_parent_wire = OpenWire { flags: 8, site: 20, error: 3, selection_mode: 1, ..OpenWire::default() };
         if !open_return(refused_parent_wire, [Some(refused_parent), None, None], true, true).is_some_and(|r|
-            r.custody_known && !r.attempted && !r.succeeded() && !r.selection.unwrap().attempted)
+            r.custody_known && !r.attempted && !r.succeeded() && !r.selection.unwrap().attempted
+                && r.selection.unwrap().projection_summary.is_none())
             || open_return(OpenWire { error: 4, ..refused_parent_wire }, [Some(refused_parent), None, None], true, true).is_some()
             || open_return(OpenWire { calls: 1, ..refused_parent_wire }, [Some(refused_parent), None, None], true, true).is_some()
             { return false; }
@@ -1386,7 +1429,8 @@ mod observation {
             initial_nodes_examined: 4, recheck_nodes_examined: 4, owned: 120, released: 120, ax_error: 0,
             last_role: 4, last_depth: 2, selection_mode: 1, selection_checks: 31, selection_flags: 7,
             selection_nodes: 12, selection_matches: 1, selection_attribute: 1, selection_last_role: 15, selection_depth: 4,
-            ..OpenWire::default() };
+            selection_summary_version: 1, selection_table_roles: 1, selection_entry_roots: 2,
+            selection_title_absent: 2, selection_value_present: 2, ..OpenWire::default() };
         if !open_return(full, rechecks, true, true).is_some_and(OpenReport::succeeded)
             || !open_return(OpenWire { selection_attribute: 2, ..full }, rechecks, true, true).is_some_and(OpenReport::succeeded)
             || open_return(full, rechecks, true, false).is_some() { return false; }
@@ -1434,6 +1478,66 @@ mod observation {
             last_role: 1, last_depth: 0, selection_checks: 1, selection_flags: 0,
             selection_nodes: 8, selection_matches: 0, selection_attribute: 0, selection_last_role: 11, selection_depth: 2, ..full };
         let admitted = [Some(parent), None, None];
+        // Inert summary DATA only. Null is unentered; an entered all-zero roster
+        // is distinct and cannot supply a successful match, URL, setter or Press.
+        let zero = OpenWire { error: 8, selection_checks: 0, selection_nodes: 0, selection_last_role: 0, selection_depth: 0,
+            selection_table_roles: 0, selection_entry_roots: 0, selection_title_absent: 0, selection_value_present: 0, ..missing };
+        let empty = SelectionProjectionSummary { table_roles: 0, outline_roles: 0, list_roles: 0, entry_roots: 0,
+            title_present: 0, title_absent: 0, value_present: 0, outside_entry_role_mask: 0 };
+        if !open_return(zero, admitted, true, true).is_some_and(|r|
+            !r.succeeded() && !r.attempted && r.selection.is_some_and(|s| s.projection_summary == Some(empty) && !s.matched()))
+            || open_return(OpenWire { selection_summary_version: 1, ..refused_parent_wire },
+                [Some(refused_parent), None, None], true, true).is_some() { return false; }
+        let no_entries = OpenWire { error: 4, selection_checks: 1, selection_nodes: 8, selection_last_role: 16,
+            selection_depth: 2, selection_outside_entry_role_mask: 1 << 16, ..zero };
+        for sample in [no_entries, OpenWire { selection_outside_entry_role_mask: 0x1c210, ..no_entries },
+            OpenWire { selection_table_roles: 1, selection_last_role: 6, selection_outside_entry_role_mask: 0, ..no_entries },
+            OpenWire { selection_table_roles: 1, selection_entry_roots: 1, selection_title_absent: 1,
+                selection_last_role: 12, selection_outside_entry_role_mask: 0, ..no_entries },
+            OpenWire { selection_table_roles: 1, selection_entry_roots: 1, selection_title_present: 1,
+                selection_last_role: 12, selection_outside_entry_role_mask: 0, ..no_entries },
+            OpenWire { selection_table_roles: 1, selection_entry_roots: 1, selection_title_absent: 1, selection_value_present: 1,
+                selection_last_role: 15, selection_depth: 3, selection_outside_entry_role_mask: 0, ..no_entries }] {
+            if !open_return(sample, admitted, true, true).is_some_and(|r| !r.succeeded() && !r.attempted
+                && r.selection.is_some_and(|s| s.projection_summary.is_some() && s.matches == 0 && !s.matched())) { return false; }
+        }
+        // A present bounded label plus zero matches still does not prove that
+        // the target was represented anywhere in this fixed grammar.
+        for bad in [OpenWire { selection_summary_version: 0, ..zero }, OpenWire { selection_summary_version: 2, ..zero },
+            OpenWire { selection_summary_version: 0, selection_table_roles: 1, site: 20, ..zero },
+            OpenWire { selection_summary_version: 0, selection_outside_entry_role_mask: 16, site: 20, ..zero },
+            OpenWire { selection_table_roles: 1, ..zero }, OpenWire { selection_outline_roles: 1, ..zero },
+            OpenWire { selection_list_roles: 1, ..zero }, OpenWire { selection_entry_roots: 1, ..zero },
+            OpenWire { selection_title_present: 1, ..zero }, OpenWire { selection_title_absent: 1, ..zero },
+            OpenWire { selection_value_present: 1, ..zero }, OpenWire { selection_outside_entry_role_mask: 16, ..zero },
+            OpenWire { selection_summary_version: 0, ..full }, OpenWire { selection_table_roles: 256, ..full },
+            OpenWire { selection_outline_roles: u32::MAX, ..full }, OpenWire { selection_list_roles: 13, ..full },
+            OpenWire { selection_entry_roots: 13, ..full }, OpenWire { selection_title_present: 13, ..full },
+            OpenWire { selection_title_absent: 13, ..full }, OpenWire { selection_value_present: 13, ..full },
+            OpenWire { selection_table_roles: 12, selection_outline_roles: 1, ..full },
+            OpenWire { selection_title_present: 9, selection_title_absent: 2, selection_value_present: 2, ..full },
+            OpenWire { selection_table_roles: 0, ..full }, OpenWire { selection_entry_roots: 0, ..full },
+            OpenWire { selection_entry_roots: 1, selection_matches: 2, selection_checks: 1, selection_flags: 0,
+                selection_attribute: 0, ..full },
+            OpenWire { selection_value_present: 0, ..full },
+            OpenWire { selection_outside_entry_role_mask: 1 << 12, ..full },
+            OpenWire { selection_outside_entry_role_mask: 1 << 13, ..full },
+            OpenWire { selection_outside_entry_role_mask: u32::MAX, ..full }] {
+            if selection_return(bad).is_some() { return false; }
+        }
+        let ordinary = OpenWire { selection_mode: 0, selection_checks: 0, selection_flags: 0, selection_nodes: 0,
+            selection_matches: 0, selection_attribute: 0, selection_last_role: 0, selection_depth: 0,
+            selection_summary_version: 0, selection_table_roles: 0, selection_entry_roots: 0,
+            selection_title_absent: 0, selection_value_present: 0, ..full };
+        let ordinary_rechecks = [None, Some(first), Some(last)];
+        if !open_return(ordinary, ordinary_rechecks, true, false).is_some_and(OpenReport::succeeded) { return false; }
+        for bad in [OpenWire { selection_summary_version: 1, ..ordinary }, OpenWire { selection_table_roles: 1, ..ordinary },
+            OpenWire { selection_outline_roles: 1, ..ordinary }, OpenWire { selection_list_roles: 1, ..ordinary },
+            OpenWire { selection_entry_roots: 1, ..ordinary }, OpenWire { selection_title_present: 1, ..ordinary },
+            OpenWire { selection_title_absent: 1, ..ordinary }, OpenWire { selection_value_present: 1, ..ordinary },
+            OpenWire { selection_outside_entry_role_mask: 16, ..ordinary }] {
+            if open_return(bad, ordinary_rechecks, true, false).is_some() { return false; }
+        }
         // Synthetic bounded refusal DATA, never an AX result or Open authority.
         let limit = OpenWire { error: 7, calls: 202, owned: 88, released: 88, selection_checks: 0,
             selection_nodes: 24, selection_matches: 0, selection_last_role: 12, selection_depth: 4,
@@ -1573,10 +1677,19 @@ mod observation {
         // Inert decoder/timeout DATA only: never manufacture a native return.
         let ordinary_return = |w, r: [Option<OpenRecheckReturn>; 2], known|
             open_return(w, [None, r[0], r[1]], known, false);
-        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 112
+        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 152
             || std::mem::offset_of!(OpenWire, selection_limit_observed) != 96
             || std::mem::offset_of!(OpenWire, ax_failure_operation) != 104
             || std::mem::offset_of!(OpenWire, ax_failure_attribute) != 108
+            || std::mem::offset_of!(OpenWire, selection_summary_version) != 112
+            || std::mem::offset_of!(OpenWire, selection_table_roles) != 116
+            || std::mem::offset_of!(OpenWire, selection_outline_roles) != 120
+            || std::mem::offset_of!(OpenWire, selection_list_roles) != 124
+            || std::mem::offset_of!(OpenWire, selection_entry_roots) != 128
+            || std::mem::offset_of!(OpenWire, selection_title_present) != 132
+            || std::mem::offset_of!(OpenWire, selection_title_absent) != 136
+            || std::mem::offset_of!(OpenWire, selection_value_present) != 140
+            || std::mem::offset_of!(OpenWire, selection_outside_entry_role_mask) != 144
             || std::mem::size_of::<RecheckWire>() != 48 || std::mem::size_of::<OpenTimeout>() != 16
             || !completion_data_check() || !selection_data_check() || !ax_failure_data_check() { return false; }
         let p = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
