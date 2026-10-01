@@ -889,6 +889,115 @@ class OwnerFailureContracts(unittest.TestCase):
             [{"code": "E0308", "spans": []}])
 
 
+    def test_build_failure_stage_survives_actual_worker_event_and_final_root_projection(self):
+        marker = "/private/never-publish-this build-input credential"
+        class TaskRoot:
+            def __truediv__(self, part):
+                return SOURCE if part == "source" else Path("/contract-task") / part
+        task = TaskRoot()
+        for stage in ("metadata-main", "native-notices"):
+            with self.subTest(stage=stage):
+                error = ValueError(marker)
+                command = mock.Mock(return_value=SimpleNamespace(stdout=b"synthetic-metadata"))
+                command.environment = {"PATH": "/usr/bin:/bin"}
+                data_module = SimpleNamespace(
+                    ROLES=A.ROLES, U=SimpleNamespace(shell_compiler_inputs=mock.Mock(return_value=({}, {}))),
+                    reconstruct_runtime=mock.Mock(return_value=({"manifestSha256": "a" * 64,
+                        "protocolSha256": "b" * 64}, Path("/contract-runtime"))),
+                    metadata_graph=mock.Mock(return_value=({}, {}, {})),
+                    collect_notices=mock.Mock(return_value=(Path("/contract-notices"), [])),
+                    support_inputs=mock.Mock(return_value={}), native_notices=mock.Mock(return_value=[]),
+                    support_unchanged=mock.Mock())
+                failing = data_module.metadata_graph if stage == "metadata-main" else data_module.native_notices
+                failing.side_effect = error
+                output = io.BytesIO()
+                with mock.patch.object(O, "data", return_value={"deadlineNs": 1, "githubTooling": {}}), \
+                     mock.patch.object(O, "worker_go"), mock.patch.object(O, "load_data", return_value=data_module), \
+                     mock.patch.object(O, "worker_environment", return_value={}), \
+                     mock.patch.object(O, "Commands", return_value=command), \
+                     mock.patch.object(O.sys, "stdout", SimpleNamespace(buffer=output)), \
+                     self.assertRaises(ValueError) as caught:
+                    O.worker(task, "build")
+                self.assertIs(caught.exception, error)
+                events = output.getvalue().splitlines()
+                self.assertEqual(len(events), 1)
+                event = json.loads(events[0])
+                self.assertEqual(set(event), {"event", "diagnostic"})
+                self.assertEqual(event["event"], "build-failed")
+                diagnostic = event["diagnostic"]
+                self.assertEqual(diagnostic["stage"], stage)
+                self.assertEqual(diagnostic["errorClass"], "ValueError")
+                self.assertTrue(1 <= len(diagnostic["locations"]) <= 2)
+                for location in diagnostic["locations"]:
+                    self.assertEqual(location["file"], "desktop/tools/linux_alpha_package.py")
+                    self.assertTrue(O.build_worker.__code__.co_firstlineno <= location["line"]
+                                    < O.package_worker.__code__.co_firstlineno)
+                manager = SimpleNamespace(cgroup_failure=None, clients=[], results=[])
+                with mock.patch.object(O, "read", return_value=output.getvalue()):
+                    public = O.failure_summary(task, manager, O.Refused(marker), "worker-build", "build", True)
+                self.assertEqual(public["buildFailure"], diagnostic)
+                self.assertNotIn(marker, json.dumps(public))
+                self.assertNotIn(marker, output.getvalue().decode())
+                data_module.support_unchanged.assert_not_called()
+                self.assertFalse(any(call.args[0].startswith("compile-") for call in command.call_args_list))
+
+    def test_build_diagnostic_bounds_unknown_data_and_finality_preserve_original_failure(self):
+        marker = "/private/do-not-publish diagnostic-marker"
+        hidden_class = type("PrivateCredentialClass", (ValueError,), {})
+        unknown = O.build_failure_diagnostic(marker, hidden_class(marker), SOURCE)
+        self.assertEqual(unknown, {"stage": "unknown", "errorClass": "unexpected", "locations": []})
+        def nested(depth):
+            if depth:
+                return nested(depth - 1)
+            O.need(False, marker)
+        try:
+            nested(40)
+        except O.Refused as error:
+            self.assertEqual(O.build_failure_diagnostic("reconstruct-runtime", error, SOURCE)["locations"], [])
+        event = {"event": "build-failed", "diagnostic": unknown}
+        manager = SimpleNamespace(cgroup_failure=None, clients=[], results=[])
+        task, failure = Path("/contract-task"), O.Refused(marker)
+        def project(raw, finality=True):
+            with mock.patch.object(O, "read", return_value=raw) as read:
+                value = O.failure_summary(task, manager, failure, "worker-build", "build", finality)
+                if not finality:
+                    read.assert_not_called()
+            self.assertNotIn(marker, json.dumps(value))
+            self.assertNotIn("PrivateCredentialClass", json.dumps(value))
+            return value
+        command = {"event": "command-failed", "command": {"label": "metadata-main", "exit": 1,
+            "stdoutBytes": 0, "stderrBytes": 0, "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64}}
+        later = copy.deepcopy(command)
+        later["command"]["label"] = "metadata-publisher"
+        raw = b"".join(O.canonical(row) + b"\n" for row in (command, event, later))
+        public = project(raw)
+        self.assertEqual(public["command"]["label"], "metadata-main")
+        self.assertEqual(public["buildFailure"], unknown)
+        self.assertNotIn("buildFailure", project(raw, False))
+        malformed = []
+        for key, value in (("stage", marker), ("errorClass", marker),
+                           ("locations", [{"file": marker, "line": 1}]),
+                           ("locations", [{"file": O.BUILD_DIAGNOSTIC_FILES[0], "line": True}]),
+                           ("locations", [{"file": O.BUILD_DIAGNOSTIC_FILES[0], "line": 1}] * 3)):
+            changed = copy.deepcopy(event)
+            changed["diagnostic"][key] = value
+            malformed.append(O.canonical(changed) + b"\n")
+        malformed.extend((O.canonical({**event, "raw": marker}) + b"\n",
+                          (O.canonical(event) + b"\n") * 2,
+                          O.canonical(event) + b"\nnot-complete-json\n"))
+        for raw in malformed:
+            with self.subTest(raw=raw[:80]):
+                public = project(raw)
+                self.assertNotIn("buildFailure", public)
+                self.assertEqual(public["workerDiagnostic"], "unavailable")
+        original = ValueError(marker)
+        command = SimpleNamespace(environment={"PATH": "/usr/bin:/bin"})
+        data_module = SimpleNamespace(reconstruct_runtime=mock.Mock(side_effect=original))
+        with mock.patch.object(O, "emit", side_effect=OSError("closed synthetic stream")), \
+             self.assertRaises(ValueError) as caught:
+            O.build_worker(task, {}, command, data_module)
+        self.assertIs(caught.exception, original)
+
 
 if __name__ == "__main__":
     unittest.main()

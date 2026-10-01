@@ -55,6 +55,27 @@ CGROUP_OPERATIONS = frozenset((
 ))
 
 
+# Closed failure-only DATA. These tags are not execution or cleanup authority.
+BUILD_STAGES = frozenset((
+    "build-setup", "reconstruct-runtime", "metadata-main", "compiler-inputs",
+    "metadata-publisher", "crate-notices", "support-inputs", "native-notices",
+    "support-postcheck", "frontend", "compile-main", "compile-publisher",
+    "dependency-inputs", "output-bindings", "output-postchecks", "build-result", "unknown",
+))
+BUILD_ERROR_CLASSES = frozenset((
+    "Refused", "ValueError", "TypeError", "KeyError", "IndexError", "AssertionError",
+    "OSError", "FileNotFoundError", "PermissionError", "FileExistsError",
+    "InterruptedError", "TimeoutError", "TimeoutExpired", "RuntimeError", "MemoryError",
+    "UnicodeError", "UnicodeDecodeError", "JSONDecodeError", "SystemExit", "KeyboardInterrupt",
+    "unexpected",
+))
+BUILD_DIAGNOSTIC_FILES = (
+    "desktop/tools/linux_alpha_package.py", "desktop/tools/linux_alpha_package_data.py",
+    "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/conventional_runtime_data.py",
+    "desktop/tools/prepare_runtime.py", "desktop/tools/stage_ubuntu_deb.py",
+)
+
+
 class Refused(ValueError):
     pass
 
@@ -236,6 +257,45 @@ def emit(event, **values):
     need(len(body) <= 8 << 20, "Worker event bound")
     sys.stdout.buffer.write(body)
     sys.stdout.buffer.flush()
+
+
+def build_failure_diagnostic(stage, error, source):
+    """At most two immutable source locations; no messages, locals or raw paths."""
+    allowed = {str(source / name): name for name in BUILD_DIAGNOSTIC_FILES}
+    locations, traceback = [], error.__traceback__
+    for _ in range(32):
+        if traceback is None:
+            break
+        name = allowed.get(traceback.tb_frame.f_code.co_filename)
+        line = traceback.tb_lineno
+        if name is not None and type(line) is int and 1 <= line <= 1_000_000:
+            locations.append({"file": name, "line": line})
+            locations = locations[-2:]
+        traceback = traceback.tb_next
+    if traceback is not None:
+        locations = []  # An over-bound traceback is unavailable, not a guessed origin.
+    error_class = type(error).__name__
+    return {
+        "stage": stage if type(stage) is str and stage in BUILD_STAGES else "unknown",
+        "errorClass": error_class if error_class in BUILD_ERROR_CLASSES else "unexpected",
+        "locations": locations,
+    }
+
+
+def public_build_diagnostic(value):
+    """Accept only the closed diagnostic shape after original-worker finality."""
+    if (type(value) is not dict or set(value) != {"stage", "errorClass", "locations"}
+            or type(value["stage"]) is not str or value["stage"] not in BUILD_STAGES
+            or type(value["errorClass"]) is not str or value["errorClass"] not in BUILD_ERROR_CLASSES
+            or type(value["locations"]) is not list or len(value["locations"]) > 2):
+        return None
+    for row in value["locations"]:
+        if (type(row) is not dict or set(row) != {"file", "line"}
+                or type(row["file"]) is not str or row["file"] not in BUILD_DIAGNOSTIC_FILES
+                or type(row["line"]) is not int or not 1 <= row["line"] <= 1_000_000):
+            return None
+    return {"stage": value["stage"], "errorClass": value["errorClass"],
+            "locations": [dict(row) for row in value["locations"]]}
 
 
 def load_data(source):
@@ -458,67 +518,88 @@ def acquire_worker(task, configuration, command, D):
 
 def build_worker(task, configuration, command, D):
     source, work = task / "source", task / "build"
-    compiler_root = work / ("rustup/toolchains/" + RUST + "-" + TARGET + "/bin")
-    cargo, rustc = str(compiler_root / "cargo"), str(compiler_root / "rustc")
-    command.environment.update(RUSTC=rustc, PATH=str(compiler_root) + ":" + command.environment["PATH"])
-    policy, runtime = D.reconstruct_runtime(source, work)
-    command.environment.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=policy["manifestSha256"],
-                               MRK_BUNDLED_PROTOCOL_SHA256=policy["protocolSha256"])
-    tooling = configuration["githubTooling"]
-    for name, value in tooling.items():
-        command.environment[name] = value
-    metadata, identities, nodes = {}, {}, {}
-    for role in ("main", "publisher"):
-        raw = command("metadata-" + role, [cargo, "metadata", "--offline", "--locked", "--format-version", "1",
-            "--no-default-features", "--features", ",".join(D.ROLES[role][2]), "--filter-platform", TARGET,
-            "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml")], timeout=90).stdout
-        metadata[role], identities[role], nodes[role] = D.metadata_graph(raw, role, source, work / "target")
-        if role == "main":
-            compiler_inputs, _ = D.U.shell_compiler_inputs(source, work, cargo, rustc, raw)
-    notices, notice_rows = D.collect_notices(source, work, metadata)
-    support = D.support_inputs(command)
-    notice_rows = D.native_notices(notices, support, command)
-    D.support_unchanged(support)
-    emit("inputs-admitted", noticeFiles=notice_rows)
-    node = str(task / "tools/node/bin/node")
-    # One meaningful no-emit check plus one frontend build, not a test rerun.
-    command("typescript-no-emit", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc",
-                                 "--noEmit", "-p", "tsconfig.json"], cwd=source / "desktop", timeout=90)
-    command("vite-assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build",
-        "--config", str(source / "desktop/vite.config.mjs"), "--configLoader", "native",
-        "--outDir", str(source / "desktop/dist")], cwd=source / "desktop", timeout=120)
-    frontend = D.U.shell_generated_tree(source / "desktop/dist")
-    need(1 <= len(frontend["files"]) <= 64 and not frontend["links"]
-         and any(row["path"] == "index.html" for row in frontend["files"]), "Actual embedded asset roster differs")
-    retained = {}
-    for role in ("main", "publisher"):
-        raw = command("compile-" + role, [cargo, "build", "--locked", "--offline", "--jobs", "1",
-            "--no-default-features", "--features", ",".join(D.ROLES[role][2]), "--target", TARGET,
-            "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml"), "--target-dir", str(work / "target"),
-            "--profile", "dev", "--bin", D.ROLES[role][0], "--message-format=json"], timeout=1800).stdout
-        selection, units = D.compiler_artifact(raw, role, source, work / "target")
-        D.U.shell_compiler_units(units, identities[role], nodes[role])
-        need(selection["packageId"] == metadata[role]["resolve"]["root"], "Compiler role is not the actual package root")
-        retained[role] = D.retain_binary(selection, work / "compiled" / D.ROLES[role][0])
-        # Root-only systemd stdout retains this BEFORE the later invocation.
-        emit("binary-retained", role=role, record=retained[role])
-        for previous in retained.values():
-            D.verify_retained_binary(previous)
-    dependencies = D.dependency_inputs(source, work,
-        {role: Path(retained[role]["retained"]["path"]) for role in retained}, runtime, policy, command, support=support)
-    notice_rows = D.bind_notice_outputs(notices, configuration["sourceSha"], policy, retained, frontend)
-    D.dependencies_unchanged(dependencies)
-    for record in retained.values():
-        D.verify_retained_binary(record)
-    runtime_rows = D.S.runtime_records(runtime, policy["manifestSha256"], policy["protocolSha256"])
-    D.current_controls(source)
-    result = {
-        "policy": policy, "runtimeFiles": list(runtime_rows.values()), "noticeFiles": notice_rows,
-        "compiler": retained, "compilerInputs": compiler_inputs, "frontend": frontend,
-        "dependencies": dependencies, "commands": command.records,
-    }
-    # The root later binds these originals after cgroup finality before transfer.
-    emit("built", result=result)
+    stage = "build-setup"
+    try:
+        compiler_root = work / ("rustup/toolchains/" + RUST + "-" + TARGET + "/bin")
+        cargo, rustc = str(compiler_root / "cargo"), str(compiler_root / "rustc")
+        command.environment.update(RUSTC=rustc, PATH=str(compiler_root) + ":" + command.environment["PATH"])
+        stage = "reconstruct-runtime"
+        policy, runtime = D.reconstruct_runtime(source, work)
+        command.environment.update(MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=policy["manifestSha256"],
+                                   MRK_BUNDLED_PROTOCOL_SHA256=policy["protocolSha256"])
+        tooling = configuration["githubTooling"]
+        for name, value in tooling.items():
+            command.environment[name] = value
+        metadata, identities, nodes = {}, {}, {}
+        for role in ("main", "publisher"):
+            stage = "metadata-" + role
+            raw = command("metadata-" + role, [cargo, "metadata", "--offline", "--locked", "--format-version", "1",
+                "--no-default-features", "--features", ",".join(D.ROLES[role][2]), "--filter-platform", TARGET,
+                "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml")], timeout=90).stdout
+            metadata[role], identities[role], nodes[role] = D.metadata_graph(raw, role, source, work / "target")
+            if role == "main":
+                stage = "compiler-inputs"
+                compiler_inputs, _ = D.U.shell_compiler_inputs(source, work, cargo, rustc, raw)
+        stage = "crate-notices"
+        notices, notice_rows = D.collect_notices(source, work, metadata)
+        stage = "support-inputs"
+        support = D.support_inputs(command)
+        stage = "native-notices"
+        notice_rows = D.native_notices(notices, support, command)
+        stage = "support-postcheck"
+        D.support_unchanged(support)
+        emit("inputs-admitted", noticeFiles=notice_rows)
+        stage = "frontend"
+        node = str(task / "tools/node/bin/node")
+        # One meaningful no-emit check plus one frontend build, not a test rerun.
+        command("typescript-no-emit", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc",
+                                     "--noEmit", "-p", "tsconfig.json"], cwd=source / "desktop", timeout=90)
+        command("vite-assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build",
+            "--config", str(source / "desktop/vite.config.mjs"), "--configLoader", "native",
+            "--outDir", str(source / "desktop/dist")], cwd=source / "desktop", timeout=120)
+        frontend = D.U.shell_generated_tree(source / "desktop/dist")
+        need(1 <= len(frontend["files"]) <= 64 and not frontend["links"]
+             and any(row["path"] == "index.html" for row in frontend["files"]), "Actual embedded asset roster differs")
+        retained = {}
+        for role in ("main", "publisher"):
+            stage = "compile-" + role
+            raw = command("compile-" + role, [cargo, "build", "--locked", "--offline", "--jobs", "1",
+                "--no-default-features", "--features", ",".join(D.ROLES[role][2]), "--target", TARGET,
+                "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml"), "--target-dir", str(work / "target"),
+                "--profile", "dev", "--bin", D.ROLES[role][0], "--message-format=json"], timeout=1800).stdout
+            selection, units = D.compiler_artifact(raw, role, source, work / "target")
+            D.U.shell_compiler_units(units, identities[role], nodes[role])
+            need(selection["packageId"] == metadata[role]["resolve"]["root"], "Compiler role is not the actual package root")
+            retained[role] = D.retain_binary(selection, work / "compiled" / D.ROLES[role][0])
+            # Root-only systemd stdout retains this BEFORE the later invocation.
+            emit("binary-retained", role=role, record=retained[role])
+            for previous in retained.values():
+                D.verify_retained_binary(previous)
+        stage = "dependency-inputs"
+        dependencies = D.dependency_inputs(source, work,
+            {role: Path(retained[role]["retained"]["path"]) for role in retained}, runtime, policy, command, support=support)
+        stage = "output-bindings"
+        notice_rows = D.bind_notice_outputs(notices, configuration["sourceSha"], policy, retained, frontend)
+        stage = "output-postchecks"
+        D.dependencies_unchanged(dependencies)
+        for record in retained.values():
+            D.verify_retained_binary(record)
+        runtime_rows = D.S.runtime_records(runtime, policy["manifestSha256"], policy["protocolSha256"])
+        D.current_controls(source)
+        stage = "build-result"
+        result = {
+            "policy": policy, "runtimeFiles": list(runtime_rows.values()), "noticeFiles": notice_rows,
+            "compiler": retained, "compilerInputs": compiler_inputs, "frontend": frontend,
+            "dependencies": dependencies, "commands": command.records,
+        }
+        # The root later binds these originals after cgroup finality before transfer.
+        emit("built", result=result)
+    except BaseException as error:
+        try:
+            emit("build-failed", diagnostic=build_failure_diagnostic(stage, error, source))
+        except BaseException:
+            pass  # A broken diagnostic stream must not replace the original failure.
+        raise
 
 
 def package_worker(task, configuration, command, D):
@@ -1562,13 +1643,24 @@ def failure_summary(task, manager, failure, phase, role, finality):
             value["unit"]["exitCode"] = original["ExecMainCode"]
             value["unit"]["exitStatus"] = original["ExecMainStatus"]
     if finality and role in ROLES:
+        build_seen, build_invalid = False, False
         try:
             raw = read(task / "private" / (role + ".stdout"), MAX_CAPTURE, 0)
             for line in raw.splitlines():
                 if len(line) > 8 << 20:
+                    build_invalid = role == "build" or build_invalid
                     continue
                 event = json.loads(line)
-                if type(event) is not dict or event.get("event") != "command-failed":
+                if type(event) is dict and event.get("event") == "build-failed" and role == "build":
+                    diagnostic = public_build_diagnostic(event.get("diagnostic"))
+                    if build_seen or set(event) != {"event", "diagnostic"} or diagnostic is None:
+                        build_invalid = True
+                    else:
+                        value["buildFailure"] = diagnostic
+                    build_seen = True
+                    continue
+                if (type(event) is not dict or event.get("event") != "command-failed"
+                        or "command" in value):
                     continue
                 item = event.get("command")
                 if (type(item) is not dict or type(item.get("label")) is not str
@@ -1582,8 +1674,11 @@ def failure_summary(task, manager, failure, phase, role, finality):
                 value["command"] = {key: item[key] for key in (
                     "label", "exit", "stdoutBytes", "stderrBytes", "stdoutSha256", "stderrSha256")}
                 value["command"]["compilerDiagnostics"] = public_compiler_diagnostics(item.get("compilerDiagnostics"))
-                break
+            if build_invalid or role == "build" and not build_seen:
+                value.pop("buildFailure", None)
+                value["workerDiagnostic"] = "unavailable"
         except (OSError, ValueError, UnicodeError):
+            value.pop("buildFailure", None)
             value["workerDiagnostic"] = "unavailable"
     return value
 
