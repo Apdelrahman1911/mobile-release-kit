@@ -15,7 +15,7 @@ from typing import Any
 
 from ._desktop_edit_control import EditInput
 from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL, NOTES_PROTOCOL,
-                                     registered_identity, response)
+                                     registered_identity, notes_registered_identity, response)
 from .build_inputs import _attempt_all
 from .cancellation import CleanupScope, DefaultCancellation
 from .config_edit import (ConfigEditFailure, CoreEditOutcome, apply_config_edit,
@@ -70,19 +70,32 @@ def _admit_image_backend(root: object, value: object) -> ImageRootIdentity:
 
 
 class _Engine:
-    def __init__(self, started: float, *, workflows: bool = False, domain: str | None = None) -> None:
+    def __init__(self, started: float, *, workflows: bool = False, domain: str | None = None,
+                 _notes_stdio: object = None, _image_stdio: Any = None) -> None:
         if type(workflows) is not bool or domain is not None and workflows:
             raise ProtocolError("Invalid fixed edit domain")
         selected = ("github_workflows" if workflows else "configuration") if domain is None else domain
         if type(selected) is not str or selected not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images", "required_notes"}:
             raise ProtocolError("Invalid fixed edit domain")
+        if _notes_stdio is not None and selected != "required_notes":
+            raise ProtocolError("The original Notes stdio cannot select another engine")
         self.domain = selected
         self.workflows = selected == "github_workflows"  # Existing private constructor compatibility.
         self.guard = DefaultCancellation(ValidationError, "configuration edit custody did not settle")
         protocol = {"configuration": PROTOCOL, "github_workflows": WORKFLOW_PROTOCOL,
                     "metadata_text": METADATA_PROTOCOL, "release_version": VERSION_PROTOCOL,
                     "metadata_images": IMAGES_PROTOCOL, "required_notes": NOTES_PROTOCOL}[selected]
-        self.input = EditInput(started, protocol=protocol)
+        self.image_stdio = None
+        self.image_writer = None
+        if sys.platform == "win32" and selected == "metadata_images":
+            from ._desktop_image_writer_windows import _original_image_stdio
+            self.image_stdio = _original_image_stdio(_image_stdio, started)
+        elif _image_stdio is not None:
+            raise ProtocolError("No image stdio handoff belongs to this edit domain")
+        self.input = EditInput(started, protocol=protocol, _notes_stdio=_notes_stdio,
+                               _windows_stdio=self.image_stdio)
+        if self.image_stdio is not None:
+            self.input._prepare_windows_owner(self.guard)
         self.lease: InitRootLease | None = None
         self.authority: Any = None
         self.last_request: EditRequest | None = None
@@ -93,10 +106,16 @@ class _Engine:
         self.first: BaseException | None = None
         self.frames = 0
         self.stdout_bytes = 0
-        self.output_owned = False
+        self.output_owned = self.input._windows_stdio is not None and self.input._windows_stdio._claims[1]
         self.output_closed = False
-        self.error_owned = False
+        self.error_owned = self.input._windows_stdio is not None and self.input._windows_stdio._claims[2]
         self.error_closed = False
+
+    def _latch_notes_failure(self, error: BaseException) -> None:
+        # Includes parsing/validation failures BETWEEN workspace scopes. Native
+        # sees the first failure before the original lease begins cleanup.
+        if self.domain == "required_notes" and self.lease is not None:
+            self.lease._record_notes_failure(error)
 
     def _remember(self, error: BaseException) -> None:
         if self.first is None:
@@ -128,6 +147,8 @@ class _Engine:
         self.outcome = CoreEditOutcome(effect, journal, resources, reason)
 
     def cleanup(self) -> None:
+        if self.image_stdio is not None:
+            self.input._image_cleanup_started()
         def retire() -> None:
             if self.authority is not None:
                 if self.domain == "github_workflows":
@@ -151,14 +172,33 @@ class _Engine:
         actions = [retire]
         if self.lease is not None:
             actions.append(self.lease.close)
-        actions.append(self.input.close)
-        _attempt_all(self.guard, actions)
+        def close_input() -> None:
+            try:
+                self.input.close()
+            except BaseException:
+                if self.image_stdio is not None:
+                    # Keep the accepted Image pre-ledger sibling settlement.
+                    # Each same native original closes once; lost custody still
+                    # vetoes native entry. No Notes terminal allowance is used.
+                    try:
+                        self.close_output()
+                    except BaseException:
+                        pass  # Native results stay rooted; first input failure prevails.
+                raise
+        actions.append(close_input)
+        try:
+            _attempt_all(self.guard, actions)
+        finally:
+            self.input._notes_cleanup_attempted = True
 
     def write(self, raw: bytes, *, terminal: bool = False) -> None:
         if self.frames >= 3 or self.stdout_bytes + len(raw) > 12 * 1024 * 1024:
             raise ProtocolError("Edit output exceeded its bound")
         self.frames += 1
         self.stdout_bytes += len(raw)
+        if self.input._windows_stdio is not None:
+            self.input._windows_stdio.write_frame(raw, terminal=terminal)
+            return
         remaining = memoryview(raw)
         # Terminal output follows root/handler settlement and has only a small
         # local bounded delivery allowance. It cannot restart native cleanup.
@@ -182,15 +222,35 @@ class _Engine:
         self.guard._install_edit_source(self.input)
         # Fixed inherited standard descriptors, never renderer-controlled paths.
         self.output_owned = True
-        os.set_blocking(1, False)
-        self.error_owned = True
+        if self.input._windows_stdio is not None:
+            self.error_owned = True
+            if self.domain == "required_notes":
+                self.input._windows_stdio.handoff()
+            # Image handoff already ran in acquire() under its startup guard.
+        else:
+            os.set_blocking(1, False)
+            self.error_owned = True
         self.guard.activate()
+        if self.image_stdio is not None:
+            from ._desktop_image_writer_windows import _open_for_original_image_child
+            self.image_writer = _open_for_original_image_child(domain=self.domain, installed_python=sys.executable,
+                before_entry=self.input.before_image_entry, before_settlement=self.input.before_image_settlement,
+                _stdio_context=self.image_stdio)
         request = self.input.request(0, None)
         self.last_request = request
         self.guard.check()
         image_identity = (_admit_image_backend(request.params["root"], request.params["registeredIdentity"])
                           if self.domain == "metadata_images" else None)
-        root = _root(request.params["root"])
+        if self.domain == "required_notes" and self.input._windows_stdio is not None:
+            value = request.params["root"]
+            if (type(value) is not str or not 1 < len(value.encode("utf-8")) <= 4096 or "\0" in value):
+                raise ProtocolError("The original Notes root is invalid")
+            # Preserve the exact registered string. The admitted native Notes
+            # factory validates Windows lexical/volume semantics before acquire;
+            # Path must not normalize it into a different root authority.
+            root = value
+        else:
+            root = _root(request.params["root"])
         if self.domain == "github_workflows":
             # The closed lease compares all five facts to raw original fstat on
             # acquire and subsequent checks BEFORE any workflow observation.
@@ -206,7 +266,8 @@ class _Engine:
             # purpose, before acquisition; there is no wire purpose parameter.
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.METADATA_TEXT, purpose=_LeasePurpose.REQUIRED_NOTES,
-                registered_identity=registered_identity(request.params["registeredIdentity"]))
+                registered_identity=notes_registered_identity(request.params["registeredIdentity"]),
+                _notes_input=self.input if self.input._windows_stdio is not None else None)
         elif self.domain == "release_version":
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.RELEASE_VERSION,
@@ -358,7 +419,8 @@ class _Engine:
             outcome = CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)
         outcome = outcome or CoreEditOutcome("not_started", "not_created", "settled", "none")
         if (not self.input.closed or self.lease is not None and not self.lease.closed
-                or self.guard.handler_state != "RESTORED" or self.guard.lifetime_ledger.fatal):
+                or self.guard.handler_state != "RESTORED" or self.guard.lifetime_ledger.fatal
+                or self.input._windows_stdio is not None and self.input._windows_stdio._unknown):
             outcome = CoreEditOutcome(outcome.effect, outcome.journal, "unknown",
                                       outcome.reason if outcome.reason != "none" else "custody_unknown")
         self.outcome = outcome
@@ -379,7 +441,10 @@ class _Engine:
             if getattr(self, name + "_owned") and not getattr(self, name + "_closed"):
                 setattr(self, name + "_owned", False)  # Retire BEFORE sole close.
                 try:
-                    os.close(number)
+                    if self.input._windows_stdio is not None:
+                        self.input._windows_stdio.close_role(number)
+                    else:
+                        os.close(number)
                     setattr(self, name + "_closed", True)
                 except BaseException as error:
                     if first is None:
@@ -388,14 +453,22 @@ class _Engine:
             raise first
 
 
-def main(*, started: float | None = None, workflows: bool = False, domain: str | None = None) -> int:
-    engine = _Engine(time.monotonic() if started is None else started, workflows=workflows, domain=domain)
+def main(*, started: float | None = None, workflows: bool = False, domain: str | None = None,
+         _notes_stdio: object = None, _image_stdio: Any = None) -> int:
+    engine = _Engine(time.monotonic() if started is None else started, workflows=workflows,
+                     domain=domain, _notes_stdio=_notes_stdio, _image_stdio=_image_stdio)
     scope = CleanupScope(engine.guard, engine.cleanup, owns_cancellation=True, first_primary=True)
     try:
         try:
             try:
                 with scope:
-                    engine.run()
+                    try:
+                        engine.run()
+                        if engine.outcome is not None and engine.outcome.reason != "none":
+                            engine._latch_notes_failure(ConfigEditFailure(engine.outcome))
+                    except BaseException as error:
+                        engine._latch_notes_failure(error)
+                        raise
             finally:
                 scope.__exit__(*sys.exc_info())
         except BaseException as error:

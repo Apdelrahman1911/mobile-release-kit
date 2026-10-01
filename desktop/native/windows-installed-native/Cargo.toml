@@ -13,6 +13,19 @@ path = "src/lib.rs"
 # Fixed privileged package producer only; never a consumer/runtime capability.
 [features]
 runtime-publication = []
+# Unwired image-only filesystem primitives; no installed writer qualification.
+image-writer = []
+# Original image child/stdio primitives; no shipping profile or backend activation.
+image-stdio = ["image-writer"]
+# Distinct Notes42/NotesLoader purpose on the existing original stdio transport.
+required-notes = ["image-stdio", "dep:sha2"]
+# Fixed protected input acquisition only; absent normal desktop/runtime publisher.
+installer-acquisition = ["dep:sha2"]
+# Private fixed launch-selection/maintenance only; not a shipping installer.
+installer-selection = ["installer-acquisition", "runtime-publication", "windows-sys/Win32_System_Com_StructuredStorage", "windows-sys/Wdk_System_Registry"]
+installer-selection-fixture = ["installer-selection", "installer-protected-fixture"]
+# Finite nonshipping retained-shell fixture; never enables desktop/installer shipping.
+installer-protected-fixture = ["installer-acquisition", "runtime-publication", "qualification-result"]
 # Qualification DATA writer only; never a normal helper capability.
 qualification-result = []
 # Same narrow native inspector used by normal startup and the read-only probe.
@@ -25,11 +38,14 @@ desktop-ui-dialogs = ["desktop-ui"]
 windows-installed-observation = ["desktop-ui-dialogs"]
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
+# Same already-locked SHA256 used by the fixed acquired prerequisite owner.
+sha2 = { version = "=0.10.9", optional = true }
 windows-sys = { version = "=0.61.2", features = [
   "Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices",
-  "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security",
+  "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization",
   "Win32_NetworkManagement_NetManagement", "Win32_Security_Cryptography",
-  "Win32_System_IO", "Win32_System_Threading", "Win32_System_SystemInformation",
+  "Win32_System_IO", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_JobObjects",
+  "Win32_System_Console", "Win32_System_Pipes",
   "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_UI_Shell",
   "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_LibraryLoader",
   "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging",

@@ -375,9 +375,40 @@ pub struct TerminalReply {
 impl TerminalReply { pub(crate) fn outcome(&self) -> CoreEditOutcome {
     CoreEditOutcome { effect: self.effect.clone(), journal: self.journal.clone(), resources: self.resources.clone(), reason: self.reason.clone() }
 } }
+// One lossless projection from the app's completed native project selection.
+// This Notes-only DATA codec neither aliases Images' decimal wire nor selects
+// a profile/acquires a lease. The original edit owner supplies the identity.
+pub(crate) fn registered_identity_from_project(identity: crate::asset_source::ProjectIdentity) -> Value {
+    use crate::asset_source::ProjectIdentity;
+    match identity {
+        ProjectIdentity::Posix(identity) => json!(identity.workflow_identity()),
+        ProjectIdentity::Windows { volume, file_id } => {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut encoded = String::with_capacity(32);
+            for byte in file_id {
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 15) as usize] as char);
+            }
+            json!({"platform":"windows-ntfs-v1","volumeSerial":format!("{volume:016x}"),"fileId":encoded})
+        },
+    }
+}
+// Closed Notes-only root DATA. This never selects a native platform or grants
+// authority, and deliberately leaves every other edit protocol unchanged.
+fn notes_registered_identity(value: &Value) -> bool {
+    if value.get("platform").and_then(Value::as_str) == Some("windows-ntfs-v1") {
+        keys(value, &["platform", "volumeSerial", "fileId"])
+            && value["volumeSerial"].as_str().is_some_and(|s| s.len() == 16
+                && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            && value["fileId"].as_str().is_some_and(|s| s.len() == 32
+                && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    } else {
+        RegisteredIdentity::deserialize(value).is_ok_and(|identity| identity.valid())
+    }
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PrivateOpen { root: String, registered_identity: RegisteredIdentity, context: Context }
+struct PrivateOpen { root: String, registered_identity: Value, context: Context }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PrivatePrepare { revision: String, context: Context, expected_baseline: Baseline, text: String }
@@ -386,7 +417,7 @@ pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Resul
     value_bounds(&params, 16, REQUEST_LIMIT)?;
     let legal = match (seq, op) {
         (0, "open") => PrivateOpen::deserialize(&params).is_ok_and(|p| p.root.len() > 1 && p.root.len() <= 4096
-            && !p.root.contains('\0') && p.registered_identity.valid() && p.context.valid()),
+            && !p.root.contains('\0') && notes_registered_identity(&p.registered_identity) && p.context.valid()),
         (1, "prepare") => keys(&params, &["revision", "context", "expectedBaseline", "text"])
             && PrivatePrepare::deserialize(&params).is_ok_and(|p| token(&p.revision) && p.context.valid()
                 && p.expected_baseline.valid_for(&p.context) && p.text.len() <= p.context.kind().byte_limit()),
@@ -656,5 +687,48 @@ pub(crate) mod tests {
             let refused=Imported::selected(context.kind(),text.clone(),validation).err().unwrap();
             assert_eq!(refused.0,text); // same raw allocation is returned, not selected
         }
+    }
+    #[test]
+    fn required_note_root_union_is_lossless_closed_and_domain_private() {
+        let identity = json!({"platform":"windows-ntfs-v1","volumeSerial":"ffffffffffffffff",
+                              "fileId":"1234567890abcdef1234567890abcdef"});
+        let params = json!({"root":r"C:\projects\mobile","registeredIdentity":identity,
+                            "context":{"kind":"ios-beta-review"}});
+        let wire = request(SESSION, 0, "open", params.clone()).unwrap();
+        let parsed: Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(parsed["params"]["registeredIdentity"], identity);
+        assert!(RegisteredIdentity::deserialize(&identity).is_err());
+        for (name, value) in [
+            ("volumeSerial", json!(u64::MAX)),
+            ("volumeSerial", json!("FFFFFFFFFFFFFFFF")),
+            ("volumeSerial", json!("fffffffffffffff")),
+            ("fileId", json!("g".repeat(32))),
+            ("uid", json!(1000)),
+            ("platform", json!("posix")),
+        ] {
+            let mut invalid = params.clone();
+            invalid["registeredIdentity"][name] = value;
+            assert!(request(SESSION, 0, "open", invalid).is_err());
+        }
+        let mut missing = params;
+        missing["registeredIdentity"].as_object_mut().unwrap().remove("fileId");
+        assert!(request(SESSION, 0, "open", missing).is_err());
+        let posix = json!({"device":"9007199254740993","inode":"18446744073709551615",
+                           "mode":0o040700,"uid":1000,"gid":1000});
+        assert!(notes_registered_identity(&posix));
+        assert!(RegisteredIdentity::deserialize(&posix).is_ok_and(|value| value.valid()));
+    }
+    #[test]
+    fn notes_project_identity_codec_preserves_native_width_and_file_id_order() {
+        use crate::asset_source::{DirectoryIdentity, ProjectIdentity};
+        let windows = registered_identity_from_project(ProjectIdentity::Windows {
+            volume: u64::MAX, file_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        });
+        assert_eq!(windows, json!({"platform":"windows-ntfs-v1","volumeSerial":"ffffffffffffffff",
+                                  "fileId":"000102030405060708090a0b0c0d0e0f"}));
+        assert!(notes_registered_identity(&windows));
+        let posix = DirectoryIdentity::synthetic_evidence_identity();
+        assert_eq!(registered_identity_from_project(ProjectIdentity::Posix(posix)),
+                   json!(posix.workflow_identity()));
     }
 }

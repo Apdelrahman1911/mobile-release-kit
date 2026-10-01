@@ -94,7 +94,36 @@ def _authentic_plan(value: object) -> bool:
 
 
 def _lease_matches(native: _shared._NativeContract, lease: object) -> bool:
-    return type(lease) is native.lease and getattr(lease, "profile", None) is _PROFILE
+    from .init_workspace_custody import _LeasePurpose
+    return (type(lease) is native.lease and getattr(lease, "profile", None) is _PROFILE
+            and getattr(lease, "_purpose", None) is _LeasePurpose.REQUIRED_NOTES)
+
+
+def _snapshot(lease: InitRootLease, value: object, path: str, limit: int) -> _shared._FileSnapshot:
+    # The concrete original lease, not a renderer identity or a dictionary tag,
+    # selects the Notes-only material family. Other editors retain _snapshot.
+    family = lease.notes_identity_family
+    if family == "posix":
+        return _shared._snapshot(value, path, limit)
+    if family != "windows-ntfs-v1":
+        raise _shared._ContractViolation()
+    from ._required_notes_windows_contract import WindowsNotesContractError, material
+    from .init_transaction import ObservedFile
+    if type(value) is not ObservedFile or type(value.path) is not str or value.path != path:
+        raise _shared._ContractViolation()
+    if value.before is None:
+        if value.data is not None:
+            raise _shared._ContractViolation()
+        return _shared._FileSnapshot(path, None, None)
+    try:
+        before = material(value.before, directory=False, limit=limit)
+    except WindowsNotesContractError:
+        raise _shared._ContractViolation() from None
+    data = value.data
+    if (type(data) is not bytes or len(data) > limit or before["size"] != str(len(data))
+            or before["sha256"] != _shared.hashlib.sha256(data).hexdigest()):
+        raise _shared._ContractViolation()
+    return _shared._FileSnapshot(path, tuple(sorted(before.items())), data)
 
 
 def _admit_revision(native: _shared._NativeContract, revision: object,
@@ -154,9 +183,9 @@ def capture_required_notes_edit(lease: InitRootLease, context: object) -> Requir
     except BaseException as error:
         raise ConfigEditFailure(_shared._settled_failure(native, error)) from None
     try:
-        captured = tuple(_shared._snapshot(item, path, limit)
+        captured = tuple(_snapshot(lease, item, path, limit)
                          for item, path, limit in zip(dependencies, targets.dependency_paths, limits))
-        item = _shared._snapshot(original, selection.path, selection.editor_byte_limit)
+        item = _snapshot(lease, original, selection.path, selection.editor_byte_limit)
         _admit_revision(native, revision, selection, item)
         _safe_original(item.data, selection)
         originals = {row.path: row.data for row in captured}

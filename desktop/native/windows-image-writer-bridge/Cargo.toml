@@ -1,0 +1,28 @@
+[package]
+name = "mrk-windows-image-writer-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+description = "Private unwired Windows image primitive ABI; not a transaction or runtime permit"
+
+[lib]
+name = "mrk_image_writer_native"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Same DLL, distinct Notes42 entry points using the existing pinned SHA2.
+required-notes = ["mrk-windows-installed-native/required-notes"]
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
+mrk-windows-installed-native = { path = "../windows-installed-native", default-features = false, features = ["image-writer", "image-stdio"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

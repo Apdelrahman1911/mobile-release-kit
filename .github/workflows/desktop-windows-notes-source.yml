@@ -1,0 +1,125 @@
+name: Windows Required Notes selected SOURCE verification
+
+on:
+  push:
+    branches: [verify/desktop-windows-required-notes-source]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed commit on the fixed verification branch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-required-notes-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-required-notes-source:
+    name: Windows MSVC / three compile-only originals and selected DATA contracts
+    if: >-
+      github.ref == 'refs/heads/verify/desktop-windows-required-notes-source' &&
+      github.workflow_sha == github.sha &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.expected_sha == github.sha))
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 45
+    env:
+      MRK_DESKTOP_PLATFORM: windows
+      MRK_DESKTOP_HOSTED_CHECKS: windows-required-notes-source-v1
+      MRK_DESKTOP_DISPATCH_SCOPE: ${{ github.event_name == 'workflow_dispatch' && 'windows-required-notes-source' || '' }}
+      MRK_DESKTOP_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Require first-push or explicit-SHA dispatch from this exact workflow commit
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          refuse() { printf '%s\n' "MRK_WINDOWS_NOTES_ROUTE_REFUSED=$1" >&2; exit 1; }
+          [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted &&
+             "${RUNNER_OS:-}" == Windows && "${RUNNER_ARCH:-}" == X64 &&
+             "${ImageOS:-}" == win25-vs2026 ]] || refuse runner
+          [[ "${GITHUB_JOB:-}" == windows-required-notes-source &&
+             "${GITHUB_RUN_ATTEMPT:-}" == 1 ]] || refuse original
+          [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ &&
+             "${GITHUB_SHA:-}" != 0000000000000000000000000000000000000000 &&
+             "${GITHUB_WORKFLOW_SHA:-}" == "${GITHUB_SHA:-}" ]] || refuse source
+          [[ "${GITHUB_REF:-}" == refs/heads/verify/desktop-windows-required-notes-source &&
+             "${GITHUB_WORKFLOW_REF:-}" == "${GITHUB_REPOSITORY:-}/.github/workflows/desktop-windows-notes-source.yml@${GITHUB_REF:-}" ]] || refuse workflow
+          if [[ "${GITHUB_EVENT_NAME:-}" == push ]]; then
+            [[ -z "${MRK_DESKTOP_DISPATCH_SCOPE:-}" &&
+               -z "${MRK_DESKTOP_EXPECTED_SHA:-}" ]] || refuse push
+          else
+            [[ "${GITHUB_EVENT_NAME:-}" == workflow_dispatch &&
+               "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-required-notes-source &&
+               "${MRK_DESKTOP_EXPECTED_SHA:-}" == "${GITHUB_SHA:-}" ]] || refuse dispatch
+          fi
+      - name: Check out the same workflow and candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select fixed native Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: x64
+      - name: Bind source selectors and one private original root
+        id: prepare
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_windows_required_notes.py prepare'
+      - name: Acquire only the locked three selected Windows graphs
+        timeout-minutes: 16
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_windows_required_notes.py acquire'
+      - name: Compile native, bridge and app originals without running libtests
+        timeout-minutes: 20
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_windows_required_notes.py compile'
+      - name: Run exactly 63 Rust and 63 separately owned scripted-memory Python contracts
+        if: success()
+        timeout-minutes: 4
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_windows_required_notes.py windows-required-notes-contracts'
+      - name: Retain bounded original DATA only, even on failure
+        if: always() && steps.prepare.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_windows_required_notes.py retain'
+      - name: Upload only whitelisted DATA, never binaries or private runtime roots
+        if: always() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-required-notes-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.root }}/public/*
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false

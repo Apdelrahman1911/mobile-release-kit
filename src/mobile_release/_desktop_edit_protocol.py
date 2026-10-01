@@ -61,6 +61,17 @@ def registered_identity(value: object) -> dict[str, int]:
     return result
 
 
+def notes_registered_identity(value: object) -> dict[str, int] | dict[str, str]:
+    """Notes-only DATA union; original native lease separately selects authority."""
+    if type(value) is dict and value.get("platform") == "windows-ntfs-v1":
+        from ._required_notes_windows_contract import WindowsNotesContractError, registered_root
+        try:
+            return registered_root(value)
+        except WindowsNotesContractError:
+            raise ProtocolError("Invalid registered required-note directory identity") from None
+    return registered_identity(value)
+
+
 def _workflow_value(value: object, *, depth_limit: int, byte_limit: int) -> None:
     # The common parser already checks JSON scalar types. This second, narrower
     # DATA bound admits this domain's draft/results without changing config wire.
@@ -125,7 +136,9 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
         else:
             names = {"root"}
         valid = op == "open" and set(params) == names and type(params["root"]) is str
-        if valid and protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, NOTES_PROTOCOL}:
+        if valid and protocol == NOTES_PROTOCOL:
+            notes_registered_identity(params["registeredIdentity"])
+        elif valid and protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
             registered_identity(params["registeredIdentity"])
         if valid and protocol == NOTES_PROTOCOL:
             try:

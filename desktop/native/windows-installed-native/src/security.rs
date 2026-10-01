@@ -51,7 +51,32 @@ impl SecurityFacts {
     }
 }
 #[derive(Clone, Copy)]
-enum DescriptorPurpose<'a> { Runtime(FileKind, AuthorityScope), PrivateCredential(&'a Sid) }
+enum DescriptorPurpose<'a> {
+    Runtime(FileKind, AuthorityScope), PrivateCredential(&'a Sid),
+    #[cfg(feature = "installer-selection")]
+    Selection(SelectionDescriptor),
+}
+#[cfg(feature = "installer-selection")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SelectionDescriptor { Registration, Reservation, RegistrationParent }
+// IMAGE-LOADER-only actual-capacity accounting inside the existing decoder.
+// Standard runtime/credential descriptor policy passes None and is unchanged.
+// Temporary group and not-yet-adopted ACE SID allocations also count; no native
+// call occurs while decoding a definitely returned descriptor.
+fn descriptor_storage(cap: Option<usize>, owner: &Sid, group: Option<&Sid>,
+    aces: Option<&Vec<AceFact>>, pending: Option<&Sid>) -> Result<()> {
+    let Some(cap) = cap else { return Ok(()); };
+    let mut bytes = size_of::<SecurityFacts>().checked_add(size_of::<Sid>())
+        .and_then(|n| n.checked_add(owner.bytes.capacity())).ok_or(Error::Bounds)?;
+    if let Some(group) = group { bytes = bytes.checked_add(group.bytes.capacity()).ok_or(Error::Bounds)?; }
+    if let Some(aces) = aces {
+        bytes = bytes.checked_add(aces.capacity().checked_mul(size_of::<AceFact>()).ok_or(Error::Bounds)?)
+            .ok_or(Error::Bounds)?;
+        for ace in aces { bytes = bytes.checked_add(ace.sid.bytes.capacity()).ok_or(Error::Bounds)?; }
+    }
+    if let Some(pending) = pending { bytes = bytes.checked_add(pending.bytes.capacity()).ok_or(Error::Bounds)?; }
+    if bytes > cap { Err(Error::Bounds) } else { Ok(()) }
+}
 impl Observed<'_> {
 fn expand(self, mask: u32) -> Result<u32> {
     let generic = F::GENERIC_READ | F::GENERIC_WRITE | F::GENERIC_EXECUTE | F::GENERIC_ALL;
@@ -98,12 +123,20 @@ pub(crate) fn descriptor(raw: &[u8], kind: FileKind, scope: AuthorityScope) -> R
 }
 impl Observed<'_> {
 pub(crate) fn descriptor(self, raw: &[u8], kind: FileKind, scope: AuthorityScope) -> Result<SecurityFacts> {
-    self.descriptor_for(raw, DescriptorPurpose::Runtime(kind, scope))
+    self.descriptor_for(raw, DescriptorPurpose::Runtime(kind, scope), None)
 }
 pub(crate) fn credential_descriptor(self, raw: &[u8], user: &Sid) -> Result<SecurityFacts> {
-    self.descriptor_for(raw, DescriptorPurpose::PrivateCredential(user))
+    self.descriptor_for(raw, DescriptorPurpose::PrivateCredential(user), None)
 }
-fn descriptor_for(self, raw: &[u8], purpose: DescriptorPurpose<'_>) -> Result<SecurityFacts> {
+#[cfg(feature = "installer-selection")]
+pub(crate) fn selection_descriptor(self, raw: &[u8], purpose: SelectionDescriptor) -> Result<SecurityFacts> {
+    self.descriptor_for(raw, DescriptorPurpose::Selection(purpose), None)
+}
+#[cfg(feature = "image-writer")]
+pub(crate) fn image_descriptor(self, raw: &[u8], kind: FileKind, scope: AuthorityScope, cap: usize) -> Result<SecurityFacts> {
+    self.descriptor_for(raw, DescriptorPurpose::Runtime(kind, scope), Some(cap))
+}
+fn descriptor_for(self, raw: &[u8], purpose: DescriptorPurpose<'_>, image_cap: Option<usize>) -> Result<SecurityFacts> {
     let d = super::decode::Observed::new(self.0);
     if raw.len() > BUFFER || raw.len() < size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>() { return Err(self.0.unsafe_at(C::DescriptorSize)); }
     let header = size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>();
@@ -122,9 +155,14 @@ fn descriptor_for(self, raw: &[u8], purpose: DescriptorPurpose<'_>) -> Result<Se
     if owner_at < header || owner_at % 4 != 0 { return Err(self.0.unsafe_at(C::OwnerOffset)); }
     if acl_at < header || acl_at % 4 != 0 { return Err(self.0.unsafe_at(C::AclOffset)); }
     let owner = self.sid_at(raw, owner_at, raw.len())?;
+    descriptor_storage(image_cap, &owner, None, None, None)?;
     let owner_allowed = match purpose {
         DescriptorPurpose::Runtime(_, _) => owner.trusted(),
         DescriptorPurpose::PrivateCredential(user) => owner == *user,
+        #[cfg(feature = "installer-selection")]
+        DescriptorPurpose::Selection(SelectionDescriptor::RegistrationParent) => owner.trusted(),
+        #[cfg(feature = "installer-selection")]
+        DescriptorPurpose::Selection(_) => owner.is(5, &[32, 544]),
     };
     if !owner_allowed { return Err(self.0.unsafe_at(C::OwnerTrust)); }
     let acl = d.span(raw, acl_at, size_of::<S::ACL>())?;
@@ -143,11 +181,13 @@ fn descriptor_for(self, raw: &[u8], purpose: DescriptorPurpose<'_>) -> Result<Se
     if group_at != 0 {
         if group_at < header || group_at % 4 != 0 { return Err(self.0.unsafe_at(C::GroupOffset)); }
         let group = self.sid_at(raw, group_at, raw.len())?;
+        descriptor_storage(image_cap, &owner, Some(&group), None, None)?;
         let range = (group_at, group_at + group.bytes.len());
         if overlap(range, (acl_at, acl_end)) || (range != owner_range && overlap(range, owner_range)) { return Err(self.0.unsafe_at(C::GroupOverlap)); }
     }
     let mut aces = Vec::new();
     aces.try_reserve(count).map_err(|_| Error::Bounds)?;
+    descriptor_storage(image_cap, &owner, None, Some(&aces), None)?;
     let mut offset = acl_at + size_of::<S::ACL>();
     for index in 0..count {
         let trace = self.0.index(AdmissionIndex::Ace, index);
@@ -162,18 +202,50 @@ fn descriptor_for(self, raw: &[u8], purpose: DescriptorPurpose<'_>) -> Result<Se
         let end = offset.checked_add(size).ok_or(Error::Bounds)?;
         if size < sid_offset + 8 || size % 4 != 0 || end > acl_end { return Err(trace.unsafe_at(C::AceSize)); }
         let sid = observed.sid_at(raw, offset + sid_offset, end)?;
+        descriptor_storage(image_cap, &owner, None, Some(&aces), Some(&sid))?;
         if offset + sid_offset + sid.bytes.len() != end { return Err(trace.unsafe_at(C::AceSidSize)); }
         let ace = AceFact { allow, flags: head[offset_of!(S::ACE_HEADER, AceFlags)],
             mask: d.u32_at(raw, offset + offset_of!(S::ACCESS_ALLOWED_ACE, Mask))?, sid };
         match purpose {
             DescriptorPurpose::Runtime(kind, scope) => observed.safe_ace(&ace, kind, scope)?,
             DescriptorPurpose::PrivateCredential(user) => observed.private_ace(&ace, user)?,
+            #[cfg(feature = "installer-selection")]
+            DescriptorPurpose::Selection(SelectionDescriptor::RegistrationParent) => {
+                // The existing OS parent is never created or rewritten. Key
+                // rights are NOT filesystem rights, even where bits overlap.
+                observed.selection_parent_ace(&ace)?;
+            },
+            #[cfg(feature = "installer-selection")]
+            DescriptorPurpose::Selection(_) => {
+                // KEY/MUTEX rights must NEVER pass through the filesystem mask
+                // expander. The exact purpose policy below checks every ACE.
+                if !ace.allow || ace.flags != 0 { return Err(trace.unsafe_at(C::AceFlags)); }
+            },
         }
         aces.push(ace); offset = end;
     }
     // Remaining bytes belong to ACL free space, not implicit extra ACEs. The
     // caller retains actual inheritance/defaulted/control facts and every ACE.
-    Ok(SecurityFacts { owner, control, revision: acl_revision, aces })
+    let facts = SecurityFacts { owner, control, revision: acl_revision, aces };
+    #[cfg(feature = "installer-selection")]
+    if let DescriptorPurpose::Selection(purpose @ (SelectionDescriptor::Registration | SelectionDescriptor::Reservation)) = purpose {
+        use windows_sys::Win32::System::{Registry as REG, Threading as T};
+        let registration = purpose == SelectionDescriptor::Registration;
+        if facts.control != S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT | S::SE_DACL_PROTECTED
+            || facts.revision != 2 || facts.aces.len() != if registration { 3 } else { 2 } {
+            return Err(self.0.unsafe_at(C::DescriptorControl));
+        }
+        for (index, ace) in facts.aces.iter().enumerate() {
+            let principal = match index { 0 => ace.sid.is(5, &[18]), 1 => ace.sid.is(5, &[32, 544]),
+                2 => registration && ace.sid.is(5, &[32, 545]), _ => false };
+            let rights = if registration { if index < 2 { REG::KEY_ALL_ACCESS } else { REG::KEY_READ } }
+                else { T::MUTEX_ALL_ACCESS };
+            if !principal || !ace.allow || ace.flags != 0 || ace.mask != rights {
+                return Err(self.0.unsafe_at(C::AceDangerousRights));
+            }
+        }
+    }
+    Ok(facts)
 }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,5 +437,80 @@ mod token_retained_capacity_data_tests {
             + facts.groups.capacity() * size_of::<GroupFact>()
             + facts.privileges.capacity() * size_of::<(u64, u32)>()
             + facts.groups[0].sid.bytes.capacity()));
+    }
+}
+
+
+#[cfg(all(test, feature = "installer-selection"))]
+mod selection_descriptor_tests {
+    use super::*;
+    use crate::installer_primitives::{admins, system, users};
+    use windows_sys::Win32::System::{Registry as REG, Threading as T};
+    fn bytes(purpose: SelectionDescriptor, user_mask: u32) -> Vec<u8> {
+        let owner = admins(); let mut acl = vec![0; 8]; acl[0] = 2;
+        let registry = purpose == SelectionDescriptor::Registration;
+        let mut entries = vec![(system(), if registry { REG::KEY_ALL_ACCESS } else { T::MUTEX_ALL_ACCESS }),
+            (owner.clone(), if registry { REG::KEY_ALL_ACCESS } else { T::MUTEX_ALL_ACCESS })];
+        if registry { entries.push((users(), user_mask)); }
+        for (sid, mask) in &entries {
+            acl.extend([0, 0]); acl.extend(((8 + sid.len()) as u16).to_le_bytes());
+            acl.extend(mask.to_le_bytes()); acl.extend(sid);
+        }
+        let size = acl.len() as u16; acl[2..4].copy_from_slice(&size.to_le_bytes());
+        acl[4..6].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+        let mut raw = vec![0; 20]; raw[0] = 1;
+        raw[2..4].copy_from_slice(&(S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT | S::SE_DACL_PROTECTED).to_le_bytes());
+        raw[4..8].copy_from_slice(&20u32.to_le_bytes()); raw[16..20].copy_from_slice(&((20 + owner.len()) as u32).to_le_bytes());
+        raw.extend(owner); raw.extend(acl); raw
+    }
+    #[test]
+    fn key_and_mutex_rights_are_explicit_and_do_not_change_file_or_credential_policy() {
+        let raw = bytes(SelectionDescriptor::Registration, REG::KEY_READ);
+        assert!(Observed::new(Refusal::none()).selection_descriptor(&raw, SelectionDescriptor::Registration).is_ok());
+        assert!(Observed::new(Refusal::none()).selection_descriptor(&raw, SelectionDescriptor::Reservation).is_err());
+        assert!(descriptor(&raw, FileKind::File, AuthorityScope::ImmutableVersion).is_err());
+        let owner = sid_at(&raw, 20, raw.len()).unwrap();
+        assert!(Observed::new(Refusal::none()).credential_descriptor(&raw, &owner).is_err());
+        for dangerous in [REG::KEY_SET_VALUE, REG::KEY_CREATE_SUB_KEY, FS::WRITE_DAC, FS::DELETE, F::GENERIC_ALL] {
+            let changed = bytes(SelectionDescriptor::Registration, REG::KEY_READ | dangerous);
+            assert!(Observed::new(Refusal::none()).selection_descriptor(&changed, SelectionDescriptor::Registration).is_err());
+        }
+        assert!(Observed::new(Refusal::none()).selection_descriptor(&raw, SelectionDescriptor::RegistrationParent).is_ok());
+        for mask in [REG::KEY_CREATE_SUB_KEY, REG::KEY_CREATE_LINK, F::GENERIC_WRITE, F::GENERIC_ALL] {
+            let changed = bytes(SelectionDescriptor::Registration, REG::KEY_READ | mask);
+            assert!(Observed::new(Refusal::none()).selection_descriptor(&changed, SelectionDescriptor::RegistrationParent).is_err());
+        }
+        let mutex = bytes(SelectionDescriptor::Reservation, 0);
+        assert!(Observed::new(Refusal::none()).selection_descriptor(&mutex, SelectionDescriptor::Reservation).is_ok());
+        assert!(Observed::new(Refusal::none()).selection_descriptor(&mutex, SelectionDescriptor::Registration).is_err());
+    }
+}
+
+
+#[cfg(feature = "installer-selection")]
+impl Observed<'_> {
+    fn selection_parent_ace(self, ace: &AceFact) -> Result<()> {
+        use windows_sys::Win32::System::Registry as REG;
+        let flags = ace.flags as u32;
+        let known_flags = S::CONTAINER_INHERIT_ACE | S::NO_PROPAGATE_INHERIT_ACE
+            | S::INHERIT_ONLY_ACE | S::INHERITED_ACE;
+        if flags & !known_flags != 0
+            || flags & (S::NO_PROPAGATE_INHERIT_ACE | S::INHERIT_ONLY_ACE) != 0
+                && flags & S::CONTAINER_INHERIT_ACE == 0 {
+            return Err(self.0.unsafe_at(C::AceFlags));
+        }
+        let generic = F::GENERIC_READ | F::GENERIC_WRITE | F::GENERIC_EXECUTE | F::GENERIC_ALL;
+        if ace.mask & !(generic | REG::KEY_ALL_ACCESS) != 0 {
+            return Err(self.0.unsafe_at(C::AceMask));
+        }
+        let mut effective = ace.mask & !generic;
+        for (flag, rights) in [(F::GENERIC_READ, REG::KEY_READ), (F::GENERIC_WRITE, REG::KEY_WRITE),
+            (F::GENERIC_EXECUTE, REG::KEY_EXECUTE), (F::GENERIC_ALL, REG::KEY_ALL_ACCESS)] {
+            if ace.mask & flag != 0 { effective |= rights; }
+        }
+        if !ace.allow || flags & S::INHERIT_ONLY_ACE != 0 || ace.sid.trusted() { return Ok(()); }
+        let dangerous = REG::KEY_SET_VALUE | REG::KEY_CREATE_SUB_KEY | REG::KEY_CREATE_LINK
+            | FS::WRITE_DAC | FS::WRITE_OWNER | FS::DELETE;
+        if effective & dangerous != 0 { Err(self.0.unsafe_at(C::AceDangerousRights)) } else { Ok(()) }
     }
 }

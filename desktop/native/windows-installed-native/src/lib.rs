@@ -31,6 +31,21 @@ mod decode;
 mod security;
 mod loader;
 pub use loader::SystemImage;
+// Unwired original-handle image primitives; never an installed writer permit.
+#[cfg(feature = "image-writer")]
+pub mod image_writer;
+// Fixed original child/stdio primitives, driven only by the existing image owner.
+#[cfg(feature = "image-stdio")]
+pub mod image_stdio;
+// Closed count-derived installed image-loader DATA; never enabled by default.
+#[cfg(feature = "image-writer")]
+pub mod image_loader_budget;
+// Distinct compile-bound Required Notes loader; no Image capability conversion.
+#[cfg(feature = "required-notes")]
+pub mod notes_loader_budget;
+// Closed project Notes namespace/context; separate from the installed loader.
+#[cfg(feature = "required-notes")]
+pub mod required_notes;
 // Pure closed DATA is also used by the headless Windows startup scalar route.
 pub mod ui_startup_data;
 #[cfg(all(feature = "desktop-ui", any(test, all(feature = "qualification-result", feature = "windows-installed-observation"))))]
@@ -59,6 +74,40 @@ pub use qualification_result::ObserverDiagnostic;
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 pub use qualification_result::{normal_ui_project, mutate_normal_ui_fixture, verify_normal_ui_fixture,
     UI_FIXTURE_CONFIG, UI_FIXTURE_CONFIG_AFTER, UI_FIXTURE_SOURCE, UI_FIXTURE_VERSION, UI_FIXTURE_KEEP};
+#[cfg(any(feature = "runtime-publication", feature = "installer-acquisition"))]
+mod installer_primitives;
+#[cfg(any(feature = "runtime-publication", feature = "installer-acquisition"))]
+mod installer_input_data;
+#[cfg(feature = "installer-acquisition")]
+mod installer_acquisition;
+#[cfg(feature = "installer-acquisition")]
+pub use installer_acquisition::{InputAcquisition, AcquisitionByteCounts, AcquisitionCleanupError, AcquisitionBook};
+#[cfg(all(feature = "installer-acquisition", feature = "runtime-publication"))]
+pub use installer_primitives::InstallerBoundary;
+#[cfg(all(feature = "installer-acquisition", feature = "runtime-publication"))]
+pub use installer_acquisition::ShellActivationCleanupError;
+#[cfg(all(feature = "installer-acquisition", feature = "runtime-publication"))]
+mod installer_webview2;
+#[cfg(all(feature = "installer-acquisition", feature = "runtime-publication"))]
+pub use installer_webview2::{OfflineWebView2Owner, OfflineWebView2Mode, OfflineWebView2Report,
+    WebView2SupportOutput, WebView2SupportDisposition, WebView2CleanupError, WebView2Original};
+#[cfg(all(feature = "installer-acquisition", feature = "runtime-publication"))]
+pub use publication::InstallerRuntimeMode;
+#[cfg(feature = "installer-protected-fixture")]
+pub mod installer_fixture_data;
+#[cfg(feature = "installer-selection")]
+pub mod installer_selection_data;
+#[cfg(feature = "installer-selection")]
+mod installer_selection;
+#[cfg(feature = "installer-selection")]
+pub use installer_selection::{SelectionOwner, SelectionProfileInput, SelectionMode, SelectionImageData,
+    SelectionPreview, SelectionReport, SelectionDisposition, SelectionCleanupError, SelectionOriginal};
+#[cfg(feature = "installer-selection-fixture")]
+pub mod installer_selection_fixture_data;
+// The existing literal roster, also available to the acquisition-only caller.
+// runtime-publication already re-exports it; combined native tests get one name.
+#[cfg(all(feature = "installer-acquisition", not(feature = "runtime-publication")))]
+pub use installer_input_data::PUBLICATION_PAYLOADS;
 #[cfg(feature = "runtime-publication")]
 mod publication;
 #[cfg(feature = "runtime-publication")]
@@ -316,6 +365,9 @@ struct Slot {
     parent: Option<usize>,
     name: Vec<u16>,
     canonical: String,
+    // Notes reserves this original consuming-close frame before acquisition.
+    #[cfg(feature = "required-notes")]
+    notes_close_reserved: bool,
     read_bytes: u64,
     read_ended: bool,
     directory_ended: bool,
@@ -330,7 +382,9 @@ enum Phase { Prepared, Entered, Returned, Complete }
 enum PrivilegeName { ChangeNotify, Shutdown, Undock, IncreaseWorkingSet, TimeZone }
 #[derive(Clone, Copy)]
 enum Call {
-    Architecture, Folder, WindowsDirectory, SystemDirectory, Mapping, DriveType,
+    Architecture, Folder, FolderX86, WindowsDirectory, SystemDirectory, Mapping, DriveType,
+    #[cfg(feature = "installer-selection")]
+    CommonPrograms,
     Open(usize), ProcessToken(usize), ThreadToken(usize), Close(usize),
     #[cfg(test)]
     QualificationSourceToken(usize),
@@ -451,7 +505,86 @@ fn observer_inventory_return(first: &mut Option<qualification_result::ObserverCa
     if retain && original.is_err() && first.is_none() { *first = Some(check); }
     original // DATA only: no clock sample, native entry or Result conversion.
 }
+enum LivePurpose {
+    Standard48,
+    #[cfg(feature = "image-writer")]
+    MetadataImages(image_loader_budget::ImageLoaderSelection),
+    #[cfg(feature = "required-notes")]
+    NotesLoader(notes_loader_budget::NotesLoaderSelection),
+    #[cfg(feature = "required-notes")]
+    NotesNamespace48,
+}
+impl LivePurpose {
+    fn limit(&self) -> usize {
+        match self {
+            Self::Standard48 => MAX_LIVE,
+            #[cfg(feature = "image-writer")]
+            Self::MetadataImages(selection) => selection.live_limit(),
+            #[cfg(feature = "required-notes")]
+            Self::NotesLoader(selection) => selection.live_limit(),
+            #[cfg(feature = "required-notes")]
+            Self::NotesNamespace48 => MAX_LIVE,
+        }
+    }
+    fn is_images(&self) -> bool {
+        match self {
+            Self::Standard48 => false,
+            #[cfg(feature = "image-writer")]
+            Self::MetadataImages(_) => true,
+            #[cfg(feature = "required-notes")]
+            Self::NotesLoader(_) => false,
+            #[cfg(feature = "required-notes")]
+            Self::NotesNamespace48 => false,
+        }
+    }
+    #[cfg(feature = "required-notes")]
+    fn is_notes_namespace(&self) -> bool { matches!(self, Self::NotesNamespace48) }
+    fn is_loader(&self) -> bool {
+        match self {
+            Self::Standard48 => false,
+            #[cfg(feature = "image-writer")]
+            Self::MetadataImages(_) => true,
+            #[cfg(feature = "required-notes")]
+            Self::NotesLoader(_) => true,
+            #[cfg(feature = "required-notes")]
+            Self::NotesNamespace48 => false,
+        }
+    }
+}
+fn counts_live(state: SlotState) -> bool {
+    !matches!(state, SlotState::NoHandle | SlotState::Closed)
+}
+// These update the ORIGINAL counters even on over-limit observations. The next
+// file/directory cannot reset an exhausted aggregate budget. Default semantics
+// and all existing ceilings are unchanged.
+fn charge_entries(total: &mut usize, count: usize) -> Result<()> {
+    *total = total.checked_add(count).ok_or(Error::Bounds)?;
+    if *total > MAX_ENTRIES { Err(Error::Bounds) } else { Ok(()) }
+}
+fn charge_read(total: &mut u64, count: u64, maximum: u64) -> Result<()> {
+    *total = total.checked_add(count).ok_or(Error::Bounds)?;
+    if *total > maximum { Err(Error::Bounds) } else { Ok(()) }
+}
 pub struct NativeBook {
+    // No setter/rebind/promotion; only the initial private constructor assigns.
+    purpose: LivePurpose,
+    // Only the private Notes context advances this boundary after known scope settlement.
+    #[cfg(feature = "required-notes")]
+    notes_scope_start: usize,
+    #[cfg(feature = "required-notes")]
+    notes_entered: u64,
+    #[cfg(feature = "required-notes")]
+    notes_returned: u64,
+    #[cfg(feature = "required-notes")]
+    notes_frames: [u32; 2],
+    #[cfg(feature = "required-notes")]
+    notes_pool: usize,
+    // Current immutable Notes ticket's original credits, never a new quota.
+    #[cfg(feature = "required-notes")]
+    notes_frame_credit: Option<u32>,
+    #[cfg(feature = "required-notes")]
+    notes_record_credit: Option<u32>,
+    capacity_refusal: Option<Error>,
     admission: AdmissionTrace,
     identity: Arc<()>,
     slots: Vec<Held<Slot>>,
@@ -461,6 +594,9 @@ pub struct NativeBook {
     retiring: bool,
     entries: usize,
     bytes_read: u64,
+    records_limit: usize,
+    live_limit: usize,
+    total_bytes_limit: u64,
     process_token: Option<usize>,
     user: Option<TokenFacts>,
     roots_started: bool,
@@ -522,9 +658,71 @@ impl NativeBook {
         arenas.checked_mul(size_of::<Arena>())?.checked_add(2 * BUFFER)?
             .checked_add(2 * size_of::<Slot>())?.checked_add(2 * NAME_UNITS * size_of::<u16>())
     }
-    pub fn new() -> Self {
-        Self { admission: AdmissionTrace::new(), identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
-            retiring: false, entries: 0, bytes_read: 0, process_token: None,
+    pub fn new() -> Self { Self::with_purpose(LivePurpose::Standard48) }
+    // A never-started Standard48 book is still Standard48. This constructor
+    // consumes only the closed compile-bound selection, never an integer limit.
+    #[cfg(feature = "image-writer")]
+    pub fn new_metadata_images_loader(selection: image_loader_budget::ImageLoaderSelection) -> Result<Self> {
+        if !selection.production_bound() { return Err(Error::Unavailable); }
+        Ok(Self::with_purpose(LivePurpose::MetadataImages(selection)))
+    }
+    #[cfg(feature = "image-writer")]
+    pub fn metadata_images_selection(&self) -> Option<&image_loader_budget::ImageLoaderSelection> {
+        match &self.purpose {
+            LivePurpose::MetadataImages(selection) => Some(selection),
+            _ => None,
+        }
+    }
+    // A separate immutable initial purpose. No native handles are acquired by
+    // constructing the book; a never-started Standard/Image book cannot promote.
+    #[cfg(feature = "required-notes")]
+    pub fn new_required_notes_loader(selection: notes_loader_budget::NotesLoaderSelection) -> Result<Self> {
+        if !selection.production_bound() { return Err(Error::Unavailable); }
+        Ok(Self::with_purpose(LivePurpose::NotesLoader(selection)))
+    }
+    #[cfg(feature = "required-notes")]
+    pub fn required_notes_loader_selection(&self) -> Option<&notes_loader_budget::NotesLoaderSelection> {
+        match &self.purpose {
+            LivePurpose::NotesLoader(selection) => Some(selection),
+            _ => None,
+        }
+    }
+    fn capacity_result<T>(&mut self, returned: Result<T>) -> Result<T> {
+        if self.purpose.is_loader() {
+            if let Err(error) = &returned {
+                if self.capacity_refusal.is_none() { self.capacity_refusal = Some(*error); }
+            }
+        }
+        returned
+    }
+    fn reservation_budget(&self, kind: Kind) -> Result<()> {
+        let live = self.slots.iter().filter(|slot| counts_live(slot.state)).count();
+        // Each closed loader purpose keeps its own selection-derived ceiling.
+        // Other books retain their existing fixed installer/default capacities.
+        let limit = if self.purpose.is_loader() { self.purpose.limit() } else { self.live_limit };
+        if self.slots.len() >= self.records_limit || live >= limit
+            || kind == Kind::File && self.slots.iter().filter(|slot| slot.kind == Kind::File).count() >= MAX_FILES {
+            Err(Error::Bounds)
+        } else { Ok(()) }
+    }
+    fn with_purpose(purpose: LivePurpose) -> Self {
+        Self { purpose,
+            #[cfg(feature = "required-notes")]
+            notes_scope_start: 0,
+            #[cfg(feature = "required-notes")]
+            notes_entered: 0,
+            #[cfg(feature = "required-notes")]
+            notes_returned: 0,
+            #[cfg(feature = "required-notes")]
+            notes_frames: [0; 2],
+            #[cfg(feature = "required-notes")]
+            notes_pool: 0,
+            #[cfg(feature = "required-notes")]
+            notes_frame_credit: None,
+            #[cfg(feature = "required-notes")]
+            notes_record_credit: None,
+            capacity_refusal: None, admission: AdmissionTrace::new(), identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
+            retiring: false, entries: 0, bytes_read: 0, records_limit: MAX_RECORDS, live_limit: MAX_LIVE, total_bytes_limit: MAX_TOTAL_BYTES, process_token: None,
             user: None, roots_started: false,
             #[cfg(test)]
             first_unavailable: None,
@@ -532,6 +730,22 @@ impl NativeBook {
             prerequisite_returned: Cell::new(None),
             #[cfg(all(test, feature = "desktop-ui"))]
             observer_inventory_gate: None }
+    }
+    // Private fixed acquisition profiles; ordinary/default/Publication stay exact.
+    #[cfg(feature = "installer-acquisition")]
+    fn installer_source() -> Self {
+        let mut book = Self::new();
+        book.total_bytes_limit = installer_input_data::ACQUISITION_TOTAL_BYTES; book
+    }
+    #[cfg(feature = "installer-selection")]
+    fn selection_retained(profile: RetainedSelectionBook) -> Self {
+        let mut book = Self::installer_source();
+        book.live_limit = profile.live_limit(); book
+    }
+    #[cfg(feature = "installer-acquisition")]
+    fn installer_output() -> Self {
+        let mut book = Self::installer_source();
+        book.records_limit = installer_input_data::OUTPUT_RECORDS; book
     }
     #[cfg(all(test, feature = "desktop-ui"))]
     fn bind_observer_inventory(&mut self, clock: Arc<qualification_result::ObserverDiagnosticClock>) -> Result<()> {
@@ -598,7 +812,8 @@ impl NativeBook {
     }
     fn clear(&self) -> Result<()> {
         if self.unknown || self.active.is_some() { Err(Error::Unknown) }
-        else if self.retiring { Err(Error::State) } else { Ok(()) }
+        else if self.retiring { Err(Error::State) }
+        else if let Some(error) = self.capacity_refusal { Err(error) } else { Ok(()) }
     }
     fn slot(&self, index: usize) -> Result<&Slot> {
         self.slots.get(index).map(|s| s.as_ref().get_ref()).ok_or(Error::State)
@@ -627,15 +842,17 @@ impl NativeBook {
         self.clear()?;
         // A selected path gets one original attempt for this book, including
         // definite failures and retired originals. Token probes have no path.
-        if matches!(kind, Kind::Directory | Kind::File) && self.slots.iter().any(|s|
+        let mut uniqueness_start = 0;
+        #[cfg(feature = "required-notes")]
+        if self.purpose.is_notes_namespace() { uniqueness_start = self.notes_scope_start; }
+        if matches!(kind, Kind::Directory | Kind::File) && self.slots.iter().skip(uniqueness_start).any(|s|
             matches!(s.kind, Kind::Directory | Kind::File) && s.canonical == canonical) {
             return Err(Error::State);
         }
-        let live = self.slots.iter().filter(|s| !matches!(s.state, SlotState::NoHandle | SlotState::Closed)).count();
-        if self.slots.len() >= MAX_RECORDS || live >= MAX_LIVE { return Err(Error::Bounds); }
-        if kind == Kind::File && self.slots.iter().filter(|s| s.kind == Kind::File).count() >= MAX_FILES {
-            return Err(Error::Bounds);
-        }
+        let budget = self.reservation_budget(kind);
+        self.capacity_result(budget)?;
+        #[cfg(feature = "required-notes")]
+        if self.purpose.is_notes_namespace() { self.notes_admit_slot()?; }
         if let Some(parent) = parent { self.handle(parent)?; }
         let mut encoded: Vec<u16> = name.encode_utf16().collect();
         if encoded.len() > 32766 { return Err(Error::Bounds); }
@@ -644,6 +861,8 @@ impl NativeBook {
         let index = self.slots.len();
         self.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
             state: SlotState::Reserved, kind, file_purpose: FileReadPurpose::Content, parent, name: encoded, canonical,
+            #[cfg(feature = "required-notes")]
+            notes_close_reserved: self.purpose.is_notes_namespace(),
             read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted,
             system_image: None, _pin: PhantomPinned })));
         Ok(Original { book: Arc::clone(&self.identity), index })
@@ -667,7 +886,46 @@ impl NativeBook {
         let frame = self.active.take().ok_or(Error::Unknown)?;
         Ok(Complete { arena: ManuallyDrop::into_inner(frame) })
     }
+    // Counts reservations, not fabricated native execution facts. Actual entered/
+    // returned counters are separate. Token/metadata/helper frames share this
+    // Notes-only pool with private Notes primitives; default/Image are unchanged.
+    #[cfg(feature = "required-notes")]
+    fn notes_admit_frame(&mut self) -> Result<()> {
+        if !self.purpose.is_notes_namespace() { return Ok(()); }
+        let value = self.notes_frame_credit.as_mut().ok_or(Error::State)?;
+        if *value == 0 { return Err(Error::Bounds); }
+        *value -= 1; Ok(())
+    }
+    #[cfg(feature = "required-notes")]
+    fn notes_admit_slot(&mut self) -> Result<()> {
+        let frames = self.notes_frame_credit.as_mut().ok_or(Error::State)?;
+        let records = self.notes_record_credit.as_mut().ok_or(Error::State)?;
+        if *frames == 0 || *records == 0 { return Err(Error::Bounds); }
+        // One original record and its consuming-close SDK frame, atomically.
+        // A later close consumes Slot.notes_close_reserved exactly once.
+        *frames -= 1; *records -= 1; Ok(())
+    }
+    #[cfg(feature = "required-notes")]
+    fn notes_begin_credit(&mut self, frames: u32, records: u32) -> Result<()> {
+        if !self.purpose.is_notes_namespace() || self.notes_frame_credit.is_some()
+            || self.notes_record_credit.is_some() { return Err(Error::State); }
+        self.notes_frame_credit = Some(frames); self.notes_record_credit = Some(records); Ok(())
+    }
+    #[cfg(feature = "required-notes")]
+    fn notes_end_credit(&mut self) -> Result<(u32, u32)> {
+        let frames = self.notes_frame_credit.take().ok_or(Error::State)?;
+        let records = self.notes_record_credit.take().ok_or(Error::State)?;
+        Ok((frames, records))
+    }
     fn call(&mut self, call: Call, handle: F::HANDLE, input: Vec<u16>) -> Result<Complete> {
+        #[cfg(feature = "required-notes")]
+        if self.purpose.is_notes_namespace() {
+            if let Call::Close(index) = call {
+                let slot = self.slot_mut(index)?;
+                if !slot.notes_close_reserved { return Err(Error::State); }
+                slot.notes_close_reserved = false;
+            } else { self.notes_admit_frame()?; }
+        }
         // Close may continue other independent known originals after a returned
         // close failure; no other call may follow Unknown or retirement.
         if matches!(call, Call::Close(_)) {
@@ -717,11 +975,16 @@ impl NativeBook {
         // SAFETY: all arguments/destinations and parents are already registered,
         // pinned, initialized, bounded and exclusively borrowed. No allocation,
         // callback or deadline check divides return from scalar capture.
+        #[cfg(feature = "required-notes")]
+        if self.purpose.is_notes_namespace() { self.notes_entered += 1; }
+        let frame = self.arena()?;
         let returned = unsafe { invoke(frame) };
         frame.returned.set(Some(returned));
         #[cfg(test)]
         self.prerequisite_capture(call, returned);
         frame.phase.set(Phase::Returned);
+        #[cfg(feature = "required-notes")]
+        if self.purpose.is_notes_namespace() { self.notes_returned += 1; }
         let original = self.finish(call, returned);
         // Never divide native return from scalar capture or adoption. Unknown
         // retains the same active arena/slots and dominates a clock refusal.
@@ -868,7 +1131,7 @@ impl NativeBook {
     pub fn mark_interrupted(&mut self) { self.unknown = true; }
     pub fn state(&self, original: &Original) -> Result<SlotState> { Ok(self.slot(self.index(original)?)?.state) }
     pub fn is_unknown(&self) -> bool { self.unknown || self.active.is_some() }
-    pub fn never_started(&self) -> bool { !self.started && self.slots.is_empty() && self.active.is_none() && !self.unknown && !self.retiring && !self.roots_started && self.user.is_none() }
+    pub fn never_started(&self) -> bool { !self.started && self.slots.is_empty() && self.active.is_none() && !self.unknown && !self.retiring && !self.roots_started && self.user.is_none() && self.capacity_refusal.is_none() }
     pub fn close_once(&mut self, original: &Original) -> Result<()> {
         let index = self.index(original)?; self.close_index(index)
     }
@@ -946,7 +1209,9 @@ fn prerequisite_native_pair(call: Call, returned: Returned) -> Option<qualificat
         },
         // DriveType/FileType are successful scalar policy observations, not
         // failed native error statuses. The existing admission detail names them.
-        Call::DriveType | Call::FileType | Call::Folder | Call::WindowsDirectory | Call::SystemDirectory
+        #[cfg(feature = "installer-selection")]
+        Call::CommonPrograms => return None,
+        Call::DriveType | Call::FileType | Call::Folder | Call::FolderX86 | Call::WindowsDirectory | Call::SystemDirectory
         | Call::Streams | Call::QualificationSourceToken(_) | Call::QualificationRestrictedToken(_) => return None,
     };
     let native = match returned {
@@ -1037,6 +1302,9 @@ unsafe fn invoke(a: &Arena) -> Returned {
         match a.call {
             Call::Architecture => boolean(T::IsWow64Process2(T::GetCurrentProcess(), a.buffer().cast(), a.buffer().add(2).cast())),
             Call::Folder => Returned::Hresult(SH::SHGetFolderPathW(null_mut(), SH::CSIDL_PROGRAM_FILES as i32, null_mut(), SH::SHGFP_TYPE_CURRENT as u32, a.buffer().cast())),
+            Call::FolderX86 => Returned::Hresult(SH::SHGetFolderPathW(null_mut(), SH::CSIDL_PROGRAM_FILESX86 as i32, null_mut(), SH::SHGFP_TYPE_CURRENT as u32, a.buffer().cast())),
+            #[cfg(feature = "installer-selection")]
+            Call::CommonPrograms => Returned::Hresult(SH::SHGetFolderPathW(null_mut(), SH::CSIDL_COMMON_PROGRAMS as i32, null_mut(), SH::SHGFP_TYPE_CURRENT as u32, a.buffer().cast())),
             Call::WindowsDirectory => counted(SI::GetSystemWindowsDirectoryW(a.buffer().cast(), NAME_UNITS as u32)),
             Call::SystemDirectory => counted(SI::GetSystemDirectoryW(a.buffer().cast(), NAME_UNITS as u32)),
             Call::Mapping => counted(FS::QueryDosDeviceW(a.input.as_ptr(), a.buffer().cast(), MAP_UNITS as u32)),
@@ -1077,7 +1345,11 @@ unsafe fn invoke(a: &Arena) -> Returned {
 }
 
 #[derive(Clone, Copy)]
-enum LocationKind { ProgramFiles, Windows, System }
+enum LocationKind {
+    ProgramFiles, ProgramFilesX86, Windows, System,
+    #[cfg(feature = "installer-selection")]
+    CommonPrograms,
+}
 pub struct KnownLocation { book: Arc<()>, kind: LocationKind, path: String, drive: String, device: String, components: Vec<String> }
 impl KnownLocation {
     pub fn path(&self) -> &str { &self.path }
@@ -1093,8 +1365,11 @@ impl NativeBook {
     fn location(&mut self, kind: LocationKind) -> Result<KnownLocation> {
         let (call, capacity, counted) = match kind {
             LocationKind::ProgramFiles => (Call::Folder, F::MAX_PATH as usize, false),
+            LocationKind::ProgramFilesX86 => (Call::FolderX86, F::MAX_PATH as usize, false),
             LocationKind::Windows => (Call::WindowsDirectory, NAME_UNITS, true),
             LocationKind::System => (Call::SystemDirectory, NAME_UNITS, true),
+            #[cfg(feature = "installer-selection")]
+            LocationKind::CommonPrograms => (Call::CommonPrograms, F::MAX_PATH as usize, false),
         };
         let (path, trace) = {
             let complete = self.call(call, null_mut(), Vec::new())?;
@@ -1189,6 +1464,22 @@ impl NativeBook {
         self.metadata_with_profile(original, MetadataObservationProfile::ManagedWebViewImage)
     }
     fn metadata_with_profile(&mut self, original: &Original, profile: MetadataObservationProfile) -> Result<Metadata> {
+        self.metadata_with_canonical(original, profile, None)
+    }
+    #[cfg(feature = "image-writer")]
+    fn image_current_metadata(&mut self, original: &Original, name: &image_writer::CurrentName<'_>) -> Result<Metadata> {
+        self.clear()?;
+        let index = self.index(original)?;
+        // The private typed value binds this book, original slot, declared row
+        // and current namespace epoch BEFORE any native metadata observation.
+        let canonical = name.canonical_for(&self.identity, index)?;
+        self.metadata_with_canonical(original, MetadataObservationProfile::Ordinary, Some(canonical))
+    }
+    // Ordinary/managed callers always pass None: their acquisition canonical
+    // checks and every native/decoder policy remain exactly the original path.
+    // Only the typed image-private adapter above may select a current name.
+    fn metadata_with_canonical(&mut self, original: &Original, profile: MetadataObservationProfile,
+        image_current: Option<&str>) -> Result<Metadata> {
         self.clear()?; let index = self.index(original)?;
         let slot = self.slot(index)?;
         // Reject role mixing BEFORE FileType or any native metadata call.
@@ -1221,11 +1512,16 @@ impl NativeBook {
             let trace = self.admission.at(AdmissionOp::Metadata);
             (complete.text_in(NAME_UNITS, true, trace)?, trace)
         };
-        if name != self.slot(index)?.canonical { return Err(trace.unsafe_at(C::CanonicalName)); }
+        let expected = image_current.unwrap_or(&self.slot(index)?.canonical);
+        if name != expected { return Err(trace.unsafe_at(C::CanonicalName)); }
         Ok(facts)
     }
     pub fn security(&mut self, original: &Original, scope: AuthorityScope) -> Result<SecurityFacts> {
-        self.clear()?; let index = self.index(original)?;
+        self.clear()?;
+        // Every loader must use its own purpose-checked resource reservation.
+        // The ordinary entry cannot bypass either selected loader's accounting.
+        if self.purpose.is_loader() { return self.capacity_result(Err(Error::State)); }
+        let index = self.index(original)?;
         let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
         let result = self.original_call(index, Call::Security)?;
         { let trace = self.admission.at(match scope {
@@ -1295,8 +1591,8 @@ impl NativeBook {
             DirectoryMode::Selected(names) => d.selected_directory(result.bytes_in(BUFFER, trace)?, names)?,
             DirectoryMode::Unstarted => return Err(Error::State),
         };
-        self.entries = self.entries.checked_add(entries.len()).ok_or(Error::Bounds)?;
-        if self.entries > MAX_ENTRIES { return Err(Error::Bounds); }
+        let charged = charge_entries(&mut self.entries, entries.len());
+        self.capacity_result(charged)?;
         self.slot_mut(index)?.directory_ended = false;
         Ok(Some(entries))
     }
@@ -1308,23 +1604,22 @@ impl NativeBook {
         if self.slot(index)?.kind != Kind::File || !matches!(self.slot(index)?.file_purpose, FileReadPurpose::Content | FileReadPurpose::PublicImage)
             || self.slot(index)?.read_ended { return Err(Error::State); }
         let prior = self.slot(index)?.read_bytes;
-        if self.bytes_read > MAX_TOTAL_BYTES || prior > MAX_FILE_BYTES { return Err(Error::Bounds); }
+        if self.bytes_read > self.total_bytes_limit || prior > MAX_FILE_BYTES { return Err(Error::Bounds); }
         // One extra byte can distinguish exact-limit EOF from excess content;
         // it is never returned as accepted data. After excess, no other original
         // can continue past the global budget. No seek or second source is used.
-        let remaining = (MAX_TOTAL_BYTES - self.bytes_read).min(MAX_FILE_BYTES - prior);
+        let remaining = (self.total_bytes_limit - self.bytes_read).min(MAX_FILE_BYTES - prior);
         let request = count.min(remaining.min(BUFFER as u64 - 1) as usize + 1);
         self.slot_mut(index)?.read_ended = true; // an error never authorizes retry
         let result = self.original_call(index, Call::Read(request))?;
         let trace = self.admission.at(AdmissionOp::Read);
         let consumed = result.count_in(trace)?;
         if consumed > request { return Err(trace.unsafe_at(C::ReadCount)); }
-        self.bytes_read = self.bytes_read.checked_add(consumed as u64).ok_or(Error::Bounds)?;
-        if self.bytes_read > MAX_TOTAL_BYTES { return Err(Error::Bounds); }
-        let slot = self.slot_mut(index)?;
-        slot.read_bytes = slot.read_bytes.checked_add(consumed as u64).ok_or(Error::Bounds)?;
-        if slot.read_bytes > MAX_FILE_BYTES { return Err(Error::Bounds); }
-        slot.read_ended = consumed == 0;
+        let charged = charge_read(&mut self.bytes_read, consumed as u64, self.total_bytes_limit);
+        self.capacity_result(charged)?;
+        let charged = charge_read(&mut self.slot_mut(index)?.read_bytes, consumed as u64, MAX_FILE_BYTES);
+        self.capacity_result(charged)?;
+        self.slot_mut(index)?.read_ended = consumed == 0;
         Ok(result.bytes_in(consumed, self.admission.at(AdmissionOp::Read))?.to_vec())
     }
     fn absent_thread_token(&mut self) -> Result<()> {
@@ -1454,5 +1749,76 @@ mod public_image_access_data_tests {
         assert!(book.public_image_retained_heap_bytes().is_some());
         assert!(book.public_image_transient_bytes(true).unwrap() > book.public_image_transient_bytes(false).unwrap());
         assert!(book.never_started());
+    }
+}
+
+
+// Only the closed selection owner can request these profiles. Ordinary,
+// acquisition and Publication defaults remain MAX_LIVE=48.
+#[cfg(feature = "installer-selection")]
+#[derive(Clone, Copy)]
+enum RetainedSelectionBook { SelectionEntries, Inputs54, Runtime47 }
+#[cfg(feature = "installer-selection")]
+impl RetainedSelectionBook {
+    const fn live_limit(self) -> usize {
+        // FileOwner positively bounds each discovered OS location to16
+        // components. One drive original and up to16 descendants per location.
+        // recheck_installer holds primary + current ProcessToken originals;
+        // collect_installer(current) additionally reserves one ThreadToken slot
+        // BEFORE its actual no-thread-token result can become NoHandle.
+        const OS_CHAIN: usize = 1 + installer_input_data::SOURCE_COMPONENTS;
+        const TOKEN_ORIGINALS: usize = 3;
+        match self {
+            // Three OS chains; MRK/selection/T; at most3 provenances of3
+            // originals; recovery root/run/7 records/2 leaves; one current
+            // authoritative selector; up to12 new output originals (retaining
+            // even ones closed during production is a conservative ceiling,
+            // not a licence to create extra files).
+            Self::SelectionEntries => 3 * OS_CHAIN + 3 + 3 * 3 + (2 + 7 + 2) + 1 + 12 + TOKEN_ORIGINALS,
+            // Closed InputLayout includes12 directories, counting MRK.
+            Self::Inputs54 => OS_CHAIN + 12 + installer_input_data::INPUTS + TOKEN_ORIGINALS,
+            // MRK/versions/T/D/python and the exact published47.
+            Self::Runtime47 => OS_CHAIN + 5 + installer_input_data::PUBLICATION_PAYLOADS.len() + TOKEN_ORIGINALS,
+        }
+    }
+}
+#[cfg(all(test, feature = "installer-selection"))]
+mod retained_selection_capacity_data_tests {
+    use super::*;
+    #[test]
+    fn closed_selection_profiles_fit_all_retained_originals_and_refuse_one_extra() {
+        let layout = installer_input_data::InputLayout::new(&"a".repeat(64), &"b".repeat(64), &"c".repeat(64))
+            .expect("closed DATA layout");
+        assert_eq!(layout.paths.len(), 54); assert_eq!(layout.output_directories.len(), 12);
+        assert_eq!(installer_input_data::PUBLICATION_PAYLOADS.len(), 47);
+        for (profile, limit) in [(RetainedSelectionBook::SelectionEntries, 90),
+            (RetainedSelectionBook::Inputs54, 86), (RetainedSelectionBook::Runtime47, 72)] {
+            let mut book = NativeBook::selection_retained(profile);
+            assert_eq!(book.live_limit, limit); assert_eq!(profile.live_limit(), limit);
+            // Image-loader SOURCE coexists, but cannot reset or latch a private
+            // installer book as an image role. Use the actual reserve path.
+            assert!(!book.purpose.is_images());
+            assert_eq!(book.records_limit, MAX_RECORDS);
+            assert_eq!(book.total_bytes_limit, installer_input_data::ACQUISITION_TOTAL_BYTES);
+            for ordinal in 0..limit - 3 {
+                // Actual reserve capacity path only: no original is opened.
+                book.reserve(Kind::File, None, "inert", format!("inert-{ordinal}")).expect("fixed retained capacity");
+            }
+            // Reproduce the peak reserve shape of recheck_installer: original
+            // process token, current process token, transient thread-token probe.
+            for kind in [Kind::ProcessToken, Kind::ProcessToken, Kind::ThreadToken] {
+                book.reserve(kind, None, "", String::new()).expect("three concurrent token slots");
+            }
+            assert!(matches!(book.reserve(Kind::File, None, "extra", "inert-extra".to_owned()), Err(Error::Bounds)));
+            assert!(!book.started && book.active.is_none());
+            assert_eq!(book.capacity_refusal, None);
+            assert_eq!(book.clear(), Ok(()));
+            assert_eq!(book.settle_once(), CloseOutcome::Settled);
+        }
+        assert_eq!(NativeBook::new().total_bytes_limit, MAX_TOTAL_BYTES);
+        assert_eq!(NativeBook::installer_output().records_limit, installer_input_data::OUTPUT_RECORDS);
+        assert_eq!(NativeBook::new().live_limit, MAX_LIVE);
+        assert_eq!(NativeBook::installer_source().live_limit, MAX_LIVE);
+        assert_eq!(NativeBook::installer_output().live_limit, MAX_LIVE);
     }
 }

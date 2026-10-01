@@ -281,8 +281,10 @@ class RootedRevision:
 class LockedInitScope:
     def __init__(self, lease: InitRootLease) -> None:
         self.lease = lease
-        self.lock = _FD(lease.guard)
-        self.meta = _FD(lease.guard)
+        self.notes = (lease._notes_native.scope_for(self, len(lease._scopes) + 1)
+                      if lease._notes_native is not None else None)
+        self.lock = _FD(lease.guard) if self.notes is None else None
+        self.meta = _FD(lease.guard) if self.notes is None else None
         self.identity: dict[str, int] | None = None
         self.meta_identity: dict[str, int] | None = None
         self.workspace: InitWorkspace | None = None
@@ -291,12 +293,21 @@ class LockedInitScope:
         self.closed = False
 
     @property
-    def fd(self) -> int:
+    def fd(self) -> Any:
+        if self.notes is not None:
+            if not self.locked or self.claimed:
+                raise _failure("custody_unknown", unknown=True)
+            return self.notes.root_borrow()
         if self.lock.number is None or not self.locked or self.claimed:
             raise _failure("custody_unknown", unknown=True)
         return self.lock.number
 
     def acquire(self) -> None:
+        if self.notes is not None:
+            self.notes.acquire()
+            self.identity = self.notes.root_material()
+            self.locked = True
+            return
         import fcntl
         guard = self.lease.guard
         guard.check()
@@ -342,6 +353,11 @@ class LockedInitScope:
 
     def check(self) -> None:
         self.lease.check()
+        if self.notes is not None:
+            if not self.locked or self.claimed:
+                raise _failure("custody_unknown", unknown=True)
+            self.notes.check()
+            return
         number = self.fd
         if _directory(os.fstat(number)) != self.identity:
             raise _failure("stale_revision")
@@ -383,7 +399,8 @@ class LockedInitScope:
             return
         self.claimed = True
         actions = ([self.workspace.settle_slots] if self.workspace is not None else [])
-        actions += [self.meta.close, self.lock.close]
+        actions += ([self.notes.close] if self.notes is not None
+                    else [self.meta.close, self.lock.close])
         _attempt_all(self.lease.guard, actions)
         self.closed = True
 
@@ -395,20 +412,21 @@ class _LeasePurpose(Enum):
 
 class InitRootLease:
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in {"_profile", "_purpose"} and name in self.__dict__:
+        if name in {"_profile", "_purpose", "_notes_native"} and name in self.__dict__:
             raise AttributeError("the original lease profile and purpose are immutable")
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name: str) -> None:
-        if name in {"_profile", "_purpose"}:
+        if name in {"_profile", "_purpose", "_notes_native"}:
             raise AttributeError("the original lease profile and purpose are immutable")
         object.__delattr__(self, name)
 
-    def __init__(self, root: Path, *, cancellation: DefaultCancellation,
+    def __init__(self, root: Path | str, *, cancellation: DefaultCancellation,
                  profile: TypedEditProfile = TypedEditProfile.CONFIGURATION,
-                 registered_identity: dict[str, int] | None = None,
+                 registered_identity: dict[str, int | str] | None = None,
                  image_recovery: bool = False,
-                 purpose: _LeasePurpose | None = None) -> None:
+                 purpose: _LeasePurpose | None = None,
+                 _notes_input: Any = None) -> None:
         if "_profile" in self.__dict__ or "_purpose" in self.__dict__:
             raise _failure("invalid_params")
         if type(cancellation) is not DefaultCancellation or type(profile) is not TypedEditProfile:
@@ -424,7 +442,17 @@ class InitRootLease:
         # Latch the exact pair before any acquisition. Neither target binding
         # nor a later context selection can turn a public lease into notes.
         self._profile, self._purpose = profile, purpose
-        if profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+        windows_notes = sys.platform == "win32" and purpose is _LeasePurpose.REQUIRED_NOTES
+        if not windows_notes and _notes_input is not None:
+            raise _failure("invalid_params")
+        if windows_notes:
+            from ._required_notes_windows_contract import WindowsNotesContractError, registered_root
+            try:
+                identity = registered_root(registered_identity)
+            except WindowsNotesContractError:
+                raise _failure("invalid_params") from None
+            self._registered_identity = tuple(sorted(identity.items()))
+        elif profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                        TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
             if (type(registered_identity) is not dict
                     or set(registered_identity) != {"device", "inode", "mode", "uid", "gid"}
@@ -440,7 +468,7 @@ class InitRootLease:
                 raise _failure("invalid_params")
             self._registered_identity = None
         self.root, self.guard = root, cancellation
-        self.directory = _Directory(root, cancellation, edit_checkpoints=True)
+        self.directory = None if windows_notes else _Directory(root, cancellation, edit_checkpoints=True)
         self._scopes: list[LockedInitScope] = []
         self._active: LockedInitScope | None = None
         self._revision: RootedRevision | None = None
@@ -456,6 +484,32 @@ class InitRootLease:
         self._failed = False
         self._close_claimed = False
         self.closed = False
+        self._notes_errors: list[BaseException] = []
+        if windows_notes:
+            from ._desktop_notes_windows import _prepare_original_notes_lease
+            # Root-owned original child/DLL admission; never a root path alone.
+            self._notes_native = _prepare_original_notes_lease(
+                self, _notes_input, registered_identity)
+        else:
+            self._notes_native = None
+
+    @property
+    def notes_identity_family(self) -> str:
+        if (self._profile is not TypedEditProfile.METADATA_TEXT
+                or self._purpose is not _LeasePurpose.REQUIRED_NOTES):
+            raise _failure("invalid_params")
+        if self._notes_native is None:
+            return "posix"
+        self._notes_native.check_lease_binding(self)
+        return "windows-ntfs-v1"
+
+    def _record_notes_failure(self, error: BaseException) -> None:
+        if self._notes_native is not None:
+            try:
+                self._notes_native.record_core_failure(error)
+            except BaseException as failure:
+                self._notes_errors.append(failure)
+                self.guard._abort(failure)
 
     @property
     def profile(self) -> TypedEditProfile:
@@ -472,6 +526,17 @@ class InitRootLease:
             self.guard._borrowable()
         except BaseException as error:
             raise _failure("custody_unknown", error, unknown=True) from None
+        if self._notes_native is not None:
+            try:
+                self._notes_native.acquire()
+                self._acquired = True
+                self.check()
+                self.guard.check()
+            except BaseException as error:
+                self._record_notes_failure(error)
+                self._failed = True
+                raise
+            return
         if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
             raise _failure("unsupported_platform")
         if (self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
@@ -512,6 +577,9 @@ class InitRootLease:
         if not self._acquired or self._close_claimed or self._failed:
             raise _failure("custody_unknown", unknown=True)
         try:
+            if self._notes_native is not None:
+                self._notes_native.check()
+                return
             self.directory.check()
             if self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                                 TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
@@ -640,6 +708,8 @@ class InitRootLease:
         extra: tuple[ObservedFile, ...] = ()
         limits = DEPENDENCY_LIMITS
         version = None
+        if workspace._notes is not None:
+            workspace._notes.freeze_version(None if configured.version is None else configured.version.source)
         if configured.version is not None:
             version = workspace.observe(configured.version.source, limit=MAX_VERSION_BYTES)
             extra = (version,)
@@ -648,6 +718,8 @@ class InitRootLease:
             selection = required_note_selection(configured, None if version is None else version.data)
         except RequiredNotesInputError as error:
             raise _failure("invalid_params" if error.reason == "invalid_params" else "invalid_config") from None
+        if workspace._notes is not None:
+            workspace._notes.freeze_selected(selection)
         if selection.counterpart_path is not None:
             counterpart = workspace.observe(selection.counterpart_path, limit=ANDROID_NOTE_MAX_BYTES)
             extra = (*extra, counterpart)
@@ -865,13 +937,19 @@ class InitRootLease:
         try:
             try:
                 with cleanup:
-                    owner.acquire()
-                    workspace = InitWorkspace.borrowed(owner)
-                    if revision is not None:
-                        self._recheck(workspace, revision)
-                    yield workspace
-                    owner.check()
-                    self.guard.check()
+                    try:
+                        owner.acquire()
+                        workspace = InitWorkspace.borrowed(owner)
+                        if revision is not None:
+                            self._recheck(workspace, revision)
+                        yield workspace
+                        owner.check()
+                        self.guard.check()
+                    except BaseException as error:
+                        # Native first-failure latching precedes original scope
+                        # close, including failures in pure core validation.
+                        self._record_notes_failure(error)
+                        raise
             finally:
                 cleanup.__exit__(*sys.exc_info())
         except BaseException as error:
@@ -953,7 +1031,9 @@ class InitRootLease:
             return
         self._close_claimed = True
         try:
-            _attempt_all(self.guard, [scope.close for scope in reversed(self._scopes)] + [self.directory.close])
+            _attempt_all(self.guard, [scope.close for scope in reversed(self._scopes)]
+                         + ([self._notes_native.close] if self._notes_native is not None
+                            else [self.directory.close]))
         except BaseException as error:
             raise _failure("custody_unknown", error, outcome=self.last_outcome, unknown=True) from None
         self.closed = True

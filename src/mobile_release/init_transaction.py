@@ -376,6 +376,8 @@ class InitWorkspace:
         self.observed_bytes = 0
         self._guard: Any = None
         self._scope: Any = None
+        self._notes: Any = None  # Original Windows Notes scope, never an fd/HANDLE.
+        self._notes_cleanup_errors: list[BaseException] = []
         self._slots: list[Any] = []
         self._cleanup_mode = False
         self._handoff_depth = 0
@@ -434,9 +436,49 @@ class InitWorkspace:
         workspace._image_targets = scope.lease._image_targets
         workspace._image_recovery = scope.lease._image_recovery
         workspace.fd = scope.fd
-        workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-        workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
+        if scope.notes is not None:
+            workspace._notes = scope.notes
+            scope.notes.bind_workspace(workspace)
+            workspace.flags = scope.notes.directory_borrow
+            workspace.root_identity = scope.notes.root_material()
+        else:
+            workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
         return workspace
+
+    def _identity_valid(self, value: Any, *, directory: bool = False, limit: int = MAX_FILE_BYTES) -> bool:
+        # Keep the public/static POSIX validator exact for all existing callers.
+        if self._notes is None:
+            return self._valid_identity(value, directory=directory, limit=limit)
+        from ._required_notes_windows_contract import material_valid
+        return material_valid(value, directory=directory, limit=limit)
+
+    def _identity_size(self, value: dict[str, Any] | None) -> int:
+        if value is None:
+            return 0
+        if self._notes is None:
+            return value["size"]
+        from ._required_notes_windows_contract import canonical_u64
+        return canonical_u64(value["size"])
+
+    def _same_volume(self, value: dict[str, Any]) -> bool:
+        if self._notes is None:
+            return value["device"] == self.root_identity["device"]
+        return (value.get("platform") == self.root_identity["platform"] == "windows-ntfs-v1"
+                and value.get("volumeSerial") == self.root_identity["volumeSerial"])
+
+    def _name_present(self, parent: Any, name: str) -> bool:
+        if self._notes is None:
+            return _stat(parent, name) is not None
+        return self._notes.name_present(parent, name)
+
+    def _notes_failure(self, error: BaseException) -> None:
+        if self._notes is not None:
+            try:
+                self._notes.record_core_failure(error)
+            except BaseException as failure:
+                self._notes_cleanup_errors.append(failure)
+                self._guard._abort(failure)
 
     @property
     def _state_names(self) -> tuple[str, str, str]:
@@ -561,6 +603,12 @@ class InitWorkspace:
                                    and facts == original_raw[path], "original metadata dependency changed")
         transitions = self._metadata_dependency_transitions()
         for path, facts in targets._parent_facts:
+            if self._notes is not None:
+                # Actual original-source or acknowledged-current-epoch proof,
+                # never relabel current metadata as immutable Capture facts.
+                self._notes.check_dependency_parent(path, facts, transitions,
+                                                     self._metadata_created_parent_facts)
+                continue
             if facts is None and path in transitions:
                 # Only a journal-owned directory may replace original absence.
                 # The counterpart itself was re-read above and must remain absent.
@@ -621,6 +669,12 @@ class InitWorkspace:
     @contextmanager
     def _descriptor(self, name: str, flags: int, mode: int = 0o600, *, dir_fd: int) -> Iterator[int]:
         self._checkpoint()
+        if self._notes is not None:
+            _require(flags is self._notes.directory_borrow and mode == 0o600,
+                     "Windows Notes permits only an original logical directory borrow")
+            with self._notes.borrow_directory(dir_fd, name) as handle:
+                yield handle
+            return
         if self._guard is None:
             with _descriptor(name, flags, mode, dir_fd=dir_fd) as handle:
                 yield handle
@@ -632,28 +686,47 @@ class InitWorkspace:
             yield slot.open(name, flags, mode, dir_fd=dir_fd)
 
     def settle_slots(self) -> None:
+        if self._notes is not None:
+            self._notes.settle_workspace_borrows()
+            return
         if self._guard is not None:
             from .build_inputs import _attempt_all
             _attempt_all(self._guard, [slot.close for slot in reversed(self._slots)])
 
     def _read(self, fd: int, name: str, limit: int | None = None):
+        if self._notes is not None:
+            return self._notes.read(fd, name, self._file_limit if limit is None else limit)
         return _read(fd, name, self._file_limit if limit is None else limit, owner=self)
 
     def _binding(self, fd: int, name: str, *, directory: bool = False, limit: int | None = None):
         self._checkpoint()
+        if self._notes is not None:
+            return self._notes.binding(fd, name, directory=directory,
+                                       limit=self._file_limit if limit is None else limit)
         return _binding(fd, name, directory=directory, limit=self._file_limit if limit is None else limit, owner=self)
 
     def _write(self, fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False):
         self._checkpoint()
+        if self._notes is not None:
+            _require(mode == 0o600 and not preserve_mode,
+                     "Windows Notes derives security from the frozen original selection, not POSIX modes")
+            return self._notes.write(fd, name, data)
         return _write(fd, name, data, mode, preserve_mode=preserve_mode, owner=self)
 
     def _fsync(self, fd: int) -> None:
         self._checkpoint()
-        _fsync(fd)
+        if self._notes is not None:
+            self._notes.full_fence(fd)
+        else:
+            _fsync(fd)
         self._checkpoint()
 
     def _mkdir(self, name: str, mode: int, *, dir_fd: int) -> None:
         self._checkpoint()
+        if self._notes is not None:
+            self._notes.mkdir(dir_fd, name, mode)
+            self._checkpoint()
+            return
         if self._guard is None:
             os.mkdir(name, mode, dir_fd=dir_fd)
             return
@@ -685,7 +758,10 @@ class InitWorkspace:
     def _unlink(self, name: str, *, dir_fd: int, directory: bool = False) -> None:
         self._checkpoint()
         with self._handoff():
-            (os.rmdir if directory else os.unlink)(name, dir_fd=dir_fd)
+            if self._notes is not None:
+                self._notes.delete(dir_fd, name, directory=directory)
+            else:
+                (os.rmdir if directory else os.unlink)(name, dir_fd=dir_fd)
         self._checkpoint()
 
     def _control_rename(self, source_fd: int, source: str, destination_fd: int, destination: str) -> None:
@@ -693,12 +769,15 @@ class InitWorkspace:
         with self._handoff():
             if self._guard is not None and not self._cleanup_mode:
                 self._guard.check()
-            self.rename(source_fd, source, destination_fd, destination)
+            if self._notes is not None:
+                self._notes.control_move(source_fd, source, destination_fd, destination)
+            else:
+                self.rename(source_fd, source, destination_fd, destination)
         self._checkpoint()
 
     def _list(self, fd: int) -> list[str]:
         self._checkpoint()
-        names = _list(fd)
+        names = self._notes.roster(fd) if self._notes is not None else _list(fd)
         self._checkpoint()
         return names
 
@@ -747,10 +826,12 @@ class InitWorkspace:
                  "project root changed; preserve transaction state")
 
     def state(self) -> str | None:
+        if self._notes is not None:
+            return self._notes.state()  # One complete original roster for all fixed aliases.
         self._root_check()
         for name in ALL_STATE_NAMES:
             self._alias(self.fd, name)
-        found = [name for name in ALL_STATE_NAMES if _stat(self.fd, name) is not None]
+        found = [name for name in ALL_STATE_NAMES if self._name_present(self.fd, name)]
         self._expect_unchanged(all(name in self._state_names for name in found),
                                "foreign typed transaction state must be preserved by its original owner")
         self._expect_unchanged(len(found) <= 1, "inconsistent simultaneous transaction directories; preserve them")
@@ -801,6 +882,10 @@ class InitWorkspace:
 
     @contextmanager
     def _private(self, name: str) -> Iterator[int]:
+        if self._notes is not None:
+            with self._notes.private(name) as handle:
+                yield handle
+            return
         self._root_check()
         _require(name in self._state_names and self.state() == name,
                  "private state is not the admitted original transaction domain")
@@ -813,6 +898,9 @@ class InitWorkspace:
             yield handle
 
     def _private_check(self, fd: int, name: str) -> None:
+        if self._notes is not None:
+            self._notes.private_check(fd, name)
+            return
         try:
             self._root_check()
             _require(name in self._state_names and self.state() == name,
@@ -835,6 +923,10 @@ class InitWorkspace:
 
     @contextmanager
     def _parent(self, path: str, *, planning: bool = False) -> Iterator[int | None]:
+        if self._notes is not None:
+            with self._notes.parent(path, planning=planning) as handle:
+                yield handle
+            return
         self._root_check()
         handle, current, missing = self.fd, [], False
         with ExitStack() as opened:
@@ -896,7 +988,7 @@ class InitWorkspace:
         with self._parent(path, planning=True) as parent:
             value = self._read(parent, path.split("/")[-1], min(limit, MAX_TOTAL_BYTES - self.observed_bytes)) if parent is not None else None
             facts = self._last_read_facts if value is not None else None
-        self.observed_bytes += value[0]["size"] if value else 0
+        self.observed_bytes += self._identity_size(value[0]) if value else 0
         if self._guard is not None:
             self._raw_observations[path] = facts
         self._checkpoint()
@@ -905,6 +997,8 @@ class InitWorkspace:
         return result
 
     def _current(self, path: str, *, directory: bool = False) -> dict[str, Any] | None:
+        if self._notes is not None:
+            return self._notes.current(path, directory=directory)
         with self._parent(path) as parent:
             if directory and self._original_facts_required and self._rooted_revision is not None:
                 from .build_inputs import _directory
@@ -935,6 +1029,10 @@ class InitWorkspace:
     def _move_owned(self, source_fd: int, source: str, destination_fd: int, destination: str,
                     expected: dict[str, Any], *, directory: bool,
                     directory_path: str | None) -> None:
+        if self._notes is not None:
+            self._notes.move_owned(source_fd, source, destination_fd, destination, expected,
+                                   directory=directory, directory_path=directory_path)
+            return
         self._namespace_check()
         self._expect_unchanged(self._binding(source_fd, source, directory=directory) == expected, "move source changed")
         self._expect_unchanged(_stat(destination_fd, destination) is None, "exclusive move destination appeared")
@@ -1011,6 +1109,9 @@ class InitWorkspace:
         self._checkpoint()
 
     def _state_move_owned(self, old: str, new: str) -> None:
+        if self._notes is not None:
+            self._notes.state_move_owned(old, new)
+            return
         self._root_check()
         _require(old in self._state_names and new in self._state_names, "state handoff cannot cross transaction domains")
         self._expect_unchanged(self.state() == old, "original transaction state changed before handoff")
@@ -1067,7 +1168,7 @@ class InitWorkspace:
                  and type(header["schemaVersion"]) is int and header["schemaVersion"] == 1
                  and isinstance(header["transactionId"], str)
                  and re.fullmatch(r"[0-9a-f]{32}", header["transactionId"]) is not None
-                 and self._valid_identity(header["root"], directory=True)
+                 and self._identity_valid(header["root"], directory=True)
                  and header["root"] == self.root_identity, "invalid recovery header/root binding")
         return header
 
@@ -1091,7 +1192,7 @@ class InitWorkspace:
             _require(type(entry) is dict and set(entry) == {"path", "before", "after"}
                      and type(entry["path"]) is str, "invalid recovery file entry")
             _require((entry["before"] is not None or entry["after"] is not None)
-                     and all(v is None or self._valid_identity(v, limit=self._file_limit) for v in (entry["before"], entry["after"])),
+                     and all(v is None or self._identity_valid(v, limit=self._file_limit) for v in (entry["before"], entry["after"])),
                      "invalid recovery file identity")
         validate_paths([entry["path"] for entry in plan["files"]])
         expected_dirs = {"/".join(e["path"].split("/")[:i]) for e in plan["files"]
@@ -1103,15 +1204,15 @@ class InitWorkspace:
                      "invalid recovery directory entry")
             seen.add(entry["path"])
             _require((entry["before"] is None) != (entry["after"] is None)
-                     and self._valid_identity(entry["before"] or entry["after"], directory=True),
+                     and self._identity_valid(entry["before"] or entry["after"], directory=True),
                      "invalid directory identity")
         _require(seen == expected_dirs, "recovery directory inventory differs from file ancestors")
         _require([e["path"] for e in plan["directories"]] == sorted(expected_dirs, key=lambda p: (p.count("/"), p)),
                  "recovery directory order is invalid")
-        _require(all(v["device"] == self.root_identity["device"] for section in ("directories", "files")
+        _require(all(self._same_volume(v) for section in ("directories", "files")
                      for e in plan[section] for v in (e["before"], e["after"]) if v is not None),
                  "recovery inode belongs to another filesystem")
-        _require(sum(v["size"] for e in plan["files"] for v in (e["before"], e["after"]) if v) <= MAX_TOTAL_BYTES,
+        _require(sum(self._identity_size(v) for e in plan["files"] for v in (e["before"], e["after"]) if v) <= MAX_TOTAL_BYTES,
                  "recovery byte bound exceeded")
 
     def _load(self, fd: int) -> dict[str, Any]:
@@ -1146,7 +1247,7 @@ class InitWorkspace:
                      and tuple(e["path"] for e in plan["files"]) == targets.paths
                      and tuple(e["path"] for e in plan["directories"]) == targets.directories
                      and all(e["path"] in self._captured and e["before"] == self._captured[e["path"]].before
-                             and all(v is None or v["size"] <= limit for v in (e["before"], e["after"]))
+                             and all(v is None or self._identity_size(v) <= limit for v in (e["before"], e["after"]))
                              for e, limit in zip(plan["files"], payload_limits)),
                      "metadata recovery cannot adopt another target or dependency inventory")
             if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
@@ -1298,10 +1399,10 @@ class InitWorkspace:
     def _prepare(self, changes: list[tuple[ObservedFile, bytes | None]]) -> dict[str, Any]:
         self.require_clean()
         self._metadata_dependencies_check()
-        _require(sum(len(payload or b"") + (item.before or {}).get("size", 0)
+        _require(sum(len(payload or b"") + self._identity_size(item.before)
                      for item, payload in changes) <= MAX_TOTAL_BYTES, "total input/staging byte bound exceeded")
         for item, _ in changes:
-            _require(item.before is None or item.before["device"] == self.root_identity["device"],
+            _require(item.before is None or self._same_volume(item.before),
                      "input belongs to another filesystem")
             self._original_target_check(item, "input changed after planning")
         self._mkdir(self._state_names[0], 0o700, dir_fd=self.fd)
@@ -1335,7 +1436,10 @@ class InitWorkspace:
                 if before is None:
                     self._mkdir(f"directory-{i}", 0o755, dir_fd=fd)
                     after = self._binding(fd, f"directory-{i}", directory=True)
-                    if path in self._metadata_dependency_transitions():
+                    if self._notes is not None and path in self._metadata_dependency_transitions():
+                        self._metadata_created_parent_facts[path] = self._notes.created_parent_facts(
+                            fd, f"directory-{i}", after)
+                    elif path in self._metadata_dependency_transitions():
                         from .build_inputs import _directory
                         with self._descriptor(f"directory-{i}", self.flags, dir_fd=fd) as staged:
                             created = _directory(os.fstat(staged))
@@ -1348,8 +1452,11 @@ class InitWorkspace:
             for i, (item, payload) in enumerate(changes):
                 after = None
                 if payload is not None:
-                    mode = item.before["mode"] if item.before else 0o644
-                    self._write(fd, f"new-{i}", payload, mode, preserve_mode=item.before is not None)
+                    if self._notes is not None:
+                        self._write(fd, f"new-{i}", payload)
+                    else:
+                        mode = item.before["mode"] if item.before else 0o644
+                        self._write(fd, f"new-{i}", payload, mode, preserve_mode=item.before is not None)
                     after = self._binding(fd, f"new-{i}")
                 files.append({"path": item.path, "before": item.before, "after": after})
             plan = {**header, "directories": directories, "files": files}
@@ -1502,16 +1609,20 @@ class InitWorkspace:
             entries: dict[str, tuple[bool, dict[str, Any]]] = {}
             observed_bytes = 0
             for name in names:
-                value = _stat(fd, name)
-                _require(value is not None, "cleanup entry disappeared")
-                directory = stat.S_ISDIR(value.st_mode)
-                if directory:
-                    binding = _dir_identity(value)
+                if self._notes is not None:
+                    directory, binding = self._notes.cleanup_entry(fd, name)
                 else:
-                    item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else self._file_limit)
-                    _require(item is not None, "cleanup entry disappeared")
-                    binding = item[0]
-                    observed_bytes += binding["size"]
+                    value = _stat(fd, name)
+                    _require(value is not None, "cleanup entry disappeared")
+                    directory = stat.S_ISDIR(value.st_mode)
+                    if directory:
+                        binding = _dir_identity(value)
+                    else:
+                        item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else self._file_limit)
+                        _require(item is not None, "cleanup entry disappeared")
+                        binding = item[0]
+                if not directory:
+                    observed_bytes += self._identity_size(binding)
                     _require(observed_bytes <= MAX_TOTAL_BYTES + len(CONTROLS) * MAX_CONTROL_BYTES,
                              "cleanup byte bound exceeded")
                 entries[name] = (directory, binding)
@@ -1618,6 +1729,8 @@ class InitWorkspace:
         No additional IO, observer reopens, or exception-text interpretation is
         performed. The outer scope/lease adds its own close evidence.
         """
+        if self._notes is not None:
+            self._notes.retain_workspace_facts()
         # A new restoration has its own current-attempt accounting. It never
         # claims that this workspace created/imported a persisted journal.
         if self._image_recovery is not None:
@@ -1678,15 +1791,32 @@ class InitWorkspace:
         _require(not self._terminal_ambiguous, "terminal publication is uncertain; preserve the journal")
         _require(self._terminal_seen != "COMMITTED" or self._terminal_durable,
                  "commit decision is known but durability is unconfirmed; preserve the journal")
+        if self._notes is not None:
+            self._notes.begin_fixed_recovery()
         self._cleanup_mode = True
+        primary: BaseException | None = None
         try:
             # Explicit cleanup mode is essential: ordinary guard.check() throws
             # on cancellation even inside deferred(). No second recovery loop.
             with self._guard.deferred(check_on_exit=False):
                 self._checkpoint()
                 self.recover()
+        except BaseException as error:
+            primary = error
+            self._notes_failure(error)
+            raise
         finally:
-            self._cleanup_mode = False
+            try:
+                if self._notes is not None:
+                    try:
+                        self._notes.finish_fixed_recovery()
+                    except BaseException as cleanup_error:
+                        self._notes_cleanup_errors.append(cleanup_error)
+                        self._notes_failure(cleanup_error)
+                        if primary is None:
+                            raise
+            finally:
+                self._cleanup_mode = False
 
     def apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
         """Configuration-only facade; legacy CLI keeps its public API."""
@@ -1806,11 +1936,14 @@ class InitWorkspace:
             self._metadata_dependencies_check()
             for item, _ in changes:
                 self._original_target_check(item, "input changed after revalidation")
+            if self._notes is not None:
+                self._notes.freeze_apply(changes)
             if all(payload is None for _, payload in changes):
                 self._unchanged = True
                 return self.current_outcome()
             # Capture/prepare do not bind ctypes symbols or perform fs probes.
-            self.rename = _rename_function()
+            if self._notes is None:
+                self.rename = _rename_function()
             plan = self._prepare(changes)
             with self._private(self._state_names[1]) as fd:
                 self._installing = True
@@ -1820,6 +1953,7 @@ class InitWorkspace:
                     self._installing = False
             self._fixed_recovery()  # Exactly committed cleanup, never a rebuild.
         except BaseException as error:
+            self._notes_failure(error)  # First failure reaches native before any recovery.
             if self._primary is None:
                 self._primary = error
                 self._reason = (error.outcome.reason if type(error) is InitOperationFailure else
@@ -1828,7 +1962,9 @@ class InitWorkspace:
             if not self._recovery_claimed and not isinstance(error, InitConflict):
                 try:
                     self._fixed_recovery()
-                except BaseException:
+                except BaseException as cleanup_error:
+                    if self._notes is not None:
+                        self._notes_cleanup_errors.append(cleanup_error)
                     # Preserve the first primary and actual irreversible facts.
                     # Independent original handle closes still run in the scope.
                     pass
