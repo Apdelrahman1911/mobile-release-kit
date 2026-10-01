@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import tempfile
 import stat
+import tarfile
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -997,6 +998,254 @@ class OwnerFailureContracts(unittest.TestCase):
              self.assertRaises(ValueError) as caught:
             O.build_worker(task, {}, command, data_module)
         self.assertIs(caught.exception, original)
+
+
+
+class CargoNoticeContracts(unittest.TestCase):
+    """Original archive/licensing DATA only; no build, service or native child."""
+
+    def archive(self, *, name="notice-fixture", version="1.0.0", license_file=None,
+                members=(), repository="https://github.com/fixture/notices", revision=None):
+        metadata = {"name": name, "version": version, "license": "MIT", "repository": repository}
+        if license_file is not None:
+            metadata["license-file"] = license_file
+        cargo = ("[package]\n" + "".join(key + " = " + json.dumps(value) + "\n"
+                                        for key, value in metadata.items())).encode()
+        roster = [("Cargo.toml", cargo, tarfile.REGTYPE), *members]
+        if revision is not None:
+            roster.append((".cargo_vcs_info.json", A.P.canonical(
+                {"git": {"sha1": revision}, "path_in_vcs": ""}), tarfile.REGTYPE))
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            for relative, body, kind in roster:
+                item = tarfile.TarInfo(name + "-" + version + "/" + relative)
+                item.type, item.mode = kind, 0o644
+                item.size = len(body) if item.isfile() else 0
+                if item.issym() or item.islnk():
+                    item.linkname = "unrelated-notice"
+                archive.addfile(item, io.BytesIO(body) if item.isfile() else None)
+        package = {"name": name, "version": version, "license": "MIT", "license_file": license_file,
+                   "source": "registry+https://github.com/rust-lang/crates.io-index",
+                   "id": name + "@" + version, "manifest_path": "/fixture/" + name + "/Cargo.toml"}
+        return output.getvalue(), package
+
+    def rule(self, raw, package, *, archive_members=(), upstream=()):
+        return {"name": package["name"], "version": package["version"],
+                "archiveSha256": A.sha(raw), "licenseMetadata": "MIT",
+                "packageRepository": "https://github.com/fixture/notices",
+                "upstreamRepository": "https://github.com/fixture/notices",
+                "revision": "a" * 40, "pathInVcs": "", "selectedLicense": "MIT",
+                "archiveMembers": list(archive_members), "upstreamNotices": list(upstream)}
+
+    def select(self, raw, package, rule=None, root=Path("/unused-notice-root"), records=None):
+        rules = {} if rule is None else {(package["name"], package["version"]): rule}
+        return A._crate_notices(raw, package, A.sha(raw), root, records or {}, rules)
+
+    def test_declared_original_and_conventional_notices_are_preserved_without_duplicates(self):
+        body, conventional = b"Original declaration fixture\n", b"Original license fixture\n"
+        raw, package = self.archive(license_file="legal/terms.txt", members=(
+            ("legal/", b"", tarfile.DIRTYPE), ("legal/terms.txt", body, tarfile.REGTYPE),
+            ("LICENSE-MIT", conventional, tarfile.REGTYPE)))
+        members, provenance = self.select(raw, package)
+        self.assertEqual(dict(members), {"legal/terms.txt": body, "LICENSE-MIT": conventional})
+        self.assertIsNone(provenance)
+        raw, package = self.archive(license_file="LICENSE-MIT",
+                                    members=(("LICENSE-MIT", conventional, tarfile.REGTYPE),))
+        self.assertEqual(self.select(raw, package)[0], [("LICENSE-MIT", conventional)])
+
+    def test_declared_missing_escaping_nonordinary_and_duplicate_members_are_refused(self):
+        for declared, members in (
+            ("/terms.txt", ()), ("../terms.txt", ()), ("legal/../terms.txt", ()),
+            ("C:/terms.txt", ()), ("legal\\terms.txt", ()), ("terms.txt", ()),
+            ("terms.txt", (("terms.txt", b"", tarfile.SYMTYPE),)),
+            ("terms.txt", (("terms.txt", b"", tarfile.LNKTYPE),)),
+            ("terms.txt", (("terms.txt/", b"", tarfile.DIRTYPE),)),
+            ("terms.txt", (("terms.txt", b"one", tarfile.REGTYPE),
+                           ("terms.txt", b"two", tarfile.REGTYPE))),
+        ):
+            with self.subTest(declared=declared, kinds=[row[2] for row in members]):
+                raw, package = self.archive(license_file=declared, members=members)
+                with self.assertRaises(ValueError):
+                    self.select(raw, package)
+
+    def test_authors_requires_an_exact_reviewed_archive_identity_not_a_filename_heuristic(self):
+        body = b"Synthetic complete licensing declaration for the archive contract\n"
+        raw, package = self.archive(revision="a" * 40, members=(("AUTHORS", body, tarfile.REGTYPE),))
+        self.assertEqual(self.select(raw, package), ([], None))
+        rule = self.rule(raw, package, archive_members=[pin("AUTHORS", body)])
+        members, provenance = self.select(raw, package, rule)
+        self.assertEqual(members, [("AUTHORS", body)])
+        self.assertEqual(provenance["archiveMembers"], rule["archiveMembers"])
+        self.assertEqual(provenance["selectedLicense"], "MIT")
+        altered = []
+        for key, value in (("archiveSha256", "b" * 64), ("packageRepository", "https://example.invalid"),
+                           ("revision", "b" * 40), ("pathInVcs", "other"), ("licenseMetadata", "Apache-2.0")):
+            changed = copy.deepcopy(rule)
+            changed[key] = value
+            altered.append(changed)
+        changed = copy.deepcopy(rule)
+        changed["archiveMembers"][0]["sha256"] = "b" * 64
+        altered.append(changed)
+        for changed in altered:
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                self.select(raw, package, changed)
+
+    def test_supplement_preserves_original_bytes_and_refuses_changed_text(self):
+        raw, package = self.archive(revision="a" * 40)
+        original = b"Original upstream license fixture; never replaced with an SPDX label.\n"
+        with tempfile.TemporaryDirectory(prefix="mrk-alpha-notice-contract-") as temporary:
+            root = Path(temporary)
+            relative = "LICENSE-MIT"
+            (root / relative).write_bytes(original)
+            row = pin(relative, original)
+            rule = self.rule(raw, package, upstream=[{"path": relative, "upstreamPath": "LICENSE-MIT"}])
+            members, provenance = self.select(raw, package, rule, root, {relative: row})
+            self.assertEqual(members, [("upstream/LICENSE-MIT", original)])
+            self.assertEqual(provenance["upstreamNotices"][0]["sha256"], row["sha256"])
+            (root / relative).write_bytes(b"Changed upstream source")
+            with self.assertRaises(ValueError):
+                self.select(raw, package, rule, root, {relative: row})
+
+    def test_real_supplement_inventory_is_source_bound_and_cms_attribution_is_accurate(self):
+        root, records, rules = A._rust_notice_inputs(SOURCE)
+        self.assertEqual(set(rules), {("cms", "0.2.3"), ("defmt-parser", "1.0.0"),
+                                      ("r-efi", "5.3.0"), ("r-efi", "6.0.0")})
+        cms = rules[("cms", "0.2.3")]
+        self.assertEqual(cms["selectedLicense"], "Apache-2.0")
+        self.assertEqual([row["path"] for row in cms["archiveMembers"]], ["README.md"])
+        self.assertEqual([row["upstreamPath"] for row in cms["upstreamNotices"]], ["der/LICENSE-APACHE"])
+        with tempfile.TemporaryDirectory(prefix="mrk-alpha-notice-input-contract-") as temporary:
+            source = Path(temporary)
+            copied = source / A.RUST_NOTICE_ROOT
+            copied.mkdir(parents=True)
+            for relative in [*records, "inputs.json"]:
+                target = copied / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((root / relative).read_bytes())
+            A._rust_notice_inputs(source)
+            manifest = (copied / "inputs.json").read_bytes()
+            (copied / "inputs.json").write_bytes(manifest + b" ")
+            with self.assertRaises(ValueError):
+                A._rust_notice_inputs(source)
+            (copied / "inputs.json").write_bytes(manifest)
+            extra = copied / "unreviewed.txt"
+            extra.write_bytes(b"not an original admitted notice")
+            with self.assertRaises(ValueError):
+                A._rust_notice_inputs(source)
+            extra.unlink()
+            (copied / next(iter(records))).write_bytes(b"changed original")
+            with self.assertRaises(ValueError):
+                A._rust_notice_inputs(source)
+
+    def build_module(self, collection, graph=None):
+        return SimpleNamespace(
+            NoticeInputsRefused=A.NoticeInputsRefused, ROLES=A.ROLES,
+            U=SimpleNamespace(shell_compiler_inputs=mock.Mock(return_value=({}, {}))),
+            reconstruct_runtime=mock.Mock(return_value=({"manifestSha256": "a" * 64,
+                "protocolSha256": "b" * 64}, Path("/contract-runtime"))),
+            metadata_graph=mock.Mock(return_value=(graph or {}, {}, {})),
+            collect_notices=collection, support_inputs=mock.Mock())
+
+    def capture_refusal(self, task, module, exception):
+        command = mock.Mock(return_value=SimpleNamespace(stdout=b"synthetic-metadata"))
+        command.environment = {"PATH": "/usr/bin:/bin"}
+        output = io.BytesIO()
+        with mock.patch.object(O.sys, "stdout", SimpleNamespace(buffer=output)), \
+             self.assertRaises(exception) as caught:
+            O.build_worker(task, {"githubTooling": {}}, command, module)
+        self.assertEqual([call.args[0] for call in command.call_args_list],
+                         ["metadata-main", "metadata-publisher"])
+        module.support_inputs.assert_not_called()
+        events = output.getvalue().splitlines()
+        self.assertEqual(len(events), 1)
+        event = json.loads(events[0])
+        self.assertEqual(set(event), {"event", "diagnostic"})
+        self.assertEqual(event["event"], "build-failed")
+        return caught.exception, event["diagnostic"], output.getvalue()
+
+    def test_two_missing_crates_are_reported_together_before_any_frontend_or_compile(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-alpha-notice-aggregate-") as temporary:
+            task = Path(temporary)
+            source, work = task / "source", task / "build"
+            retained = source / "desktop/packaging/debian/native-notices"
+            retained.mkdir(parents=True)
+            original = b"Local synthetic baseline license\n"
+            (retained / "LICENSE").write_bytes(original)
+            baseline = A.P.canonical({"files": [pin("LICENSE", original)]})
+            (retained / "inputs.json").write_bytes(baseline)
+            cache = work / "cargo/registry/cache/contract-index"
+            cache.mkdir(parents=True)
+            graph, locked, expected = {"packages": []}, [], []
+            for name in ("missing-one", "missing-two"):
+                raw, package = self.archive(name=name)
+                (cache / (name + "-1.0.0.crate")).write_bytes(raw)
+                graph["packages"].append(package)
+                locked.append("[[package]]\n" + "".join(key + " = " + json.dumps(value) + "\n"
+                    for key, value in {"name": name, "version": "1.0.0", "source": package["source"],
+                                       "checksum": A.sha(raw)}.items()))
+                expected.append({"name": name, "version": "1.0.0", "archiveSha256": A.sha(raw),
+                                 "reason": "missing-original-notices"})
+            manifest = source / "desktop/src-tauri/Cargo.lock"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("\n".join(locked), encoding="utf-8")
+            module = self.build_module(A.collect_notices, graph)
+            with mock.patch.object(A.U, "NOTICE_INPUTS_SHA256", A.sha(baseline)), \
+                 mock.patch.object(A.U, "native_source_notice_inputs"), \
+                 mock.patch.object(A, "_rust_notice_inputs", return_value=(source, {}, {})):
+                error, diagnostic, output = self.capture_refusal(task, module, A.NoticeInputsRefused)
+            self.assertEqual(error.failures, expected)
+            self.assertEqual(diagnostic["stage"], "crate-notices")
+            self.assertEqual(diagnostic["noticeFailureTotal"], 2)
+            self.assertEqual(diagnostic["noticeFailures"], expected)
+            manager = SimpleNamespace(cgroup_failure=None, clients=[], results=[])
+            with mock.patch.object(O, "read", return_value=output):
+                public = O.failure_summary(task, manager, ValueError("private marker"),
+                                           "worker-build", "build", True)
+            self.assertEqual(public["buildFailure"], diagnostic)
+            with mock.patch.object(O, "read") as read:
+                public = O.failure_summary(task, manager, ValueError("private marker"),
+                                           "worker-build", "build", False)
+                read.assert_not_called()
+            self.assertNotIn("buildFailure", public)
+
+    def test_notice_diagnostic_is_bounded_typed_and_rejects_extra_private_or_malformed_data(self):
+        rows = [{"name": "missing-" + str(index), "version": "1.0.0", "archiveSha256": "a" * 64,
+                 "reason": "missing-original-notices"} for index in range(65)]
+        actual = A.NoticeInputsRefused(rows)
+        module = self.build_module(mock.Mock(side_effect=actual))
+        caught, diagnostic, _ = self.capture_refusal(Path("/contract-task"), module, A.NoticeInputsRefused)
+        self.assertIs(caught, actual)
+        self.assertEqual(diagnostic["noticeFailureTotal"], 65)
+        self.assertEqual(diagnostic["noticeFailures"], rows[:64])
+        self.assertEqual(O.public_build_diagnostic(diagnostic), diagnostic)
+        marker = "/private/do-not-publish notice-marker"
+        impostor = type("NoticeInputsRefused", (ValueError,), {})(marker)
+        impostor.failures = rows
+        malformed = A.NoticeInputsRefused([{**rows[0], "path": marker}])
+        for error in (impostor, malformed):
+            module = self.build_module(mock.Mock(side_effect=error))
+            caught, value, output = self.capture_refusal(Path("/contract-task"), module, ValueError)
+            self.assertIs(caught, error)
+            self.assertNotIn("noticeFailures", value)
+            self.assertNotIn(marker, output.decode())
+        invalid = []
+        for key, value in (("noticeFailureTotal", True), ("noticeFailureTotal", 1025),
+                           ("noticeFailureTotal", 63), ("noticeFailures", rows[:63]),
+                           ("stage", "compile-main"), ("errorClass", "ValueError"), ("raw", marker)):
+            changed = copy.deepcopy(diagnostic)
+            changed[key] = value
+            invalid.append(changed)
+        for key, value in (("name", marker), ("version", marker), ("archiveSha256", "A" * 64),
+                           ("reason", marker), ("path", marker)):
+            changed = copy.deepcopy(diagnostic)
+            changed["noticeFailures"][0][key] = value
+            invalid.append(changed)
+        changed = copy.deepcopy(diagnostic)
+        changed["noticeFailures"][1] = dict(changed["noticeFailures"][0])
+        invalid.append(changed)
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(O.public_build_diagnostic(value))
 
 
 if __name__ == "__main__":

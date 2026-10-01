@@ -1,0 +1,115 @@
+{
+  "files": [
+    {
+      "path": "cms-0.2.3/der/LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "size": 10849
+    },
+    {
+      "path": "defmt-parser-1.0.0/LICENSE-APACHE",
+      "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+      "size": 10850
+    },
+    {
+      "path": "defmt-parser-1.0.0/LICENSE-MIT",
+      "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50",
+      "size": 1053
+    }
+  ],
+  "packages": [
+    {
+      "archiveMembers": [
+        {
+          "path": "README.md",
+          "sha256": "279211a02ae388bfb1053f8453d77c0eeee261d002d4b235ed66d740e52677c1",
+          "size": 2386
+        }
+      ],
+      "archiveSha256": "7b77c319abfd5219629c45c34c89ba945ed3c5e49fcde9d16b6c3885f118a730",
+      "licenseMetadata": "Apache-2.0 OR MIT",
+      "name": "cms",
+      "packageRepository": "https://github.com/RustCrypto/formats/tree/master/cms",
+      "pathInVcs": "cms",
+      "revision": "5821a21553509dbd03eae593b0a1fad4e2083d4e",
+      "selectedLicense": "Apache-2.0",
+      "upstreamNotices": [
+        {
+          "gitBlob": "78173fa2e753d614bb0aa5ad125ddbbe70b282c4",
+          "path": "cms-0.2.3/der/LICENSE-APACHE",
+          "upstreamPath": "der/LICENSE-APACHE"
+        }
+      ],
+      "upstreamRepository": "https://github.com/RustCrypto/formats",
+      "version": "0.2.3"
+    },
+    {
+      "archiveMembers": [
+        {
+          "path": "README.md",
+          "sha256": "a40aae66ea32ccd2b2c30ea976d4ac02fab1025a8dece8bfae6aa83bdcfd9c0e",
+          "size": 1497
+        }
+      ],
+      "archiveSha256": "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e",
+      "licenseMetadata": "MIT OR Apache-2.0",
+      "name": "defmt-parser",
+      "packageRepository": "https://github.com/knurling-rs/defmt",
+      "pathInVcs": "parser",
+      "revision": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "11069edd79019f7dafbe3138841cf289209270dd",
+          "path": "defmt-parser-1.0.0/LICENSE-APACHE",
+          "upstreamPath": "LICENSE-APACHE"
+        },
+        {
+          "gitBlob": "e68a7ab37c8accca023db5f1505d48e4375d4324",
+          "path": "defmt-parser-1.0.0/LICENSE-MIT",
+          "upstreamPath": "LICENSE-MIT"
+        }
+      ],
+      "upstreamRepository": "https://github.com/knurling-rs/defmt",
+      "version": "1.0.0"
+    },
+    {
+      "archiveMembers": [
+        {
+          "path": "AUTHORS",
+          "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7",
+          "size": 3693
+        }
+      ],
+      "archiveSha256": "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f",
+      "licenseMetadata": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "name": "r-efi",
+      "packageRepository": "https://github.com/r-efi/r-efi",
+      "pathInVcs": "",
+      "revision": "97b55bed1c2c91dcbf787674849f05337ff80b33",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [],
+      "upstreamRepository": "https://github.com/r-efi/r-efi",
+      "version": "5.3.0"
+    },
+    {
+      "archiveMembers": [
+        {
+          "path": "AUTHORS",
+          "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+          "size": 3733
+        }
+      ],
+      "archiveSha256": "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf",
+      "licenseMetadata": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "name": "r-efi",
+      "packageRepository": "https://github.com/r-efi/r-efi",
+      "pathInVcs": "",
+      "revision": "7e1b0322d31d625f81a5656096330934f9cd835d",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [],
+      "upstreamRepository": "https://github.com/r-efi/r-efi",
+      "version": "6.0.0"
+    }
+  ],
+  "schema": "mrk-ubuntu-alpha-original-rust-notices-v1"
+}

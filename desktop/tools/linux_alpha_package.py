@@ -67,7 +67,11 @@ BUILD_ERROR_CLASSES = frozenset((
     "OSError", "FileNotFoundError", "PermissionError", "FileExistsError",
     "InterruptedError", "TimeoutError", "TimeoutExpired", "RuntimeError", "MemoryError",
     "UnicodeError", "UnicodeDecodeError", "JSONDecodeError", "SystemExit", "KeyboardInterrupt",
-    "unexpected",
+    "NoticeInputsRefused", "unexpected",
+))
+NOTICE_FAILURE_REASONS = frozenset((
+    "missing-original-notices", "notice-count", "duplicate-notice-members",
+    "notice-byte-bound", "invalid-original-notice-source",
 ))
 BUILD_DIAGNOSTIC_FILES = (
     "desktop/tools/linux_alpha_package.py", "desktop/tools/linux_alpha_package_data.py",
@@ -282,9 +286,38 @@ def build_failure_diagnostic(stage, error, source):
     }
 
 
+def public_notice_failures(value, total):
+    """Locked public Cargo identities only; no paths, free text or extra fields."""
+    if (type(total) is not int or not 1 <= total <= 1024
+            or type(value) is not list or len(value) != min(total, 64)):
+        return None
+    result, seen = [], set()
+    for row in value:
+        if (type(row) is not dict or set(row) != {"name", "version", "archiveSha256", "reason"}
+                or type(row["name"]) is not str
+                or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}", row["name"]) is None
+                or type(row["version"]) is not str or not 1 <= len(row["version"]) <= 128
+                or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+                                row["version"]) is None
+                or type(row["archiveSha256"]) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", row["archiveSha256"]) is None
+                or type(row["reason"]) is not str or row["reason"] not in NOTICE_FAILURE_REASONS):
+            return None
+        identity = row["name"], row["version"]
+        if identity in seen:
+            return None
+        seen.add(identity)
+        result.append(dict(row))
+    return result
+
+
 def public_build_diagnostic(value):
     """Accept only the closed diagnostic shape after original-worker finality."""
-    if (type(value) is not dict or set(value) != {"stage", "errorClass", "locations"}
+    fields = {"stage", "errorClass", "locations"}
+    if type(value) is not dict:
+        return None
+    has_notices = set(value) == fields | {"noticeFailures", "noticeFailureTotal"}
+    if (set(value) != fields and not has_notices
             or type(value["stage"]) is not str or value["stage"] not in BUILD_STAGES
             or type(value["errorClass"]) is not str or value["errorClass"] not in BUILD_ERROR_CLASSES
             or type(value["locations"]) is not list or len(value["locations"]) > 2):
@@ -294,8 +327,16 @@ def public_build_diagnostic(value):
                 or type(row["file"]) is not str or row["file"] not in BUILD_DIAGNOSTIC_FILES
                 or type(row["line"]) is not int or not 1 <= row["line"] <= 1_000_000):
             return None
-    return {"stage": value["stage"], "errorClass": value["errorClass"],
-            "locations": [dict(row) for row in value["locations"]]}
+    result = {"stage": value["stage"], "errorClass": value["errorClass"],
+              "locations": [dict(row) for row in value["locations"]]}
+    if has_notices:
+        if value["stage"] != "crate-notices" or value["errorClass"] != "NoticeInputsRefused":
+            return None
+        rows = public_notice_failures(value["noticeFailures"], value["noticeFailureTotal"])
+        if rows is None:
+            return None
+        result.update(noticeFailures=rows, noticeFailureTotal=value["noticeFailureTotal"])
+    return result
 
 
 def load_data(source):
@@ -596,7 +637,14 @@ def build_worker(task, configuration, command, D):
         emit("built", result=result)
     except BaseException as error:
         try:
-            emit("build-failed", diagnostic=build_failure_diagnostic(stage, error, source))
+            diagnostic = build_failure_diagnostic(stage, error, source)
+            if stage == "crate-notices" and type(error) is getattr(D, "NoticeInputsRefused", None):
+                failures = error.failures
+                if type(failures) is list and 1 <= len(failures) <= 1024:
+                    rows = public_notice_failures(failures[:64], len(failures))
+                    if rows is not None:
+                        diagnostic.update(noticeFailures=rows, noticeFailureTotal=len(failures))
+            emit("build-failed", diagnostic=diagnostic)
         except BaseException:
             pass  # A broken diagnostic stream must not replace the original failure.
         raise

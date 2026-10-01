@@ -34,6 +34,8 @@ P = local("prepare_runtime")
 S = local("stage_ubuntu_deb")
 TARGET = "x86_64-unknown-linux-gnu"
 CONTROLS = Path("desktop/packaging/ubuntu-alpha")
+RUST_NOTICE_ROOT = CONTROLS / "rust-notices"
+RUST_NOTICE_INPUTS_SHA256 = "9907ff5d471ad84c008cd1bd56e8e75f928140ab665d750cd2c9fdcacec5494e"
 MAP_SHA = "37d9fb826f5ed04cd691c5b8d08c2061e8f1691e279993d5ea6ef65b8f59c150"
 VITE_SHA = "ed97e7caa84c313e6e80028447e62b039e9006810e6228837a7b2914c1b438ec"
 NPM_LOCK_SHA = "61ed80ddda8840a13fdb54c7aac6b0d5edc3c270c0731d4044542b29fc6736cb"
@@ -249,6 +251,145 @@ def _notice_name(name):
                for part in Path(name).parts)
 
 
+class NoticeInputsRefused(ValueError):
+    """Typed public-crate facts only; never an exception message or local path."""
+
+    def __init__(self, failures):
+        super().__init__("Required original Cargo notices are unavailable")
+        self.failures = failures
+
+
+def _notice_issue(members):
+    if not members:
+        return "missing-original-notices"
+    if len(members) > 256:
+        return "notice-count"
+    if len({name for name, _ in members}) != len(members):
+        return "duplicate-notice-members"
+    if any(type(raw) is not bytes or not 0 < len(raw) <= 2 << 20 for _, raw in members):
+        return "notice-byte-bound"
+    return None
+
+
+def _rust_notice_inputs(source):
+    """Reviewed immutable public originals, not a build-time network fallback."""
+    root = source / RUST_NOTICE_ROOT
+    raw = D.read(root / "inputs.json", 256 << 10)
+    D.need(sha(raw) == RUST_NOTICE_INPUTS_SHA256, "Reviewed Cargo notice inputs differ")
+    value = D.decode(raw, 256 << 10)
+    D.need(type(value) is dict and set(value) == {"schema", "files", "packages"}
+           and value["schema"] == "mrk-ubuntu-alpha-original-rust-notices-v1"
+           and type(value["packages"]) is list and len(value["packages"]) == 4,
+           "Reviewed Cargo notice input profile differs")
+    records = D.records(value["files"])
+    C.conventional_files(D, root, sorted([*records.values(), D.file_record(root / "inputs.json")],
+                                        key=lambda row: row["path"]))
+    rules = {(row["name"], row["version"]): row for row in value["packages"]}
+    D.need(len(rules) == 4, "Reviewed Cargo notice input identities duplicate")
+    for rule in rules.values():
+        D.need(all(item["path"] in records for item in rule["upstreamNotices"]),
+               "Reviewed upstream notice has no original record")
+    return root, records, rules
+
+
+def _crate_notices(raw, package, archive_sha, supplement_root, supplement_records, rules):
+    """Read original archive members as DATA; never extract or import crate code."""
+    name, version = package["name"], package["version"]
+    rule = rules.get((name, version))
+    prefix = name + "-" + version + "/"
+    entries, notices = {}, {}
+
+    def refuse(reason):
+        raise NoticeInputsRefused([{"name": name, "version": version,
+            "archiveSha256": archive_sha, "reason": reason}])
+
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+        count = 0
+        for member in archive:
+            count += 1
+            D.need(count <= 50000, "Crate member count bound")
+            if member.isdir() and member.name.rstrip("/") == prefix.rstrip("/"):
+                continue
+            D.need(member.name.startswith(prefix), "Crate member roster differs")
+            relative = member.name.removeprefix(prefix)
+            if member.isdir():
+                relative = relative.removesuffix("/")
+            D.need(relative and len(relative) <= 4096 and not relative.startswith("/")
+                   and all(part not in ("", ".", "..") for part in relative.split("/")),
+                   "Crate member name differs")
+            if relative in entries:
+                refuse("duplicate-notice-members")
+            entries[relative] = member
+
+        def original(relative, limit=2 << 20, *, notice=False):
+            member = entries.get(relative)
+            D.need(member is not None and member.isfile(),
+                   "Required notice metadata/member is absent or nonordinary")
+            if not 0 < member.size <= limit:
+                if notice:
+                    refuse("notice-byte-bound")
+                raise ValueError("Original crate metadata exceeds its byte bound")
+            stream = archive.extractfile(member)
+            D.need(stream is not None, "Original crate member is unavailable")
+            with stream:
+                body = stream.read(limit + 1)
+            D.need(len(body) == member.size, "Original crate member size differs")
+            return body
+
+        metadata = tomllib.loads(original("Cargo.toml", 256 << 10).decode("utf-8")).get("package")
+        D.need(type(metadata) is dict and metadata.get("name") == name and metadata.get("version") == version
+               and metadata.get("license") == package.get("license"),
+               "Original crate package/license metadata differs")
+        for relative, member in entries.items():
+            if _notice_name(relative):
+                if member.isdir():
+                    continue
+                notices[relative] = original(relative, notice=True)
+        declared = metadata.get("license-file")
+        if declared is not None:
+            D.need(type(declared) is str and declared and not declared.startswith("/")
+                   and all(part not in ("", ".", "..") for part in declared.split("/"))
+                   and "\\" not in declared and ":" not in declared,
+                   "Original declared license-file is not an in-archive relative member")
+            notices[declared] = original(declared, notice=True)
+        provenance = None
+        if rule is not None:
+            D.need(rule["archiveSha256"] == archive_sha
+                   and rule["licenseMetadata"] == metadata.get("license")
+                   and rule["packageRepository"] == metadata.get("repository"),
+                   "Reviewed original crate notice identity differs")
+            vcs = D.decode(original(".cargo_vcs_info.json", 64 << 10), 64 << 10)
+            D.need(type(vcs) is dict and type(vcs.get("git")) is dict
+                   and vcs["git"].get("sha1") == rule["revision"]
+                   and vcs.get("path_in_vcs") == rule["pathInVcs"],
+                   "Reviewed crate revision/path differs")
+            for row in rule["archiveMembers"]:
+                body = original(row["path"], notice=True)
+                D.need(len(body) == row["size"] and sha(body) == row["sha256"],
+                       "Reviewed original crate licensing declaration differs")
+                notices[row["path"]] = body
+            for row in rule["upstreamNotices"]:
+                record = supplement_records[row["path"]]
+                body = D.read(supplement_root / D.relative(row["path"]), 2 << 20)
+                D.need(len(body) == record["size"] and sha(body) == record["sha256"],
+                       "Immutable upstream original license differs")
+                original_name = "upstream/" + row["upstreamPath"]
+                D.need(original_name not in notices, "Upstream and archive notice identities collide")
+                notices[original_name] = body
+            provenance = {
+                "selectedLicense": rule["selectedLicense"],
+                "repository": rule["upstreamRepository"], "revision": rule["revision"],
+                "cratePath": rule["pathInVcs"], "archiveMembers": rule["archiveMembers"],
+                "upstreamNotices": [
+                    {**row, "size": supplement_records[row["path"]]["size"],
+                     "sha256": supplement_records[row["path"]]["sha256"]}
+                    for row in rule["upstreamNotices"]],
+            }
+    return sorted(notices.items()), provenance
+
+
+
+
 def _notice_output(root, component, members):
     D.need(members and len(members) <= 256 and len({name for name, _ in members}) == len(members),
            "A required component has no bounded unique original notices")
@@ -314,9 +455,12 @@ def collect_notices(source, work, metadata):
             D.need(key not in packages or all(packages[key].get(field) == row.get(field)
                                              for field in identity_fields), "Conflicting Cargo source metadata")
             packages[key] = row
-    components = []
+    supplement_root, supplement_records, supplement_rules = _rust_notice_inputs(source)
+    D.need(len(packages) <= 1024, "Cargo notice component count exceeds its bound")
+    components, missing = [], []
     for index, (key, package) in enumerate(sorted(packages.items(), key=lambda item: str(item[0]))):
         name, version, origin = key
+        provenance = None
         if origin is None:
             path = Path(package["manifest_path"]).parent
             D.need(path.is_relative_to(source), "Local Cargo notice source escapes the admitted source")
@@ -338,33 +482,27 @@ def collect_notices(source, work, metadata):
             raw = D.read(archives[0], 32 << 20)
             archive_sha = sha(raw)
             D.need(archive_sha == D.sha(locked[(name, version)]["checksum"]), "Original crate checksum differs")
-            members = []
-            prefix = name + "-" + version + "/"
-            with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
-                count = 0
-                for member in archive:
-                    count += 1
-                    D.need(count <= 50000, "Crate member count bound")
-                    if member.isdir() and member.name.rstrip("/") == prefix.rstrip("/"):
-                        continue
-                    D.need(member.name.startswith(prefix), "Crate member roster differs")
-                    relative = member.name.removeprefix(prefix)
-                    D.need(relative and ".." not in Path(relative).parts and not Path(relative).is_absolute(),
-                           "Crate member name differs")
-                    if _notice_name(relative) and member.isfile():
-                        D.need(0 < member.size <= 2 << 20, "Original crate notice bound")
-                        stream = archive.extractfile(member)
-                        D.need(stream is not None, "Original crate notice is unavailable")
-                        with stream:
-                            body = stream.read((2 << 20) + 1)
-                        D.need(len(body) == member.size, "Original crate notice size differs")
-                        members.append((relative, body))
-                    elif _notice_name(relative) and not member.isdir():
-                        raise ValueError("Crate notice is not an ordinary original member")
+            try:
+                members, provenance = _crate_notices(
+                    raw, package, archive_sha, supplement_root, supplement_records, supplement_rules)
+            except NoticeInputsRefused:
+                raise
+            except (ValueError, KeyError, TypeError, OSError, tarfile.TarError) as error:
+                raise NoticeInputsRefused([{"name": name, "version": version,
+                    "archiveSha256": archive_sha, "reason": "invalid-original-notice-source"}]) from error
+        issue = _notice_issue(members)
+        if issue is not None and archive_sha is not None:
+            missing.append({"name": name, "version": version, "archiveSha256": archive_sha, "reason": issue})
+            continue
         rows = _notice_output(notices, "cargo/component-" + str(index).zfill(3), members)
         components.append({"kind": "cargo-source", "name": name, "version": version,
                            "source": origin or "admitted-local-source", "archiveSha256": archive_sha,
-                           "licenseMetadata": package.get("license"), "notices": rows})
+                           "licenseMetadata": package.get("license"), "notices": rows,
+                           "originalNoticeProvenance": provenance})
+    if missing:
+        # Inspect every valid admitted Cargo archive before refusing; never
+        # compile or issue one expensive CI run for each missing component.
+        raise NoticeInputsRefused(missing)
     D.need(sha(D.read(source / "desktop/vite.config.mjs", 64 << 10)) == VITE_SHA
            and sha(D.read(source / "desktop/package-lock.json", 256 << 10)) == NPM_LOCK_SHA,
            "Closed frontend generator configuration/lock differs")
