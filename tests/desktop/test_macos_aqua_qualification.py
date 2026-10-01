@@ -1170,8 +1170,8 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(attributes.count("None"), 1)
         self.assertIn("uint32_t ax_failure_operation, ax_failure_attribute;", native)
         self.assertIn("selection_limit_observed: i64, ax_failure_operation: u32, ax_failure_attribute: u32", rust)
-        self.assertIn("sizeof(MRKOpenResult) == 152 && sizeof(MRKOpenRecheck) == 48", native)
-        self.assertIn("std::mem::size_of::<OpenWire>() != 152", rust)
+        self.assertIn("sizeof(MRKOpenResult) == 624 && sizeof(MRKOpenRecheck) == 48", native)
+        self.assertIn("std::mem::size_of::<OpenWire>() != 624", rust)
         for field, offset in (("selection_limit_observed", 96), ("ax_failure_operation", 104), ("ax_failure_attribute", 108),
                               ("selection_summary_version", 112), ("selection_table_roles", 116), ("selection_outline_roles", 120),
                               ("selection_list_roles", 124), ("selection_entry_roots", 128), ("selection_title_present", 132),
@@ -2501,7 +2501,7 @@ class AquaDataTests(unittest.TestCase):
         second_census = "mrk_ax_control_roster(s, sheet, prompt_text->value, YES, &rechecked)"
         self.assertIn("MRKControlPass initial = {0}, rechecked = {0};", action)
         self.assertEqual(action.count("mrk_ax_control_roster("), 2)
-        self.assertEqual(action.count("mrk_ax_projection("), 2)
+        self.assertEqual(action.count("mrk_ax_projection("), 3)
         self.assertEqual(action.count("mrk_ax_button(s, parent, &initial, prompt_text->value)"), 2)
         self.assertEqual(native.count("s->button ="), 1)
         self.assertLess(action.index("mrk_ax_original(s, 1)"), action.index(first_census))
@@ -2527,7 +2527,7 @@ class AquaDataTests(unittest.TestCase):
         timeout = native.split("static BOOL mrk_ax_before(", 1)[1].split("static BOOL mrk_ax_type(", 1)[0]
         self.assertIn("AXUIElementSetMessagingTimeout(element, timeout.seconds)", timeout)
         self.assertIn("const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CALLS : MRK_PROMPT_CALLS;", timeout)
-        self.assertIn("s->result.calls > cap - 2", timeout)
+        self.assertIn("used > cap - 2", timeout)
         self.assertIn("timeout.seconds <= 0", timeout)
         self.assertIn("timeout.required_ns > 100000000", timeout)
         self.assertLess(timeout.index("AXUIElementSetMessagingTimeout"), timeout.index("mrk_ax_admit(s, timeout.required_ns"))
@@ -2627,9 +2627,9 @@ class AquaDataTests(unittest.TestCase):
                            ("Browser", "BROWSER"), ("Table", "TABLE"), ("Outline", "OUTLINE"), ("ScrollArea", "SCROLL_AREA")):
             self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_ROLE_{code};", roles)
         self.assertIn("return MRK_ROLE_OPAQUE;", roles)
-        self.assertTrue("sizeof(MRKOpenResult) == 152 && sizeof(MRKOpenRecheck) == 48" in native,
-                        "native selection/Open wire152B and unchanged recheck48B")
-        self.assertTrue("std::mem::size_of::<OpenWire>() != 152" in rust, "Rust selection/Open wire must be152B")
+        self.assertTrue("sizeof(MRKOpenResult) == 624 && sizeof(MRKOpenRecheck) == 48" in native,
+                        "native selection/Open wire624B and unchanged recheck48B")
+        self.assertTrue("std::mem::size_of::<OpenWire>() != 624" in rust, "Rust selection/Open wire must be624B")
         self.assertIn("offsetof(MRKOpenResult, selection_limit_observed) == 96", native)
         self.assertIn("std::mem::offset_of!(OpenWire, selection_limit_observed) != 96", rust)
         for field, offset in (("ax_failure_operation", 104), ("ax_failure_attribute", 108)):
@@ -2641,7 +2641,7 @@ class AquaDataTests(unittest.TestCase):
         for bound in ("const SELECT_CALLS: u32 = 3072;", "const SELECT_CF: u32 = 1024;"):
             self.assertIn(bound, rust)
         limits = rust.split("fn prompt_limits(selecting: bool) -> (u32, u32) {", 1)[1].split("\n    }", 1)[0]
-        self.assertEqual(limits.strip(), "if selecting { (SELECT_CALLS, SELECT_CF) } else { (512, 256) }")
+        self.assertEqual(limits.strip(), "if selecting { (SELECT_SAMPLES * SELECT_CALLS, SELECT_SAMPLES * SELECT_CF) } else { (512, 256) }")
         invoke = rust.split("pub fn installed_prompt_button<", 1)[1].split("pub fn installed_accessibility_trusted(", 1)[0]
         valid = "if main_thread() || !identity.valid() { return returned; }"
         original_return = "returned.report = open_return(wire, context.rechecks, context.custody_known, identity.selection);"
@@ -2656,7 +2656,10 @@ class AquaDataTests(unittest.TestCase):
                       "            || w.selection_summary_version != 0 || w.selection_table_roles != 0 || w.selection_outline_roles != 0\n"
                       "            || w.selection_list_roles != 0 || w.selection_entry_roots != 0 || w.selection_title_present != 0\n"
                       "            || w.selection_title_absent != 0 || w.selection_value_present != 0\n"
-                      "            || w.selection_outside_entry_role_mask != 0) { return None; }")
+                      "            || w.selection_outside_entry_role_mask != 0 || w.selection_fixture_label_mask != 0\n"
+                      "            || w.selection_expected_label_relations != 0 || w.selection_expected_label_role_mask != 0\n"
+                      "            || w.selection_sample != 0 || w.selection_calls_before != 0 || w.selection_cf_before != 0 || w.selection_wait != 0\n"
+                      "            || w.selection_pending != [[0; 16]; 7]) { return None; }")
         choose_limits = "let (calls, slots) = prompt_limits(selecting);"
         self.assertEqual(wire.count(choose_limits), 1)
         self.assertLess(wire.index(mode_guard) + len(mode_guard), wire.index(choose_limits))
@@ -4693,7 +4696,9 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertEqual(row, {
                 "operationId": identifier, "field": field, "kind": kind,
                 "nativeResponse": "accept" if accepted else "decline",
-                "initialRootAndOptions": {"result": "ok", "facts": mask},
+                "initialRootAndOptions": {"result": "ok", "facts": mask,
+                    "fileFilter": {"facts": 23, "allowedTypes": "unrestricted", "allowsOther": False}
+                        if kind == "version-source" else None},
                 "nameFieldPreparation": {"returned": True, "result": "ok", "facts": 31} if accepted and kind == "version-source" else None,
                 "laterSyntheticNavigation": accepted, "exactNativeSelection": True if accepted else None,
                 "sourceBookStarted": started, "originalSourceChildGuiAndCoordinatorSettled": True,
@@ -4704,7 +4709,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         for index, identifier in ((1, 2), (5, 8), (6, 9), (7, 10)):
             original = histories[index]
             action, binding, completion = (original[key] for key in ("selectionInput", "selectionBinding", "selectionCompletion"))
-            self.assertEqual(action["mechanism"], "accessibility-version-source-selection-press-v7")
+            self.assertEqual(action["mechanism"], "accessibility-version-source-selection-press-v8")
             self.assertEqual(binding["mechanism"], "selection-parent-original-sheet-v3")
             self.assertEqual((action["id"], binding["id"], completion["id"]), (identifier,) * 3)
             self.assertEqual(action["selectionParentProof"]["purpose"], "selection-parent")
@@ -4931,7 +4936,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             site="directory", error="ineligible", checks=dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, None))
         sample["selectionParentProof"]["checks"].update(eligible=True, attached=True, directory=False)
         sample["selection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False), nodes=0, matches=0,
-                                   lastRole="not-read", depth=0, projectionSummary=None)
+                                   lastRole="not-read", depth=0, projectionSummary=None, contentReadiness=None)
         sample["promptButton"].update(checks=dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False), calls=0,
                                       lastRole="not-read", cfSlots=0, cfSlotsRetired=0)
         failures.append(("selection-parent-refused", parent_refused))
@@ -5029,6 +5034,291 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIsNone(M._accessibility_context(historical["accessibility"], None, None,
             case=case, expected_id=2, field_history=True))
 
+    def test_content_readiness_is_contiguous_bounded_data_and_never_action_authority(self):
+        # Inert current-protocol DATA only. Not a simulated clock/AX worker,
+        # native readiness observation, returned original or platform receipt.
+        good = M.expected_result(BINDING, "project-fields")
+
+        def progress(count):
+            value = deepcopy(good)
+            action = value["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]
+            action["selection"]["contentReadiness"] = {
+                "sample": count + 1, "callsBefore": count * 707, "cfBefore": count * 434, "wait": 0,
+                "pending": [[i + 1, i * 707, (i + 1) * 707, i * 434, (i + 1) * 434,
+                             182, 8, 16, 43, 24, 0, 1, 0, 0, 0, 2] for i in range(count)]}
+            action["promptButton"].update(calls=count * 707 + 221, cfSlots=count * 434 + 120,
+                                         cfSlotsRetired=count * 434 + 120)
+            return value, action
+
+        for count in range(8):
+            value, action = progress(count)
+            with self.subTest(complete_pending_samples=count):
+                self.assertEqual(M.parse_result(captured(value), b"", BINDING, "project-fields"), value)
+                self.assertTrue(M._accessibility_succeeded(action))
+                self.assertEqual(len(action["selection"]["contentReadiness"]["pending"]), count)
+                if count:
+                    with self.assertRaises(M.Refused):
+                        M._accessibility_prompt_button(action["promptButton"])  # Ordinary limits stay unchanged.
+
+        for mutate in (
+            lambda a: a["selection"].pop("contentReadiness"),
+            lambda a: a["selection"].update(contentReadiness=None),
+            lambda a: a["selection"]["contentReadiness"].update(sample=0),
+            lambda a: a["selection"]["contentReadiness"].update(sample=9),
+            lambda a: a["selection"]["contentReadiness"].update(sample=True),
+            lambda a: a["selection"]["contentReadiness"].update(callsBefore=1415),
+            lambda a: a["selection"]["contentReadiness"].update(cfBefore=869),
+            lambda a: a["selection"]["contentReadiness"].update(wait=1),
+            lambda a: a["selection"]["contentReadiness"].update(wait=2),
+            lambda a: a["selection"]["contentReadiness"].update(wait=3),
+            lambda a: a["selection"]["contentReadiness"]["pending"].pop(),
+            lambda a: a["selection"]["contentReadiness"]["pending"].append([0] * 16),
+            lambda a: a["selection"]["contentReadiness"]["pending"].reverse(),
+            lambda a: a["selection"]["contentReadiness"]["pending"][0].append(0),
+            lambda a: a["promptButton"].update(calls=1414 + 3073),
+            lambda a: a["promptButton"].update(cfSlots=868 + 1025, cfSlotsRetired=868 + 1025),
+            lambda a: a["promptButton"].update(cfSlotsRetired=987),
+            lambda a: a.update(barrierRetired=False),
+            lambda a: a.update(workerJoined=False),
+        ):
+            value, action = progress(2); mutate(action)
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(value), b"", BINDING, "project-fields")
+        # Each tuple cell is closed: gaps/overlap, budgets, grammar, ambiguity,
+        # prior actions/errors and wait failures cannot become a pending sample.
+        for index, malformed in ((0, 2), (1, 1), (2, 3073), (3, 1), (4, 1025),
+                                  (5, 256), (6, 9), (7, 17), (8, 183), (9, 32),
+                                  (10, 1), (11, 3), (12, 1), (13, 1), (14, 8), (15, 3)):
+            value, action = progress(2)
+            action["selection"]["contentReadiness"]["pending"][0][index] = malformed
+            with self.subTest(tuple_cell=index), self.assertRaises(M.Refused):
+                M.parse_result(captured(value), b"", BINDING, "project-fields")
+        for index in (0, 1, 2, 4, 11, 15):
+            value, action = progress(2)
+            action["selection"]["contentReadiness"]["pending"][0][index] = True
+            with self.subTest(boolean_cell=index), self.assertRaises(M.Refused):
+                M.parse_result(captured(value), b"", BINDING, "project-fields")
+
+        def stopped(count, wait, error):
+            _, action = progress(count)
+            action.update(attempted=False, pressReturned=False, triggered=None, initialOriginalProof=None,
+                          originalProof=None, promptChecks={"initial": None, "final": None},
+                          site="selection-projection", error=error, expired=error == "deadline",
+                          timely=error != "deadline")
+            action["promptButton"].update(
+                checks={key: i < 2 for i, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)},
+                calls=count * 707 + 707, cfSlots=count * 434 + 434, cfSlotsRetired=count * 434 + 434,
+                initialNodesExamined=0, recheckNodesExamined=0, lastRole="not-read", lastDepth=0)
+            selection = action["selection"]
+            selection.update(checks={key: i == 0 for i, key in enumerate(M.ACCESSIBILITY_SELECTION_CHECKS)},
+                             attempted=False, returned=False, selected=None, nodes=182, matches=0,
+                             attribute="not-read", lastRole="TextField", depth=8)
+            selection["projectionSummary"].update(tableRoles=1, entryRoots=43, titleAbsent=43, valuePresent=43,
+                fixtureLabelMask=24, expectedLabelRelations=0, expectedLabelRoleMask=0)
+            selection["contentReadiness"]["wait"] = wait
+            if error == "objc-exception":
+                action.update(state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False)
+                action["promptButton"].update(cleanupReturned=False, cfSlotsRetired=0)
+            return action
+
+        for count, wait, error in ((0, 0, "deadline"), (2, 1, "objc-exception"), (2, 2, "deadline"),
+                                   (2, 3, "ax-other"), (7, 0, "unsupported")):
+            action = stopped(count, wait, error)
+            with self.subTest(sample=count + 1, wait=wait, stopped=error):
+                self.assertEqual(M._accessibility_context(action, None, None,
+                    expected_id=2, case="project-fields", field_history=True), action)
+                self.assertFalse(M._accessibility_succeeded(action))
+                value = deepcopy(good)
+                value["projectFields"]["acceptedOpenHistories"][1]["selectionInput"] = action
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(value), b"", BINDING, "project-fields")
+        for wait, matches, error in ((2, 2, "ambiguous"), (3, 0, "deadline"), (2, 0, "none")):
+            action = stopped(2, wait, error); action["selection"]["matches"] = matches
+            self.assertIsNone(M._accessibility_context(action, None, None,
+                expected_id=2, case="project-fields", field_history=True))
+        eighth = stopped(7, 2, "deadline")
+        self.assertIsNone(M._accessibility_context(eighth, None, None,
+            expected_id=2, case="project-fields", field_history=True))
+
+        # Historical v7 remains readable only as failure DATA. It cannot borrow
+        # the v8 history envelope or qualify a new successful field journey.
+        old = stopped(0, 0, "unsupported")
+        old["mechanism"] = "accessibility-version-source-selection-press-v7"
+        old["selection"].pop("contentReadiness")
+        frame = accessibility_context_data(); step = "ProjectFields(Native(0))"
+        frame.update(snapshotSource="record", accessibility=old)
+        frame["nativeHandler"]["step"] = step
+        frame["lastPanel"].update(step=step, id=2, kind="version-source")
+        self.assertEqual(M.failure_context(b"", context_row(frame), "project-fields"), frame)
+        self.assertFalse(M._accessibility_succeeded(old))
+        self.assertIsNone(M._accessibility_context(old, None, None,
+            expected_id=2, case="project-fields", field_history=True))
+        old_success = deepcopy(good)
+        old_action = old_success["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]
+        old_action["mechanism"] = old["mechanism"]; old_action["selection"].pop("contentReadiness")
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(old_success), b"", BINDING, "project-fields")
+
+    def test_content_readiness_uses_original_owner_wait_budgets_and_bounded_filter_diagnostics(self):
+        # SOURCE/closed scalar DATA only. Sleep return is not readiness, source
+        # checks are not native execution, and these frames are not receipts.
+        root = PATH.parents[1]
+        native = (root / "native/macos-installed-native/src/native.m").read_text()
+        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        wait = native.split("static BOOL mrk_ax_content_wait(", 1)[1].split("static BOOL mrk_ax_next_content_sample(", 1)[0]
+        advance = native.split("static BOOL mrk_ax_next_content_sample(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
+        action = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_prompt_press(", 1)[0]
+        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_content_wait(", 1)[0]
+        write = native.split("static BOOL mrk_ax_select_entry(", 1)[1].split("static void mrk_ax_open(", 1)[0]
+        for guard in ("s->result.error", "s->result.selection_checks != 1", "s->result.selection_matches",
+                      "s->result.selection_flags", "s->result.flags", "s->result.selection_wait",
+                      "s->result.selection_sample >= MRK_SELECT_SAMPLES"):
+            self.assertIn(guard, wait)
+        self.assertEqual(wait.count("nanosleep("), 1)
+        self.assertEqual(wait.count("mrk_ax_admit("), 2)
+        ordering = ("mrk_ax_admit(s, 50000000u, 0, NULL)", "s->result.selection_wait = 1u",
+                    "nanosleep(&interval, NULL)", "s->result.selection_wait = status == 0 ? 2u : 3u",
+                    "mrk_ax_fail(s, MRK_OPEN_OTHER)", "mrk_ax_admit(s, 0, 0, NULL)")
+        positions = [wait.index(value) for value in ordering]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("return returned && admitted;", wait)
+        for forbidden in ("while (", "for (", "dispatch_", "pthread_create", "Instant::", "CFRelease(", "mrk_ax_projection"):
+            self.assertNotIn(forbidden, wait)
+        self.assertIn("s->result.selection_sample = ordinal + 1", advance)
+        self.assertIn("s->result.selection_pending[ordinal - 1] = (MRKContentPending)", advance)
+        self.assertLess(advance.index("s->result.selection_pending[ordinal - 1] ="),
+                        advance.index("s->result.selection_sample = ordinal + 1"))
+        self.assertIn("s->result.selection_calls_before = s->result.calls", advance)
+        self.assertIn("s->result.selection_cf_before = s->count", advance)
+        for forbidden in ("s->result.error =", "s->result.calls =", "s->count =", "s->result.selection_flags =",
+                          "s->result.flags =", "CFRelease(", "memset(", "s->selection["):
+            self.assertNotIn(forbidden, advance)
+        self.assertEqual(native.count("s->result.selection_pending[ordinal - 1] ="), 1)
+        self.assertIn("MRK_SELECT_SAMPLES = 8, MRK_SELECT_PENDING = MRK_SELECT_SAMPLES - 1", native)
+        self.assertIn("MRK_SELECT_TOTAL_CALLS = MRK_SELECT_SAMPLES * MRK_SELECT_CALLS", native)
+        self.assertIn("MRK_SELECT_TOTAL_CF = MRK_SELECT_SAMPLES * MRK_SELECT_CF", native)
+        self.assertIn("sizeof(MRKContentPending) == 64", native)
+        for field, offset in (("selection_sample", 160), ("selection_pending", 176)):
+            self.assertIn(f"offsetof(MRKOpenResult, {field}) == {offset}", native)
+            self.assertIn(f"std::mem::offset_of!(OpenWire, {field}) != {offset}", rust)
+        self.assertIn("s->result.selection_sample == MRK_SELECT_SAMPLES", action)
+        self.assertLess(action.index("if (s->result.selection_matches == 1) break;"),
+                        action.index("mrk_ax_content_wait(s)"))
+        self.assertLess(action.index("mrk_ax_content_wait(s)"), action.index("mrk_ax_next_content_sample(s)"))
+        self.assertEqual(action.count("mrk_ax_original(s, s->result.selection_mode ? 0 : 1)"), 1)
+        self.assertEqual(action.count("mrk_ax_select_entry("), 1)
+        self.assertEqual(action.count("AXUIElementPerformAction("), 1)
+        self.assertIn("MRKSelectionPass *p = &s->selection[s->result.selection_sample - 1];", roster)
+        self.assertIn("if (p->nodes[0])", roster)
+        self.assertIn("MRKSelectionPass *p = &s->selection[s->result.selection_sample - 1];", write)
+        self.assertEqual(native.count("AXUIElementSetAttributeValue("), 1)
+        self.assertIn("if (s->result.selection_matches > 1) return mrk_ax_fail(s, MRK_OPEN_AMBIGUOUS);", roster)
+        self.assertIn("if (s->result.selection_matches == 1) s->result.selection_checks |= 2u;", roster)
+        self.assertIn("rows || list ? MRK_SELECT_ROWS : 16, at != 0", roster)  # Empty root is unsupported, not pending.
+        self.assertIn("required_ns > 100_000_000", rust)
+        self.assertIn("remaining.as_nanos() < u128::from(required_ns)", rust)
+        self.assertIn("context.end.saturating_duration_since(Instant::now())", rust)
+        self.assertIn("self.end.min(Instant::now() + Duration::from_secs(2))", observer)
+        self.assertIn("edit::bounded(&failure_context(&self), 8192)", observer)
+        self.assertIn("(frame.len() <= 8448).then_some(frame)", observer)
+        filter_source = native.split("static BOOL mrk_panel_observe_file_filter(", 1)[1].split("int mrk_panel_observe_project_field(", 1)[0]
+        for getter in ("[panel allowedContentTypes]", "[panel allowsOtherFileTypes]"):
+            self.assertEqual(filter_source.count(getter), 1)
+        self.assertIn("if (s->observationFileFilter) return NO;", filter_source)
+        for forbidden in ("setAllowed", "setAllows", "UTF8String", "for (", "while (", " retain]", " release]"):
+            self.assertNotIn(forbidden, filter_source)
+        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("int mrk_panel_observe_version_source_name(", 1)[0]
+        self.assertLess(navigation.index("s->observationProjectField != 511u || !mrk_panel_observe_file_filter"),
+                        navigation.index("[panel setDirectoryURL:"))
+        self.assertIn("*filter = s->observationFileFilter; return result;", navigation)
+        self.assertIn('file_filter: filter_valid.then_some(filter)', rust)
+        good = M.expected_result(BINDING, "project-fields")
+        for flags, allowed, other in ((1, None, None), (3, None, None), (7, "unrestricted", None),
+                                       (11, "restricted", None), (23, "unrestricted", False),
+                                       (27, "restricted", False), (55, "unrestricted", True), (59, "restricted", True)):
+            diagnostic = {"facts": flags, "allowedTypes": allowed, "allowsOther": other}
+            self.assertEqual(M._file_filter_context(diagnostic), diagnostic)
+            if flags in (23, 27, 55, 59):
+                value = deepcopy(good)
+                value["projectFields"]["rows"][0]["initialRootAndOptions"]["fileFilter"] = diagnostic
+                self.assertEqual(M.parse_result(captured(value), b"", BINDING, "project-fields"), value)
+            else:
+                with self.assertRaises(M.Refused): M._file_filter_context(diagnostic, complete=True)
+        for diagnostic in (None, {"facts": 0, "allowedTypes": None, "allowsOther": None},
+                            {"facts": True, "allowedTypes": None, "allowsOther": None},
+                            {"facts": 63, "allowedTypes": "unrestricted", "allowsOther": True},
+                            {"facts": 23, "allowedTypes": "restricted", "allowsOther": False},
+                            {"facts": 23, "allowedTypes": "unrestricted", "allowsOther": 0}):
+            with self.assertRaises(M.Refused): M._file_filter_context(diagnostic, complete=True)
+        # Largest current success report: all four VersionSource histories at
+        # the full 8-pass AX/CF envelopes, plus maximum-length complete filter DATA.
+        largest = deepcopy(good)
+        pending = [[i + 1, i * 3072, (i + 1) * 3072, i * 1024, (i + 1) * 1024,
+                    255, 8, 16, 255, 31, 6, 1, 0, 0, 0, 2] for i in range(7)]
+        for index in (1, 5, 6, 7):
+            action = largest["projectFields"]["acceptedOpenHistories"][index]["selectionInput"]
+            action["selection"].update(nodes=255, depth=8, attribute="SelectedChildren")
+            action["selection"]["contentReadiness"] = {
+                "sample": 8, "callsBefore": 21504, "cfBefore": 7168, "wait": 0, "pending": deepcopy(pending)}
+            action["promptButton"].update(calls=24576, cfSlots=8192, cfSlotsRetired=8192,
+                                         initialNodesExamined=16, recheckNodesExamined=16, lastDepth=8)
+        for row in largest["projectFields"]["rows"]:
+            if row["kind"] == "version-source":
+                row["initialRootAndOptions"]["fileFilter"] = {"facts": 23, "allowedTypes": "unrestricted", "allowsOther": False}
+        self.assertEqual(M.parse_result(captured(largest), b"", BINDING, "project-fields"), largest)
+        self.assertLessEqual(len(captured(largest)) - len(M.MARKER) - 1, M.PROJECT_FIELDS_JSON_LIMIT)
+        # Conservative complete-shape failure-size DATA only; contradictory
+        # maxima are deliberately NOT presented to the parser as a native event.
+        frame = accessibility_context_data(); frame["snapshotSource"] = "record"
+        frame["pending"] = {"kind": "accessibility", "step": "ProjectFields(Native(0))"}
+        frame["nativeHandler"]["step"] = "ProjectFields(Native(0))"
+        frame["lastPanel"].update(step="ProjectFields(Native(0))", id=2, kind="version-source",
+            directoryBound=False, directoryReturned=False, directoryReady=False,
+            directoryReadiness="selection-not-matched", waitLocation="open-directory-readiness")
+        frame["accessibility"] = deepcopy(largest["projectFields"]["acceptedOpenHistories"][1]["selectionInput"])
+        frame["accessibilityBinding"] = deepcopy(largest["projectFields"]["acceptedOpenHistories"][1]["selectionBinding"])
+        frame["completionSelection"] = deepcopy(largest["projectFields"]["acceptedOpenHistories"][1]["selectionCompletion"])
+        frame["originalWindow"] = deepcopy(good["native"]["originalWindow"])
+        frame["projectSelection"] = project_selection_context_data("inconsistent-original-data", "captured-object-metadata-changed")["projectSelection"]
+        frame["projectFieldPreparation"] = {"operationId": 2, "kind": "version-source", "returned": True,
+            "result": "permission-denied", "facts": 6143,
+            "fileFilter": {"facts": 23, "allowedTypes": "unrestricted", "allowsOther": False},
+            "nameFieldPreparation": {"returned": True, "result": "permission-denied", "facts": 31}}
+        frame["dom"] = {"evaluations": 160, "lastProjectChooser": {
+            "step": "ChooseProject", "sequence": 160, "dashboardSelected": False,
+            "buttonDisabled": False, "reason": "offline-preflight"}}
+        action = frame["accessibility"]
+        action.update(site="control-child-count-limit", error="cleanup-unknown", state="requested",
+                      timely=False, custodyKnown=False, triggered=False)
+        action["promptChecks"] = {"initial": False, "final": False}
+        action["promptButton"].update(cleanupReturned=False, lastRole="ScrollArea", axError=-25214,
+            axFailure={"operation": "get-attribute-value-count", "attribute": "SelectedChildren"})
+        action["promptButton"]["checks"] = dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False)
+        action["selection"]["checks"] = dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False)
+        action["selection"]["projectionSummary"] = {key: 255 for key in action["selection"]["projectionSummary"]}
+        action["selection"]["projectionSummary"].update(outsideEntryRoleMask=0x1c210,
+            fixtureLabelMask=31, expectedLabelRelations=7, expectedLabelRoleMask=0x1f004)
+        action["selection"]["limit"] = {"predicate": "child-copy-count", "observed": -9223372036854775808,
+                                       "cap": 1024, "queued": 256, "children": 32}
+        for proof in (frame["accessibilityBinding"]["binding"], action["selectionParentProof"],
+                      action["initialOriginalProof"], action["originalProof"]):
+            proof.update(parent="type-invalid", panel="encoding-invalid", originals="multiple",
+                         site="panel-attached-sheet", error="cleanup-unknown", children=17)
+            proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, False)
+        frame["accessibilityBinding"]["start"]["result"] = "permission-denied"
+        frame["accessibilityBinding"]["configuration"].update(parent="type-invalid", prompt="type-invalid",
+            site="initial-directory-url", error="cleanup-unknown", initialDirectorySetterEntered=False,
+            initialDirectorySetterReturned=False)
+        frame["completionSelection"].update(pollResult="invalid-return", timely=False)
+        frame["completionSelection"]["facts"].update(response="decline", selection="ordinary-path-disagreement",
+            callbackEntered=False, urlsReadEntered=False, urlsReadReturned=False, callbackReturned=False)
+        payload = context_row(frame)
+        self.assertLessEqual(len(payload.split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
+        marker = (b"MRK_MACOS_AQUA_FAILURE_STEP=ProjectFields(Native(0))\n"
+                  b"MRK_MACOS_AQUA_FAILURE_REASON=native-default-input\n")
+        self.assertLessEqual(len(marker + payload + b"MRK_MACOS_AQUA=failed\n"), 8448)
+
     def test_selection_limit_scalars_are_closed_original_counts_not_success(self):
         # Synthetic DATA only; never recovered/native branch observations.
         good = M.expected_result(BINDING, "project-fields")["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]
@@ -5043,7 +5333,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         action["selection"]["projectionSummary"].update(fixtureLabelMask=0, expectedLabelRelations=0, expectedLabelRoleMask=0)
 
         def admit(sample):
-            self.assertEqual(M._accessibility_selection(sample["selection"], sample["promptButton"], sample["site"], sample["error"]),
+            self.assertEqual(M._accessibility_selection(sample["selection"], sample["promptButton"], sample["site"], sample["error"], content=True),
                              sample["selection"])
             self.assertFalse(M._selection_succeeded(sample["selection"]))
             self.assertFalse(M._accessibility_succeeded(sample))
@@ -5089,7 +5379,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             for key in ("queued", "children"):
                 bad = deepcopy(sample); bad["selection"]["limit"][key] = 0
                 with self.assertRaises(M.Refused):
-                    M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+                    M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"], content=True)
         for patch_data in (
             {"predicate": "INERT_PRIVATE"}, {"observed": 512}, {"observed": True}, {"observed": 513.0},
             {"observed": 1 << 63}, {"observed": -(1 << 63) - 1}, {"cap": True}, {"cap": 0}, {"cap": 513},
@@ -5117,7 +5407,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             if patch_data.get("predicate") == "cf-slot-budget":
                 bad["promptButton"].update(cfSlots=patch_data["observed"], cfSlotsRetired=patch_data["observed"])
             with self.subTest(refused=patch_data), self.assertRaises(M.Refused):
-                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"], content=True)
         for mutation in (
             lambda a: a["selection"].pop("limit"),
             lambda a: a["selection"].update(limit=None),
@@ -5128,17 +5418,17 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         ):
             bad = deepcopy(action); mutation(bad)
             with self.assertRaises(M.Refused):
-                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"], content=True)
         self.assertIsNone(good["selection"]["limit"])
         self.assertTrue(M._selection_succeeded(good["selection"]))
         forged = deepcopy(good); forged["selection"]["limit"] = deepcopy(action["selection"]["limit"])
         self.assertFalse(M._selection_succeeded(forged["selection"]))
         with self.assertRaises(M.Refused):
-            M._accessibility_selection(forged["selection"], forged["promptButton"], forged["site"], forged["error"])
+            M._accessibility_selection(forged["selection"], forged["promptButton"], forged["site"], forged["error"], content=True)
         for absent in (None, {"predicate": None, "observed": None, "cap": None, "queued": None, "children": None}):
             bad = deepcopy(action); bad["selection"]["limit"] = absent
             with self.assertRaises(M.Refused):
-                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"], content=True)
 
     def test_selection_limit_source_preserves_first_error_and_query_budgets(self):
         native = (PATH.parents[1] / "native/macos-installed-native/src/native.m").read_text()
@@ -5160,11 +5450,11 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             "AXUIElementRef nodes[MRK_SELECT_NODES];",
             "unsigned parents[MRK_SELECT_NODES], depths[MRK_SELECT_NODES], roles[MRK_SELECT_NODES], entries[MRK_SELECT_NODES];",
             "BOOL matches[MRK_SELECT_NODES]; unsigned candidate, label;",
-            "MRKSelectionPass selection;",
+            "MRKSelectionPass selection[MRK_SELECT_SAMPLES];",
             "CFArrayRef selection_attributes;", "AXUIElementRef timeout_element;", "MRKOpenTimeout installed_timeout;",
             "static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];",
-            "MRKPromptOwned owned[MRK_SELECT_CF]; unsigned count;",
-            "_Static_assert(sizeof(mrk_prompt_originals) <= 144u * 1024u,",
+            "MRKPromptOwned owned[MRK_SELECT_TOTAL_CF]; unsigned count;",
+            "_Static_assert(sizeof(mrk_prompt_originals) <= 1152u * 1024u,",
             "MRK_SELECT_CF >= 3u * MRK_SELECT_NODES + 8u * MRK_CONTROL_NODES + 6u * MRK_CONTROL_DEPTH + 64u",
             "MRK_SELECT_CALLS >= 8u * MRK_SELECT_NODES + 20u * MRK_CONTROL_NODES + 12u * MRK_CONTROL_DEPTH + 132u",
         ):
@@ -5172,7 +5462,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         label = native.split("static BOOL mrk_ax_selection_label(", 1)[1].split("static BOOL mrk_ax_selection_roster(", 1)[0]
         self.assertEqual(label.count("CFStringGetLength(value)"), 1)
         self.assertIn("if (length > 512)", label)
-        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
+        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_content_wait(", 1)[0]
         self.assertLess(roster.index("s->selection_queued = queued;"), roster.index("mrk_ax_type(s, node"))
         self.assertLess(roster.index("if (p->depths[at] == MRK_CONTROL_DEPTH)"),
                         roster.index("if ((unsigned)count > MRK_SELECT_NODES - queued)"))
@@ -5206,11 +5496,11 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertEqual(paired_slots, 1 + labels + copied)
             self.assertEqual(old_calls - 2 * (1 + labels + counted + copied), 2)
         # The fixed request array adds one original slot, not one per node.
-        # Selection plus every later control/proof/Press operation shares3072;
-        # ordinary originals stay512. Neither mode may reset its counter.
+        # Each sample includes its own setup and possible final tail within3072;
+        # ordinary originals stay512. Aggregate counters never reset.
         slots = native.split("static MRKPromptOwned *mrk_ax_slot(", 1)[1].split("static BOOL mrk_ax_admit(", 1)[0]
         self.assertIn("const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CF : MRK_PROMPT_CF;", slots)
-        self.assertIn("if (s->count == cap)", slots)
+        self.assertIn("if (used == cap || s->count == total_cap)", slots)
         self.assertNotRegex(native, r"s->result\.calls\s*(?:=(?!=)|-=|--)")
         decoder = rust.split("fn selection_limit_return(", 1)[1].split("/// The actual selecting", 1)[0]
         labels = M.re.findall(r'"([a-z-]+)"', decoder.split("predicate: *[", 1)[1].split("]", 1)[0])
@@ -5303,7 +5593,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("unsigned entry = p->entries[at]", label)
         self.assertLess(label.index("if (!p->matches[entry])"), label.index("s->result.selection_matches++"))
         self.assertIn("p->candidate = entry; p->label = at; p->label_attribute = attribute", label)
-        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
+        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_content_wait(", 1)[0]
         for condition in ("other != at && p->nodes[other] && CFEqual(node, p->nodes[other])",
                           "mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])",
                           "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE", "kind == MRK_SELECT_LIST",
@@ -5313,10 +5603,10 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                           "kAXValueAttribute, NO, expected", "kAXTitleAttribute, YES, expected",
                           "rows ? kAXRowsAttribute : kAXChildrenAttribute", "rows || list ? MRK_SELECT_ROWS : 16",
                           "p->depths[at] == MRK_CONTROL_DEPTH", "(unsigned)count > MRK_SELECT_NODES - queued",
-                          "p->entries[queued] = rows || list ? queued : entry", "s->result.selection_matches != 1"):
+                          "p->entries[queued] = rows || list ? queued : entry", "s->result.selection_matches > 1"):
             self.assertIn(condition, roster)
         self.assertLess(roster.index("for (unsigned at = 0; at < queued; ++at)"), roster.index("s->result.selection_checks |= 1u"))
-        self.assertLess(roster.index("s->result.selection_checks |= 1u"), roster.index("s->result.selection_matches != 1"))
+        self.assertLess(roster.index("s->result.selection_checks |= 1u"), roster.index("s->result.selection_matches > 1"))
         pair = native.split("static CFTypeRef mrk_ax_selection_pair(", 1)[1].split("static BOOL mrk_ax_projection(", 1)[0]
         self.assertIn("const void *names[] = { kAXParentAttribute, kAXRoleAttribute };", pair)
         self.assertIn("CFArrayCreate(NULL, names, 2, &kCFTypeArrayCallBacks)", pair)
@@ -5379,7 +5669,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("mrk_version_source_name_state(s, s->observationSample, MRK_NAME_ALL)", observe)
         self.assertIn("*flags |= MRK_VERSION_SOURCE_SELECTION_READY", observe)
         self.assertIn("MRK_SELECT_NODES = 256, MRK_SELECT_ROWS = 32", native)
-        self.assertIn("MRKSelectionPass selection;", native)
+        self.assertIn("MRKSelectionPass selection[MRK_SELECT_SAMPLES];", native)
         for forbidden in ("kAXURLAttribute", "kAXFilenameAttribute", "kAXPressAction", "setNameFieldStringValue", "setDirectoryURL",
                           "CGEvent", "NSPasteboard", "sleep(", "dispatch_", "pthread_create", "CFRelease("):
             self.assertNotIn(forbidden, label + roster + write)

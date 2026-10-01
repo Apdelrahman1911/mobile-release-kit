@@ -227,7 +227,7 @@ impl Record {
                 || !self.prepared(i) || row.source_started != Some(accepts(i) && i != 6) { return None; }
             Some(json!({"operationId":id(i)?,"field":choice.name,"kind":kind_name(i)?,
                 "nativeResponse":if accepts(i) { "accept" } else { "decline" },
-                "initialRootAndOptions":{"result":preparation.result,"facts":preparation.facts},
+                "initialRootAndOptions":{"result":preparation.result,"facts":preparation.facts,"fileFilter":super::file_filter_value(preparation.file_filter)},
                 "nameFieldPreparation":row.name_preparation.map(|name| json!({"returned":true,"result":name.result,"facts":name.facts})),
                 "laterSyntheticNavigation":accepts(i),"exactNativeSelection":accepts(i).then_some(true),
                 "sourceBookStarted":row.source_started,"originalSourceChildGuiAndCoordinatorSettled":row.native_settled,
@@ -505,10 +505,11 @@ pub(super) fn data_checks() -> bool {
         let mut record = Record::new(); record.completed = usize::from(i); record.rows[usize::from(i)].requested = true;
         let name = VersionSourceNamePreparation { result: "ok", facts: Some(31) };
         let mask = 511 | 4096 | if accepts(i) { 512 | 1024 } else { 0 };
+        let file_filter = Some(if kind(i) == Some(PanelKind::VersionSource) { 55 } else { 0 });
         if record.name_preparation(i, name) || record.prepared(i) || record.name_pending(i)
-            || !record.preparation(i, ProjectFieldPreparation { result: "would-block", facts: Some(0) }) || record.navigation_prepared(i)
-            || !record.preparation(i, ProjectFieldPreparation { result: "ok", facts: Some(mask) }) || !record.navigation_prepared(i)
-            || record.preparation(i, ProjectFieldPreparation { result: "ok", facts: Some(mask) }) { return false; }
+            || !record.preparation(i, ProjectFieldPreparation { result: "would-block", facts: Some(0), file_filter: Some(0) }) || record.navigation_prepared(i)
+            || !record.preparation(i, ProjectFieldPreparation { result: "ok", facts: Some(mask), file_filter }) || !record.navigation_prepared(i)
+            || record.preparation(i, ProjectFieldPreparation { result: "ok", facts: Some(mask), file_filter }) { return false; }
         if needs_name(i) {
             if record.prepared(i) || !record.name_pending(i) { return false; }
             let mut wrong = record.clone(); wrong.completed += 1;
@@ -531,9 +532,9 @@ pub(super) fn data_checks() -> bool {
                 || record.name_preparation(i, name) { return false; }
         } else if !record.prepared(i) || record.name_pending(i) || record.name_preparation(i, name) { return false; }
         for bit in [1, 2, 4, 8, 16, 32, 64, 128, 256, 4096] {
-            if (ProjectFieldPreparation { result: "ok", facts: Some(mask & !bit) }).succeeded(kind(i).unwrap(), accepts(i)) { return false; }
+            if (ProjectFieldPreparation { result: "ok", facts: Some(mask & !bit), file_filter }).succeeded(kind(i).unwrap(), accepts(i)) { return false; }
         }
-        if (ProjectFieldPreparation { result: "ok", facts: Some(mask | 2048) }).succeeded(kind(i).unwrap(), accepts(i)) { return false; }
+        if (ProjectFieldPreparation { result: "ok", facts: Some(mask | 2048), file_filter }).succeeded(kind(i).unwrap(), accepts(i)) { return false; }
     }
     true
 }

@@ -359,11 +359,18 @@ fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
     if p.purpose == "selection-parent" { value["purpose"] = json!(p.purpose); }
     value
 }
+fn file_filter_value(flags: Option<u32>) -> Value {
+    let Some(flags) = flags.filter(|flags| *flags != 0) else { return Value::Null; };
+    json!({"facts":flags,"allowedTypes":match flags & 12 { 4 => Some("unrestricted"), 8 => Some("restricted"), _ => None },
+        "allowsOther":(flags & 16 != 0).then_some(flags & 32 != 0)})
+}
 fn selection_value(p: mrk_macos_installed_native::VersionSourceSelection) -> Value {
     let c = p.checks;
     json!({"checks":{"completeProjection":c[0],"uniqueEntry":c[1],"originalLabelChainRechecked":c[2],
         "attributeSettable":c[3],"singletonOriginalEntryReadback":c[4]},"attempted":p.attempted,"returned":p.returned,
         "selected":p.selected,"nodes":p.nodes,"matches":p.matches,"attribute":p.attribute,"lastRole":p.last_role,"depth":p.depth,
+        "contentReadiness":p.content_readiness.map(|r| json!({"sample":r.sample,"callsBefore":r.calls_before,
+            "cfBefore":r.cf_before,"wait":r.wait,"pending":&r.pending[..r.sample.saturating_sub(1) as usize]})),
         "limit":p.limit.map(|r| json!({"predicate":r.predicate,"observed":r.observed,"cap":r.cap,"queued":r.queued,"children":r.children})),
         "projectionSummary":p.projection_summary.map(|r| json!({"tableRoles":r.table_roles,"outlineRoles":r.outline_roles,
             "listRoles":r.list_roles,"entryRoots":r.entry_roots,"titlePresent":r.title_present,"titleAbsent":r.title_absent,
@@ -474,7 +481,7 @@ impl OpenInputSample {
             && self.report.is_some_and(|r| r.selection_mode == self.selection && r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        let mechanism = if self.selection { "accessibility-version-source-selection-press-v7" }
+        let mechanism = if self.selection { "accessibility-version-source-selection-press-v8" }
             else { "accessibility-preconfigured-original-press-v5" };
         let mut value = json!({"mechanism":mechanism,"step":format!("{:?}",self.step),"id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
@@ -961,7 +968,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some((i,data,name)) = r.field_preparation {
         value["projectFieldPreparation"] = json!({"operationId":project_fields::id(i),"kind":project_fields::kind_name(i),
-            "returned":true,"result":data.result,"facts":data.facts,
+            "returned":true,"result":data.result,"facts":data.facts,"fileFilter":file_filter_value(data.file_filter),
             "nameFieldPreparation":name.map(|name| json!({"returned":true,"result":name.result,"facts":name.facts}))});
     }
     value

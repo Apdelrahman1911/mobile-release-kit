@@ -22,6 +22,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <time.h>
 #endif
 
 int mrk_platform(void) {
@@ -283,6 +284,7 @@ enum { MRK_SELECTION_UNOBSERVED, MRK_SELECTION_EMPTY, MRK_SELECTION_MALFORMED,
     char observationInitialRoot[4097];
     uint32_t observationProjectField, observationNamePhase;
     uint32_t observationSample, observationParentSample, observationSelectionSample;
+    uint32_t observationFileFilter; // One initial-options DATA sample, never readiness authority.
     BOOL observationSelectionBound, observationSelectionParentChecked;
     NSString *observationFieldName;
     char observationParentTag[64], observationPanelTag[64];
@@ -787,9 +789,23 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
 // Bits0..8 are the latched initial proof;9/10 navigation entry/return;11 name
 // return;12 all same-call temporary closes returned. The native original owns
 // the latch and conversion pointers; an uncertain entered call is not retried.
-int mrk_panel_observe_project_field(void *opaque, int navigate, uint32_t *facts) {
-    if (!pthread_main_np() || !opaque || !facts || (navigate != 0 && navigate != 1)) return EINVAL;
-    MRKInstalledPanel *s = opaque; *facts = s->observationProjectField;
+// Public getter DATA from the same original initial-options call. No UTI
+// strings, enumeration, setters or retained native objects leave this scope.
+static BOOL mrk_panel_observe_file_filter(MRKInstalledPanel *s, NSOpenPanel *panel) {
+    if (s->kind != 4) return YES;
+    if (s->observationFileFilter) return NO;
+    s->observationFileFilter = 1u;
+    id types = [panel allowedContentTypes];
+    s->observationFileFilter |= 2u;
+    if (types && ![types isKindOfClass:[NSArray class]]) return NO;
+    s->observationFileFilter |= !types || [types count] == 0 ? 4u : 8u;
+    BOOL other = [panel allowsOtherFileTypes];
+    s->observationFileFilter |= 16u | (other ? 32u : 0u);
+    return YES;
+}
+int mrk_panel_observe_project_field(void *opaque, int navigate, uint32_t *facts, uint32_t *filter) {
+    if (!pthread_main_np() || !opaque || !facts || !filter || (navigate != 0 && navigate != 1)) return EINVAL;
+    MRKInstalledPanel *s = opaque; *facts = s->observationProjectField; *filter = s->observationFileFilter;
     if (s->unknown) return EIO;
     if (!mrk_panel_project_field(s->kind) || !s->started || !s->parent || !s->window || !s->completion
         || s->responded || s->callbackActive || s->closeAttempted || s->closed || s->observationActionAttempted
@@ -812,7 +828,7 @@ int mrk_panel_observe_project_field(void *opaque, int navigate, uint32_t *facts)
         if (![panel allowsMultipleSelection]) s->observationProjectField |= 32u;
         if (![panel canCreateDirectories]) s->observationProjectField |= 64u;
         if (![panel resolvesAliases]) s->observationProjectField |= 128u;
-        if (s->observationProjectField != 511u) result = EPERM;
+        if (s->observationProjectField != 511u || !mrk_panel_observe_file_filter(s, panel)) result = EPERM;
         else if (!navigate) result = 0;
         else {
             size_t length = strlen(s->observationTarget);
@@ -834,7 +850,7 @@ int mrk_panel_observe_project_field(void *opaque, int navigate, uint32_t *facts)
     @try { if (s->initialPath) { [s->initialPath release]; s->initialPath = nil; } }
     @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
     if (!s->unknown && !s->initialDirectory && !s->initialPath && !s->observationFieldName) s->observationProjectField |= 4096u;
-    *facts = s->observationProjectField; return result;
+    *facts = s->observationProjectField; *filter = s->observationFileFilter; return result;
 }
 
 int mrk_panel_observe_version_source_name(void *opaque, uint32_t sample, uint32_t *facts) {
@@ -892,6 +908,13 @@ enum { MRK_AX_OP_NONE = 0, MRK_AX_OP_SET_MESSAGING_TIMEOUT = 1, MRK_AX_OP_COPY_A
 enum { MRK_AX_ATTR_NONE = 0, MRK_AX_ATTR_PARENT = 1, MRK_AX_ATTR_ROLE = 2, MRK_AX_ATTR_IDENTIFIER = 3,
     MRK_AX_ATTR_TITLE = 4, MRK_AX_ATTR_VALUE = 5, MRK_AX_ATTR_ENABLED = 6, MRK_AX_ATTR_WINDOWS = 7,
     MRK_AX_ATTR_CHILDREN = 8, MRK_AX_ATTR_ROWS = 9, MRK_AX_ATTR_SELECTED_CHILDREN = 10, MRK_AX_ATTR_SELECTED_ROWS = 11 };
+enum { MRK_SELECT_SAMPLES = 8, MRK_SELECT_PENDING = MRK_SELECT_SAMPLES - 1 };
+// Each entry is immutable after its completed zero-match sample and sole wait.
+// Opaque CF objects remain in the one original append-only ownership ledger.
+typedef struct {
+    uint32_t ordinal, calls_before, calls_after, cf_before, cf_after, nodes, depth, role,
+        entries, fixture_mask, relations, checks, matches, flags, error, wait;
+} MRKContentPending;
 typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_examined, recheck_nodes_examined, owned, released;
     int32_t ax_error; uint32_t last_role, last_depth;
     uint32_t selection_mode, selection_checks, selection_flags, selection_nodes, selection_matches,
@@ -906,9 +929,13 @@ typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_exami
         selection_entry_roots, selection_title_present, selection_title_absent, selection_value_present,
         selection_outside_entry_role_mask, selection_fixture_label_mask, selection_expected_label_relations,
         selection_expected_label_role_mask;
+    uint32_t selection_sample, selection_calls_before, selection_cf_before, selection_wait;
+    MRKContentPending selection_pending[MRK_SELECT_PENDING];
 } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 160 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 624 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKContentPending) == 64 && offsetof(MRKOpenResult, selection_sample) == 160
+    && offsetof(MRKOpenResult, selection_pending) == 176, "fixed bounded content-readiness history ABI");
 _Static_assert(sizeof(CFIndex) == sizeof(int64_t) && offsetof(MRKOpenResult, selection_limit_observed) == 96,
     "lossless original selection count ABI");
 _Static_assert(offsetof(MRKOpenResult, ax_failure_operation) == 104 && offsetof(MRKOpenResult, ax_failure_attribute) == 108,
@@ -1254,7 +1281,9 @@ done:
 }
 
 enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_CONTROL_DEPTH = 8,
-    MRK_SELECT_NODES = 256, MRK_SELECT_ROWS = 32, MRK_SELECT_CALLS = 3072, MRK_SELECT_CF = 1024 };
+    MRK_SELECT_NODES = 256, MRK_SELECT_ROWS = 32, MRK_SELECT_CALLS = 3072, MRK_SELECT_CF = 1024,
+    MRK_SELECT_TOTAL_CALLS = MRK_SELECT_SAMPLES * MRK_SELECT_CALLS,
+    MRK_SELECT_TOTAL_CF = MRK_SELECT_SAMPLES * MRK_SELECT_CF };
 // Complete selecting original: both window/control projections, original
 // chains, one selection/readback and final Press. Charge every AX operation
 // its own timeout setter; successful-path bounds do not depend on reuse.
@@ -1284,10 +1313,10 @@ typedef struct {
 typedef struct {
     MRKOpenAdmission admit; MRKOpenRecheckCall recheck; void *context; MRKOpenResult result;
     CFTypeID elementType;
-    MRKPromptOwned owned[MRK_SELECT_CF]; unsigned count;
+    MRKPromptOwned owned[MRK_SELECT_TOTAL_CF]; unsigned count;
     AXUIElementRef button; // Borrowed only from the first pass's retained original CFArray.
     BOOL cleanupKnown;
-    MRKSelectionPass selection; // Original chain retained even on uncertain return.
+    MRKSelectionPass selection[MRK_SELECT_SAMPLES]; // Every sampled chain remains immutable and retained.
     unsigned selection_queued; // Same original loop's bounded queue, not another AX observation.
     CFArrayRef selection_attributes; // Borrowed from this original's registered CF slot.
     AXUIElementRef timeout_element; // Exact retained pointer, not CFEqual or proof authority.
@@ -1300,8 +1329,11 @@ typedef struct {
 // recycled; Cancel does not consume a Press original.
 enum { MRK_PROMPT_ORIGINALS = 9 };
 static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];
-_Static_assert(sizeof(mrk_prompt_originals) <= 144u * 1024u,
-    "bounded original prompt arenas");
+// 9 complete original arenas: 8192 registered CF slots, 8 immutable256-node
+// pass arrays and the complete scalar history in EACH arena. This bounds the
+// first-party backing, not opaque CF allocations made by public AX APIs.
+_Static_assert(sizeof(mrk_prompt_originals) <= 1152u * 1024u,
+    "bounded original prompt arenas including all content samples");
 static atomic_uint mrk_prompt_next = 0;
 static atomic_flag mrk_prompt_active = ATOMIC_FLAG_INIT;
 static atomic_bool mrk_prompt_unknown = false;
@@ -1361,9 +1393,16 @@ static BOOL mrk_ax_status(MRKPrompt *s, AXError error, uint32_t operation_code, 
 static MRKPromptOwned *mrk_ax_slot(MRKPrompt *s) {
     // The entry's frozen mode covers this whole original, not its current site.
     const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CF : MRK_PROMPT_CF;
-    if (s->count == cap) {
-        mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CF_SLOTS, s->count, cap, 0); return NULL;
+    unsigned before = s->result.selection_mode == 1 ? s->result.selection_cf_before : 0;
+    unsigned total_cap = s->result.selection_mode == 1 ? MRK_SELECT_TOTAL_CF : MRK_PROMPT_CF;
+    if (before > s->count || s->count > total_cap) {
+        s->cleanupKnown = NO; mrk_ax_fail(s, MRK_OPEN_CUSTODY); return NULL;
     }
+    unsigned used = s->count - before;
+    if (used == cap || s->count == total_cap) {
+        mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CF_SLOTS, used, cap, 0); return NULL;
+    }
+    if (used > cap) { s->cleanupKnown = NO; mrk_ax_fail(s, MRK_OPEN_CUSTODY); return NULL; }
     return &s->owned[s->count++]; // Register actual out-slot BEFORE every Create/Copy.
 }
 static BOOL mrk_ax_admit(MRKPrompt *s, uint64_t required_ns, int after, MRKOpenTimeout *timeout) {
@@ -1377,8 +1416,14 @@ static BOOL mrk_ax_admit(MRKPrompt *s, uint64_t required_ns, int after, MRKOpenT
 }
 static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
     const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CALLS : MRK_PROMPT_CALLS;
-    if (s->result.calls > cap - 2)
-        return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_AX_CALLS, s->result.calls, cap, 0);
+    unsigned before = s->result.selection_mode == 1 ? s->result.selection_calls_before : 0;
+    unsigned total_cap = s->result.selection_mode == 1 ? MRK_SELECT_TOTAL_CALLS : MRK_PROMPT_CALLS;
+    if (before > s->result.calls || s->result.calls > total_cap) {
+        s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
+    }
+    unsigned used = s->result.calls - before;
+    if (used > cap - 2 || s->result.calls > total_cap - 2)
+        return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_AX_CALLS, used, cap, 0);
     MRKOpenTimeout timeout = {0};
     if (!mrk_ax_admit(s, 0, 0, &timeout)) return NO;
     if (!isfinite(timeout.seconds) || timeout.seconds <= 0 || (double)timeout.seconds > 0.1
@@ -1679,7 +1724,12 @@ static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned a
     return YES;
 }
 static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRef expected) {
-    MRKSelectionPass *p = &s->selection; p->nodes[0] = sheet; unsigned queued = 1;
+    if (!s->result.selection_sample || s->result.selection_sample > MRK_SELECT_SAMPLES) {
+        s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
+    }
+    MRKSelectionPass *p = &s->selection[s->result.selection_sample - 1];
+    if (p->nodes[0]) { s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY); }
+    p->nodes[0] = sheet; unsigned queued = 1;
     s->result.site = MRK_OPEN_SELECTION_PROJECTION;
     s->result.selection_summary_version = 2u;
     for (unsigned at = 0; at < queued; ++at) {
@@ -1742,11 +1792,61 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
         }
     }
     s->result.selection_checks |= 1u; // Complete, never truncated or first-match.
-    if (s->result.selection_matches != 1) return mrk_ax_fail(s, s->result.selection_matches ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED);
-    s->result.selection_checks |= 2u; return YES;
+    if (s->result.selection_matches > 1) return mrk_ax_fail(s, MRK_OPEN_AMBIGUOUS);
+    if (s->result.selection_matches == 1) s->result.selection_checks |= 2u;
+    return YES; // Complete zero-match is only pending, never permission to write.
+}
+static BOOL mrk_ax_content_wait(MRKPrompt *s) {
+    if (s->result.error || s->result.selection_checks != 1 || s->result.selection_matches
+        || s->result.selection_flags || s->result.flags || s->result.selection_wait
+        || !s->result.selection_sample || s->result.selection_sample >= MRK_SELECT_SAMPLES) {
+        s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
+    }
+    // One ordinary off-main wait per complete pending sample. The caller's
+    // original2s/45s endpoint admits it; no deadline, timer or owner is made.
+    if (!mrk_ax_admit(s, 50000000u, 0, NULL)) return NO;
+    s->result.selection_wait = 1u;
+    const struct timespec interval = { .tv_sec = 0, .tv_nsec = 50000000 };
+    int status = nanosleep(&interval, NULL); // A returned EINTR is terminal, never retried.
+    s->result.selection_wait = status == 0 ? 2u : 3u;
+    BOOL returned = status == 0 || mrk_ax_fail(s, MRK_OPEN_OTHER);
+    BOOL admitted = mrk_ax_admit(s, 0, 0, NULL);
+    return returned && admitted;
+}
+static BOOL mrk_ax_next_content_sample(MRKPrompt *s) {
+    unsigned ordinal = s->result.selection_sample;
+    if (!ordinal || ordinal >= MRK_SELECT_SAMPLES || s->result.error || s->result.selection_checks != 1
+        || s->result.selection_matches || s->result.selection_flags || s->result.flags
+        || s->result.selection_wait != 2 || s->result.selection_pending[ordinal - 1].ordinal
+        || s->result.calls < s->result.selection_calls_before || s->count < s->result.selection_cf_before
+        || s->result.calls - s->result.selection_calls_before > MRK_SELECT_CALLS
+        || s->count - s->result.selection_cf_before > MRK_SELECT_CF) {
+        s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
+    }
+    s->result.selection_pending[ordinal - 1] = (MRKContentPending){
+        ordinal, s->result.selection_calls_before, s->result.calls, s->result.selection_cf_before, s->count,
+        s->result.selection_nodes, s->result.selection_depth, s->result.selection_last_role,
+        s->result.selection_entry_roots, s->result.selection_fixture_label_mask, s->result.selection_expected_label_relations,
+        s->result.selection_checks, s->result.selection_matches, s->result.selection_flags, s->result.error, s->result.selection_wait };
+    // New, separately retained pass DATA only. Never clear an error, cumulative
+    // calls/CF ownership, or an attempted action; all previous records stay fixed.
+    s->result.selection_sample = ordinal + 1;
+    s->result.selection_calls_before = s->result.calls; s->result.selection_cf_before = s->count;
+    s->result.selection_wait = 0; s->selection_queued = 0;
+    s->result.selection_checks = 0; s->result.selection_nodes = 0;
+    s->result.selection_last_role = 0; s->result.selection_depth = 0;
+    s->result.selection_summary_version = 0;
+    s->result.selection_table_roles = s->result.selection_outline_roles = s->result.selection_list_roles = 0;
+    s->result.selection_entry_roots = s->result.selection_title_present = s->result.selection_title_absent = 0;
+    s->result.selection_value_present = s->result.selection_outside_entry_role_mask = 0;
+    s->result.selection_fixture_label_mask = s->result.selection_expected_label_relations = s->result.selection_expected_label_role_mask = 0;
+    return YES;
 }
 static BOOL mrk_ax_select_entry(MRKPrompt *s, AXUIElementRef parent, CFStringRef expected) {
-    MRKSelectionPass *p = &s->selection;
+    if (!s->result.selection_sample || s->result.selection_sample > MRK_SELECT_SAMPLES) {
+        s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
+    }
+    MRKSelectionPass *p = &s->selection[s->result.selection_sample - 1];
     if (s->result.selection_flags || s->result.selection_checks != 3 || !p->candidate || !p->label || !p->label_attribute) {
         s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
     }
@@ -1799,6 +1899,7 @@ static BOOL mrk_ax_select_entry(MRKPrompt *s, AXUIElementRef parent, CFStringRef
 }
 static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *panel_tag, const uint8_t *prompt, const uint8_t *target) {
     if (!mrk_ax_admit(s, 0, 0, NULL) || !mrk_ax_original(s, s->result.selection_mode ? 0 : 1)) return;
+    if (s->result.selection_mode) s->result.selection_sample = 1; // Setup belongs to this first sample's budget.
     s->result.calls++; s->elementType = AXUIElementGetTypeID(); // Count and reuse this local AX API too.
     MRKPromptOwned *parent_text = mrk_ax_slot(s), *panel_text = mrk_ax_slot(s), *prompt_text = mrk_ax_slot(s), *application = mrk_ax_slot(s);
     if (!parent_text || !panel_text || !prompt_text || !application) return;
@@ -1816,9 +1917,19 @@ static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *
         const char *leaf = strrchr((const char *)target, '/');
         if (!leaf || !leaf[1]) { mrk_ax_fail(s, MRK_OPEN_INPUT); return; }
         filename->value = CFStringCreateWithCString(NULL, leaf + 1, kCFStringEncodingUTF8);
-        if (!mrk_ax_type(s, filename->value, CFStringGetTypeID())
-            || !mrk_ax_selection_roster(s, sheet, filename->value)
-            || !mrk_ax_select_entry(s, parent, filename->value)) return;
+        if (!mrk_ax_type(s, filename->value, CFStringGetTypeID())) return;
+        for (;;) {
+            if (!mrk_ax_selection_roster(s, sheet, filename->value)) return;
+            if (s->result.selection_matches == 1) break;
+            if (s->result.selection_sample == MRK_SELECT_SAMPLES) {
+                mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return; // Bounded no-content failure, not readiness.
+            }
+            if (!mrk_ax_content_wait(s) || !mrk_ax_next_content_sample(s)) return;
+            // Same original AX application/parent/sheet. Projection itself
+            // requires CFEqual with both retained originals; stage0 is NOT repeated.
+            if (!mrk_ax_projection(s, (AXUIElementRef)application->value, parent_text->value, panel_text->value, &parent, &sheet)) return;
+        }
+        if (!mrk_ax_select_entry(s, parent, filename->value)) return;
         // Selector/readback are NOT URL identity. Original full proof1 and the
         // second full proof below both still require actual singleton URLs.
         if (!mrk_ax_original(s, 1)) return;

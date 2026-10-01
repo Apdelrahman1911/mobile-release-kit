@@ -981,7 +981,8 @@ def _expected_project_fields():
         facts = 511 | 4096 | ((512 | 1024) if accepted else 0)
         rows.append({"operationId": i + 2, "field": field, "kind": kind,
             "nativeResponse": "accept" if accepted else "decline",
-            "initialRootAndOptions": {"result": "ok", "facts": facts},
+            "initialRootAndOptions": {"result": "ok", "facts": facts,
+                "fileFilter": {"facts": 23, "allowedTypes": "unrestricted", "allowsOther": False} if kind == "version-source" else None},
             "nameFieldPreparation": {"returned": True, "result": "ok", "facts": 31} if accepted and kind == "version-source" else None,
             "laterSyntheticNavigation": accepted, "exactNativeSelection": True if accepted else None,
             "sourceBookStarted": accepted and i != 6, "originalSourceChildGuiAndCoordinatorSettled": True,
@@ -1021,7 +1022,7 @@ def expected_result(binding, case):
                 identifier = row["operationId"]
                 parent = {**_expected_identity_proof(), "purpose": "selection-parent"}
                 row["selectionInput"] = {**value["native"]["projectOpenInput"],
-                    "mechanism": "accessibility-version-source-selection-press-v7",
+                    "mechanism": "accessibility-version-source-selection-press-v8",
                     "id": identifier, "step": _field_open_step(case, identifier),
                     "initialOriginalProof": _expected_identity_proof(), "originalProof": _expected_identity_proof(),
                     "promptChecks": {"initial": True, "final": True}, "promptButton": _expected_prompt_button(),
@@ -1029,6 +1030,7 @@ def expected_result(binding, case):
                     "selection": {"checks": dict.fromkeys(ACCESSIBILITY_SELECTION_CHECKS, True),
                         "attempted": True, "returned": True, "selected": True, "nodes": 12, "matches": 1,
                         "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4, "limit": None,
+                        "contentReadiness": {"sample": 1, "callsBefore": 0, "cfBefore": 0, "wait": 0, "pending": []},
                         "projectionSummary": {"tableRoles": 1, "outlineRoles": 0, "listRoles": 0, "entryRoots": 2,
                             "titlePresent": 0, "titleAbsent": 2, "valuePresent": 2, "outsideEntryRoleMask": 0,
                             "fixtureLabelMask": 1, "expectedLabelRelations": 1, "expectedLabelRoleMask": 1 << 15}}}
@@ -1151,7 +1153,8 @@ RESULT_LOCATION_KEYS |= frozenset((
     "acceptedOpenHistories originalInputSucceeded originalBarrierRetired originalBindingMatched originalCompletionMatched "
     "selectionInput selectionBinding selectionCompletion selectionParentProof selectionParentPrompt purpose "
     "completeProjection uniqueEntry originalLabelChainRechecked attributeSettable singletonOriginalEntryReadback "
-    "nodes matches attribute depth selected"
+    "nodes matches attribute depth selected contentReadiness sample callsBefore cfBefore wait pending "
+    "fileFilter allowedTypes allowsOther"
 ).split())
 RESULT_LOCATION_KEYS |= frozenset((
     "signingInputs oneUseOriginalDocumentRegistration mode rows role nativeResponse exactNativeSelection "
@@ -1428,13 +1431,18 @@ def _accessibility_ax_failure(value, ax_error):
 ACCESSIBILITY_SELECT_NODES = 256
 ACCESSIBILITY_SELECT_CALLS = 3072
 ACCESSIBILITY_SELECT_CF = 1024
+ACCESSIBILITY_SELECT_SAMPLES = 8
 
 
-def _accessibility_prompt_button(value, *, selecting=False):
+def _accessibility_prompt_button(value, *, selecting=False, content=False):
     """Bounded AX/CF DATA; selecting comes from the validated original context."""
     label = "accessibility-prompt-button"
-    need(type(selecting) is bool, label)
+    need(type(selecting) is bool and type(content) is bool, label)
     calls, slots = (ACCESSIBILITY_SELECT_CALLS, ACCESSIBILITY_SELECT_CF) if selecting else (512, 256)
+    need(not content or selecting, label)
+    if content:
+        calls *= ACCESSIBILITY_SELECT_SAMPLES
+        slots *= ACCESSIBILITY_SELECT_SAMPLES
     need(type(value) is dict and set(value) == {"checks", "calls", "initialNodesExamined", "recheckNodesExamined",
                                                "lastRole", "lastDepth", "cfSlots", "cfSlotsRetired", "cleanupReturned", "axError", "axFailure"}, label)
     checks = value["checks"]
@@ -1504,10 +1512,14 @@ def _accessibility_selection_limit(value, selection, button, site, error):
         valid = (projection and cap == 8 and count == 8 and selection["depth"] == 8
                  and child_cap != 0 and children is not None and children <= child_cap)
     elif predicate == "ax-call-budget":
-        valid = (cap == ACCESSIBILITY_SELECT_CALLS and count == button["calls"]
+        current = selection.get("contentReadiness")
+        before = current["callsBefore"] if current is not None else 0
+        valid = (cap == ACCESSIBILITY_SELECT_CALLS and count == button["calls"] - before
                  and ACCESSIBILITY_SELECT_CALLS - 1 <= count <= ACCESSIBILITY_SELECT_CALLS and children is None)
     else:
-        valid = cap == ACCESSIBILITY_SELECT_CF and count == button["cfSlots"] == ACCESSIBILITY_SELECT_CF and children is None
+        current = selection.get("contentReadiness")
+        before = current["cfBefore"] if current is not None else 0
+        valid = cap == ACCESSIBILITY_SELECT_CF and count == button["cfSlots"] - before == ACCESSIBILITY_SELECT_CF and children is None
     need(valid, label)
     return value
 
@@ -1544,11 +1556,48 @@ def _accessibility_selection_projection_summary(value, selection, site):
     return value
 
 
-def _accessibility_selection(value, button, site, error):
+def _accessibility_content_readiness(value, selection, button, site, error):
+    """Eight bounded original samples, not another owner or an action-retry receipt."""
+    label = "accessibility-selection-data"
+    if value is None:
+        need(button["calls"] == button["cfSlots"] == 0, label)
+        return None
+    need(type(value) is dict and set(value) == {"sample", "callsBefore", "cfBefore", "wait", "pending"}, label)
+    need(all(type(value[key]) is int for key in ("sample", "callsBefore", "cfBefore", "wait"))
+         and 1 <= value["sample"] <= ACCESSIBILITY_SELECT_SAMPLES and 0 <= value["wait"] <= 3, label)
+    history = value["pending"]
+    need(type(history) is list and len(history) == value["sample"] - 1, label)
+    calls, slots = 0, 0
+    for index, row in enumerate(history):
+        need(type(row) is list and len(row) == 16 and all(type(v) is int and 0 <= v <= (1 << 32) - 1 for v in row), label)
+        (ordinal, before, after, cf_before, cf_after, nodes, depth, role, entries, mask,
+         relations, checks, matches, flags, sample_error, wait) = row
+        need(ordinal == index + 1 and before == calls and cf_before == slots
+             and 0 < after - before <= ACCESSIBILITY_SELECT_CALLS and 0 < cf_after - cf_before <= ACCESSIBILITY_SELECT_CF
+             and 1 <= nodes < ACCESSIBILITY_SELECT_NODES and 1 <= depth <= min(nodes, 8)
+             and 1 <= role <= 16 and entries <= nodes and mask <= 31 and mask.bit_count() <= nodes
+             and relations <= 6 and not relations & 1 and (entries != 0 or mask == relations == 0)
+             and checks == 1 and matches == flags == sample_error == 0 and wait == 2, label)
+        calls, slots = after, cf_after
+    need(value["callsBefore"] == calls and value["cfBefore"] == slots
+         and 0 <= button["calls"] - calls <= ACCESSIBILITY_SELECT_CALLS
+         and 0 <= button["cfSlots"] - slots <= ACCESSIBILITY_SELECT_CF
+         and button["calls"] <= ACCESSIBILITY_SELECT_SAMPLES * ACCESSIBILITY_SELECT_CALLS
+         and button["cfSlots"] <= ACCESSIBILITY_SELECT_SAMPLES * ACCESSIBILITY_SELECT_CF, label)
+    if value["wait"]:
+        need(value["sample"] < ACCESSIBILITY_SELECT_SAMPLES and site == "selection-projection"
+             and error not in (None, "none") and button["axError"] == 0
+             and selection["checks"] == dict(zip(ACCESSIBILITY_SELECTION_CHECKS, (True, False, False, False, False)))
+             and selection["matches"] == 0 and not selection["attempted"] and not selection["returned"]
+             and selection["selected"] is None and (value["wait"] != 3 or error == "ax-other"), label)
+    return value
+
+
+def _accessibility_selection(value, button, site, error, *, content=False):
     """Actual selector scalars, never a filename, URL, or substitute Open proof."""
     label = "accessibility-selection-data"
     need(type(value) is dict and set(value) == {"checks", "attempted", "returned", "selected",
-                                               "nodes", "matches", "attribute", "lastRole", "depth", "limit", "projectionSummary"}, label)
+         "nodes", "matches", "attribute", "lastRole", "depth", "limit", "projectionSummary", *({"contentReadiness"} if content else set())}, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
          and all(type(v) is bool for v in checks.values()), label)
@@ -1570,6 +1619,8 @@ def _accessibility_selection(value, button, site, error):
     need(not value["attempted"] or checks["attributeSettable"], label)
     need(not checks["singletonOriginalEntryReadback"] or value["selected"] is True, label)
     need(value["selected"] is not False or button is not None and button["axError"] != 0, label)
+    if content:
+        _accessibility_content_readiness(value["contentReadiness"], value, button, site, error)
     _accessibility_selection_limit(value["limit"], value, button, site, error)
     _accessibility_selection_projection_summary(value["projectionSummary"], value, site)
     return value
@@ -1579,8 +1630,10 @@ def _accessibility_succeeded(value):
     # A matching receipt alone never means that its input thread has joined.
     field = PROJECT_FIELD_PANELS.get(value["step"])
     selecting = field is not None and field[1] == "version-source"
-    selected = (value.get("mechanism") == "accessibility-version-source-selection-press-v7"
-        and _selection_succeeded(value.get("selection")) and value.get("selectionParentPrompt") is True
+    selected = (value.get("mechanism") == "accessibility-version-source-selection-press-v8"
+        and _selection_succeeded(value.get("selection"))
+        and value["selection"].get("contentReadiness") is not None and value["selection"]["contentReadiness"]["wait"] == 0
+        and value.get("selectionParentPrompt") is True
         and value.get("selectionParentProof") is not None
         and value["selectionParentProof"].get("purpose") == "selection-parent"
         and value["selectionParentProof"]["error"] == "none")
@@ -1609,10 +1662,11 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
         need(type(value) is dict and type(value.get("id")) is int, label)
         field_step = _field_open_step(case, value["id"]) if expected_id is None or field_history else None
         version_source = field_step is not None and PROJECT_FIELD_PANELS[field_step][1] == "version-source"
-        selecting = version_source and value.get("mechanism") == "accessibility-version-source-selection-press-v7"
-        mechanism = "accessibility-version-source-selection-press-v7" if version_source else "accessibility-preconfigured-original-press-v5"
+        content = version_source and value.get("mechanism") == "accessibility-version-source-selection-press-v8"
+        selecting = content or historical and version_source and value.get("mechanism") == "accessibility-version-source-selection-press-v7"
+        mechanism = "accessibility-version-source-selection-press-v8" if version_source else "accessibility-preconfigured-original-press-v5"
         need(value.get("mechanism") == mechanism or historical and version_source
-             and value.get("mechanism") == "accessibility-preconfigured-original-press-v5", label)
+             and value.get("mechanism") in ("accessibility-preconfigured-original-press-v5", "accessibility-version-source-selection-press-v7"), label)
         extra = {"selectionParentProof", "selectionParentPrompt", "selection"} if selecting else set()
         need(set(value) == {"mechanism", "step", "id", "state", "site", "error",
              "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed, *extra}, label)
@@ -1705,7 +1759,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
         button = value["promptButton"]
         if button is not None:
             need(value["bodyReturned"] and value["nativeEntered"] is True, label)
-            _accessibility_prompt_button(button, selecting=selecting)
+            _accessibility_prompt_button(button, selecting=selecting, content=content)
             need(button["calls"] == 0 or (parent_ready if selecting else full_ready), label)
             need(button["initialNodesExamined"] == 0 and not button["checks"]["completeControlProjection"] or full_ready, label)
             need(button["cleanupReturned"] or value["custodyKnown"] is not True
@@ -1715,7 +1769,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
             need((selection is None) == (button is None), label)
             if selection is not None:
                 need(value["bodyReturned"] and value["nativeEntered"] is True, label)
-                _accessibility_selection(selection, button, site, error)
+                _accessibility_selection(selection, button, site, error, content=content)
                 selector_ready = _selection_succeeded(selection)
                 started = (any(selection["checks"].values()) or selection["nodes"] != 0 or selection["matches"] != 0
                     or selection["lastRole"] != "not-read" or selection["depth"] != 0
@@ -1945,6 +1999,18 @@ def _completion_selection_succeeded(value):
 def _project_field_selection_histories(value, expected):
     label = "project-fields-selection-history"
     need(type(value) is dict and type(value.get("projectFields")) is dict, label)
+    rows = value["projectFields"].get("rows")
+    expected_rows = expected["projectFields"]["rows"]
+    need(type(rows) is list and len(rows) == len(expected_rows), label)
+    for actual, original in zip(rows, expected_rows):
+        need(type(actual) is dict and type(actual.get("initialRootAndOptions")) is dict
+             and "fileFilter" in actual["initialRootAndOptions"], label)
+        observed = actual["initialRootAndOptions"]["fileFilter"]
+        if original["kind"] == "version-source":
+            _file_filter_context(observed, complete=True)
+        else:
+            need(observed is None, label)
+        original["initialRootAndOptions"]["fileFilter"] = observed
     histories = value["projectFields"].get("acceptedOpenHistories")
     originals = expected["projectFields"]["acceptedOpenHistories"]
     need(type(histories) is list and len(histories) == len(originals), label)
@@ -2016,13 +2082,29 @@ def _project_selection_context(value, source, step, reason, case):
     return value
 
 
+def _file_filter_context(value, *, complete=False):
+    label = "project-field-preparation-data"
+    if value is None:
+        need(not complete, label)
+        return None
+    need(type(value) is dict and set(value) == {"facts", "allowedTypes", "allowsOther"}, label)
+    flags = value["facts"]
+    need(type(flags) is int and flags in (1, 3, 7, 11, 23, 27, 55, 59), label)
+    expected_types = "unrestricted" if flags & 4 else "restricted" if flags & 8 else None
+    expected_other = bool(flags & 32) if flags & 16 else None
+    need(value["allowedTypes"] == expected_types and value["allowsOther"] is expected_other
+         and (not complete or flags in (23, 27, 55, 59)), label)
+    return value
+
+
 def _field_preparation_context(value, case, step):
     if value is None:
         return None
     try:
         need(case == PROJECT_FIELDS_CASE and type(value) is dict
              and set(value) in ({"operationId", "kind", "returned", "result", "facts"},
-                                {"operationId", "kind", "returned", "result", "facts", "nameFieldPreparation"}),
+                                {"operationId", "kind", "returned", "result", "facts", "nameFieldPreparation"},
+                                {"operationId", "kind", "returned", "result", "facts", "nameFieldPreparation", "fileFilter"}),
              "project-field-preparation-data")
         identifier = value["operationId"]
         need(type(identifier) is int and 2 <= identifier <= 11
@@ -2036,6 +2118,12 @@ def _field_preparation_context(value, case, step):
              and (flags == 0 or flags & 257 == 257) and (not flags & 512 or flags & 511 == 511)
              and (not flags & 1024 or flags & 512) and (not flags & 2048 or flags & 1024)
              and (value["result"] != "would-block" or flags == 0), "project-field-preparation-data")
+        if "fileFilter" in value:
+            if value["kind"] == "version-source":
+                _file_filter_context(value["fileFilter"])
+                need(value["fileFilter"] is None or flags is not None and flags & 511 == 511, "project-field-preparation-data")
+            else:
+                need(value["fileFilter"] is None, "project-field-preparation-data")
         if "nameFieldPreparation" in value:
             # The new shape retains navigation and name as distinct returns.
             # Historical five-key8191 frames stay historical; never relabel one.

@@ -252,7 +252,7 @@ impl Panel {
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
     OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, AxFailure, CompletionSelection, CompletionReturn, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
-    OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, VersionSourceNamePreparation, VersionSourceParentReady, VersionSourceSelectionReady, VersionSourceSelection, SelectionLimit, SelectionProjectionSummary, installed_original_window,
+    OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, VersionSourceNamePreparation, VersionSourceParentReady, VersionSourceSelectionReady, VersionSourceSelection, SelectionLimit, SelectionProjectionSummary, ContentReadiness, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
@@ -393,11 +393,13 @@ mod observation {
     /// Saved scalar DATA from a returned original initial-root/navigation
     /// preparation. It does not include VersionSource's later name phase.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct ProjectFieldPreparation { pub result: &'static str, pub facts: Option<u32> }
+    pub struct ProjectFieldPreparation { pub result: &'static str, pub facts: Option<u32>, pub file_filter: Option<u32> }
     impl ProjectFieldPreparation {
         pub fn succeeded(self, kind: PanelKind, navigate: bool) -> bool {
             kind.project_field() && self.result == "ok"
                 && self.facts == Some(511 | 4096 | if navigate { 512 | 1024 } else { 0 })
+                && if kind == PanelKind::VersionSource { matches!(self.file_filter, Some(23 | 27 | 55 | 59)) }
+                    else { self.file_filter == Some(0) }
         }
     }
     /// Separate closed five-bit original name receipt: phase entry, saved
@@ -411,13 +413,19 @@ mod observation {
         match status { 0 => "ok", 1 => "permission-denied", 5 => "io", 22 => "invalid-input",
             35 => "would-block", 37 => "already", _ => "invalid-return" }
     }
-    fn project_field_preparation(status: c_int, flags: u32) -> ProjectFieldPreparation {
+    fn project_field_preparation(status: c_int, flags: u32, filter: u32) -> ProjectFieldPreparation {
         // Bit2048 is no longer a navigation fact. Historical failure DATA is
         // parsed separately; no old8191 mask can stand in for the new name call.
         let valid = flags & !6143 == 0 && (flags == 0 || flags & 257 == 257)
             && (flags & 512 == 0 || flags & 511 == 511) && (flags & 1024 == 0 || flags & 512 != 0)
             && (status != 35 || flags == 0);
-        ProjectFieldPreparation { result: project_field_result(status), facts: valid.then_some(flags) }
+        // Closed one-call getter prefix; zero means not sampled for this kind.
+        // Nil/empty content types and nonempty restriction are distinct, but
+        // neither permits selection. No UTI strings or borrowed objects cross.
+        let filter_valid = matches!(filter, 0 | 1 | 3 | 7 | 11 | 23 | 27 | 55 | 59)
+            && (filter == 0 || flags & 511 == 511);
+        ProjectFieldPreparation { result: project_field_result(status), facts: valid.then_some(flags),
+            file_filter: filter_valid.then_some(filter) }
     }
     fn version_source_name_preparation(status: c_int, flags: u32) -> VersionSourceNamePreparation {
         let valid = flags & !31 == 0 && (flags == 0 || flags & 1 != 0)
@@ -504,26 +512,32 @@ mod observation {
             for invalid in ["", "relative", "//Users", "/Users/../project", "/Users/./project", "/Users/project/", "/Users/a\0b"] {
                 if project_field_initial(kind, Path::new(invalid)).is_ok() { return false; }
             }
+            let filter = if kind == PanelKind::VersionSource { 55 } else { 0 };
             for navigate in [false, true] {
                 let mask = 511 | 4096 | if navigate { 512 | 1024 } else { 0 };
-                if !project_field_preparation(0, mask).succeeded(kind, navigate) { return false; }
+                if !project_field_preparation(0, mask, filter).succeeded(kind, navigate) { return false; }
                 for bit in 0..13 {
-                    if project_field_preparation(0, mask ^ (1 << bit)).succeeded(kind, navigate) { return false; }
+                    if project_field_preparation(0, mask ^ (1 << bit), filter).succeeded(kind, navigate) { return false; }
                 }
                 for status in [1, 5, 22, 35, 37, -1] {
-                    if project_field_preparation(status, mask).succeeded(kind, navigate) { return false; }
+                    if project_field_preparation(status, mask, filter).succeeded(kind, navigate) { return false; }
                 }
             }
         }
         for kind in [PanelKind::Project, PanelKind::File, PanelKind::Quit] {
             if project_field_initial(kind, Path::new("/Users/owner/project")).is_ok()
-                || project_field_preparation(0, 511 | 4096).succeeded(kind, false) { return false; }
+                || project_field_preparation(0, 511 | 4096, 0).succeeded(kind, false) { return false; }
         }
         for flags in [2048, 8191, 8192, 1, 256, 512, 257 | 1024, 257 | 2048, 4096, u32::MAX] {
-            if project_field_preparation(5, flags).facts.is_some() { return false; }
+            if project_field_preparation(5, flags, 0).facts.is_some() { return false; }
         }
-        project_field_preparation(35, 0) == (ProjectFieldPreparation { result: "would-block", facts: Some(0) })
-            && project_field_preparation(35, 257).facts.is_none()
+        for filter in 0..=64 {
+            let sample = project_field_preparation(0, 6143, filter);
+            if sample.succeeded(PanelKind::VersionSource, true) != matches!(filter, 23 | 27 | 55 | 59)
+                || sample.succeeded(PanelKind::IosProject, true) != (filter == 0) { return false; }
+        }
+        project_field_preparation(35, 0, 0) == (ProjectFieldPreparation { result: "would-block", facts: Some(0), file_filter: Some(0) })
+            && project_field_preparation(35, 257, 0).facts.is_none()
             && project_field_initial(PanelKind::VersionSource, Path::new(&format!("/{}", "a".repeat(4096)))).is_err()
             && version_source_name_data_check()
     }
@@ -533,7 +547,7 @@ mod observation {
             response: *mut c_int, path: *mut u8, capacity: usize, name_sample: *mut u32) -> c_int;
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
             diagnostic: *mut u32) -> c_int;
-        fn mrk_panel_observe_project_field(panel: *mut c_void, navigate: c_int, facts: *mut u32) -> c_int;
+        fn mrk_panel_observe_project_field(panel: *mut c_void, navigate: c_int, facts: *mut u32, filter: *mut u32) -> c_int;
         fn mrk_panel_observe_version_source_name(panel: *mut c_void, sample: u32, facts: *mut u32) -> c_int;
         fn mrk_observation_ax_trusted() -> c_int;
         fn mrk_panel_observe_arm_open_identity(panel: *mut c_void, target: *const u8, capacity: usize) -> c_int;
@@ -918,7 +932,9 @@ mod observation {
         selection_summary_version: u32, selection_table_roles: u32, selection_outline_roles: u32, selection_list_roles: u32,
         selection_entry_roots: u32, selection_title_present: u32, selection_title_absent: u32, selection_value_present: u32,
         selection_outside_entry_role_mask: u32, selection_fixture_label_mask: u32,
-        selection_expected_label_relations: u32, selection_expected_label_role_mask: u32 }
+        selection_expected_label_relations: u32, selection_expected_label_role_mask: u32,
+        selection_sample: u32, selection_calls_before: u32, selection_cf_before: u32, selection_wait: u32,
+        selection_pending: [[u32; 16]; 7] }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct RecheckWire { known: u32, error: u32, prompt: u32, proof: IdentityProofWire }
@@ -985,8 +1001,50 @@ mod observation {
     const SELECT_NODES: u32 = 256;
     const SELECT_CALLS: u32 = 3072;
     const SELECT_CF: u32 = 1024;
+    const SELECT_SAMPLES: u32 = 8;
     fn prompt_limits(selecting: bool) -> (u32, u32) {
-        if selecting { (SELECT_CALLS, SELECT_CF) } else { (512, 256) }
+        if selecting { (SELECT_SAMPLES * SELECT_CALLS, SELECT_SAMPLES * SELECT_CF) } else { (512, 256) }
+    }
+    /// Compact fixed DATA for complete zero-match samples only. Rows are:
+    /// ordinal, calls-before/after, CF-before/after, nodes, depth, role, entries,
+    /// fixture-mask, expected-relations, checks, matches, flags, error, wait.
+    /// No pending row or wait result is permission for a selection or Open.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ContentReadiness {
+        pub sample: u32, pub calls_before: u32, pub cf_before: u32, pub wait: u32,
+        pub pending: [[u32; 16]; 7],
+    }
+    fn content_readiness_return(w: OpenWire) -> Option<Option<ContentReadiness>> {
+        if w.selection_sample == 0 {
+            if w.selection_calls_before != 0 || w.selection_cf_before != 0 || w.selection_wait != 0
+                || w.selection_pending != [[0; 16]; 7] || w.calls != 0 || w.owned != 0 { return None; }
+            return Some(None);
+        }
+        if w.selection_mode != 1 || w.selection_sample > SELECT_SAMPLES || w.selection_wait > 3 { return None; }
+        let mut calls = 0; let mut slots = 0;
+        for (i, row) in w.selection_pending.into_iter().enumerate() {
+            if i >= (w.selection_sample - 1) as usize {
+                if row != [0; 16] { return None; }
+                continue;
+            }
+            let [ordinal, before, after, cf_before, cf_after, nodes, depth, role, entries, mask,
+                relations, checks, matches, flags, error, wait] = row;
+            if ordinal != i as u32 + 1 || before != calls || cf_before != slots
+                || after <= before || after - before > SELECT_CALLS || cf_after <= cf_before || cf_after - cf_before > SELECT_CF
+                || !(1..SELECT_NODES).contains(&nodes) || !(1..=8).contains(&depth) || depth > nodes
+                || !(1..=16).contains(&role) || entries > nodes || mask > 31 || mask.count_ones() > nodes
+                || relations > 6 || relations & 1 != 0 || entries == 0 && (mask != 0 || relations != 0)
+                || checks != 1 || matches != 0 || flags != 0 || error != 0 || wait != 2 { return None; }
+            calls = after; slots = cf_after;
+        }
+        if w.selection_calls_before != calls || w.selection_cf_before != slots || w.calls < calls || w.owned < slots
+            || w.calls - calls > SELECT_CALLS || w.owned - slots > SELECT_CF
+            || w.calls > SELECT_SAMPLES * SELECT_CALLS || w.owned > SELECT_SAMPLES * SELECT_CF { return None; }
+        if w.selection_wait != 0 && (w.selection_sample == SELECT_SAMPLES || w.selection_checks != 1
+            || w.selection_matches != 0 || w.selection_flags != 0 || w.flags & 7 != 0 || w.site != 21 || w.error == 0
+            || w.ax_error != 0 || w.selection_wait == 3 && w.error != 12) { return None; }
+        Some(Some(ContentReadiness { sample: w.selection_sample, calls_before: calls, cf_before: slots,
+            wait: w.selection_wait, pending: w.selection_pending }))
     }
     /// Finite actual AX/CF DATA from the one original worker. A retired slot is
     /// either a definite empty out-slot or its CFRelease actually returned;
@@ -1046,8 +1104,10 @@ mod observation {
                 && child_cap != 0 && (1..=child_cap).contains(&children),
             // Each AX admission reserves the same original two-call batch;
             // Selection CF allocation refuses BEFORE reserving the 1025th original slot.
-            6 => cap == SELECT_CALLS && count == i64::from(w.calls) && (SELECT_CALLS - 1..=SELECT_CALLS).contains(&w.calls) && children == 0,
-            7 => cap == SELECT_CF && count == i64::from(w.owned) && w.owned == SELECT_CF && children == 0,
+            6 => cap == SELECT_CALLS && count == i64::from(w.calls.checked_sub(w.selection_calls_before)?)
+                && (SELECT_CALLS - 1..=SELECT_CALLS).contains(&(count as u32)) && children == 0,
+            7 => cap == SELECT_CF && count == i64::from(w.owned.checked_sub(w.selection_cf_before)?)
+                && count == i64::from(SELECT_CF) && children == 0,
             _ => false,
         };
         if !valid { return None; }
@@ -1115,14 +1175,66 @@ mod observation {
         pub checks: [bool; 5], pub attempted: bool, pub returned: bool, pub selected: Option<bool>,
         pub nodes: u32, pub matches: u32, pub attribute: &'static str, pub last_role: &'static str, pub depth: u32,
         pub limit: Option<SelectionLimit>, pub projection_summary: Option<SelectionProjectionSummary>,
+        pub content_readiness: Option<ContentReadiness>,
     }
     impl VersionSourceSelection {
         pub fn matched(self) -> bool {
-            self.limit.is_none() && self.checks == [true; 5] && self.attempted && self.returned && self.selected == Some(true)
+            self.content_readiness.is_some_and(|r| (1..=SELECT_SAMPLES).contains(&r.sample) && r.wait == 0)
+                && self.limit.is_none() && self.checks == [true; 5] && self.attempted && self.returned && self.selected == Some(true)
                 && (1..SELECT_NODES).contains(&self.nodes) && self.matches == 1
                 && matches!(self.attribute, "SelectedRows" | "SelectedChildren") && self.last_role != "not-read"
                 && (1..=8).contains(&self.depth) && self.depth <= self.nodes
         }
+    }
+    fn content_readiness_data_check(full: OpenWire, rechecks: [Option<OpenRecheckReturn>; 3]) -> bool {
+        let mut pending = [[0u32; 16]; 7];
+        for count in 0..=7usize {
+            if count > 0 { let i = count - 1; pending[i] = [i as u32 + 1, i as u32 * 707, (i as u32 + 1) * 707,
+                i as u32 * 434, (i as u32 + 1) * 434, 182, 8, 16, 43, 24, 0, 1, 0, 0, 0, 2]; }
+            let before = count as u32 * 707; let cf_before = count as u32 * 434;
+            let current = OpenWire { selection_sample: count as u32 + 1, selection_calls_before: before,
+                selection_cf_before: cf_before, selection_pending: pending, calls: before + full.calls,
+                owned: cf_before + full.owned, released: cf_before + full.owned, ..full };
+            if !open_return(current, rechecks, true, true).is_some_and(OpenReport::succeeded) { return false; }
+            for bad in [OpenWire { calls: before + SELECT_CALLS + 1, ..current },
+                OpenWire { owned: cf_before + SELECT_CF + 1, released: cf_before + SELECT_CF + 1, ..current },
+                OpenWire { selection_calls_before: before + 1, ..current },
+                OpenWire { released: current.owned - 1, ..current },
+                OpenWire { selection_wait: 2, ..current }, OpenWire { selection_sample: 9, ..current }] {
+                if open_return(bad, rechecks, true, true).is_some() { return false; }
+            }
+            if count > 0 {
+                for index in 0..16 {
+                    let mut bad = current;
+                    bad.selection_pending[count - 1][index] = u32::MAX;
+                    if open_return(bad, rechecks, true, true).is_some() { return false; }
+                }
+            }
+            if count < 7 {
+                let mut trailing = current; trailing.selection_pending[count][0] = count as u32 + 1;
+                if open_return(trailing, rechecks, true, true).is_some() { return false; }
+            }
+        }
+        // A complete pending sample can stop for deadline, wait error or the
+        // eighth-sample bound, never manufacture a selected or successful input.
+        for (count, wait, error) in [(0usize, 0, 8), (2, 1, 14), (2, 2, 8), (2, 3, 12), (7, 0, 4)] {
+            let mut history = pending;
+            for row in &mut history[count..] { *row = [0; 16]; }
+            let calls_before = count as u32 * 707; let cf_before = count as u32 * 434;
+            let stopped = OpenWire { flags: 8, site: 21, error, checks: 3, selection_checks: 1,
+                selection_flags: 0, selection_matches: 0, selection_attribute: 0, selection_wait: wait,
+                selection_expected_label_relations: 0, selection_expected_label_role_mask: 0,
+                initial_nodes_examined: 0, recheck_nodes_examined: 0, last_role: 0, last_depth: 0,
+                selection_sample: count as u32 + 1, selection_pending: history,
+                selection_calls_before: calls_before, selection_cf_before: cf_before,
+                calls: calls_before + full.calls, owned: cf_before + full.owned, ..full };
+            let known = error != 14;
+            let stopped = OpenWire { flags: if known { 8 } else { 0 },
+                released: if known { stopped.owned } else { 0 }, ..stopped };
+            if !open_return(stopped, [rechecks[0], None, None], known, true)
+                .is_some_and(|r| !r.succeeded() && !r.attempted && r.custody_known == known) { return false; }
+        }
+        true
     }
     fn selection_return(w: OpenWire) -> Option<VersionSourceSelection> {
         if w.selection_checks > 31 || w.selection_checks & (w.selection_checks + 1) != 0
@@ -1143,6 +1255,7 @@ mod observation {
             last_role: *["not-read", "Sheet", "Group", "SplitGroup", "Button", "Browser", "Table", "Outline", "ScrollArea", "opaque",
                 "Column", "List", "Row", "Cell", "Image", "StaticText", "TextField"].get(w.selection_last_role as usize)?,
             depth: w.selection_depth, limit: selection_limit_return(w)?, projection_summary: selection_projection_summary_return(w)?,
+            content_readiness: content_readiness_return(w)?,
         })
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1178,7 +1291,9 @@ mod observation {
             || w.selection_list_roles != 0 || w.selection_entry_roots != 0 || w.selection_title_present != 0
             || w.selection_title_absent != 0 || w.selection_value_present != 0
             || w.selection_outside_entry_role_mask != 0 || w.selection_fixture_label_mask != 0
-            || w.selection_expected_label_relations != 0 || w.selection_expected_label_role_mask != 0) { return None; }
+            || w.selection_expected_label_relations != 0 || w.selection_expected_label_role_mask != 0
+            || w.selection_sample != 0 || w.selection_calls_before != 0 || w.selection_cf_before != 0 || w.selection_wait != 0
+            || w.selection_pending != [[0; 16]; 7]) { return None; }
         // Only the already-bound original mode chooses the whole-call envelope.
         let (calls, slots) = prompt_limits(selecting);
         // Control completion bits form a prefix over the eligible projection,
@@ -1445,11 +1560,12 @@ mod observation {
         let rechecks = [Some(parent), Some(first), Some(last)];
         let full = OpenWire { flags: 15, site: 13, error: 0, checks: 127, calls: 221,
             initial_nodes_examined: 4, recheck_nodes_examined: 4, owned: 120, released: 120, ax_error: 0,
-            last_role: 4, last_depth: 2, selection_mode: 1, selection_checks: 31, selection_flags: 7,
+            last_role: 4, last_depth: 2, selection_mode: 1, selection_sample: 1, selection_checks: 31, selection_flags: 7,
             selection_nodes: 12, selection_matches: 1, selection_attribute: 1, selection_last_role: 15, selection_depth: 4,
             selection_summary_version: 2, selection_table_roles: 1, selection_entry_roots: 2,
             selection_title_absent: 2, selection_value_present: 2, selection_fixture_label_mask: 1,
             selection_expected_label_relations: 1, selection_expected_label_role_mask: 1 << 15, ..OpenWire::default() };
+        if !content_readiness_data_check(full, rechecks) { return false; }
         if !open_return(full, rechecks, true, true).is_some_and(OpenReport::succeeded)
             || !open_return(OpenWire { selection_attribute: 2, ..full }, rechecks, true, true).is_some_and(OpenReport::succeeded)
             || open_return(full, rechecks, true, false).is_some() { return false; }
@@ -1566,7 +1682,7 @@ mod observation {
         if !open_return(OpenWire { selection_fixture_label_mask: 31, selection_value_present: 5,
             selection_expected_label_relations: 7, selection_expected_label_role_mask: (1 << 15) | (1 << 16), ..full },
             rechecks, true, true).is_some_and(OpenReport::succeeded) { return false; }
-        let ordinary = OpenWire { selection_mode: 0, selection_checks: 0, selection_flags: 0, selection_nodes: 0,
+        let ordinary = OpenWire { selection_mode: 0, selection_sample: 0, selection_checks: 0, selection_flags: 0, selection_nodes: 0,
             selection_matches: 0, selection_attribute: 0, selection_last_role: 0, selection_depth: 0,
             selection_summary_version: 0, selection_table_roles: 0, selection_entry_roots: 0,
             selection_title_absent: 0, selection_value_present: 0, selection_fixture_label_mask: 0,
@@ -1727,7 +1843,9 @@ mod observation {
         // Inert decoder/timeout DATA only: never manufacture a native return.
         let ordinary_return = |w, r: [Option<OpenRecheckReturn>; 2], known|
             open_return(w, [None, r[0], r[1]], known, false);
-        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 160
+        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 624
+            || std::mem::offset_of!(OpenWire, selection_sample) != 160
+            || std::mem::offset_of!(OpenWire, selection_pending) != 176
             || std::mem::offset_of!(OpenWire, selection_limit_observed) != 96
             || std::mem::offset_of!(OpenWire, ax_failure_operation) != 104
             || std::mem::offset_of!(OpenWire, ax_failure_attribute) != 108
@@ -1986,11 +2104,11 @@ mod observation {
             *returned = None;
             self.usable()?;
             if !kind.project_field() { return Err(io::ErrorKind::InvalidInput.into()); }
-            let mut facts = 0;
-            // SAFETY: retained main-thread original, fixed scalar argument and
-            // writable cell; every conversion is owned/retired by that call.
-            let status = unsafe { mrk_panel_observe_project_field(self.original.as_ptr(), i32::from(navigate), &mut facts) };
-            let data = project_field_preparation(status, facts); *returned = Some(data);
+            let mut facts = 0; let mut filter = 0;
+            // SAFETY: retained main-thread original, fixed scalar arguments and
+            // writable cells; every conversion is owned/retired by that call.
+            let status = unsafe { mrk_panel_observe_project_field(self.original.as_ptr(), i32::from(navigate), &mut facts, &mut filter) };
+            let data = project_field_preparation(status, facts, filter); *returned = Some(data);
             match result(status) {
                 Ok(()) if data.succeeded(kind, navigate) => Ok(true),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock && data.facts == Some(0) => Ok(false),
