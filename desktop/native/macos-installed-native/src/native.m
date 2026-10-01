@@ -904,10 +904,11 @@ typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_exami
     // Diagnostic-only roster observations: zero version is unentered, not an observed empty roster.
     uint32_t selection_summary_version, selection_table_roles, selection_outline_roles, selection_list_roles,
         selection_entry_roots, selection_title_present, selection_title_absent, selection_value_present,
-        selection_outside_entry_role_mask;
+        selection_outside_entry_role_mask, selection_fixture_label_mask, selection_expected_label_relations,
+        selection_expected_label_role_mask;
 } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 152 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 160 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
 _Static_assert(sizeof(CFIndex) == sizeof(int64_t) && offsetof(MRKOpenResult, selection_limit_observed) == 96,
     "lossless original selection count ABI");
 _Static_assert(offsetof(MRKOpenResult, ax_failure_operation) == 104 && offsetof(MRKOpenResult, ax_failure_attribute) == 108,
@@ -920,7 +921,10 @@ _Static_assert(offsetof(MRKOpenResult, selection_summary_version) == 112
     && offsetof(MRKOpenResult, selection_title_present) == 132
     && offsetof(MRKOpenResult, selection_title_absent) == 136
     && offsetof(MRKOpenResult, selection_value_present) == 140
-    && offsetof(MRKOpenResult, selection_outside_entry_role_mask) == 144,
+    && offsetof(MRKOpenResult, selection_outside_entry_role_mask) == 144
+    && offsetof(MRKOpenResult, selection_fixture_label_mask) == 148
+    && offsetof(MRKOpenResult, selection_expected_label_relations) == 152
+    && offsetof(MRKOpenResult, selection_expected_label_role_mask) == 156,
     "fixed selection projection summary ABI");
 typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
 typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
@@ -1617,6 +1621,26 @@ static BOOL mrk_ax_original(MRKPrompt *s, int stage) {
     if (code == MRK_OPEN_CUSTODY) s->cleanupKnown = NO;
     return code ? mrk_ax_fail(s, (uint32_t)code) : YES;
 }
+// Diagnostic comparisons of an ALREADY retained, typed and bounded label only.
+// Fixed synthetic labels are never supplemented by raw labels, URLs or paths.
+// None of these bits participates in candidate choice, selection or Open proof.
+static void mrk_ax_selection_label_summary(MRKPrompt *s, CFStringRef value, CFStringRef expected,
+    unsigned role, BOOL exact) {
+    static const CFStringRef fixture_labels[] = {
+        CFSTR("VERSION"), CFSTR("link-input"), CFSTR("kind-input"), CFSTR("inputs"), CFSTR("version.properties")
+    };
+    for (unsigned i = 0; i < 5; ++i)
+        if (CFEqual(value, fixture_labels[i])) s->result.selection_fixture_label_mask |= 1u << i;
+    // bit0 exact; bit1 unequal but case-insensitive equal; bit2 unequal but
+    // containing the literal expected basename. An aggregate can hold all3.
+    uint32_t relations = exact ? 1u : 0u;
+    if (!exact) {
+        if (CFStringCompare(value, expected, kCFCompareCaseInsensitive) == kCFCompareEqualTo) relations |= 2u;
+        if (CFStringFind(value, expected, 0).location != kCFNotFound) relations |= 4u;
+    }
+    s->result.selection_expected_label_relations |= relations;
+    if (relations) s->result.selection_expected_label_role_mask |= 1u << role;
+}
 static unsigned mrk_ax_selection_role(CFStringRef role) {
     if (CFEqual(role, kAXColumnRole)) return MRK_SELECT_COLUMN;
     if (CFEqual(role, kAXListRole)) return MRK_SELECT_LIST;
@@ -1641,7 +1665,8 @@ static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned a
     // Count only the already-returned, typed and bounded string; never its bytes.
     if (optional) s->result.selection_title_present++;
     else s->result.selection_value_present++;
-    if (CFEqual(value, expected)) {
+    BOOL exact = CFEqual(value, expected);
+    if (exact) {
         unsigned entry = p->entries[at];
         if (!entry) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
         if (!p->matches[entry]) {
@@ -1650,12 +1675,13 @@ static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned a
             if (s->result.selection_matches == 1) { p->candidate = entry; p->label = at; p->label_attribute = attribute; p->label_attribute_code = attribute_code; }
         }
     }
+    mrk_ax_selection_label_summary(s, value, expected, p->roles[at], exact);
     return YES;
 }
 static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRef expected) {
     MRKSelectionPass *p = &s->selection; p->nodes[0] = sheet; unsigned queued = 1;
     s->result.site = MRK_OPEN_SELECTION_PROJECTION;
-    s->result.selection_summary_version = 1u;
+    s->result.selection_summary_version = 2u;
     for (unsigned at = 0; at < queued; ++at) {
         s->selection_queued = queued;
         AXUIElementRef node = p->nodes[at];

@@ -1030,7 +1030,8 @@ def expected_result(binding, case):
                         "attempted": True, "returned": True, "selected": True, "nodes": 12, "matches": 1,
                         "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4, "limit": None,
                         "projectionSummary": {"tableRoles": 1, "outlineRoles": 0, "listRoles": 0, "entryRoots": 2,
-                            "titlePresent": 0, "titleAbsent": 2, "valuePresent": 2, "outsideEntryRoleMask": 0}}}
+                            "titlePresent": 0, "titleAbsent": 2, "valuePresent": 2, "outsideEntryRoleMask": 0,
+                            "fixtureLabelMask": 1, "expectedLabelRelations": 1, "expectedLabelRoleMask": 1 << 15}}}
                 row["selectionInput"]["promptButton"].update(calls=221, cfSlots=120, cfSlotsRetired=120)
                 row["selectionBinding"] = {**value["native"]["projectOpenBinding"],
                     "mechanism": "selection-parent-original-sheet-v3", "id": identifier, "kind": "version-source",
@@ -1512,7 +1513,7 @@ def _accessibility_selection_limit(value, selection, button, site, error):
 
 
 def _accessibility_selection_projection_summary(value, selection, site):
-    """Closed existing-roster scalars only; present labels do not prove target presence."""
+    """Closed existing-roster scalars only; fixed label relations never authorize selection."""
     label = "accessibility-selection-data"
     if value is None:
         need(not any(selection["checks"].values()) and not selection["attempted"] and not selection["returned"]
@@ -1521,17 +1522,25 @@ def _accessibility_selection_projection_summary(value, selection, site):
              and site not in ACCESSIBILITY_SELECTION_SITES - {"selection-parent-proof"}, label)
         return None
     counts = ("tableRoles", "outlineRoles", "listRoles", "entryRoots", "titlePresent", "titleAbsent", "valuePresent")
-    need(type(value) is dict and set(value) == {*counts, "outsideEntryRoleMask"}, label)
+    masks = {"outsideEntryRoleMask": 0x1c210, "fixtureLabelMask": 31,
+             "expectedLabelRelations": 7, "expectedLabelRoleMask": 0x1f004}
+    need(type(value) is dict and set(value) == {*counts, *masks}, label)
     need(all(type(value[key]) is int and 0 <= value[key] <= selection["nodes"] for key in counts), label)
+    need(all(type(value[key]) is int and value[key] >= 0 and value[key] & ~allowed == 0
+             for key, allowed in masks.items()), label)
     roles = sum(value[key] for key in counts[:3])
     labels = sum(value[key] for key in counts[4:])
     mask = value["outsideEntryRoleMask"]
+    present = value["titlePresent"] + value["valuePresent"]
     need(roles <= selection["nodes"] and labels <= selection["nodes"]
          and (value["entryRoots"] == 0 or roles > 0) and (labels == 0 or value["entryRoots"] > 0)
          and selection["matches"] <= value["entryRoots"]
          and selection["matches"] <= value["titlePresent"] + value["valuePresent"]
-         and type(mask) is int and mask >= 0 and mask & ~0x1c210 == 0
-         and (mask == 0 or selection["nodes"] > 0), label)
+         and (mask == 0 or selection["nodes"] > 0)
+         and value["fixtureLabelMask"].bit_count() <= present
+         and value["expectedLabelRoleMask"].bit_count() <= present
+         and (value["expectedLabelRelations"] == 0) == (value["expectedLabelRoleMask"] == 0)
+         and bool(value["expectedLabelRelations"] & 1) == (selection["matches"] != 0), label)
     return value
 
 

@@ -367,7 +367,9 @@ fn selection_value(p: mrk_macos_installed_native::VersionSourceSelection) -> Val
         "limit":p.limit.map(|r| json!({"predicate":r.predicate,"observed":r.observed,"cap":r.cap,"queued":r.queued,"children":r.children})),
         "projectionSummary":p.projection_summary.map(|r| json!({"tableRoles":r.table_roles,"outlineRoles":r.outline_roles,
             "listRoles":r.list_roles,"entryRoots":r.entry_roots,"titlePresent":r.title_present,"titleAbsent":r.title_absent,
-            "valuePresent":r.value_present,"outsideEntryRoleMask":r.outside_entry_role_mask}))})
+            "valuePresent":r.value_present,"outsideEntryRoleMask":r.outside_entry_role_mask,
+            "fixtureLabelMask":r.fixture_label_mask,"expectedLabelRelations":r.expected_label_relations,
+            "expectedLabelRoleMask":r.expected_label_role_mask}))})
 }
 fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProof) -> Value {
     let c = p.checks;
