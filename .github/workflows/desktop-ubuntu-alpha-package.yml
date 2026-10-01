@@ -1,0 +1,179 @@
+name: Ubuntu Desktop alpha package
+
+on:
+  push:
+    branches: [verify/desktop-ubuntu-alpha-package]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - templates/workflows/**
+      - .github/workflows/desktop-ubuntu-alpha-package.yml
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed alpha source commit; no release or Store action
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-ubuntu-alpha-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  alpha:
+    name: Real GUI, publisher and .deb / Ubuntu 24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      NODE_DISABLE_COMPILE_CACHE: '1'
+    steps:
+      - name: Require the exact nonrelease disposable source route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-ubuntu-alpha-package ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-ubuntu-alpha-package.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push ]]
+          fi
+
+      - name: Check out reviewed source without checkout credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select the fixed frontend compiler
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+
+      - name: Install only native GUI/compiler/package prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          # No JDK, Xvfb, observation fixture, Store client or runtime execution.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev \
+            libglx-mesa0 libegl-mesa0 libgbm1 bubblewrap xdg-dbus-proxy dpkg-dev
+          /usr/bin/python3.12 --version
+          /usr/bin/systemctl --version
+          df -h /
+          free -m
+
+      - name: Allocate this job's exclusive supplier DATA output
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3.12 -I -S -B - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / ("mrk-alpha-a-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"])
+          path.mkdir(mode=0o700)
+          value = path.lstat()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write("root=" + str(path) + "\n")
+              stream.write("device=" + str(value.st_dev) + "\n")
+              stream.write("inode=" + str(value.st_ino) + "\n")
+          PY
+
+      - name: Download the exact admitted Python supplier as DATA
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: '36282923412'
+          artifact-ids: '10919138502'
+          github-token: ${{ github.token }}
+          path: ${{ steps.inputs.outputs.root }}
+          merge-multiple: true
+
+      - name: Owned acquisition, offline real compile, finality and unprivileged package
+        id: package
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          SUPPLIER: ${{ steps.inputs.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          result="$RUNNER_TEMP/mrk-alpha-result-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          [[ ! -e "$result" && ! -L "$result" ]]
+          set -o noclobber
+          sudo /usr/bin/env -i PATH=/usr/bin:/bin \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            /usr/bin/python3.12 -I -S -B desktop/tools/linux_alpha_package.py owner \
+            --source "$GITHUB_WORKSPACE" --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --supplier "$SUPPLIER" --node "$(command -v node)" --rustup "$(command -v rustup)" > "$result"
+          /usr/bin/python3.12 -I -S -B - "$result" <<'PY'
+          import json, os, re, stat, sys
+          from pathlib import Path
+          raw = Path(sys.argv[1]).read_bytes()
+          assert 0 < len(raw) <= 8192
+          value = json.loads(raw)
+          path = Path(value["publicDirectory"])
+          expected = r"/opt/mrk-alpha-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"] + r"-[0-9a-f]{24}/public"
+          assert re.fullmatch(expected, str(path))
+          info = path.lstat()
+          assert stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o755
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write("public=" + str(path) + "\n")
+          PY
+
+      - name: Retain only the actual alpha .deb and sanitized build binding
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-ubuntu-alpha-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.package.outputs.public }}/*.deb
+            ${{ steps.package.outputs.public }}/package-summary.json
+            ${{ steps.package.outputs.public }}/source-files.json
+            ${{ steps.package.outputs.public }}/ALPHA-README.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+
+      - name: Remove only this job's disposable supplier download
+        if: always() && steps.inputs.outcome == 'success'
+        shell: bash
+        env:
+          SUPPLIER: ${{ steps.inputs.outputs.root }}
+          ORIGINAL_DEVICE: ${{ steps.inputs.outputs.device }}
+          ORIGINAL_INODE: ${{ steps.inputs.outputs.inode }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3.12 -I -S -B - <<'PY'
+          import os, shutil, stat
+          from pathlib import Path
+          path = Path(os.environ["SUPPLIER"])
+          expected = Path(os.environ["RUNNER_TEMP"]) / ("mrk-alpha-a-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"])
+          value = path.lstat()
+          assert path == expected and stat.S_ISDIR(value.st_mode) and value.st_uid == os.getuid()
+          assert (value.st_dev, value.st_ino) == (int(os.environ["ORIGINAL_DEVICE"]), int(os.environ["ORIGINAL_INODE"]))
+          assert shutil.rmtree.avoids_symlink_attacks
+          shutil.rmtree(path)
+          assert not path.exists() and not path.is_symlink()
+          PY
+          df -h /
+          free -m

@@ -198,6 +198,7 @@ impl Profile {
             Self::Passive(Method::MetadataValidate) => crate::metadata_validation_protocol::RESPONSE_LIMIT,
             Self::Passive(Method::EnvironmentRequirements) => crate::environment::RESPONSE_LIMIT,
             Self::Passive(Method::MetadataTextObserve | Method::MetadataTextValidate) => crate::metadata_text_edit_protocol::RESPONSE_LIMIT,
+            Self::Passive(Method::RequiredNotesObserve | Method::RequiredNotesValidate) => crate::required_notes_edit_protocol::RESPONSE_LIMIT,
             Self::Passive(_) => protocol::RESPONSE_LIMIT, Self::GitHubReadOnly => github_protocol::RESPONSE_LIMIT,
             Self::GitHubDevice(_) => device_protocol::RESPONSE_LIMIT,
             Self::GitHubPreflight => preflight_protocol::RESPONSE_LIMIT,
@@ -211,6 +212,7 @@ impl Profile {
             Self::Passive(Method::MetadataValidate) => crate::metadata_validation_protocol::decode_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(Method::EnvironmentRequirements) => crate::environment::decode_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(Method::MetadataTextObserve | Method::MetadataTextValidate) => crate::metadata_text_edit_protocol::decode_passive_envelope(bytes, id).map(ReadOutcome::Passive),
+            Self::Passive(Method::RequiredNotesObserve | Method::RequiredNotesValidate) => crate::required_notes_edit_protocol::decode_passive_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(_) => protocol::decode_response(bytes, id).map(ReadOutcome::Passive),
             Self::GitHubReadOnly => github_protocol::decode_private_response(id, bytes).map(ReadOutcome::GitHub),
             Self::GitHubDevice(step) => device_protocol::decode_response(id, step, bytes).map(ReadOutcome::Device),
@@ -846,6 +848,20 @@ pub(crate) struct PassiveQuery {
     inner: Arc<Inner>, owner: Arc<Owner>, receiver: oneshot::Receiver<Result<Value, BridgeError>>,
 }
 impl PassiveQuery {
+    /// Observe the existing query while the original native coordinator keeps
+    /// driving its own STOP/tick. No new watcher, timer, executor or handle is
+    /// created. On STOP, retain and await the SAME reply/cleanup owner.
+    pub(crate) async fn wait_required_notes(mut self, original: &crate::asset_session::OriginalWork) -> Result<Value, BridgeError> {
+        use std::{future::Future, pin::Pin};
+        if !matches!(self.owner.profile, Profile::Passive(Method::RequiredNotesObserve | Method::RequiredNotesValidate)) {
+            self.owner.fail(BridgeError::invalid());
+        }
+        let result = std::future::poll_fn(|cx| {
+            if original.interrupted() { self.owner.fail(BridgeError::new("cancelled", "The original notes import was stopped.")); }
+            Pin::new(&mut self.receiver).poll(cx)
+        }).await;
+        result.unwrap_or_else(|_| { owner_unknown!(self.owner, &self.inner, None, ReplyLoss); Err(BridgeError::cleanup_unknown()) })
+    }
     pub(crate) async fn wait(self) -> Result<Value, BridgeError> {
         self.receiver.await.unwrap_or_else(|_| { owner_unknown!(self.owner, &self.inner, None, ReplyLoss); Err(BridgeError::cleanup_unknown()) })
     }
@@ -915,6 +931,15 @@ impl Supervisor {
         let owner = self.admit(AdmissionRequest::Passive { method, params: &params }, CompletionTarget::Passive(reply))?;
         // No owner/task cancellation on receiver abandonment. The registry retains
         // Child, IO tasks, startup handles and permits until actual settlement.
+        Ok(PassiveQuery { inner: self.inner.clone(), owner, receiver })
+    }
+
+    /// Fixed required-note import only; all queries share the original native
+    /// work endpoint and the SAME passive admission/roster/cleanup algorithm.
+    pub(crate) fn start_required_notes_passive_until(&self, method: Method, params: Value, original_end: Instant) -> Result<PassiveQuery, BridgeError> {
+        if !matches!(method, Method::RequiredNotesObserve | Method::RequiredNotesValidate) { return Err(BridgeError::invalid()); }
+        let (reply, receiver) = oneshot::channel();
+        let owner = self.admit_until(AdmissionRequest::Passive { method, params: &params }, CompletionTarget::Passive(reply), Some(original_end))?;
         Ok(PassiveQuery { inner: self.inner.clone(), owner, receiver })
     }
 

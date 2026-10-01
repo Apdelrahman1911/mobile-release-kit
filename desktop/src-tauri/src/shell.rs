@@ -528,6 +528,12 @@ fn request_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, B
         tauri::ipc::InvokeBody::Raw(_) => Err(BridgeError::invalid()),
     }
 }
+fn required_notes_raw<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a [u8], BridgeError> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes),
+        tauri::ipc::InvokeBody::Json(_) => Err(BridgeError::invalid()),
+    }
+}
 fn preflight_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
     match body {
         // Original length and duplicate-aware parsing precede all DTO copying.
@@ -814,6 +820,64 @@ async fn metadata_text_edit_status(webview: Webview, request: tauri::ipc::Reques
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let (Some(q), Ok(status)) = (&state.observation, &result) { q.metadata_edit_status(status, &state.bridge.edits); }
     result
+}
+
+#[tauri::command]
+async fn required_notes_capabilities(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::Capabilities, BridgeError> {
+    let window = edit_window(&webview)?;
+    crate::required_notes_commands::capabilities(required_notes_raw(&request)?)?;
+    state.document.required_notes_capabilities(window).map_err(crate::required_notes_edit_protocol::public_error)
+}
+#[tauri::command]
+async fn required_notes_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::Loaded, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::observe(required_notes_raw(&request)?)?;
+    state.bridge.observe_required_notes(&state.document, window, args).await
+}
+#[tauri::command]
+async fn required_notes_validate(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::Validation, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::validate(required_notes_raw(&request)?)?;
+    state.bridge.validate_required_notes(&state.document, window, args).await
+}
+#[tauri::command]
+async fn required_notes_import(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::ImportEnvelope, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::import(required_notes_raw(&request)?)?;
+    let owner = state.document.choose_required_note(app, window, args).map_err(crate::required_notes_edit_protocol::public_error)?;
+    state.document.required_note_result(owner).await.map_err(crate::required_notes_edit_protocol::public_error)
+}
+#[tauri::command]
+async fn required_notes_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::PreparedEnvelope, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::prepare(required_notes_raw(&request)?)?;
+    state.bridge.edits.prepare_required_notes_request(&state.document, window, args).await.map_err(crate::required_notes_edit_protocol::public_error)
+}
+#[tauri::command]
+async fn required_notes_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::StatusEnvelope, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::apply(required_notes_raw(&request)?)?;
+    state.bridge.edits.apply_required_notes_request(&state.document, window, args).map_err(crate::required_notes_edit_protocol::public_error)
+}
+#[tauri::command]
+async fn required_notes_edit_close(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::StatusEnvelope, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::close(required_notes_raw(&request)?)?;
+    // Exact original STOP/status remain callable during a pending quit. Never
+    // pass note text/results through the historical generic fixture hooks.
+    state.bridge.edits.close_required_notes_request(window, args).map_err(crate::required_notes_edit_protocol::public_error)
+}
+#[tauri::command]
+async fn required_notes_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::StatusEnvelope, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::status(required_notes_raw(&request)?)?;
+    state.bridge.edits.required_notes_status(window, &args.window_generation, args.request_id).map_err(crate::required_notes_edit_protocol::public_error)
+}
+#[tauri::command]
+async fn required_notes_import_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::required_notes_edit_protocol::ImportStatusEnvelope, BridgeError> {
+    let window = edit_window(&webview)?;
+    let args = crate::required_notes_commands::status(required_notes_raw(&request)?)?;
+    state.document.required_notes_import_status(window, &args.window_generation, args.request_id).map_err(crate::required_notes_edit_protocol::public_error)
 }
 
 #[tauri::command]
@@ -1515,6 +1579,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
         let mut metadata_revision = None;
+        let mut notes_edit_revision = None;
+        let mut notes_import_revision = None;
         let mut images_edit_revision = None;
         let mut images_selection_revision = None;
         let mut release_version_revision = None;
@@ -1558,6 +1624,22 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.metadata_edit_status(&status, &edits); }
                     metadata_revision = Some(status.status_revision);
                     let _ = app.emit_to(MAIN_WINDOW, metadata_text_wire::EVENT, &status);
+                }
+            }
+            // Private notes never serialize through generic edit/fixture
+            // projection. These two explicit envelopes contain correlation and
+            // finality only: no text, selected paths, baselines or file hashes.
+            if notes_edit_revision != Some(revision) {
+                if let Ok(status) = edits.required_notes_latest_status() {
+                    notes_edit_revision = Some(revision);
+                    if let Some(status) = status { let _ = app.emit_to(MAIN_WINDOW, crate::required_notes_edit_protocol::EVENT, &status); }
+                }
+            }
+            let notes_document_revision = *assets.borrow();
+            if notes_import_revision != Some(notes_document_revision) {
+                if let Ok(status) = document.required_notes_import_latest() {
+                    notes_import_revision = Some(notes_document_revision);
+                    if let Some(status) = status { let _ = app.emit_to(MAIN_WINDOW, crate::required_notes_edit_protocol::IMPORT_EVENT, &status); }
                 }
             }
             if release_version_revision != Some(revision) {
@@ -1790,11 +1872,11 @@ fn request_shutdown(app: &tauri::AppHandle) {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit }
+pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, RequiredNoteText, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit }
 
 #[cfg(target_os = "linux")]
 fn requires_recent_files_suppression(choice: DialogChoice) -> bool {
-    matches!(choice, DialogChoice::File(_) | DialogChoice::PublicImages | DialogChoice::Project | DialogChoice::EvidenceFolder | DialogChoice::ProjectPath(_))
+    matches!(choice, DialogChoice::File(_) | DialogChoice::PublicImages | DialogChoice::RequiredNoteText | DialogChoice::Project | DialogChoice::EvidenceFolder | DialogChoice::ProjectPath(_))
 }
 
 // Public-image support is purpose-specific and separately qualified. macOS
@@ -1917,6 +1999,8 @@ mod owned_gtk {
             }
             DialogChoice::Project => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a mobile project folder"), Some(&parent), gtk::FileChooserAction::SelectFolder,
                 &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)])),
+            DialogChoice::RequiredNoteText => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a UTF-8 release or review note (.txt)"), Some(&parent), gtk::FileChooserAction::Open,
+                &[("Cancel", gtk::ResponseType::Cancel), ("Select text file", gtk::ResponseType::Accept)])),
             DialogChoice::PublicImages => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose public listing images (up to 10)"), Some(&parent), gtk::FileChooserAction::Open,
                 &[("Cancel", gtk::ResponseType::Cancel), ("Select images", gtk::ResponseType::Accept)])),
             DialogChoice::ProjectPath(field) => {
@@ -1991,6 +2075,11 @@ mod owned_gtk {
                             // closed match fail-safe if this path ever changes.
                             FileKind::AppleP12 | FileKind::AppleProfile => { call.failed(Reason::UnsupportedPlatform); return; }
                         }
+                        dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);
+                    }
+                    if matches!(choice, DialogChoice::RequiredNoteText) {
+                        let filter = gtk::FileFilter::new(); filter.set_name(Some("UTF-8 text (.txt)"));
+                        for pattern in ["*.txt", "*.TXT"] { filter.add_pattern(pattern); }
                         dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);
                     }
                     if matches!(choice, DialogChoice::PublicImages) {
@@ -2783,7 +2872,7 @@ mod owned_gtk {
                     else if facts.destroyed && facts.released && facts.close_ack {
                         if matches!(choice, DialogChoice::Quit) { Some(Ok(None)) }
                         else if let Some(reason) = facts.refusal { Some(Err(reason)) }
-                        else if matches!(choice, DialogChoice::ProjectPath(_) | DialogChoice::PublicImages) && facts.declined && !facts.accepted { Some(Ok(None)) }
+                        else if matches!(choice, DialogChoice::ProjectPath(_) | DialogChoice::PublicImages | DialogChoice::RequiredNoteText) && facts.declined && !facts.accepted { Some(Ok(None)) }
                         else if !facts.accepted || owner.interrupted() { Some(Err(Reason::UserCancelled)) }
                         else if matches!(choice, DialogChoice::PublicImages) {
                             Some(call.take_public_images().and_then(|paths| paths.map(DialogResult::Images).map(Some).ok_or(Reason::SourceRefused)))
@@ -3108,6 +3197,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_workflow_edit_close, github_workflow_edit_status,
             metadata_validate, metadata_text_observe, metadata_text_validate, metadata_text_edit_open, metadata_text_edit_prepare,
             metadata_text_edit_apply, metadata_text_edit_close, metadata_text_edit_status,
+        required_notes_capabilities, required_notes_observe, required_notes_validate, required_notes_import,
+        required_notes_edit_prepare, required_notes_edit_apply, required_notes_edit_close, required_notes_edit_status, required_notes_import_status,
             metadata_images_catalog, metadata_images_choose, metadata_images_selection_status, metadata_images_selection_cancel,
             metadata_images_edit_open, metadata_images_recovery_open, metadata_images_edit_prepare,
             metadata_images_edit_apply, metadata_images_edit_close, metadata_images_edit_status,

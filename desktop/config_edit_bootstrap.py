@@ -7,7 +7,7 @@ import time
 def main() -> int:
     started = time.monotonic()
     domain = "configuration" if len(sys.argv) == 2 else sys.argv[2] if len(sys.argv) == 3 else None
-    if (domain not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images"}
+    if (domain not in {"configuration", "github_workflows", "metadata_text", "required_notes", "release_version", "metadata_images"}
             or len(sys.argv) == 3 and domain == "configuration"
             or not sys.flags.isolated or not sys.flags.no_site
             or not sys.dont_write_bytecode or not os.path.isabs(sys.argv[1])

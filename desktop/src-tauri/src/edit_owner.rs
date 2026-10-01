@@ -15,11 +15,12 @@ use {std::process::Stdio, tokio::process::Command};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-use crate::installed_runtime::{GitHubWorkflowRuntimeSlots, MetadataTextRuntimeSlots, ReleaseVersionRuntimeSlots, MetadataImagesRuntimeSlots};
+use crate::installed_runtime::{GitHubWorkflowRuntimeSlots, MetadataTextRuntimeSlots, RequiredNotesRuntimeSlots, ReleaseVersionRuntimeSlots, MetadataImagesRuntimeSlots};
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
     PrepareConfigEdit, Prepared, ResourceState}, github_workflow_edit_protocol::{self as workflow_wire, PrepareWorkflowEdit, WorkflowEditStatus},
     metadata_text_edit_protocol::{self as metadata_wire, MetadataTextEditStatus, PrepareMetadataTextEdit},
+    required_notes_edit_protocol as notes_wire,
     release_version_edit_protocol::{self as version_wire, ReleaseVersionEditStatus, PrepareReleaseVersionEdit},
     metadata_images_edit_protocol::{self as images_wire, MetadataImagesEditStatus, PrepareMetadataImagesEdit},
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
@@ -27,6 +28,9 @@ use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, Conf
 const NATIVE_EDIT_QUALIFIED: bool = false;
 const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
 const NATIVE_METADATA_TEXT_EDIT_QUALIFIED: bool = false;
+const NATIVE_REQUIRED_NOTES_EDIT_QUALIFIED: bool = false;
+#[path = "edit_owner_required_notes.rs"]
+mod required_notes;
 // General/development writer gate stays closed; the installed-only selector
 // separately requires this domain's exact source-bound runtime profile.
 const NATIVE_RELEASE_VERSION_EDIT_QUALIFIED: bool = false;
@@ -41,6 +45,7 @@ fn qualified(domain: EditDomain, configuration_fixture: bool) -> bool {
         EditDomain::Configuration => NATIVE_EDIT_QUALIFIED || configuration_fixture,
         EditDomain::GitHubWorkflows => NATIVE_WORKFLOW_EDIT_QUALIFIED,
         EditDomain::MetadataText => NATIVE_METADATA_TEXT_EDIT_QUALIFIED,
+        EditDomain::RequiredNotes => NATIVE_REQUIRED_NOTES_EDIT_QUALIFIED,
         EditDomain::ReleaseVersion => NATIVE_RELEASE_VERSION_EDIT_QUALIFIED,
         EditDomain::MetadataImages => NATIVE_METADATA_IMAGES_EDIT_QUALIFIED,
     }
@@ -54,6 +59,9 @@ fn workflow_installed_selected(domain: EditDomain, profile_available: bool) -> b
 fn metadata_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
     domain == EditDomain::MetadataText && profile_available
 }
+fn notes_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
+    domain == EditDomain::RequiredNotes && profile_available
+}
 fn version_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
     domain == EditDomain::ReleaseVersion && profile_available
 }
@@ -63,7 +71,7 @@ fn images_installed_selected(domain: EditDomain, profile_available: bool) -> boo
 fn installed_registration_matches(domain: EditDomain, registered: bool) -> bool {
     match domain {
         EditDomain::Configuration => true,
-        EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages => registered,
+        EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::RequiredNotes | EditDomain::ReleaseVersion | EditDomain::MetadataImages => registered,
     }
 }
 fn installed_bootstrap_argument(domain: EditDomain) -> Option<&'static str> {
@@ -71,6 +79,7 @@ fn installed_bootstrap_argument(domain: EditDomain) -> Option<&'static str> {
         EditDomain::Configuration => None,
         EditDomain::GitHubWorkflows => Some("github_workflows"),
         EditDomain::MetadataText => Some("metadata_text"),
+        EditDomain::RequiredNotes => Some("required_notes"),
         EditDomain::ReleaseVersion => Some("release_version"),
         EditDomain::MetadataImages => Some("metadata_images"),
     }
@@ -80,12 +89,13 @@ fn installed_edit_selected(domain: EditDomain, runtime: &RuntimeConfig) -> bool 
         EditDomain::Configuration => configuration_installed_selected(domain, runtime.configuration_edit_profile_available()),
         EditDomain::GitHubWorkflows => workflow_installed_selected(domain, runtime.github_workflow_edit_profile_available()),
         EditDomain::MetadataText => metadata_installed_selected(domain, runtime.metadata_text_edit_profile_available()),
+        EditDomain::RequiredNotes => notes_installed_selected(domain, runtime.required_notes_edit_profile_available()),
         EditDomain::ReleaseVersion => version_installed_selected(domain, runtime.release_version_edit_profile_available()),
         EditDomain::MetadataImages => images_installed_selected(domain, runtime.metadata_images_edit_profile_available()),
     }
 }
 fn installed_domains_match(session: EditDomain, projection: EditDomain, slots: EditDomain) -> bool {
-    matches!(session, EditDomain::Configuration | EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages)
+    matches!(session, EditDomain::Configuration | EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::RequiredNotes | EditDomain::ReleaseVersion | EditDomain::MetadataImages)
         && session == projection && session == slots
 }
 
@@ -99,6 +109,8 @@ enum InstalledEditSlots {
     GitHubWorkflows(GitHubWorkflowRuntimeSlots),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     MetadataText(MetadataTextRuntimeSlots),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    RequiredNotes(RequiredNotesRuntimeSlots),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     ReleaseVersion(ReleaseVersionRuntimeSlots),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -117,6 +129,8 @@ impl InstalledEditSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             EditDomain::MetadataText => Some(Self::MetadataText(MetadataTextRuntimeSlots::new())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            EditDomain::RequiredNotes => Some(Self::RequiredNotes(RequiredNotesRuntimeSlots::new())),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             EditDomain::ReleaseVersion => Some(Self::ReleaseVersion(ReleaseVersionRuntimeSlots::new())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             EditDomain::MetadataImages => Some(Self::MetadataImages(MetadataImagesRuntimeSlots::new())),
@@ -129,6 +143,8 @@ impl InstalledEditSlots {
         Self::GitHubWorkflows(_) => EditDomain::GitHubWorkflows,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::MetadataText(_) => EditDomain::MetadataText,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Self::RequiredNotes(_) => EditDomain::RequiredNotes,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::ReleaseVersion(_) => EditDomain::ReleaseVersion,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -147,6 +163,8 @@ impl InstalledEditSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataText(slots) => runtime.resolve_metadata_text_installed(slots, end, stop),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::RequiredNotes(slots) => runtime.resolve_required_notes_installed(slots, end, stop),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::ReleaseVersion(slots) => runtime.resolve_release_version_installed(slots, end, stop),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => runtime.resolve_metadata_images_installed(slots, end, stop),
@@ -160,6 +178,8 @@ impl InstalledEditSlots {
             Self::GitHubWorkflows(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataText(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::RequiredNotes(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::ReleaseVersion(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -179,6 +199,9 @@ impl InstalledEditSlots {
             Self::MetadataText(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
                 .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::RequiredNotes(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
+                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::ReleaseVersion(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
                 .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -195,6 +218,8 @@ impl InstalledEditSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataText(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::RequiredNotes(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::ReleaseVersion(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
@@ -208,6 +233,8 @@ impl InstalledEditSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataText(slots) => slots.no_child_effect(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::RequiredNotes(slots) => slots.no_child_effect(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::ReleaseVersion(slots) => slots.no_child_effect(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.no_child_effect(),
@@ -219,6 +246,8 @@ impl InstalledEditSlots {
         Self::GitHubWorkflows(slots) => slots.mark_interrupted(),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::MetadataText(slots) => slots.mark_interrupted(),
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Self::RequiredNotes(slots) => slots.mark_interrupted(),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::ReleaseVersion(slots) => slots.mark_interrupted(),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -233,6 +262,8 @@ impl InstalledEditSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataText(slots) => slots.settle_originals(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::RequiredNotes(slots) => slots.settle_originals(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::ReleaseVersion(slots) => slots.settle_originals(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.settle_originals(),
@@ -245,6 +276,8 @@ impl InstalledEditSlots {
             Self::GitHubWorkflows(slots) => slots.settled(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataText(slots) => slots.settled(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::RequiredNotes(slots) => slots.settled(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::ReleaseVersion(slots) => slots.settled(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -263,6 +296,7 @@ fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: b
         EditDomain::Configuration => !(cfg!(target_os = "linux") || cfg!(target_os = "macos")),
         EditDomain::GitHubWorkflows => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
         EditDomain::MetadataText => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
+        EditDomain::RequiredNotes => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
         EditDomain::ReleaseVersion => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
         EditDomain::MetadataImages => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
     } { EditAvailability::UnsupportedPlatform }
@@ -295,12 +329,16 @@ fn request_bytes(domain: EditDomain, session: &str, seq: u32, op: &str, params: 
         EditDomain::Configuration => wire::request(session, seq, op, params),
         EditDomain::GitHubWorkflows => workflow_wire::request(session, seq, op, params),
         EditDomain::MetadataText => metadata_wire::request(session, seq, op, params),
+        EditDomain::RequiredNotes => notes_wire::request(session, seq, op, params),
         EditDomain::ReleaseVersion => version_wire::request(session, seq, op, params),
         EditDomain::MetadataImages => images_wire::request(session, seq, op, params),
     }
 }
-enum DomainStatus { Configuration(ConfigEditStatus), GitHubWorkflows(WorkflowEditStatus), MetadataText(MetadataTextEditStatus), ReleaseVersion(ReleaseVersionEditStatus), MetadataImages(MetadataImagesEditStatus) }
+enum DomainStatus { Configuration(ConfigEditStatus), GitHubWorkflows(WorkflowEditStatus), MetadataText(MetadataTextEditStatus), ReleaseVersion(ReleaseVersionEditStatus), MetadataImages(MetadataImagesEditStatus), RequiredNotes(Option<notes_wire::StatusEnvelope>) }
 impl DomainStatus {
+    fn required_notes(self) -> Result<notes_wire::StatusEnvelope, BridgeError> {
+        match self { Self::RequiredNotes(Some(status)) => Ok(status), _ => Err(BridgeError::protocol()) }
+    }
     fn configuration(self) -> Result<ConfigEditStatus, BridgeError> {
         match self { Self::Configuration(status) => Ok(status), _ => Err(BridgeError::protocol()) }
     }
@@ -317,7 +355,7 @@ impl DomainStatus {
         match self { Self::MetadataImages(status) => Ok(status), _ => Err(BridgeError::protocol()) }
     }
 }
-enum SavedTextSubmission { MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission) }
+enum SavedTextSubmission { RequiredNotes(notes_wire::Submission), MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission) }
 enum ImageOpen { Import(images_wire::ImportData), Recover }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredEditRoot {
@@ -477,7 +515,7 @@ struct Inner {
 }
 struct Registry {
     generation: String, loss_generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
-    revision: u32, exhausted: bool, stopping: bool, disabled: bool,
+    revision: u32, exhausted: bool, stopping: bool, disabled: bool, notes_sequence: Option<u32>,
     active: Option<ActiveOwner>, last: Option<EditProjection>, blocked_projects: BTreeSet<String>, image_recovery_projects: BTreeSet<String>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"),
@@ -1023,6 +1061,7 @@ impl Inner {
             EditDomain::Configuration => self.snapshot(r).map(DomainStatus::Configuration),
             EditDomain::GitHubWorkflows => self.workflow_snapshot(r).map(DomainStatus::GitHubWorkflows),
             EditDomain::MetadataText => self.metadata_text_snapshot(r).map(DomainStatus::MetadataText),
+            EditDomain::RequiredNotes => self.required_notes_snapshot(r).map(DomainStatus::RequiredNotes),
             EditDomain::ReleaseVersion => self.release_version_snapshot(r).map(DomainStatus::ReleaseVersion),
             EditDomain::MetadataImages => self.metadata_images_snapshot(r).map(DomainStatus::MetadataImages),
         }
@@ -1058,6 +1097,7 @@ impl Inner {
             a.unknown = true;
             a.projection.phase = Phase::Unknown;
             a.projection.native_finality = NativeFinality::Unknown;
+            if let Some(detail) = a.projection.required_notes.as_mut() { detail.drop_private(); }
             if a.projection.native_reason == Reason::None { a.projection.native_reason = Reason::CleanupUnknown; }
             if a.cleanup_start.is_none() { a.cleanup_start = Some(Instant::now()); }
             a.session.stop.send_replace(true);
@@ -1139,7 +1179,7 @@ impl EditOwner {
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_next_schedule: Mutex::new(None),
             registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
-                revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new(), image_recovery_projects: BTreeSet::new(),
+                revision: 0, exhausted: false, stopping: false, disabled, notes_sequence: None, active: None, last: None, blocked_projects: BTreeSet::new(), image_recovery_projects: BTreeSet::new(),
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
                     not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -1285,7 +1325,7 @@ impl EditOwner {
     }
 
     pub fn open(&self, window: &str, project_id: String, root: PathBuf) -> Result<ConfigEditStatus, BridgeError> {
-        self.open_domain(window, project_id, root, EditDomain::Configuration, None, None, None, None)?.configuration()
+        self.open_domain(window, project_id, root, EditDomain::Configuration, None, None, None, None, None)?.configuration()
     }
     pub(crate) fn workflow_open_ticket(&self, window: &str) -> Result<WorkflowOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::GitHubWorkflows)
@@ -1300,7 +1340,7 @@ impl EditOwner {
         self.registered_open_ticket(window, EditDomain::MetadataImages)
     }
     fn registered_open_ticket(&self, window: &str, domain: EditDomain) -> Result<RegisteredOpenTicket, BridgeError> {
-        if !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { return Err(invalid_owner()); }
+        if !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::RequiredNotes | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { return Err(invalid_owner()); }
         { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
         // Entropy is obtained before the real document/selection mutex. This
         // private ticket performs no observation, registration, claim or spawn.
@@ -1310,42 +1350,42 @@ impl EditOwner {
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
         ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket), None, None)?.workflows()
+        self.open_domain(window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket), None, None, None)?.workflows()
     }
     pub(crate) fn open_metadata_text(&self, window: &str, project_id: String, context: metadata_wire::Context,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataTextEditStatus, BridgeError> {
         if !context.valid() { return Err(BridgeError::invalid()); }
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::MetadataText, Some(registration), Some(ticket), Some(context), None)?.metadata_text()
+        self.open_domain(window, project_id, root, EditDomain::MetadataText, Some(registration), Some(ticket), Some(context), None, None)?.metadata_text()
     }
     pub(crate) fn open_release_version(&self, window: &str, project_id: String,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<ReleaseVersionEditStatus, BridgeError> {
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::ReleaseVersion, Some(registration), Some(ticket), None, None)?.release_version()
+        self.open_domain(window, project_id, root, EditDomain::ReleaseVersion, Some(registration), Some(ticket), None, None, None)?.release_version()
     }
     pub(crate) fn open_metadata_images(&self, window: &str, project_id: String, data: images_wire::ImportData,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket, claimed: &mut bool) -> Result<MetadataImagesEditStatus, BridgeError> {
         let root = registration.root.path.clone();
         self.open_domain_attempt(window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
-            Some(ImageOpen::Import(data)), claimed)?.metadata_images()
+            Some(ImageOpen::Import(data)), None, claimed)?.metadata_images()
     }
     pub(crate) fn open_metadata_images_recovery(&self, window: &str, project_id: String,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataImagesEditStatus, BridgeError> {
         let root = registration.root.path.clone();
         self.open_domain(window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
-            Some(ImageOpen::Recover))?.metadata_images()
+            Some(ImageOpen::Recover), None)?.metadata_images()
     }
     fn open_domain(&self, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
         registration: Option<RegisteredEditRoot>, ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
-        images: Option<ImageOpen>) -> Result<DomainStatus, BridgeError> {
+        images: Option<ImageOpen>, notes: Option<notes_wire::Binding>) -> Result<DomainStatus, BridgeError> {
         let recovery = domain == EditDomain::MetadataImages && matches!(images.as_ref(), Some(ImageOpen::Recover));
         let mut claimed = false;
-        self.open_domain_attempt(window, project_id, root, domain, registration, ticket, metadata, images, &mut claimed)
+        self.open_domain_attempt(window, project_id, root, domain, registration, ticket, metadata, images, notes, &mut claimed)
             .map_err(|error| image_open_admission_error(recovery, claimed, error))
     }
     fn open_domain_attempt(&self, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
         registration: Option<RegisteredEditRoot>, ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
-        images: Option<ImageOpen>, claimed: &mut bool) -> Result<DomainStatus, BridgeError> {
+        images: Option<ImageOpen>, notes: Option<notes_wire::Binding>, claimed: &mut bool) -> Result<DomainStatus, BridgeError> {
         { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let fixture_workflow = if domain == EditDomain::GitHubWorkflows && !NATIVE_WORKFLOW_EDIT_QUALIFIED {
@@ -1372,7 +1412,7 @@ impl EditOwner {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
                 (nonce()?, executor)
             },
-            (EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages, Some(ticket))
+            (EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::RequiredNotes | EditDomain::ReleaseVersion | EditDomain::MetadataImages, Some(ticket))
                 if ticket.domain == domain && Arc::ptr_eq(&self.inner, &ticket.owner) => (ticket.id, ticket.executor),
             _ => return Err(invalid_owner()),
         };
@@ -1380,14 +1420,16 @@ impl EditOwner {
             Some(ImageOpen::Import(data)) => Some(data.details()), Some(ImageOpen::Recover) => Some(images_wire::Details::recovery()), None => None,
         };
         let image_recovery = image_details.as_ref().is_some_and(|detail| detail.intent == images_wire::Intent::Recover);
-        let params = match (domain, registration.as_ref(), metadata.as_ref(), images) {
-            (EditDomain::Configuration, None, None, None) => json!({"root": root}),
-            (EditDomain::GitHubWorkflows | EditDomain::ReleaseVersion, Some(binding), None, None) => json!({"root":root,"registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
-            (EditDomain::MetadataText, Some(binding), Some(context), None) if context.valid() => json!({"root":root,
+        let params = match (domain, registration.as_ref(), metadata.as_ref(), images, notes.as_ref()) {
+            (EditDomain::Configuration, None, None, None, None) => json!({"root": root}),
+            (EditDomain::GitHubWorkflows | EditDomain::ReleaseVersion, Some(binding), None, None, None) => json!({"root":root,"registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
+            (EditDomain::RequiredNotes, Some(binding), None, None, Some(notes)) if notes.valid() => json!({"root":root,
+                "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"context":notes.context}),
+            (EditDomain::MetadataText, Some(binding), Some(context), None, None) if context.valid() => json!({"root":root,
                 "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"platform":context.platform,"locale":context.locale}),
-            (EditDomain::MetadataImages, Some(binding), None, Some(ImageOpen::Import(data))) =>
+            (EditDomain::MetadataImages, Some(binding), None, Some(ImageOpen::Import(data)), None) =>
                 images_wire::import_params(root, images_wire::ImageRegisteredIdentity::from_project(binding.root.identity), data)?,
-            (EditDomain::MetadataImages, Some(binding), None, Some(ImageOpen::Recover)) => json!({"root":root,
+            (EditDomain::MetadataImages, Some(binding), None, Some(ImageOpen::Recover), None) => json!({"root":root,
                 "registeredIdentity":images_wire::ImageRegisteredIdentity::from_project(binding.root.identity),"intent":"recover"}),
             _ => return Err(invalid_owner()),
         };
@@ -1436,15 +1478,20 @@ impl EditOwner {
                 && !(domain == EditDomain::MetadataImages && image_recovery && r.image_recovery_projects.contains(&project_id)) {
                 return Err(BridgeError::new("pending_state", "This project requires its separately authorized recovery; an import cannot retry it."));
             }
+            if let Some(binding) = &notes {
+                if binding.window_generation != r.generation || r.notes_sequence.is_some_and(|last| binding.request_id <= last) { return Err(invalid_owner()); }
+            }
             let now = Instant::now();
             let generation = r.generation.clone();
             // Claim is permanent for this invocation BEFORE its projection or
             // queue can fail. No postclaim error is a negative admission fact.
             *claimed = true;
+            if let Some(binding) = &notes { r.notes_sequence = Some(binding.request_id); }
             r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
                 projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(workflow_wire::Details::default),
                     metadata_text: metadata.map(metadata_wire::Details::new),
+                    required_notes: notes.map(notes_wire::Details::new),
                     release_version: (domain == EditDomain::ReleaseVersion).then(version_wire::Details::default),
                     metadata_images: image_details,
                     project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
@@ -1517,10 +1564,16 @@ impl EditOwner {
             };
             // Wrong revisions do not revise an original checkout or renew time.
             if a.projection.revision() != Some(revision) {
-                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::RequiredNotes | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
             }
             match (domain, submission) {
+                (EditDomain::RequiredNotes, Some(SavedTextSubmission::RequiredNotes(submission))) => {
+                    let valid = a.projection.required_notes.as_ref().is_some_and(|detail| detail.submission.is_none()
+                        && detail.binding.draft_revision == counters.0 && counters.1 == 0 && submission.valid_for(&detail.binding.context));
+                    if !valid { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                    if let Some(detail) = a.projection.required_notes.as_mut() { detail.submission = Some(submission); }
+                },
                 (EditDomain::MetadataText, Some(SavedTextSubmission::MetadataText(submission))) => {
                     let valid = a.projection.metadata_text.as_ref().is_some_and(|detail| detail.submission.is_none() && submission.valid_for(detail.platform));
                     if !valid { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
@@ -1593,7 +1646,7 @@ impl EditOwner {
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
             if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
-                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::RequiredNotes | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
             }
             let Some(phase_end) = claim_phase(a.review_end, now) else {
@@ -1663,7 +1716,7 @@ impl EditOwner {
         let projection = r.active.as_ref().map(|a| &a.projection).filter(|p| p.session_id == session_id)
             .or_else(|| r.last.as_ref().filter(|p| p.session_id == session_id)).ok_or_else(invalid_owner)?;
         if projection.domain != domain || projection.owner_generation != r.generation
-            || !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { return Err(invalid_owner()); }
+            || !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::RequiredNotes | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { return Err(invalid_owner()); }
         Ok(projection.project_id.clone())
     }
 
@@ -1880,6 +1933,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                         EditDomain::Configuration => wire::RESPONSE_LIMIT,
                         EditDomain::GitHubWorkflows => workflow_wire::RESPONSE_LIMIT,
                         EditDomain::MetadataText => metadata_wire::RESPONSE_LIMIT,
+                        EditDomain::RequiredNotes => notes_wire::RESPONSE_LIMIT,
                         EditDomain::ReleaseVersion => version_wire::RESPONSE_LIMIT,
                         EditDomain::MetadataImages => images_wire::RESPONSE_LIMIT,
                     };
@@ -1893,6 +1947,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                                 EditDomain::Configuration => wire::decode(&frame, &owner.id),
                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
                                 EditDomain::MetadataText => metadata_wire::decode(&frame, &owner.id),
+                                EditDomain::RequiredNotes => notes_wire::decode(&frame, &owner.id),
                                 EditDomain::ReleaseVersion => version_wire::decode(&frame, &owner.id),
                                 EditDomain::MetadataImages => images_wire::decode(&frame, &owner.id),
                             }
@@ -1949,6 +2004,10 @@ fn terminal_projection_admissible(projection: &EditProjection, plan_token: Optio
             EditDomain::GitHubWorkflows => {
                 let Some(prepared) = projection.workflow.as_ref().and_then(|w| w.prepared.as_ref()) else { return false; };
                 Some(prepared.view.files.iter().any(|f| f.action != workflow_wire::Action::Preserve))
+            },
+            EditDomain::RequiredNotes => {
+                let Some(action) = projection.required_notes.as_ref().and_then(|detail| detail.action) else { return false; };
+                Some(action != notes_wire::Action::Preserve)
             },
             EditDomain::MetadataText => {
                 let Some(prepared) = projection.metadata_text.as_ref().and_then(|m| m.prepared.as_ref()) else { return false; };
@@ -2054,6 +2113,42 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
                         owner.fixture_schedule.accepted_terminal(seq);
                     }
+                }
+            }
+            ChildFrame::RequiredNotesOpened(opened) => {
+                if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
+                else if let Some(detail) = a.projection.required_notes.as_mut() {
+                    if opened.selection.context != detail.binding.context || !opened.baseline.valid_for(&detail.binding.context) { invalid = true; }
+                    else {
+                        detail.revision = Some(opened.revision.clone());
+                        detail.checkout = Some(notes_wire::Checkout { revision: opened.revision, selection: opened.selection, baseline: opened.baseline });
+                        a.opened = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Editing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
+            }
+            ChildFrame::RequiredNotesPrepared(prepared) => {
+                if !a.opened || a.prepared || a.claimed_seq != 1 || a.projection.revision() != Some(prepared.revision.as_str()) { invalid = true; }
+                else if let (Some((draft_revision, baseline_generation)), Some(detail)) = (a.prepare_counters, a.projection.required_notes.as_mut()) {
+                    if detail.binding.draft_revision != draft_revision || baseline_generation != 0
+                        || !detail.checkout.as_ref().is_some_and(|old| prepared.view.matches_checkout(old, &detail.binding.context)
+                            && detail.submission.as_ref().is_some_and(|submission| submission.matches(old, &prepared.view))) { invalid = true; }
+                    else {
+                        detail.submission = None;
+                        detail.plan_token = Some(prepared.plan_token.clone()); detail.action = Some(prepared.view.action);
+                        detail.prepared = Some(notes_wire::PrivatePrepared { revision: prepared.revision, plan_token: prepared.plan_token, view: prepared.view });
+                        a.prepared = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Reviewing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
+            }
+            ChildFrame::RequiredNotesTerminal(seq, result) => {
+                let core = result.outcome();
+                if !terminal_admissible(a, seq, result.plan_token.as_deref(), &core) { invalid = true; }
+                else {
+                    uncertain = core.resources == ResourceState::Unknown || core.effect == Effect::Unknown || core.journal == Journal::Unknown;
+                    if let Some(detail) = a.projection.required_notes.as_mut() { detail.drop_private(); }
+                    a.projection.core_outcome = Some(core); a.terminal = true; terminal = true;
                 }
             }
             ChildFrame::MetadataTextOpened(opened) => {
@@ -2359,7 +2454,7 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
             && cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
         EditDomain::ReleaseVersion => version_allowed
             && cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
-        EditDomain::MetadataImages => false, // Installed-only independently qualified source profile.
+        EditDomain::MetadataImages | EditDomain::RequiredNotes => false, // Separate installed-only source qualification.
     };
     if !domain_allowed {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
@@ -2391,6 +2486,7 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
             EditDomain::Configuration => {},
             EditDomain::GitHubWorkflows => { command.arg("github_workflows"); },
             EditDomain::MetadataText => { command.arg("metadata_text"); },
+            EditDomain::RequiredNotes => { command.arg("required_notes"); },
             EditDomain::ReleaseVersion => { command.arg("release_version"); },
             EditDomain::MetadataImages => { command.arg("metadata_images"); },
         }
@@ -3085,6 +3181,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         if a.unknown {
             a.projection.phase = Phase::Unknown;
             a.projection.native_finality = NativeFinality::Unknown;
+            if let Some(detail) = a.projection.required_notes.as_mut() { detail.drop_private(); }
             a.projection.late_settled = true;
         } else {
             a.projection.phase = Phase::Final;
@@ -3106,7 +3203,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                 installed_observed.and_then(|facts| facts.bind_original(&a.projection))
             } else { None };
         }
-        r.last = Some(a.projection); // Atomic active -> one terminal projection.
+        if let Some(detail) = a.projection.required_notes.as_mut() { detail.drop_private(); }
+        r.last = Some(a.projection); // Atomic active -> one terminal projection; no note text/digests.
         inner.bump(&mut r);
     }
     guard.completed = true;
@@ -3459,7 +3557,7 @@ mod workflow_domain_tests {
             template_set:workflow_wire::TemplateSet { core_version:"0.3.0".into(),resource_version:1,resource_sha256:"a".repeat(64) },
             tooling:workflow_wire::Tooling { repository:"example/toolkit".into(),sha:"0".repeat(40),
                 schema_reference:format!("https://raw.githubusercontent.com/example/toolkit/{}/schemas/project.schema.json","0".repeat(40)),state:"format-only".into() } };
-        EditProjection { domain:EditDomain::GitHubWorkflows,metadata_text:None,release_version:None,metadata_images:None,workflow:Some(workflow_wire::Details {
+        EditProjection { domain:EditDomain::GitHubWorkflows,required_notes:None,metadata_text:None,release_version:None,metadata_images:None,workflow:Some(workflow_wire::Details {
             checkout:Some(workflow_wire::Checkout { revision:REVISION.into(),observed }),
             prepared:Some(workflow_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),conflict:None }),
             project_id:"project-1".into(),session_id:SESSION.into(),owner_generation:GENERATION.into(),phase:Phase::Reviewing,

@@ -381,6 +381,8 @@ class InitWorkspace:
         self._handoff_depth = 0
         self._raw_observations: dict[str, tuple[tuple[str, int], ...] | None] = {}
         self._parent_facts: dict[str, tuple[tuple[str, int], ...] | None] = {}
+        # Original staged directory facts for the readonly absent note counterpart.
+        self._metadata_created_parent_facts: dict[str, tuple[tuple[str, int], ...]] = {}
         self._last_read_facts: tuple[tuple[str, int], ...] | None = None
         self._captured: dict[str, ObservedFile] = {}
         self._typed_claimed = False
@@ -543,21 +545,48 @@ class InitWorkspace:
             restoration.check_context(self, changing=changing)
             return
         targets = self._saved_text_targets()
-        dependency_limits = (targets.dependency_limits if self._typed_profile is TypedEditProfile.METADATA_IMAGES
-                             else targets.observation_limits[:2])
+        dependency_limits = targets.dependency_limits
         original_raw = dict(targets._raw)
+        _require(len(targets._dependencies) == len(dependency_limits) == len(targets.dependency_paths)
+                 and tuple(row[0] for row in targets._dependencies) == targets.dependency_paths
+                 and set(original_raw) == set(targets.dependency_paths),
+                 "original metadata dependency inventory is incomplete")
         for (path, before, raw), limit in zip(targets._dependencies, dependency_limits):
             self._last_read_facts = None
             with self._parent(path) as parent:
                 current = self._read(parent, path.split("/")[-1], limit) if parent is not None else None
                 facts = self._last_read_facts
-            self._expect_unchanged(current is not None and current[0] == dict(before) and current[1] == raw
+            expected = None if before is None else (dict(before), raw)
+            self._expect_unchanged(current == expected and (before is not None or raw is None)
                                    and facts == original_raw[path], "original metadata dependency changed")
+        transitions = self._metadata_dependency_transitions()
         for path, facts in targets._parent_facts:
-            self._expect_unchanged(self._parent_facts.get(path) == facts,
-                                   "original metadata dependency parent facts changed")
+            if facts is None and path in transitions:
+                # Only a journal-owned directory may replace original absence.
+                # The counterpart itself was re-read above and must remain absent.
+                current = self.parents[path]
+                if current is None:
+                    self._expect_unchanged(self._current(path, directory=True) is None,
+                                           "original absent note parent appeared")
+                else:
+                    created = self._metadata_created_parent_facts.get(path)
+                    _require(created is not None and all(dict(created)[key] == current[key]
+                                                        for key in ("device", "inode", "mode")),
+                             "note parent has no original staged identity")
+                    # Borrow the known parent; never open/create the sentinel leaf.
+                    with self._parent(path + "/.mrk-required-notes-parent") as parent:
+                        self._expect_unchanged(parent is not None and self._parent_facts.get(path) == created,
+                                               "original staged note parent facts changed")
+            else:
+                self._expect_unchanged(self._parent_facts.get(path) == facts,
+                                       "original metadata dependency parent facts changed")
         if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
             targets.check_roster(self, changing=changing)
+
+    def _metadata_dependency_transitions(self) -> tuple[str, ...]:
+        if self._typed_profile is not TypedEditProfile.METADATA_TEXT:
+            return ()
+        return self._saved_text_targets().transition_directories
 
     def _dependency_only_parents(self) -> dict[str, dict[str, Any] | None]:
         if not self._saved_text_profile:
@@ -935,7 +964,8 @@ class InitWorkspace:
                         self._expect_unchanged(not self._list(handle), "moved directory gained unrelated contents")
                 if self._publishing_terminal is not None:
                     self._terminal_seen = self._publishing_terminal
-                if directory_path is not None and self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+                if directory_path is not None and (self._typed_profile is TypedEditProfile.METADATA_IMAGES
+                        or directory_path in self._metadata_dependency_transitions()):
                     # This exact original-new directory has already moved.
                     # Record that known owned transition before image sibling
                     # traversal, including when rename lost its return. Never
@@ -1111,20 +1141,20 @@ class InitWorkspace:
                      "workflow recovery differs from the original validated inventory")
         elif self._saved_text_profile:
             targets = self._saved_text_targets()
-            target_limit = (MAX_IMAGE_FILE_BYTES if self._typed_profile is TypedEditProfile.METADATA_IMAGES
-                            else targets.observation_limits[2])
-            _require(tuple(e["path"] for e in plan["files"]) == targets.paths
+            payload_limits = targets.payload_limits
+            _require(len(plan["files"]) == len(targets.paths) == len(payload_limits)
+                     and tuple(e["path"] for e in plan["files"]) == targets.paths
                      and tuple(e["path"] for e in plan["directories"]) == targets.directories
-                     and all(e["before"] == self._captured[e["path"]].before
-                             and all(v is None or v["size"] <= target_limit for v in (e["before"], e["after"]))
-                             for e in plan["files"]),
+                     and all(e["path"] in self._captured and e["before"] == self._captured[e["path"]].before
+                             and all(v is None or v["size"] <= limit for v in (e["before"], e["after"]))
+                             for e, limit in zip(plan["files"], payload_limits)),
                      "metadata recovery cannot adopt another target or dependency inventory")
             if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
                 _require(sum(len(raw) for _, _, raw in targets._dependencies)
                          + sum(v["size"] for entry in plan["files"] for v in (entry["before"], entry["after"]) if v)
                          <= MAX_TOTAL_BYTES, "image dependencies and transaction exceed combined bound")
-        if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
-            # Image sibling validation traverses the selected folder. A newly
+        if self._typed_profile is TypedEditProfile.METADATA_IMAGES or self._metadata_dependency_transitions():
+            # Image siblings and an absent note counterpart traverse the selected folder. A newly
             # staged directory identity is not yet its public parent identity;
             # preserve actual None/installed facts until _locations validates
             # the complete corresponding journal relationship.
@@ -1305,6 +1335,14 @@ class InitWorkspace:
                 if before is None:
                     self._mkdir(f"directory-{i}", 0o755, dir_fd=fd)
                     after = self._binding(fd, f"directory-{i}", directory=True)
+                    if path in self._metadata_dependency_transitions():
+                        from .build_inputs import _directory
+                        with self._descriptor(f"directory-{i}", self.flags, dir_fd=fd) as staged:
+                            created = _directory(os.fstat(staged))
+                            self._expect_unchanged(after is not None and all(created[key] == after[key]
+                                                   for key in ("device", "inode", "mode")),
+                                                   "original staged note directory changed")
+                            self._metadata_created_parent_facts[path] = tuple(sorted(created.items()))
                 directories.append({"path": path, "before": before, "after": after})
             files = []
             for i, (item, payload) in enumerate(changes):
@@ -1688,7 +1726,7 @@ class InitWorkspace:
         self._workflow_updates = frozenset(item.path for _, item, _ in updates)
 
     def apply_metadata_text_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
-        """Only original config-bound public text targets; never dependencies."""
+        """Only original config-bound public text or required-note targets; never dependencies."""
         return self._apply_typed(changes, TypedEditProfile.METADATA_TEXT)
 
     def apply_version_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
@@ -1731,12 +1769,12 @@ class InitWorkspace:
                          and original_targets is targets,
                          "metadata Apply requires its original rechecked revision")
                 paths = targets.paths
-                limits = targets.payload_limits if profile is TypedEditProfile.METADATA_IMAGES else targets.observation_limits[2:]
+                limits = targets.payload_limits
             elif profile in (TypedEditProfile.CONFIGURATION, TypedEditProfile.GITHUB_WORKFLOWS):
                 paths, limits = profile.paths, profile.payload_limits
             else:
                 raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
-            _require(type(changes) is list and len(changes) == len(paths), "invalid desktop change count")
+            _require(type(changes) is list and len(changes) == len(paths) == len(limits), "invalid desktop change count")
             for change, path, limit in zip(changes, paths, limits):
                 _require(type(change) is tuple and len(change) == 2, "invalid desktop change")
                 item, payload = change
@@ -1759,7 +1797,7 @@ class InitWorkspace:
                 self._admit_workflow_updates(changes, workflow_resource_sha256)
             elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
                 _require(set(self._captured) == set(targets.observation_paths)
-                         and set(self.parents) == {"release", *targets.directories},
+                         and set(self.parents) == {*targets.dependency_only_parents, *targets.directories},
                          "metadata capture is not the original target/dependency domain")
                 if profile is TypedEditProfile.METADATA_IMAGES:
                     targets.check_payloads(changes)

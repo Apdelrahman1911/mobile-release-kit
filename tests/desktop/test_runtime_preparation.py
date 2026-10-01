@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import stat
@@ -181,6 +182,74 @@ class RuntimePreparationTests(unittest.TestCase):
             self.assertEqual({row["path"] for row in manifest["files"]},
                 set(preparation.CURRENT_BOOTSTRAPS) | {"core.zip", "github-ca.pem", "python/bin/python3"})
             self.assertTrue(set(current_only).isdisjoint(preparation.BOOTSTRAPS))
+
+    def test_cli_roster_is_explicit_and_failures_preserve_supplier_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source"
+            package = source / "src/mobile_release"
+            (source / "desktop").mkdir(parents=True)
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_bytes(b'__version__ = "0.3.0"\n')
+            protocol = b"# inert CLI protocol; never imported\n"
+            (package / "_desktop_engine.py").write_bytes(protocol)
+            for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.GITHUB_CA_NAME):
+                (source / "desktop" / name).write_bytes(b"INERT CLI INPUT; NEVER EXECUTED\n")
+            supplier = b"INERT SUPPLIER FILE; NOT EXECUTABLE\n"
+            target = "x86_64-unknown-linux-gnu"
+            selections = (
+                ("default", [], preparation.BOOTSTRAPS),
+                ("historical", ["--bootstrap-roster", "historical"], preparation.BOOTSTRAPS),
+                ("current", ["--bootstrap-roster", "current"], preparation.CURRENT_BOOTSTRAPS),
+            )
+            historical_manifests = []
+            for label, option, names in selections:
+                with self.subTest(roster=label):
+                    runtime = base / label
+                    (runtime / "python/bin").mkdir(parents=True)
+                    executable = runtime / "python/bin/python3"
+                    executable.write_bytes(supplier)
+                    argv = ["prepare_runtime.py", "--source", str(source),
+                            "--runtime-root", str(runtime), "--target", target, *option]
+                    with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as output:
+                        preparation.main()
+                    raw = (runtime / "manifest.json").read_bytes()
+                    manifest = json.loads(raw)
+                    self.assertEqual({row["path"] for row in manifest["files"]},
+                        set(names) | {"core.zip", "github-ca.pem", "python/bin/python3"})
+                    self.assertEqual(json.loads(output.getvalue()), {
+                        "manifestSha256": hashlib.sha256(raw).hexdigest(),
+                        "protocolSha256": hashlib.sha256(protocol).hexdigest(),
+                        "qualification": "prepared-not-native-verified",
+                    })
+                    self.assertEqual(executable.read_bytes(), supplier)
+                    if label != "current":
+                        historical_manifests.append(raw)
+            self.assertEqual(historical_manifests[0], historical_manifests[1])
+            missing = preparation.CURRENT_BOOTSTRAPS[-1]
+            self.assertNotIn(missing, preparation.BOOTSTRAPS)
+            (source / "desktop" / missing).unlink()
+            for label, option, exit_code in (
+                ("invalid", "unsupported", 2), ("incomplete-current", "current", 1),
+            ):
+                with self.subTest(refusal=label):
+                    runtime = base / label
+                    (runtime / "python/bin").mkdir(parents=True)
+                    executable = runtime / "python/bin/python3"
+                    executable.write_bytes(supplier)
+                    argv = ["prepare_runtime.py", "--source", str(source),
+                            "--runtime-root", str(runtime), "--target", target,
+                            "--bootstrap-roster", option]
+                    with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as output, \
+                            patch("sys.stderr", new_callable=io.StringIO) as error:
+                        with self.assertRaises(SystemExit) as stopped:
+                            preparation.main()
+                    self.assertEqual(stopped.exception.code, exit_code)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertIn("invalid choice" if exit_code == 2 else "Existing inputs/partial output",
+                                  error.getvalue())
+                    self.assertEqual({entry.name for entry in runtime.iterdir()}, {"python"})
+                    self.assertEqual(executable.read_bytes(), supplier)
 
     def test_input_group_entry_is_a_fixed_family_without_changing_old_entries(self):
         # Source DATA only: never import/execute a runtime bootstrap. Exact

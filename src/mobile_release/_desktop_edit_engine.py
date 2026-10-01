@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ._desktop_edit_control import EditInput
-from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL,
+from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL, NOTES_PROTOCOL,
                                      registered_identity, response)
 from .build_inputs import _attempt_all
 from .cancellation import CleanupScope, DefaultCancellation
@@ -25,11 +25,13 @@ from .github_workflow_edit import (WorkflowConflict, apply_github_workflow_edit,
                                    capture_github_workflow_edit, discard_github_workflow_edit,
                                    prepare_github_workflow_edit)
 from .init_transaction import InitOperationFailure, TypedEditProfile
-from .init_workspace_custody import InitRootLease
+from .init_workspace_custody import InitRootLease, _LeasePurpose
 from .metadata_images import (ImageRootIdentity, MetadataImagesInputError,
                               admit_image_root, image_registered_identity)
 from .metadata_text_edit import (apply_metadata_text_edit, capture_metadata_text_edit,
                                  discard_metadata_text_edit, prepare_metadata_text_edit)
+from .required_notes_edit import (apply_required_notes_edit, capture_required_notes_edit,
+                                  discard_required_notes_edit, prepare_required_notes_edit)
 from .release_version_edit import (apply_release_version_edit, capture_release_version_edit,
                                    discard_release_version_edit, prepare_release_version_edit)
 from .metadata_images_edit import (apply_metadata_images_edit, capture_metadata_images_edit,
@@ -72,14 +74,14 @@ class _Engine:
         if type(workflows) is not bool or domain is not None and workflows:
             raise ProtocolError("Invalid fixed edit domain")
         selected = ("github_workflows" if workflows else "configuration") if domain is None else domain
-        if type(selected) is not str or selected not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images"}:
+        if type(selected) is not str or selected not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images", "required_notes"}:
             raise ProtocolError("Invalid fixed edit domain")
         self.domain = selected
         self.workflows = selected == "github_workflows"  # Existing private constructor compatibility.
         self.guard = DefaultCancellation(ValidationError, "configuration edit custody did not settle")
         protocol = {"configuration": PROTOCOL, "github_workflows": WORKFLOW_PROTOCOL,
                     "metadata_text": METADATA_PROTOCOL, "release_version": VERSION_PROTOCOL,
-                    "metadata_images": IMAGES_PROTOCOL}[selected]
+                    "metadata_images": IMAGES_PROTOCOL, "required_notes": NOTES_PROTOCOL}[selected]
         self.input = EditInput(started, protocol=protocol)
         self.lease: InitRootLease | None = None
         self.authority: Any = None
@@ -132,6 +134,8 @@ class _Engine:
                     discard_github_workflow_edit(self.authority)
                 elif self.domain == "metadata_text":
                     discard_metadata_text_edit(self.authority)
+                elif self.domain == "required_notes":
+                    discard_required_notes_edit(self.authority)
                 elif self.domain == "release_version":
                     discard_release_version_edit(self.authority)
                 elif self.domain == "metadata_images":
@@ -197,6 +201,12 @@ class _Engine:
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.METADATA_TEXT,
                 registered_identity=registered_identity(request.params["registeredIdentity"]))
+        elif self.domain == "required_notes":
+            # Only this fixed engine domain supplies the closed internal
+            # purpose, before acquisition; there is no wire purpose parameter.
+            self.lease = InitRootLease(root, cancellation=self.guard,
+                profile=TypedEditProfile.METADATA_TEXT, purpose=_LeasePurpose.REQUIRED_NOTES,
+                registered_identity=registered_identity(request.params["registeredIdentity"]))
         elif self.domain == "release_version":
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.RELEASE_VERSION,
@@ -216,6 +226,8 @@ class _Engine:
             checkout = capture_github_workflow_edit(self.lease)
         elif self.domain == "metadata_text":
             checkout = capture_metadata_text_edit(self.lease, request.params["platform"], request.params["locale"])
+        elif self.domain == "required_notes":
+            checkout = capture_required_notes_edit(self.lease, request.params["context"])
         elif self.domain == "release_version":
             checkout = capture_release_version_edit(self.lease)
         elif self.domain == "metadata_images":
@@ -240,6 +252,9 @@ class _Engine:
                                                   "scopeResources": "settled"})
         elif self.domain == "metadata_text":
             opened = response(request, "opened", {"revision": checkout.revision, "metadataRoot": checkout.metadata_root,
+                                                  "baseline": checkout.baseline, "scopeResources": "settled"})
+        elif self.domain == "required_notes":
+            opened = response(request, "opened", {"revision": checkout.revision, "selection": checkout.selection,
                                                   "baseline": checkout.baseline, "scopeResources": "settled"})
         elif self.domain == "release_version":
             selected = checkout.selection
@@ -275,6 +290,13 @@ class _Engine:
         elif self.domain == "metadata_text":
             plan = prepare_metadata_text_edit(self.lease, checkout, request.params["revision"],
                                              request.params["expectedBaseline"], request.params["fields"])
+        elif self.domain == "required_notes":
+            private_text = request.params.pop("text")
+            try:
+                plan = prepare_required_notes_edit(self.lease, checkout, request.params["revision"],
+                    request.params["context"], request.params["expectedBaseline"], private_text)
+            finally:
+                del private_text
         elif self.domain == "release_version":
             plan = prepare_release_version_edit(self.lease, checkout, request.params["revision"],
                 request.params["expectedBaseline"], request.params["intent"], request.params["values"])
@@ -312,6 +334,8 @@ class _Engine:
             self.outcome = apply_github_workflow_edit(self.lease, plan)
         elif self.domain == "metadata_text":
             self.outcome = apply_metadata_text_edit(self.lease, plan)
+        elif self.domain == "required_notes":
+            self.outcome = apply_required_notes_edit(self.lease, plan)
         elif self.domain == "release_version":
             self.outcome = apply_release_version_edit(self.lease, plan)
         elif self.domain == "metadata_images":
@@ -342,7 +366,7 @@ class _Engine:
             "planToken": self.published_token, "effect": outcome.effect, "journal": outcome.journal,
             "resources": outcome.resources, "reason": outcome.reason,
         }
-        if self.domain in {"github_workflows", "metadata_text", "release_version", "metadata_images"}:
+        if self.domain in {"github_workflows", "metadata_text", "release_version", "metadata_images", "required_notes"}:
             result["kind"] = "outcome"
             if self.domain == "github_workflows" and self.conflict is not None:
                 del result["planToken"]

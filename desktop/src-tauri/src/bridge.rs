@@ -383,6 +383,23 @@ impl DesktopBridge {
         let value = document.passive_query(self, Method::MetadataTextValidate, json!({"platform":input.platform,"fields":&input.fields}))?.wait().await?;
         crate::metadata_text_edit_protocol::validation_result(value, input.platform, &input.fields)
     }
+    pub(crate) async fn observe_required_notes(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::required_notes_commands::Observe) -> Result<crate::required_notes_edit_protocol::Loaded, BridgeError> {
+        use crate::required_notes_edit_protocol as notes;
+        let (registered, query) = document.required_notes_observe_start(self, window, &args).map_err(notes::public_error)?;
+        let value = query.wait().await.map_err(notes::public_error)?;
+        document.required_notes_observe_recheck(self, window, &args, &registered).map_err(notes::public_error)?;
+        let observed = notes::observation_result(value, &args.context).map_err(notes::public_error)?;
+        Ok(observed.loaded(args.project_id, args.window_generation))
+    }
+    pub(crate) async fn validate_required_notes(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::required_notes_commands::Validate) -> Result<crate::required_notes_edit_protocol::Validation, BridgeError> {
+        use crate::required_notes_edit_protocol as notes;
+        self.edits.required_notes_window(window).map_err(notes::public_error)?;
+        let value = document.passive_query(self, Method::RequiredNotesValidate, json!({"context":&args.context,"text":&args.text}))
+            .map_err(notes::public_error)?.wait().await.map_err(notes::public_error)?;
+        notes::validation_result(value, &args.context, &args.text).map_err(notes::public_error)
+    }
     fn project_root(&self, project_id: &str) -> Result<PathBuf, BridgeError> {
         if !crate::protocol::valid_id(project_id) { return Err(BridgeError::invalid()); }
         let projects = self.projects.lock().map_err(|_| BridgeError::new("unavailable", "The project registry is unavailable."))?;

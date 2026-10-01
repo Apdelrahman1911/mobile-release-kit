@@ -27,13 +27,16 @@ from ._metadata_text import (metadata_text_observation_available, observe_metada
 from ._metadata_validation import metadata_validation_available, validate_saved_metadata
 from ._release_version import (observe_release_version,
                               release_version_observation_available)
+from ._required_notes import (observe_required_notes, required_notes_observation_available,
+                              validate_required_notes)
 from ._snapshot import project_snapshot, snapshot_available
 from .contracts import ApiError, CapabilitiesResult, ValidateResult, assurance, issue
 
 __all__ = ["ApiError", "execute"]
 METHODS = ("capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
            "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate", "metadata.validate",
-           "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe")
+           "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe",
+           "required.notes.observe", "required.notes.validate")
 _FUTURE_ACTIONS = (
     "project.initialize", "config.save", "doctor", "preflight.offline",
     "preflight.signing", "preflight.online", "android.build", "ios.build",
@@ -52,6 +55,7 @@ def capabilities() -> CapabilitiesResult:
         "methods": [
             {"method": name, "available": (snapshot_available() if name == "project.snapshot" else
                                            metadata_text_observation_available() if name == "metadata.text.observe" else
+                                           required_notes_observation_available() if name == "required.notes.observe" else
                                            metadata_validation_available() if name == "metadata.validate" else
                                            release_version_observation_available() if name == "release.version.observe" else
                                            candidate_evidence_observation_available() if name in {"artifacts.candidate.observe", "release.evidence.observe"} else True),
@@ -59,6 +63,8 @@ def capabilities() -> CapabilitiesResult:
                         if name == "project.snapshot" and not snapshot_available()
                          else "Selected public text observation is unavailable on this platform."
                          if name == "metadata.text.observe" and not metadata_text_observation_available()
+                         else "Saved required-note observation is unavailable on this platform."
+                         if name == "required.notes.observe" and not required_notes_observation_available()
                          else "Saved metadata validation is unavailable on this platform."
                          if name == "metadata.validate" and not metadata_validation_available()
                          else "Saved release-version observation is unavailable on this platform."
@@ -118,6 +124,10 @@ def execute(method: str, params: dict[str, Any]) -> dict[str, Any]:
         return observe_metadata_text(params)
     if method == "metadata.text.validate":
         return validate_metadata_text(params)
+    if method == "required.notes.observe":
+        return observe_required_notes(params)
+    if method == "required.notes.validate":
+        return validate_required_notes(params)
     if method == "release.version.observe":
         return observe_release_version(params)
     if method == "artifacts.candidate.observe":

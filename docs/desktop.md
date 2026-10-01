@@ -694,10 +694,14 @@ standalone distribution**:
 - The Linux installed-runtime inspection module retains original descriptor
   custody, refuses unknown namespace/mount/permission observations and records
   consuming close results. Separate fixed installed-A selectors connect the
-  twelve-method passive profile and configuration edit owner on the exact
-  reviewed Linux x86_64 GNU host profile (including its pinned kernel). This is
-  not general Ubuntu/Linux qualification or permission to use an arbitrary
-  manifest, host or engine; installed shell/Save verification remains pending.
+  twelve-method passive profile and configuration edit owner on Linux x86_64
+  GNU. Their kernel selector shares the existing Ubuntu 24.04 GA
+  `6.8.0-<ABI>-generic` rule (1–10 decimal ABI digits, no leading zero) plus
+  exact `6.17.0-1022-azure`. The existing distro, namespace, mount, permission,
+  payload and purpose-specific gates still apply. Wider kernel selection alone
+  does not prove installed execution on GA 6.8; new-GA native owner/loader
+  verification remains pending. This is not general Ubuntu/Linux qualification
+  or permission to use an arbitrary manifest, host or engine.
 
 Supply provenance, accepted redistribution notices, real native custody,
 loader/import behavior, installer publication and clean-install checks remain
@@ -717,7 +721,9 @@ labelled with inert example data. A bridge error must never activate preview.
 
 The prepared installed workflow route is limited to the normal
 `desktop-shell` profile on Linux x86_64 GNU, with the existing A runtime and
-exact Ubuntu/platform/custody checks, including kernel `6.17.0-1022-azure`.
+exact Ubuntu/platform/custody checks, with the normal-purpose GA 6.8/exact-Azure
+kernel selector described above. Nonshipping GitHub observation profiles retain
+their Azure-only selectors; they do not establish native GA 6.8 qualification.
 It does not enable a global edit flag or a development/publisher fallback.
 The existing installed-shell observer has a separate fifth `workflow-apply`
 case: mixed preserve/create, a changed-pin conflict without a token, explicit

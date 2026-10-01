@@ -21,6 +21,8 @@
     "allow-github-workflow-edit-close", "allow-github-workflow-edit-status",
     "allow-metadata-validate", "allow-metadata-text-observe", "allow-metadata-text-validate", "allow-metadata-text-edit-open", "allow-metadata-text-edit-prepare",
     "allow-metadata-text-edit-apply", "allow-metadata-text-edit-close", "allow-metadata-text-edit-status",
+    "allow-required-notes-capabilities", "allow-required-notes-observe", "allow-required-notes-validate", "allow-required-notes-import",
+    "allow-required-notes-edit-prepare", "allow-required-notes-edit-apply", "allow-required-notes-edit-close", "allow-required-notes-edit-status", "allow-required-notes-import-status",
     "allow-metadata-images-catalog", "allow-metadata-images-choose", "allow-metadata-images-selection-status", "allow-metadata-images-selection-cancel",
     "allow-metadata-images-edit-open", "allow-metadata-images-recovery-open", "allow-metadata-images-edit-prepare",
     "allow-metadata-images-edit-apply", "allow-metadata-images-edit-close", "allow-metadata-images-edit-status",

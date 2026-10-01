@@ -227,6 +227,11 @@ class ApiPureTests(unittest.TestCase):
                      patch.object(os, "stat", side_effect=AssertionError("filesystem stat")), \
                      patch.object(Path, "open", side_effect=AssertionError("path open")):
                     fresh.execute("environment.requirements", {"draft": draft(), "platform": "android", "operation": "build"})
+                    note = fresh.execute("required.notes.validate", {"context": {"kind": "ios-app-review"}, "text": "Reviewed instructions"})
+                    self.assertTrue(note["valid"])
+                    with self.assertRaises(fresh.ApiError) as notes_refused:
+                        fresh.execute("required.notes.observe", {})
+                    self.assertEqual(notes_refused.exception.code, "required_notes_invalid_params")
                     with self.assertRaises(fresh.ApiError) as refused:
                         fresh.execute("release.version.observe", {})
                     self.assertEqual(refused.exception.code, "release_version_invalid_params")
@@ -274,6 +279,7 @@ class ApiPureTests(unittest.TestCase):
                                        "github.setup.propose": True, "credentials.assess": True,
                                        "metadata.validate": False,
                                        "metadata.text.observe": False, "metadata.text.validate": True,
+                                       "required.notes.observe": False, "required.notes.validate": True,
                                         "environment.requirements": True, "release.version.observe": False,
                                         "artifacts.candidate.observe": False, "release.evidence.observe": False})
             self.assertTrue(execute("config.validate", {"draft": draft()})["valid"])

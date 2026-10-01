@@ -49,6 +49,8 @@ pub(crate) use github_input::{GitHubInputMaterial, GitHubInputGoGate, GitHubRunn
 // never become credential records or private-vault material.
 #[path = "asset_session_images.rs"]
 mod images;
+#[path = "asset_session_required_notes.rs"]
+mod required_notes;
 
 // Explicitly ignored component fixture only: no installed window, persistent
 // provider admission or renderer command is enabled by compiling this module.
@@ -165,13 +167,14 @@ impl SafeAssessment { fn permits(&self) -> bool { self.0.permits_session_preview
 pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing, Preview, Mutating, Stopping, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseImages, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
+enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseImages, ChooseRequiredNote, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
     OpenVault, PrepareInitialize, Initialize, Unlock }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
     fn images(self) -> bool { self == Self::ChooseImages }
-    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.images() || self.evidence() }
+    fn required_notes(self) -> bool { self == Self::ChooseRequiredNote }
+    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.images() || self.required_notes() || self.evidence() }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -284,6 +287,7 @@ struct Retirement {
     payload: Option<Arc<Payload>>, context: Option<Arc<NativeContext>>, slot_context: Option<Arc<NativeContext>>,
     assessment: Option<SafeAssessment>, records: Vec<Record>, assignments: Vec<Assignment>,
     image_batch: Option<asset_source::CapturedPublicImageBatch>, image_paths: Option<Vec<std::path::PathBuf>>,
+    note_content: Option<required_notes::Content>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     vault: vault::Retired,
 }
@@ -589,6 +593,7 @@ struct Slot {
     kind: Option<Kind>, result_record: Option<RecordKey>, retired_payload: Option<Arc<Payload>>,
     evidence: Option<EvidenceBinding>, project_path: Option<Arc<ProjectPathBinding>>, path_result: Option<commands::ProjectPathResult>,
     images: Option<Arc<images::Binding>>, image_batch: Option<asset_source::CapturedPublicImageBatch>,
+    required_notes: Option<Arc<required_notes::Binding>>, note_content: Option<required_notes::Content>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     vault: vault::SlotData,
 }
@@ -617,7 +622,7 @@ struct DocumentState {
     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
     github: ConnectionState,
     evidence: EvidenceRegistry,
-    images: images::Registry,
+    images: images::Registry, required_notes: required_notes::Registry,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     vault: Option<vault::Session>,
 }
@@ -627,7 +632,7 @@ fn project_path_pending(state: &DocumentState) -> bool {
 }
 fn credential_lock_gate(state: &DocumentState) -> Result<(), AssetError> {
     if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
-    if project_path_pending(state) || images::pending(state) {
+    if project_path_pending(state) || images::pending(state) || required_notes::pending(state) {
         return Err(AssetError::new(if state.unknown { Reason::CleanupUnknown } else { Reason::Busy }));
     }
     Ok(())
@@ -830,7 +835,7 @@ fn session_data_empty(state: &DocumentState) -> bool {
     state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
         && state.assignment_retirement.empty() && state.github.input_material_settled()
         && state.slot.as_ref().is_none_or(|slot| slot.candidate.is_none() && slot.staged.is_none() && slot.context.is_none()
-            && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none() && slot.image_batch.is_none() && slot_private_data_empty(slot))
+            && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none() && slot.image_batch.is_none() && slot.note_content.is_none() && slot_private_data_empty(slot))
 }
 fn slot_private_data_empty(_slot: &Slot) -> bool {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1297,7 +1302,7 @@ mod lookup_memory {
     pub(super) fn retirement_empty(value: &Retirement) -> bool {
         value.old_slot.is_none() && value.candidate.is_none() && value.staged.is_none() && value.payload.is_none()
             && value.context.is_none() && value.slot_context.is_none() && value.assessment.is_none()
-            && value.records.capacity() == 0 && value.assignments.capacity() == 0 && value.image_batch.is_none() && value.image_paths.is_none() && value.vault.empty()
+            && value.records.capacity() == 0 && value.assignments.capacity() == 0 && value.image_batch.is_none() && value.image_paths.is_none() && value.note_content.is_none() && value.vault.empty()
     }
     fn retirement_known(owner: &OriginalWork, value: &Retirement) -> Result<(), Problem> {
         // Empty + no positive drain receipt is NOT zero live bytes. The actual
@@ -1422,6 +1427,10 @@ mod lookup_memory {
                 Staged::Bound(value) => self.assignment(value),
                 Staged::Refused(_) => Ok(()),
                 Staged::Vault(value) => self.add(value.retained_bytes().ok_or(Problem::Capacity)?),
+                Staged::RequiredNote { content, binding } => {
+                    self.add(content.retained_bytes().ok_or(Problem::Capacity)?)?;
+                    self.add(binding.retained_bytes().ok_or(Problem::Capacity)?)
+                },
                 Staged::Images { batch, binding } => {
                     self.add(batch.retained_bytes().ok_or(Problem::Capacity)?)?;
                     self.add(binding.retained_bytes().ok_or(Problem::Capacity)?)
@@ -1455,6 +1464,8 @@ mod lookup_memory {
             if let Some(payload) = &slot.retired_payload { self.payload(payload)?; }
             if let Some(batch) = &slot.image_batch { self.add(batch.retained_bytes().ok_or(Problem::Capacity)?)?; }
             if let Some(binding) = &slot.images { self.add(binding.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(binding) = &slot.required_notes { self.add(binding.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(content) = &slot.note_content { self.add(content.retained_bytes().ok_or(Problem::Capacity)?)?; }
             self.owner(&slot.owner)
         }
         fn retirement(&mut self, retirement: &Retirement) -> Result<(), Problem> {
@@ -1467,6 +1478,7 @@ mod lookup_memory {
             if let Some(staged) = &retirement.staged { self.staged(staged)?; }
             if let Some(payload) = &retirement.payload { self.payload(payload)?; }
             if let Some(batch) = &retirement.image_batch { self.add(batch.retained_bytes().ok_or(Problem::Capacity)?)?; }
+            if let Some(content) = &retirement.note_content { self.add(content.retained_bytes().ok_or(Problem::Capacity)?)?; }
             if let Some(paths) = &retirement.image_paths {
                 self.cells::<std::path::PathBuf>(paths.capacity())?;
                 for path in paths { self.add(path.capacity())?; }
@@ -1512,6 +1524,7 @@ mod lookup_memory {
             if state.retiring { return Err(Problem::CleanupUnknown); }
             self.add(std::mem::size_of::<DocumentState>())?;
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(state.required_notes.retained_bytes().ok_or(Problem::Capacity)?)?;
             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             for holding in state.assignment_retirement.slots.iter().flatten() { self.assigned(holding)?; }
@@ -1745,7 +1758,7 @@ fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     // The caller still holds this same document mutex through Supervisor claim.
     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
     if state.stopping { return Err(BridgeError::shutdown()); }
-    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) {
+    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || required_notes::pending(state) {
         return Err(BridgeError::new("busy", "Finish the original native operation first."));
     }
     Ok(())
@@ -1758,7 +1771,7 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
     owner_gate()?;
     if state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
-    if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.images())
+    if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.images() || slot.operation.required_notes())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
     lookup_allocation_gate(state)
@@ -1892,7 +1905,7 @@ impl DocumentBinding {
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), assignment_retirement: AssignmentRetirement::default(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), required_notes: required_notes::Registry::new(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2072,7 +2085,7 @@ impl DocumentBinding {
         vault::observe_stop(state, Instant::now());
         if state.exhausted { return; }
         if state.unknown { state.github.unknown(); state.evidence.revoke(true); }
-        images::refresh(state);
+        images::refresh(state); required_notes::refresh(state);
         let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return; };
         state.evidence.revision = revision;
         match status_successor(state.revision) {
@@ -2089,7 +2102,7 @@ impl DocumentBinding {
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         vault::revoke_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
-        images::refresh(state);
+        images::refresh(state); required_notes::refresh(state);
         stop_quit(state, Instant::now());
         self.inner.bridge.edits.document_lost(MAIN);
         self.inner.bridge.diagnostics.document_lost();
@@ -2467,7 +2480,7 @@ impl DocumentBinding {
                     source: SourceState::NotRun, settlement: Settlement::Pending, context: None, target: None,
                     review_end: None, cleanup_end: None, candidate: None, selection: None, assessment: None,
                     preview: None, assessment_context_revision: None, staged: None, error: None, project: None,
-                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, images: None, image_batch: None,
+                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, images: None, image_batch: None, required_notes: None, note_content: None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             vault: vault::SlotData::default() });
             },
@@ -2519,7 +2532,7 @@ impl DocumentBinding {
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending { return Err(BridgeError::new("busy", "Finish the original native operation first.")); }
         if state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
             && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(evidence_wire::refused(EvidenceProblem::Busy)); }
-        if project_path_pending(&state) || images::pending(&state) { return Err(BridgeError::new("busy", "Finish the original native file selection first.")); }
+        if project_path_pending(&state) || images::pending(&state) || required_notes::pending(&state) { return Err(BridgeError::new("busy", "Finish the original native file selection first.")); }
         self.inner.bridge.preflight.context_changed();
         self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
         self.inner.bridge.preflight.ensure_idle()?;
@@ -2956,7 +2969,7 @@ impl DocumentBinding {
         selected_images: Option<&Arc<images::Binding>>,
     ) -> Result<crate::edit_owner::RegisteredEditRoot, BridgeError> {
         if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText
-            | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages)
+            | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages | crate::edit_protocol::EditDomain::RequiredNotes)
             || selected_images.is_some() && domain != crate::edit_protocol::EditDomain::MetadataImages { return Err(BridgeError::invalid()); }
         self.expire(state, Instant::now());
         if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
@@ -3021,7 +3034,7 @@ impl DocumentBinding {
             crate::edit_protocol::EditDomain::GitHubWorkflows => self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::MetadataText => self.inner.bridge.edits.metadata_fixture_registration_permitted(proof.path()),
             crate::edit_protocol::EditDomain::ReleaseVersion => self.inner.bridge.edits.version_fixture_registration_permitted(proof.path()),
-            crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::MetadataImages => false,
+            crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::MetadataImages | crate::edit_protocol::EditDomain::RequiredNotes => false,
         };
         if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
             || state.session || state.context.is_some() || !state.records.is_empty() || !state.assignments.is_empty()
@@ -3393,13 +3406,14 @@ enum ChildJob {
     Probe { path: std::path::PathBuf, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { path: std::path::PathBuf, binding: Arc<ProjectPathBinding> },
     Images { paths: Vec<std::path::PathBuf>, binding: Arc<images::Binding> },
+    RequiredNote { path: std::path::PathBuf, binding: Arc<required_notes::Binding> },
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     Vault(vault::Child),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     KeyringProvider { step: crate::vault_keyring_linux::ProviderStep },
 }
 enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
-    Images(asset_source::CapturedPublicImageBatch),
+    Images(asset_source::CapturedPublicImageBatch), RequiredNote(String),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     Vault(vault::ChildResult),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3410,6 +3424,7 @@ enum Staged {
     Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
     ProjectPath { proof: asset_source::ProjectPathProbe, binding: Arc<ProjectPathBinding> },
     Images { batch: asset_source::CapturedPublicImageBatch, binding: Arc<images::Binding> },
+    RequiredNote { content: required_notes::Content, binding: Arc<required_notes::Binding> },
     EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch, purpose: EvidencePurpose }, EvidenceObserved(EvidenceResult),
     Committed { bind: Option<Token> }, Bound(Assignment), Refused(Reason),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3421,6 +3436,7 @@ enum Job {
     Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { app: tauri::AppHandle, binding: Arc<ProjectPathBinding> },
     Images { app: tauri::AppHandle, binding: Arc<images::Binding> },
+    RequiredNote { app: tauri::AppHandle, binding: Arc<required_notes::Binding> },
     ChooseEvidenceFolder { app: tauri::AppHandle, purpose: EvidencePurpose }, InspectEvidence { root: asset_source::RegisteredRoot, purpose: EvidencePurpose },
     Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3429,7 +3445,7 @@ enum Job {
 
 async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Reason> {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6, ChildJob::Images { .. } => 7 };
+    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6, ChildJob::Images { .. } => 7, ChildJob::RequiredNote { .. } => 8 };
     let mut book = owner.child.lock().await;
     let mut failed_cleanup = false;
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3497,6 +3513,17 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
                 Ok(proof) => ChildEnd::ProjectPath(proof), Err(reason) => ChildEnd::Refused(reason),
             },
             Err(_) => ChildEnd::Refused(Reason::CleanupUnknown),
+        },
+        ChildJob::RequiredNote { path, binding } => {
+            let captured = match owner.source.lock() {
+                Ok(mut book) => asset_source::capture_required_note(&mut book, path, &binding.root, binding.kind(),
+                    &mut stop, &mut |why| images::source_failure(owner, why)),
+                Err(_) => Err(Reason::CleanupUnknown),
+            };
+            match captured {
+                Ok(text) => ChildEnd::RequiredNote(text),
+                Err(why) => { images::source_failure(owner, why); ChildEnd::Refused(why) },
+            }
         },
         ChildJob::Images { paths, binding } => {
             let captured = match owner.source.lock() {
@@ -3595,7 +3622,7 @@ impl Slot {
         Self { owner, operation, phase: Phase::Admitting, reason: Reason::None, source: SourceState::NotRun, settlement: Settlement::Pending,
             context, target, review_end, cleanup_end: None, candidate: None, selection: None, assessment: None, preview: None,
             assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None,
-            evidence: None, project_path: None, path_result: None, images: None, image_batch: None,
+            evidence: None, project_path: None, path_result: None, images: None, image_batch: None, required_notes: None, note_content: None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             vault: vault::SlotData::default() }
     }
@@ -3620,7 +3647,7 @@ impl DocumentBinding {
             else { state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)) && state.lifetime.original_bound() && !state.stopping && !state.unknown };
         // Remember the actual native decline before stop_quit changes STOP.
         // A programmatic post-STOP close or rejected late OK is never Cancel.
-        let path_choice = !quit && state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.images()));
+        let path_choice = !quit && state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.images() || slot.operation.required_notes()));
         // Preserve the existing Project/File/Evidence receipt semantics. This
         // new purpose separately records genuine native Cancel, never Other or
         // a programmatic/late post-STOP close, for its null-only cancellation.
@@ -3646,7 +3673,7 @@ impl DocumentBinding {
         } else if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
             if read_one_path {
                 slot.phase = Phase::Capturing;
-                slot.source = if slot.operation == Operation::ChooseFile || slot.operation.images() { SourceState::Pending } else { SourceState::NotRun };
+                slot.source = if slot.operation == Operation::ChooseFile || slot.operation.images() || slot.operation.required_notes() { SourceState::Pending } else { SourceState::NotRun };
                 if !slot.operation.project_path() && slot.review_end.is_none() { slot.review_end = Some(now + REVIEW); }
             } else { slot.stop(Reason::UserCancelled, now); }
         }
@@ -3772,6 +3799,22 @@ impl DocumentBinding {
             }
         }
 
+        if matches!(&orphan_result, Some(ChildEnd::RequiredNote(_))) {
+            slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true;
+            slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
+            if slot.note_content.is_none() {
+                if let Some(ChildEnd::RequiredNote(text)) = orphan_result.take() {
+                    slot.note_content = Some(required_notes::Content { text, validation: None });
+                }
+            } else {
+                state.slot = Some(slot); state.retiring = true; self.bump(&mut state);
+                drop(state); drop(orphan_result);
+                let mut state = self.lock(); state.retiring = false; self.bump(&mut state); drop(state);
+                self.reconcile(); return;
+            }
+            self.bump(&mut state);
+        }
+
         if matches!(&orphan_result, Some(ChildEnd::Images(_))) {
             // The actual original child has joined, but its coordinator did
             // not consume the result. Preserve its complete batch in this
@@ -3890,7 +3933,7 @@ impl DocumentBinding {
         if (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready) {
             let retire_context = slot.cleanup_end.is_some() || slot.candidate.is_some() || state.lock_pending || state.stopping || state.unknown || !state.lifetime.original_bound();
             let mut retirement = Retirement { candidate: slot.candidate.take(), staged: slot.staged.take(),
-                payload: slot.retired_payload.take(), image_batch: slot.image_batch.take(),
+                payload: slot.retired_payload.take(), image_batch: slot.image_batch.take(), note_content: slot.note_content.take(),
                 slot_context: if retire_context { slot.context.take() } else { None }, ..Retirement::default() };
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             { retirement.vault = vault::take_retirement(&mut state, &mut slot); }
@@ -3905,7 +3948,7 @@ impl DocumentBinding {
                 if slot.target.as_ref() == Some(&record.key) || slot.result_record.as_ref() == Some(&record.key) { record.mutation_pending = false; }
             }
             let had_data = retirement.candidate.is_some() || retirement.staged.is_some() || retirement.payload.is_some() || retirement.slot_context.is_some() || !retirement.records.is_empty()
-                || !retirement.assignments.is_empty() || retirement.context.is_some() || retirement.image_batch.is_some() || vault_retirement_data(&retirement);
+                || !retirement.assignments.is_empty() || retirement.context.is_some() || retirement.image_batch.is_some() || retirement.note_content.is_some() || vault_retirement_data(&retirement);
             if had_data || resources && slot.phase != Phase::Idle && slot.settlement != Settlement::LateKnown {
                 match slot.owner.retain_retirement(retirement) {
                     Ok(()) => {
@@ -3922,7 +3965,7 @@ impl DocumentBinding {
                         // could not be established.
                         slot.candidate = retirement.candidate; slot.staged = retirement.staged;
                         slot.retired_payload = retirement.payload; slot.context = retirement.slot_context;
-                        slot.image_batch = retirement.image_batch;
+                        slot.image_batch = retirement.image_batch; slot.note_content = retirement.note_content;
                         if !retirement.records.is_empty() { state.records = retirement.records; }
                         if !retirement.assignments.is_empty() { state.assignments = retirement.assignments; }
                         if retirement.context.is_some() { state.context = retirement.context; }
@@ -3996,6 +4039,7 @@ impl DocumentBinding {
         }
         match staged {
             Staged::Images { batch, binding } => images::publish(self, state, slot, batch, binding),
+            Staged::RequiredNote { content, binding } => required_notes::publish(self, state, slot, content, binding),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Staged::Vault(result) => vault::publish(self, state, slot, result),
             Staged::ProjectPath { proof, binding } => {
@@ -4238,13 +4282,13 @@ impl DocumentBinding {
         // An already-late-settled unrelated path remains Unknown. Only the
         // revoked vault lease's finite Release may retain/retire that old slot;
         // this is never permission to replace a live path or start new work.
-        if (project_path_pending(state) || images::pending(state)) && !retired_cleanup { return Err(AssetError::new(Reason::Busy)); }
+        if (project_path_pending(state) || images::pending(state) || required_notes::pending(state)) && !retired_cleanup { return Err(AssetError::new(Reason::Busy)); }
         lookup_allocation_gate(state)?;
         // Public images share lifecycle custody, not a private credential
         // session/lease. Their raw allowance already charges retained vault
         // DATA without attaching or consuming the vault's use authority.
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        if !slot.operation.images() { vault::attach_asset_slot(state, &mut slot)?; }
+        if !slot.operation.images() && !slot.operation.required_notes() { vault::attach_asset_slot(state, &mut slot)?; }
         settle_evidence_status(state);
         let owner = slot.owner.clone();
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -4425,6 +4469,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
     if owner.interrupted() { owner.gui.not_created(Reason::UserCancelled); return Staged::Refused(Reason::UserCancelled); }
     match job {
         Job::Images { app, binding } => images::run(document, owner, app, binding).await,
+        Job::RequiredNote { app, binding } => required_notes::run(document, owner, app, binding).await,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Job::Vault(job) => vault::run(document, owner, job).await,
         Job::Retire { bind } => Staged::Committed { bind },
@@ -6228,7 +6273,7 @@ pub(crate) fn assert_project_path_document_contracts() {
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), assignment_retirement: AssignmentRetirement::default(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), required_notes: required_notes::Registry::new(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -6361,7 +6406,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), assignment_retirement: AssignmentRetirement::default(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), required_notes: required_notes::Registry::new(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -6458,7 +6503,7 @@ mod tests {
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), assignment_retirement: AssignmentRetirement::default(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), required_notes: required_notes::Registry::new(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

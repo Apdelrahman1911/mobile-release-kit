@@ -67,7 +67,7 @@ pub(crate) enum AdmissionFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, ConfigurationPreparing, ConfigurationPrepared,
-    GitHubWorkflowPreparing, GitHubWorkflowPrepared, GitHubReadOnlyPreparing, GitHubReadOnlyPrepared, GitHubDevicePreparing, GitHubDevicePrepared, GitHubPreflightPreparing, GitHubPreflightPrepared, GitHubReleasePreparing, GitHubReleasePrepared, GitHubInputGroupPreparing, GitHubInputGroupPrepared, GitHubRunnerPrerequisitePreparing, GitHubRunnerPrerequisitePrepared, MetadataTextPreparing, MetadataTextPrepared, ReleaseVersionPreparing, ReleaseVersionPrepared, MetadataImagesPreparing, MetadataImagesPrepared,
+    GitHubWorkflowPreparing, GitHubWorkflowPrepared, GitHubReadOnlyPreparing, GitHubReadOnlyPrepared, GitHubDevicePreparing, GitHubDevicePrepared, GitHubPreflightPreparing, GitHubPreflightPrepared, GitHubReleasePreparing, GitHubReleasePrepared, GitHubInputGroupPreparing, GitHubInputGroupPrepared, GitHubRunnerPrerequisitePreparing, GitHubRunnerPrerequisitePrepared, MetadataTextPreparing, MetadataTextPrepared, RequiredNotesPreparing, RequiredNotesPrepared, ReleaseVersionPreparing, ReleaseVersionPrepared, MetadataImagesPreparing, MetadataImagesPrepared,
     EnvironmentDiagnosticsPreparing, EnvironmentDiagnosticsPrepared, OfflinePreflightPreparing, OfflinePreflightPrepared, ProjectRecoveryPreparing, ProjectRecoveryPrepared,
     Retained, Auditing, Refused, Settling, Settled, Unknown }
 
@@ -75,7 +75,7 @@ enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, 
 // renderer argument or extensible runtime interface. Keep the existing edit
 // facades stable; the slot, original ledger and sealed profile must agree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InstalledEditDomain { Configuration, GitHubWorkflows, GitHubReadOnly, GitHubDevice, GitHubPreflight, GitHubRelease, GitHubInputGroup, GitHubRunnerPrerequisite, MetadataText, ReleaseVersion, MetadataImages, EnvironmentDiagnostics, OfflinePreflight, ProjectRecovery }
+enum InstalledEditDomain { Configuration, GitHubWorkflows, GitHubReadOnly, GitHubDevice, GitHubPreflight, GitHubRelease, GitHubInputGroup, GitHubRunnerPrerequisite, MetadataText, RequiredNotes, ReleaseVersion, MetadataImages, EnvironmentDiagnostics, OfflinePreflight, ProjectRecovery }
 impl InstalledEditDomain {
     fn preparing(self) -> Phase { match self {
         Self::Configuration => Phase::ConfigurationPreparing, Self::GitHubWorkflows => Phase::GitHubWorkflowPreparing,
@@ -86,6 +86,7 @@ impl InstalledEditDomain {
         Self::GitHubInputGroup => Phase::GitHubInputGroupPreparing,
         Self::GitHubRunnerPrerequisite => Phase::GitHubRunnerPrerequisitePreparing,
         Self::MetadataText => Phase::MetadataTextPreparing,
+        Self::RequiredNotes => Phase::RequiredNotesPreparing,
         Self::ReleaseVersion => Phase::ReleaseVersionPreparing,
         Self::MetadataImages => Phase::MetadataImagesPreparing,
         Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPreparing, Self::OfflinePreflight => Phase::OfflinePreflightPreparing, Self::ProjectRecovery => Phase::ProjectRecoveryPreparing,
@@ -99,6 +100,7 @@ impl InstalledEditDomain {
         Self::GitHubInputGroup => Phase::GitHubInputGroupPrepared,
         Self::GitHubRunnerPrerequisite => Phase::GitHubRunnerPrerequisitePrepared,
         Self::MetadataText => Phase::MetadataTextPrepared,
+        Self::RequiredNotes => Phase::RequiredNotesPrepared,
         Self::ReleaseVersion => Phase::ReleaseVersionPrepared,
         Self::MetadataImages => Phase::MetadataImagesPrepared,
         Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPrepared, Self::OfflinePreflight => Phase::OfflinePreflightPrepared, Self::ProjectRecovery => Phase::ProjectRecoveryPrepared,
@@ -114,6 +116,7 @@ enum InstalledEditProfile {
     GitHubInputGroup(crate::runtime::GitHubInputGroupInstalledProfile),
     GitHubRunnerPrerequisite(crate::runtime::GitHubRunnerPrerequisiteInstalledProfile),
     MetadataText(crate::runtime::MetadataTextInstalledProfile),
+    RequiredNotes(crate::runtime::RequiredNotesInstalledProfile),
     ReleaseVersion(crate::runtime::ReleaseVersionInstalledProfile),
     MetadataImages(crate::runtime::MetadataImagesInstalledProfile),
     EnvironmentDiagnostics(crate::runtime::EnvironmentDiagnosticsInstalledProfile),
@@ -130,6 +133,7 @@ impl InstalledEditProfile {
         Self::GitHubInputGroup(_) => InstalledEditDomain::GitHubInputGroup,
         Self::GitHubRunnerPrerequisite(_) => InstalledEditDomain::GitHubRunnerPrerequisite,
         Self::MetadataText(_) => InstalledEditDomain::MetadataText,
+        Self::RequiredNotes(_) => InstalledEditDomain::RequiredNotes,
         Self::ReleaseVersion(_) => InstalledEditDomain::ReleaseVersion,
         Self::MetadataImages(_) => InstalledEditDomain::MetadataImages,
         Self::EnvironmentDiagnostics(_) => InstalledEditDomain::EnvironmentDiagnostics, Self::OfflinePreflight(_) => InstalledEditDomain::OfflinePreflight, Self::ProjectRecovery(_) => InstalledEditDomain::ProjectRecovery,
@@ -143,6 +147,7 @@ impl InstalledEditProfile {
         Self::GitHubInputGroup(profile) => profile.selection(),
         Self::GitHubRunnerPrerequisite(profile) => profile.selection(),
         Self::MetadataText(profile) => profile.selection(),
+        Self::RequiredNotes(profile) => profile.selection(),
         Self::ReleaseVersion(profile) => profile.selection(),
         Self::MetadataImages(profile) => profile.selection(),
         Self::EnvironmentDiagnostics(profile) => profile.selection(), Self::OfflinePreflight(profile) => profile.selection(), Self::ProjectRecovery(profile) => profile.selection(),
@@ -157,6 +162,7 @@ impl InstalledEditProfile {
         Self::GitHubInputGroup(profile) => profile.accepts_platform(sysname, machine, release),
         Self::GitHubRunnerPrerequisite(profile) => profile.accepts_platform(sysname, machine, release),
         Self::MetadataText(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::RequiredNotes(profile) => profile.accepts_platform(sysname, machine, release),
         Self::ReleaseVersion(profile) => profile.accepts_platform(sysname, machine, release),
         Self::MetadataImages(profile) => profile.accepts_platform(sysname, machine, release),
         Self::EnvironmentDiagnostics(profile) => profile.accepts_platform(sysname, machine, release),
@@ -203,6 +209,7 @@ impl CustodyObservation {
             Phase::GitHubInputGroupPreparing => "githubInputGroupPreparing", Phase::GitHubInputGroupPrepared => "githubInputGroupPrepared",
             Phase::GitHubRunnerPrerequisitePreparing => "githubRunnerPrerequisitePreparing", Phase::GitHubRunnerPrerequisitePrepared => "githubRunnerPrerequisitePrepared",
             Phase::MetadataTextPreparing => "metadataTextPreparing", Phase::MetadataTextPrepared => "metadataTextPrepared",
+            Phase::RequiredNotesPreparing => "requiredNotesPreparing", Phase::RequiredNotesPrepared => "requiredNotesPrepared",
             Phase::ReleaseVersionPreparing => "releaseVersionPreparing", Phase::ReleaseVersionPrepared => "releaseVersionPrepared",
             Phase::MetadataImagesPreparing => "metadataImagesPreparing", Phase::MetadataImagesPrepared => "metadataImagesPrepared",
             Phase::EnvironmentDiagnosticsPreparing => "environmentDiagnosticsPreparing", Phase::EnvironmentDiagnosticsPrepared => "environmentDiagnosticsPrepared",
@@ -585,7 +592,7 @@ impl OriginalDescriptorBook {
     pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
         self.settlement_started = true; // Absorbing: even empty/positive settlement disables transfer.
         if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing | Phase::GitHubDevicePreparing
-            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::GitHubInputGroupPreparing | Phase::GitHubRunnerPrerequisitePreparing) { self.mark_interrupted(); }
+            | Phase::MetadataTextPreparing | Phase::RequiredNotesPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::GitHubInputGroupPreparing | Phase::GitHubRunnerPrerequisitePreparing) { self.mark_interrupted(); }
         if !self.unknown { self.phase = Phase::Settling; }
         for index in (0..self.records.len()).rev() {
             let _ = self.close_one(SlotId(index)); // Continue every independent known original.
@@ -622,7 +629,7 @@ impl OriginalDescriptorBook {
 
     fn begin(&mut self, operation: Operation, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing | Phase::GitHubDevicePreparing
-            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::GitHubInputGroupPreparing | Phase::GitHubRunnerPrerequisitePreparing | Phase::Retained | Phase::Auditing)
+            | Phase::MetadataTextPreparing | Phase::RequiredNotesPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::GitHubInputGroupPreparing | Phase::GitHubRunnerPrerequisitePreparing | Phase::Retained | Phase::Auditing)
             || self.unknown || self.interrupted || self.settlement_started {
             return Err(AdmissionFailure::LedgerInvariant);
         }
@@ -1187,6 +1194,7 @@ impl InstalledEditRuntimeSlots {
             InstalledEditDomain::GitHubInputGroup => "The GitHub input-group installed runtime failed original-custody inspection.",
             InstalledEditDomain::GitHubRunnerPrerequisite => "The GitHub runner-prerequisite installed runtime failed original-custody inspection.",
             InstalledEditDomain::MetadataText => "The metadata text installed runtime failed original-custody inspection.",
+            InstalledEditDomain::RequiredNotes => "The required notes installed runtime failed original-custody inspection.",
             InstalledEditDomain::ReleaseVersion => "The saved-version installed runtime failed original-custody inspection.",
             InstalledEditDomain::MetadataImages => "The public-image installed runtime failed original-custody inspection.",
             InstalledEditDomain::EnvironmentDiagnostics => "The build-tool diagnostics installed runtime failed original-custody inspection.",
@@ -1472,6 +1480,29 @@ impl MetadataTextRuntimeSlots {
         self.inner.settle_originals()
     }
     pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataText).is_ok() && self.inner.settled() }
+}
+
+pub(crate) struct RequiredNotesRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl RequiredNotesRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::RequiredNotes) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::RequiredNotesInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::RequiredNotes(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::RequiredNotes).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::RequiredNotes)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::RequiredNotes)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::RequiredNotes).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::RequiredNotes).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::RequiredNotes).is_ok() && self.inner.settled() }
 }
 
 pub(crate) struct ReleaseVersionRuntimeSlots { inner: InstalledEditRuntimeSlots }

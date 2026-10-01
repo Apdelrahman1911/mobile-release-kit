@@ -16,12 +16,13 @@ from ..config import (MAX_CONFIG_BYTES, MAX_VERSION_BYTES, parse_config_text,
                       parse_key_value_text, release_version_from_values)
 from ..errors import ConfigurationError, ValidationError
 from ..metadata import (ANDROID_NOTE_MAX_BYTES, REQUIRED_LOCALE_TEXT,
-                        _reject_duplicate_json_pairs, check_metadata_text,
-                        validate_android_release_note)
+                        _reject_duplicate_json_pairs, check_metadata_text)
 from ..metadata_images import (MAX_IMAGE_BYTES, MetadataImagesInputError, image_summary, image_type,
                                public_image_selection, safe_name, _types)
 from ..metadata_text import (CONFIG_PATH, MAX_TEXT_BYTES, MetadataTextInputError,
                              platform_value, public_text_selection)
+from ..required_notes import (IOS_PATHS, NotesConfiguration, NotesContext, RequiredNotesInputError,
+                              check_required_note, required_note_selection)
 from . import _snapshot
 from ._json import bounded_json_text
 from ._release_version import _sensitive, _source_path
@@ -156,19 +157,29 @@ def _android_note(reader: _snapshot._NamedTextReads, root: str,
     if raw is None:
         path = paths[1]
         raw = cast(bytes | None, reader.read(path, limit=ANDROID_NOTE_MAX_BYTES, binary=True))
-    codes: list[str] = []
-    if raw is not None:
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeError:
-            codes.append("metadata.utf8")
-        else:
-            try:
-                validate_android_release_note(text)
-            except ValidationError:
-                codes.append("metadata.android-note")
+    kind = "android-build" if path == paths[0] else "android-default"
+    checked = check_required_note(kind, raw)
+    # Preserve the established coarse, content-free report contract. Policy is
+    # the same helper used by the direct editor; this only maps diagnostics.
+    codes = (["metadata.utf8"] if "notes.utf8" in checked.issues else
+             ["metadata.android-note"] if raw is not None and not checked.valid else [])
     # Invalid/unsafe exact-version files never fall back to a different file.
     return _file("android-note", "release-notes", path, locale, True, raw, codes)
+
+
+def _ios_note(reader: _snapshot._NamedTextReads, root: str, kind: str) -> dict[str, Any]:
+    suffix = IOS_PATHS[kind]
+    try:
+        selection = required_note_selection(NotesConfiguration(NotesContext(kind), root, None))
+    except RequiredNotesInputError:
+        raise MetadataTextInputError("unsafe") from None
+    path = selection.path
+    raw = cast(bytes | None, reader.read(path, limit=selection.editor_byte_limit, binary=True))
+    checked = check_required_note(kind, raw)
+    mapping = {"notes.utf8": "metadata.utf8", "notes.apple-empty": "metadata.empty-text",
+               "notes.testflight-length": "metadata.length", "notes.editor-byte-limit": "metadata.length"}
+    codes = [mapping.get(code, code) for code in checked.issues if code != "notes.missing"]
+    return _file("ios-note", PurePosixPath(suffix).name, path, None, True, raw, codes)
 
 
 def _image_set(reader: _snapshot._NamedTextReads, config: str, platform: str,
@@ -266,9 +277,8 @@ def _outcome(reader: _snapshot._NamedTextReads, platform: str
             _tick(reader)
             _image_set(reader, config, platform, locale, identity, rows, sets)
     if platform == "ios":
-        for name in IOS_NOTES:
-            _append(rows, _text(reader, root + "/" + name, PurePosixPath(name).name,
-                               None, True, "ios-note"))
+        for kind in IOS_PATHS:
+            _append(rows, _ios_note(reader, root, kind))
     valid = all(row["state"] == "checked" for row in rows) and all(not row["issues"] for row in sets)
     result = {"schemaVersion": 1, "platform": platform, "metadataRoot": root,
               "locales": locales, "androidBuild": build,

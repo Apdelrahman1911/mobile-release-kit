@@ -267,10 +267,10 @@ pub(crate) struct PassiveInstalledProfile { _private: () }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl PassiveInstalledProfile {
-    // Current payload V 36282923412/1. Any later profile requires separate source review.
+    // Prepared Ubuntu alpha payload: fixed SOURCE DATA, not native acceptance.
     const TARGET: &'static str = "x86_64-unknown-linux-gnu";
-    pub(crate) const MANIFEST: &'static str = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba";
-    const PROTOCOL: &'static str = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5";
+    pub(crate) const MANIFEST: &'static str = "56c5c970bf9d62a5728ea04d919f65eaf559f031033d70d8dc0e8986ff241301";
+    const PROTOCOL: &'static str = "1519a30721fa3fb8fd5161705ae03d94db49f468d951df1a477f7253f1370fa0";
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         target == Self::TARGET && manifest == Some(Self::MANIFEST) && protocol == Some(Self::PROTOCOL)
     }
@@ -283,7 +283,7 @@ impl PassiveInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -306,7 +306,7 @@ impl GitHubWorkflowInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -364,7 +364,14 @@ impl GitHubReadOnlyInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        // Nonshipping observation payloads retain their original host scope.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.observation.is_some() {
+            return sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure";
+        }
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -398,7 +405,7 @@ impl GitHubDeviceInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -660,7 +667,14 @@ impl GitHubPreflightInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        // Nonshipping observation payloads retain their original host scope.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.observation.is_some() {
+            return sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure";
+        }
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -774,7 +788,14 @@ impl GitHubReleaseInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        // Nonshipping observation payloads retain their original host scope.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.observation.is_some() {
+            return sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure";
+        }
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -797,7 +818,32 @@ impl MetadataTextInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
+    }
+}
+
+// Required notes is a separate closed installed purpose. Neither passive,
+// configuration nor public metadata evidence qualifies the private notes writer.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct RequiredNotesInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl RequiredNotesInstalledProfile {
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    // Filled only by the reviewed source-bound publication/qualification step.
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = None;
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
+            target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let (manifest, _) = Self::SOURCE_BINDING.ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -810,8 +856,8 @@ pub(crate) struct ReleaseVersionInstalledProfile { _private: () }
 impl ReleaseVersionInstalledProfile {
     const TARGET: &'static str = "x86_64-unknown-linux-gnu";
     const SOURCE_BINDING: Option<(&'static str, &'static str)> = Some((
-        "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
-        "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+        "56c5c970bf9d62a5728ea04d919f65eaf559f031033d70d8dc0e8986ff241301",
+        "1519a30721fa3fb8fd5161705ae03d94db49f468d951df1a477f7253f1370fa0",
     ));
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
@@ -825,7 +871,7 @@ impl ReleaseVersionInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -850,7 +896,7 @@ impl MetadataImagesInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -865,8 +911,8 @@ impl ProjectRecoveryInstalledProfile {
     // Q source binding only. Ordinary native/runtime qualification stays closed
     // until this exact profile's two-original recovery evidence is accepted.
     const SOURCE_BINDING: Option<(&'static str, &'static str)> = Some((
-        "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
-        "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+        "56c5c970bf9d62a5728ea04d919f65eaf559f031033d70d8dc0e8986ff241301",
+        "1519a30721fa3fb8fd5161705ae03d94db49f468d951df1a477f7253f1370fa0",
     ));
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
@@ -880,7 +926,7 @@ impl ProjectRecoveryInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -898,7 +944,7 @@ impl EnvironmentDiagnosticsInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -914,7 +960,7 @@ impl OfflinePreflightInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -938,7 +984,7 @@ impl ConfigurationInstalledProfile {
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -970,6 +1016,14 @@ fn linux_installed_passive_method(name: &str) -> bool {
         "release.version.observe" | "metadata.validate" | "metadata.text.observe" | "metadata.text.validate" | "artifacts.candidate.observe" | "release.evidence.observe")
 }
 fn installed_passive_method(name: &str) -> bool {
+    // New private-note methods need their own exact source binding; the old
+    // passive/metadata/credential pin is not evidence for this surface.
+    if matches!(name, "required.notes.observe" | "required.notes.validate") {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { return RequiredNotesInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR); }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { return false; }
+    }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     { linux_installed_passive_method(name) }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1625,6 +1679,29 @@ impl RuntimeConfig {
         // returned paths are DATA; they cannot carry the ledger or spawn.
         originals.inspect_once(self.metadata_text_installed_profile()?, end, stop)
     }
+    /// SAME sealed required_notes selector for capability and original-owner admission.
+    /// Neither another edit profile nor a feature-off native test can select it.
+    pub(crate) fn required_notes_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.required_notes_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn required_notes_installed_profile(&self) -> Result<RequiredNotesInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if RequiredNotesInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(RequiredNotesInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The required notes installed-runtime release and custody profile are not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_required_notes_installed(&self, originals: &mut crate::installed_runtime::RequiredNotesRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // The registered original worker borrows its domain-bound slots. The
+        // returned paths are DATA; they cannot carry the ledger or spawn.
+        originals.inspect_once(self.required_notes_installed_profile()?, end, stop)
+    }
     /// SAME sealed version selector for capability and original-owner admission.
     /// Neither another edit profile nor a feature-off native test can select it.
     pub(crate) fn release_version_edit_profile_available(&self) -> bool {
@@ -2140,6 +2217,93 @@ pub(crate) fn assert_installed_version_profile_contract() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn ordinary_installed_purpose_profiles_share_reviewed_kernel_scope() {
+        // Predicate DATA only: no selection, native inspection, path, process or
+        // feature qualification. Closed purposes remain closed independently.
+        let cases: &[(&[u8], &[u8], &[u8], bool)] = &[
+            (b"Linux", b"x86_64", b"6.8.0-1-generic", true),
+            (b"Linux", b"x86_64", b"6.8.0-91-generic", true),
+            (b"Linux", b"x86_64", b"6.8.0-9999999999-generic", true),
+            (b"Linux", b"x86_64", b"6.17.0-1022-azure", true),
+            (b"Linux", b"x86_64", b"6.8.0-generic", false),
+            (b"Linux", b"x86_64", b"6.8.0-0-generic", false),
+            (b"Linux", b"x86_64", b"6.8.0-091-generic", false),
+            (b"Linux", b"x86_64", b"6.8.0-+91-generic", false),
+            (b"Linux", b"x86_64", b"6.8.0-99999999999-generic", false),
+            (b"Linux", b"x86_64", b"6.8.0-91-generic-custom", false),
+            (b"Linux", b"x86_64", b"6.11.0-29-generic", false),
+            (b"Linux", b"x86_64", b"6.17.0-1021-azure", false),
+            (b"Linux", b"x86_64", b"6.17.0-1023-azure", false),
+            (b"Linux", b"x86_64", b"6.17.0-1022-azure-custom", false),
+            (b"FreeBSD", b"x86_64", b"6.8.0-91-generic", false),
+            (b"Linux", b"aarch64", b"6.8.0-91-generic", false),
+        ];
+        macro_rules! check {
+            ($profile:expr) => {{
+                let profile = $profile;
+                for &(sysname, machine, release, expected) in cases {
+                    assert_eq!(profile.accepts_platform(sysname, machine, release), expected,
+                        "{}", stringify!($profile));
+                }
+            }};
+        }
+        check!(PassiveInstalledProfile { _private: () });
+        check!(GitHubWorkflowInstalledProfile { _private: () });
+        check!(GitHubReadOnlyInstalledProfile {
+            _private: (),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation: None,
+        });
+        check!(GitHubDeviceInstalledProfile { _private: () });
+        check!(GitHubPreflightInstalledProfile {
+            _private: (),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation: None,
+        });
+        check!(GitHubReleaseInstalledProfile {
+            _private: (),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation: None,
+        });
+        check!(MetadataTextInstalledProfile { _private: () });
+        check!(RequiredNotesInstalledProfile { _private: () });
+        check!(ReleaseVersionInstalledProfile { _private: () });
+        check!(MetadataImagesInstalledProfile { _private: () });
+        check!(ProjectRecoveryInstalledProfile { _private: () });
+        check!(EnvironmentDiagnosticsInstalledProfile { _private: () });
+        check!(OfflinePreflightInstalledProfile { _private: () });
+        check!(ConfigurationInstalledProfile { _private: () });
+    }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn nonshipping_installed_observers_keep_their_exact_azure_scope() {
+        macro_rules! check {
+            ($profile:expr) => {{
+                let profile = $profile;
+                assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+                assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+                assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            }};
+        }
+        for observation in [GitHubReadOnlyObservationProfile::Normal, GitHubReadOnlyObservationProfile::DialRealCa,
+            GitHubReadOnlyObservationProfile::DialSyntheticCa] {
+            check!(GitHubReadOnlyInstalledProfile { _private: (), observation: Some(observation) });
+        }
+        check!(GitHubPreflightInstalledProfile { _private: (), observation: Some(GitHubPreflightObservationProfile::Synthetic) });
+        check!(GitHubReleaseInstalledProfile { _private: (), observation: Some(GitHubReleaseObservationProfile::Synthetic) });
+    }
     #[test]
     fn installed_allowlist_is_exactly_the_read_only_project_draft_guidance_and_saved_services() {
         for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
@@ -2662,7 +2826,7 @@ mod tests {
             assert_eq!(data.python, root.join("python/bin/python3")); assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
             assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
             assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
-            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
         }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
@@ -2739,7 +2903,8 @@ mod tests {
             assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
             assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
             assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
-            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+            for release in [b"6.17.0-1021-azure".as_slice(), b"6.17.0-1022-azure-custom"] {
                 assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
             }
             assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
@@ -2781,8 +2946,8 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn version_candidate_bindings_are_exactly_the_current_payload() {
         let (target, manifest, protocol) = ("x86_64-unknown-linux-gnu",
-            "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
-            "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5");
+            "56c5c970bf9d62a5728ea04d919f65eaf559f031033d70d8dc0e8986ff241301",
+            "1519a30721fa3fb8fd5161705ae03d94db49f468d951df1a477f7253f1370fa0");
         assert_eq!(ReleaseVersionInstalledProfile::TARGET, target);
         assert_eq!(ReleaseVersionInstalledProfile::SOURCE_BINDING, Some((manifest, protocol)));
         assert!(ReleaseVersionInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
@@ -2833,7 +2998,8 @@ mod tests {
             assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
             assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
             assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
-            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+            for release in [b"6.17.0-1021-azure".as_slice(), b"6.17.0-1022-azure-custom"] {
                 assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
             }
             assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
@@ -2882,7 +3048,8 @@ mod tests {
             assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
             assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
             assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
-            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+            for release in [b"6.17.0-1021-azure".as_slice(), b"6.17.0-1022-azure-custom"] {
                 assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
             }
             assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
@@ -2933,7 +3100,8 @@ mod tests {
             assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
             assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
             assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
-            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+            for release in [b"6.17.0-1021-azure".as_slice(), b"6.17.0-1022-azure-custom"] {
                 assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
             }
             assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
@@ -2948,6 +3116,39 @@ mod tests {
         }
         assert!(runtime.resolve(Instant::now()).is_err());
         assert!(runtime.resolve_edit(Instant::now()).is_err());
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn ubuntu_alpha_source_bindings_match_prepared_runtime() {
+        // Source DATA agreement only; this cannot grant native or owner admission.
+        let source: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packaging/ubuntu-alpha/runtime-bindings.json")).unwrap();
+        assert_eq!(source["schema"].as_str(), Some("mrk-desktop-ubuntu-alpha-runtime-bindings-v1"));
+        assert_eq!(source["qualification"].as_str(), Some("prepared-not-native-verified"));
+        let (target, manifest, protocol) = (source["target"].as_str().unwrap(),
+            source["manifestSha256"].as_str().unwrap(), source["protocolSha256"].as_str().unwrap());
+        assert_eq!(PassiveInstalledProfile::TARGET, target);
+        assert_eq!((PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL), (manifest, protocol));
+        for (profile_target, binding) in [
+            (ReleaseVersionInstalledProfile::TARGET, ReleaseVersionInstalledProfile::SOURCE_BINDING),
+            (ProjectRecoveryInstalledProfile::TARGET, ProjectRecoveryInstalledProfile::SOURCE_BINDING),
+        ] {
+            assert_eq!(profile_target, target);
+            assert_eq!(binding, Some((manifest, protocol)));
+        }
+        let old_manifest = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba";
+        let old_protocol = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5";
+        type BindingPredicate = fn(&str, Option<&str>, Option<&str>) -> bool;
+        let predicates: [BindingPredicate; 3] = [PassiveInstalledProfile::bindings_match,
+            ReleaseVersionInstalledProfile::bindings_match, ProjectRecoveryInstalledProfile::bindings_match];
+        for predicate in predicates {
+            assert!(predicate(target, Some(manifest), Some(protocol)));
+            for (stale_manifest, stale_protocol) in [
+                (old_manifest, old_protocol), (old_manifest, protocol), (manifest, old_protocol),
+            ] {
+                assert!(!predicate(target, Some(stale_manifest), Some(stale_protocol)));
+            }
+        }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
@@ -3003,7 +3204,8 @@ mod tests {
             assert_eq!(data.bootstrap, root.join("engine_bootstrap.py"));
             assert_eq!(data.core, root.join("core.zip"));
             assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
-            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+            for release in [b"6.17.0-1021-azure".as_slice(), b"6.17.0-1022-azure-custom"] {
                 assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
             }
             assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));

@@ -77,7 +77,7 @@ pub enum NativeFinality { Pending, Settled, Unknown }
 pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown, OtherEditActive }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion, MetadataImages }
+pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion, MetadataImages, RequiredNotes }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +100,8 @@ pub struct EditProjection {
     #[serde(skip)]
     pub(crate) metadata_text: Option<crate::metadata_text_edit_protocol::Details>,
     #[serde(skip)]
+    pub(crate) required_notes: Option<crate::required_notes_edit_protocol::Details>,
+    #[serde(skip)]
     pub(crate) release_version: Option<crate::release_version_edit_protocol::Details>,
     #[serde(skip)]
     pub(crate) metadata_images: Option<crate::metadata_images_edit_protocol::Details>,
@@ -114,6 +116,7 @@ impl EditProjection {
             EditDomain::Configuration => self.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
+            EditDomain::RequiredNotes => self.required_notes.as_ref()?.revision.as_deref(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::MetadataImages => self.metadata_images.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
         }
@@ -123,13 +126,30 @@ impl EditProjection {
             EditDomain::Configuration => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            EditDomain::RequiredNotes => self.required_notes.as_ref()?.plan_token.as_deref(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::MetadataImages => self.metadata_images.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
         }
     }
+    pub(crate) fn required_notes_projection(&self, status_revision: u32) -> Result<crate::required_notes_edit_protocol::StatusEnvelope, BridgeError> {
+        use crate::required_notes_edit_protocol::{DOMAIN, RoutineStatus, StatusEnvelope};
+        if self.domain != EditDomain::RequiredNotes || self.workflow.is_some() || self.metadata_text.is_some()
+            || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
+            return Err(BridgeError::protocol());
+        }
+        let detail = self.required_notes.as_ref().ok_or_else(BridgeError::protocol)?;
+        if !detail.binding.valid() { return Err(BridgeError::protocol()); }
+        Ok(StatusEnvelope { request_id: detail.binding.request_id, status: Some(RoutineStatus {
+            schema_version: 1, domain: DOMAIN, project_id: self.project_id.clone(), window_generation: detail.binding.window_generation.clone(),
+            owner_generation: self.owner_generation.clone(), session_id: self.session_id.clone(),
+            plan_token: detail.plan_token.clone(), revision: detail.revision.clone(), context: detail.binding.context.clone(),
+            draft_revision: detail.binding.draft_revision, status_revision, phase: self.phase, apply_submitted: self.apply_submitted,
+            core_outcome: self.core_outcome.clone(), native_reason: self.native_reason, native_finality: self.native_finality, late_settled: self.late_settled,
+        }) })
+    }
     pub(crate) fn workflow_projection(&self) -> Result<crate::github_workflow_edit_protocol::Projection, BridgeError> {
         use crate::github_workflow_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::GitHubWorkflows || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        if self.domain != EditDomain::GitHubWorkflows || self.required_notes.is_some() || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
@@ -139,7 +159,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_text_projection(&self) -> Result<crate::metadata_text_edit_protocol::Projection, BridgeError> {
         use crate::metadata_text_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataText || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
+        if self.domain != EditDomain::MetadataText || self.required_notes.is_some() || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
         let detail = self.metadata_text.as_ref().ok_or_else(BridgeError::protocol)?;
@@ -151,7 +171,7 @@ impl EditProjection {
     }
     pub(crate) fn release_version_projection(&self) -> Result<crate::release_version_edit_protocol::Projection, BridgeError> {
         use crate::release_version_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::ReleaseVersion || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
+        if self.domain != EditDomain::ReleaseVersion || self.required_notes.is_some() || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
             || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.release_version.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
@@ -162,7 +182,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_images_projection(&self) -> Result<crate::metadata_images_edit_protocol::Projection, BridgeError> {
         use crate::metadata_images_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataImages || self.workflow.is_some() || self.metadata_text.is_some()
+        if self.domain != EditDomain::MetadataImages || self.required_notes.is_some() || self.workflow.is_some() || self.metadata_text.is_some()
             || self.release_version.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
@@ -295,6 +315,9 @@ pub enum ChildFrame {
     MetadataTextOpened(crate::metadata_text_edit_protocol::Opened),
     MetadataTextPrepared(crate::metadata_text_edit_protocol::PreparedReply),
     MetadataTextTerminal(u32, crate::metadata_text_edit_protocol::TerminalReply),
+    RequiredNotesOpened(crate::required_notes_edit_protocol::Opened),
+    RequiredNotesPrepared(crate::required_notes_edit_protocol::PreparedReply),
+    RequiredNotesTerminal(u32, crate::required_notes_edit_protocol::TerminalReply),
     ReleaseVersionOpened(crate::release_version_edit_protocol::Opened),
     ReleaseVersionPrepared(crate::release_version_edit_protocol::PreparedReply),
     ReleaseVersionTerminal(u32, crate::release_version_edit_protocol::TerminalReply),
@@ -308,6 +331,7 @@ impl ChildFrame {
             Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..) => EditDomain::Configuration,
             Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..) => EditDomain::GitHubWorkflows,
             Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) => EditDomain::MetadataText,
+            Self::RequiredNotesOpened(_) | Self::RequiredNotesPrepared(_) | Self::RequiredNotesTerminal(..) => EditDomain::RequiredNotes,
             Self::ReleaseVersionOpened(_) | Self::ReleaseVersionPrepared(_) | Self::ReleaseVersionTerminal(..) => EditDomain::ReleaseVersion,
             Self::MetadataImagesOpened(_) | Self::MetadataImagesPrepared(_) | Self::MetadataImagesTerminal(..) => EditDomain::MetadataImages,
         }

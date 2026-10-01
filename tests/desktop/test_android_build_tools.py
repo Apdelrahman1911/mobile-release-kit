@@ -329,8 +329,12 @@ class ManifestDataTests(unittest.TestCase):
                    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
                    "/var/cache/fontconfig/CACHEDIR.TAG",
                    "/var/cache/fontconfig/" + "0a" * 16 + "-le64.cache-9",
-                   "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf")
+                   "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf",
+                   "/run/systemd/resolve/stub-resolv.conf")
         denied = ("/etc/passwd", "/etc/resolv.conf.bak", "/etc/fonts/conf.avail/.conf",
+                  "/run/systemd/resolve/resolv.conf", "/run/systemd/resolve/stub-resolv.conf.bak",
+                  "/run/systemd/resolve/stub-resolv.conf/child", "/run/systemd/resolve/Stub-resolv.conf",
+                  "/run/other.conf",
                   "/etc/fonts/conf.avail/nested/file.conf", "/etc/fonts/conf.avail/FILE.CONF",
                   "/etc/fonts/conf.avail/../outside.conf", "/etc/fonts/conf.d/50-user.conf",
                   "/usr/share/fontconfig/conf.avail/nested/file.conf",

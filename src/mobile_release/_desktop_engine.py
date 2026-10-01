@@ -27,7 +27,8 @@ MAX_METADATA_DEPTH = 12
 MAX_METADATA_RESPONSE_BYTES = 256 * 1024 + 4096
 METHODS = frozenset({"capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
                      "github.setup.propose", "credentials.assess", "metadata.validate", "metadata.text.observe", "metadata.text.validate",
-                     "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe"})
+                     "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe",
+                     "required.notes.observe", "required.notes.validate"})
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 
 

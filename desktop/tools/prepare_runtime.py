@@ -267,9 +267,14 @@ def main() -> None:
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--target", required=True, choices=sorted(TARGETS))
+    parser.add_argument(
+        "--bootstrap-roster", choices=("historical", "current"), default="historical",
+        help="Select current for new Desktop packages; the default preserves the historical supplier roster.",
+    )
     args = parser.parse_args()
     try:
-        print(json.dumps(prepare(args.source, args.runtime_root, args.target), sort_keys=True))
+        selected = prepare_current if args.bootstrap_roster == "current" else prepare
+        print(json.dumps(selected(args.source, args.runtime_root, args.target), sort_keys=True))
     except (OSError, ValueError, KeyError, UnicodeError):
         parser.exit(1, "Runtime preparation failed. Existing inputs/partial output were preserved; no native qualification was performed.\n")
 

@@ -1,3 +1,12 @@
+import { isU32 } from './configEditProtocol.ts';
+import { RequiredNotesController } from './requiredNotesController.ts';
+import type { RequiredNotesIntent } from './requiredNotesController.ts';
+import { RequiredNotesEditor } from './components/RequiredNotesEditor.tsx';
+import { parseRequiredNoteContext, parseRequiredNotesCapabilities, parseRequiredNotesGuide, parseRequiredNotesImportStatusReply,
+  parseRequiredNotesStatusReply, requiredNotesCapabilityMessage, requiredNotesError } from './requiredNotesProtocol.ts';
+import type { RequiredNotesCapabilities } from './requiredNotesProtocol.ts';
+import { sameRequiredNoteContext } from './requiredNotes.ts';
+import type { RequiredNoteContext, RequiredNotesScope } from './requiredNotes.ts';
 import { SavedMetadataValidationController } from './metadataValidationController.ts';
 import { SavedMetadataValidation } from './components/MetadataValidation.tsx';
 import { savedMetadataError } from './metadataValidation.ts';
@@ -46,8 +55,8 @@ import { githubSetupError } from './githubSetupProtocol.ts';
 import { suggestionHints } from './preparation.ts';
 import { beginProjectPath, finishProjectPath, initialProjectPathState, projectPathAvailabilityReason, projectPathOwnerReason, retireProjectPath } from './projectPaths.ts';
 import type { ProjectPathState } from './projectPaths.ts';
-import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page, ProjectPathField } from './types.ts';
-import { Badge, ConfirmDialog, ErrorNotice, HelpDialog, PageHeading } from './components/Common.tsx';
+import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonObject, JsonValue, Page, ProjectPathField } from './types.ts';
+import { Badge, ConfirmDialog, ErrorNotice, HelpButton, HelpDialog, PageHeading } from './components/Common.tsx';
 import { DraftEditor } from './components/DraftEditor.tsx';
 import { ConfigSave } from './components/ConfigSave.tsx';
 import { GitHubWorkflowApply } from './components/GitHubWorkflowApply.tsx';
@@ -83,6 +92,50 @@ const navigation: { id: Page; label: string; icon: IconName; group: 'workspace' 
   { id: 'artifacts', label: 'Artifacts', icon: 'box', group: 'release' },
   { id: 'recovery', label: 'Recovery', icon: 'recovery', group: 'release' },
 ];
+
+// Saved project DATA selects the closed UI context. Neither this list nor a
+// renderer generation is native filesystem, saved-build or admission authority.
+function requiredNoteContexts(data: JsonObject | null): RequiredNoteContext[] {
+  const object = (value: JsonValue | undefined): JsonObject | null =>
+    typeof value === 'object' && value !== null && !Array.isArray(value) ? value : null;
+  const android = object(data?.android), ios = object(data?.ios), metadata = object(data?.metadata);
+  const result: RequiredNoteContext[] = [];
+  if (android?.enabled === true && Array.isArray(metadata?.androidLocales)) {
+    for (const locale of metadata.androidLocales) {
+      const context = parseRequiredNoteContext({ kind: 'android-build', locale });
+      if (context && !result.some((row) => sameRequiredNoteContext(row, context))) {
+        result.push(context);
+        if ('locale' in context) result.push({ kind: 'android-default', locale: context.locale });
+      }
+    }
+  }
+  if (ios?.enabled === true) result.push({ kind: 'ios-beta-review' }, { kind: 'ios-app-review' }, { kind: 'testflight-what-to-test' });
+  return result;
+}
+function requiredNoteContextKey(context: RequiredNoteContext): string {
+  return context.kind + ('locale' in context ? ':' + context.locale : '');
+}
+function sameRequiredNotesScope(a: RequiredNotesScope, b: RequiredNotesScope): boolean {
+  return a.projectId === b.projectId && a.windowGeneration === b.windowGeneration &&
+    a.configGeneration === b.configGeneration && a.serviceGeneration === b.serviceGeneration &&
+    sameRequiredNoteContext(a.context, b.context);
+}
+interface RequiredNotesServiceBinding {
+  api: DesktopApi;
+  generation: number;
+  capabilities: RequiredNotesCapabilities | null;
+  editListening: boolean;
+  importListening: boolean;
+  releases: (() => void)[];
+}
+interface RequiredNotesOriginalService {
+  api: DesktopApi;
+  requestId: number;
+  windowGeneration: string;
+  serviceGeneration: number;
+}
+type RequiredNotesConfirmation = { type: 'context'; context: RequiredNoteContext } |
+  { type: 'workspace'; action: Extract<WorkspaceAction, { type: 'switch' | 'select' }> } | { type: 'picker' };
 
 export function App() {
   const [api, setApi] = useState<DesktopApi | null>(null);
@@ -131,6 +184,16 @@ export function App() {
   const workflowControllerRef = useRef<GitHubWorkflowEditController | null>(null);
   const assetControllerRef = useRef<AssetSessionController | null>(null);
   const metadataControllerRef = useRef<MetadataTextEditController | null>(null);
+  const notesControllerRef = useRef<RequiredNotesController | null>(null);
+  const notesServiceRef = useRef<RequiredNotesServiceBinding | null>(null);
+  const notesServiceGeneration = useRef(0);
+  const notesEditServiceRef = useRef<RequiredNotesOriginalService | null>(null);
+  const notesImportServiceRef = useRef<RequiredNotesOriginalService | null>(null);
+  const notesStatusPending = useRef(false);
+  const [notesStatusBusy, setNotesStatusBusy] = useState(false);
+  const [notesConnection, setNotesConnection] = useState<{ capabilities: RequiredNotesCapabilities | null; editListening: boolean; importListening: boolean } | null>(null);
+  const [notesNotice, setNotesNotice] = useState<string | null>(null);
+  const [notesConfirmation, setNotesConfirmation] = useState<RequiredNotesConfirmation | null>(null);
   const imageControllerRef = useRef<MetadataImagesController | null>(null);
   const metadataValidationRef = useRef<SavedMetadataValidationController | null>(null);
   const [pathPicker, setPathPicker] = useState(initialProjectPathState);
@@ -148,7 +211,9 @@ export function App() {
   const recoveryBusy = useCallback(() => projectRecoveryControllerRef.current ? projectRecoveryOwnerReason(projectRecoveryControllerRef.current.getSnapshot()) : null, []);
   // Existing reciprocal admission callbacks also retain the original path
   // picker, even after its display eligibility was retired by a local edit.
-  const savedCommandBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeMetadataValidation = false, excludeGitHubInputGroup = false) => preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+  const savedCommandBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeMetadataValidation = false, excludeGitHubInputGroup = false, excludeNotes = false) =>
+    (notesStatusPending.current ? 'An original required-note status query is still pending.' : null) ??
+    (excludeNotes ? null : notesControllerRef.current?.ownerReason()) ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
     (!excludeGitHubInputGroup && githubInputGroupControllerRef.current ? githubInputGroupOwnerReason(githubInputGroupControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubPreflight && githubPreflightControllerRef.current ? githubPreflightOwnerReason(githubPreflightControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
@@ -172,7 +237,27 @@ export function App() {
   };
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
-  const dispatch = useCallback((action: WorkspaceAction) => {
+  const dispatch = useCallback((action: WorkspaceAction, discardNotesConfirmed = false): boolean => {
+    const previous = workspaceRef.current, notes = notesControllerRef.current;
+    const selecting = action.type === 'switch' || action.type === 'select';
+    const target = action.type === 'switch' ? action.projectId : action.type === 'select' ? action.project.id : previous.selectedId;
+    // Guard EVERY project-switch route, before another controller's callbacks
+    // or a reducer publication. A lost original request cannot be detached.
+    if (selecting && target !== previous.selectedId) {
+      if (notesStatusPending.current || notes?.ownerReason()) {
+        setNotesNotice('Keep the original required-note operation and project until its native finality and recovery are known.');
+        return false;
+      }
+      if (notes?.dirty() && !discardNotesConfirmed) {
+        setNotesConfirmation({ type: 'workspace', action });
+        return false;
+      }
+    }
+    if ('projectId' in action && action.projectId === notes?.snapshot().scope?.projectId &&
+        ['edit', 'reset', 'new-draft', 'adopt-suggestion', 'remove-forbidden', 'undo-removal', 'forget-removal',
+          'config-save-intent', 'config-save-final', 'config-save-recovery', 'snapshot-start', 'snapshot-done', 'snapshot-failed'].includes(action.type)) {
+      notes?.invalidateContext();
+    }
     // Intent/event retirement must precede even an unchanged reducer result:
     // failed refresh and unchanged/older saves need not advance generations.
     retirePathPicker();
@@ -186,10 +271,15 @@ export function App() {
     releaseInputControllerRef.current?.beforeWorkspaceAction(action);
     imageControllerRef.current?.beforeWorkspaceAction(action);
     metadataValidationRef.current?.beforeWorkspaceAction(action);
-    const previous = workspaceRef.current;
     const next = workspaceReducer(previous, action);
-    if (next === previous) return;
+    if (next === previous) return true;
     if (next.selectedId !== previous.selectedId) {
+      if (notes && !notes.setScope(null, true)) {
+        setNotesNotice('The original required-note operation must settle before changing projects.');
+        return false;
+      }
+      notesEditServiceRef.current = null; notesImportServiceRef.current = null;
+      setNotesConfirmation(null); setNotesNotice(null);
       // Retire before publishing the project change; even away-and-back cannot
       // adopt an older catalogue reply. No native document/session is invented.
       connectionHelpGeneration.current = {};
@@ -219,6 +309,7 @@ export function App() {
     editControllerRef.current?.syncDraft();
     syncConnectionContext();
     githubInputGroupControllerRef.current?.syncContext();
+    return true;
   }, [syncConnectionContext, retirePathPicker]);
   const [configEdit] = useState(() => new ConfigEditController({
     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
@@ -315,6 +406,9 @@ export function App() {
   }));
   metadataControllerRef.current = metadataText;
   const metadataState = useSyncExternalStore(metadataText.subscribe, metadataText.getSnapshot, metadataText.getSnapshot);
+  const [requiredNotes] = useState(() => new RequiredNotesController());
+  notesControllerRef.current = requiredNotes;
+  const notesState = useSyncExternalStore(requiredNotes.subscribe, requiredNotes.snapshot, requiredNotes.snapshot);
   const [metadataValidation] = useState(() => new SavedMetadataValidationController({
     selectedProject: () => {
       const current = workspaceRef.current;
@@ -352,6 +446,7 @@ export function App() {
     onSaveBoundary: () => {
       // Retire before the submitted intent/outcome can notify subscribers, even
       // for unchanged, failed or out-of-context saves. Never fabricate a Read.
+      requiredNotes.invalidateContext();
       releaseVersion.saveIntent(); releaseInputs.saveIntent();
       androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
     },
@@ -379,7 +474,9 @@ export function App() {
   // Evidence selection has deliberately no source-project or draft callback.
   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
-  const savedCommandPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeMetadataValidation = false): string | null => {
+  const savedCommandPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeMetadataValidation = false, excludeNotes = false): string | null => {
+    const noteOwner = excludeNotes ? null : requiredNotes.ownerReason(); if (noteOwner) return noteOwner;
+    if (notesStatusPending.current) return 'An original required-note status query is still pending.';
     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
     const projectId = workspaceRef.current.selectedId ?? '';
@@ -465,9 +562,75 @@ export function App() {
     metadataImagesState.selectionStatus?.capability.available === true && metadataImagesState.editStatus?.capability.available === true &&
     !metadataImagesState.reading && !metadataImagesState.integrityFailed && !metadataImagesState.generationLost && !metadataImagesState.nativeBlocked &&
     !metadataImagesState.selectionIssue && !metadataImagesState.editIssue;
-  const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
+  const nativeNotesAvailable = mode === 'native' && notesConnection?.capabilities?.edit.available === true && notesConnection.editListening;
+  const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable || nativeNotesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
+
+  const retireNotesService = useCallback(() => {
+    const previous = notesServiceRef.current;
+    notesServiceRef.current = null;
+    if (previous) for (const release of previous.releases) {
+      try { release(); } catch { /* Unsubscribing display events never establishes native finality. */ }
+    }
+    setNotesConnection(null);
+  }, []);
+  const connectNotesService = useCallback(async (connection: DesktopApi) => {
+    if (connection.mode !== 'native' || !connection.requiredNotesCapabilities || notesServiceGeneration.current === 0xffff_ffff) {
+      setNotesNotice('Real native required-note capabilities are unavailable. No preview picker or file writer is substituted.');
+      return;
+    }
+    const binding: RequiredNotesServiceBinding = { api: connection, generation: ++notesServiceGeneration.current,
+      capabilities: null, editListening: false, importListening: false, releases: [] };
+    notesServiceRef.current = binding;
+    const originalMatches = (original: RequiredNotesOriginalService | null) =>
+      original?.api === binding.api && original.serviceGeneration === binding.generation;
+    try {
+      const capabilities = parseRequiredNotesCapabilities(await connection.requiredNotesCapabilities());
+      if (notesServiceRef.current !== binding) return;
+      if (!capabilities) throw { code: 'required_notes_protocol' };
+      binding.capabilities = capabilities;
+      const accept = (kind: 'edit' | 'import', value: unknown) => {
+        if (notesServiceRef.current !== binding) return;
+        const original = kind === 'edit' ? notesEditServiceRef.current : notesImportServiceRef.current;
+        if (!originalMatches(original)) return;
+        if (value === null) {
+          requiredNotes.invalidateContext();
+          setNotesNotice('The original required-note status could not be accepted. No finality or replacement session was inferred.');
+          return;
+        }
+        if (kind === 'edit') requiredNotes.acceptRoutineStatus(value);
+        else requiredNotes.acceptImportStatus(value);
+      };
+      if (connection.subscribeRequiredNotes) {
+        try {
+          const release = await connection.subscribeRequiredNotes((value) => accept('edit', value));
+          if (notesServiceRef.current !== binding) { release(); return; }
+          binding.releases.push(release); binding.editListening = true;
+        } catch { setNotesNotice('Original required-note edit notifications are unavailable. Review and Save remain disabled.'); }
+      }
+      if (connection.subscribeRequiredNotesImport) {
+        try {
+          const release = await connection.subscribeRequiredNotesImport((value) => accept('import', value));
+          if (notesServiceRef.current !== binding) { release(); return; }
+          binding.releases.push(release); binding.importListening = true;
+        } catch { setNotesNotice('Original required-note import notifications are unavailable. The text picker remains disabled.'); }
+      }
+      if (notesServiceRef.current === binding) setNotesConnection({ capabilities,
+        editListening: binding.editListening, importListening: binding.importListening });
+    } catch (error) {
+      if (notesServiceRef.current === binding) {
+        binding.capabilities = null; setNotesConnection(null);
+        setNotesNotice(requiredNotesError(error).message);
+      }
+    }
+  }, [requiredNotes]);
 
   const bootstrap = useCallback(async () => {
+    // Freeze the private view at reconnection INTENT, but retain the original
+    // API and listeners until its request/owner/query is actually settled.
+    requiredNotes.invalidateContext();
+    if (requiredNotes.ownerReason() || notesStatusPending.current) {
+      setBootError(requiredNotesError({ code: 'required_notes_busy' })); return;
+    }
     githubInputGroup.setGuide(null);
     metadataValidation.beginConnection();
     versionEdit.beginConnection();
@@ -481,6 +644,7 @@ export function App() {
     projectRecovery.beginConnection(); iosArchive.beginConnection();
     if (savedCommandBusy()) { setBootError(metadataValidation.passiveBusyReason() ? savedMetadataError({ code: 'metadata_validation_busy' }) : versionOwnerReason(versionEdit.getSnapshot(), workspaceRef.current.selectedId ?? '') ?
       versionEditError({ code: 'VersionEditBusy' }) : metadataImagesOwnerReason(metadataImages.getSnapshot()) ? metadataImagesError({ code: 'metadata_images_busy' }) : recoveryBusy() ? projectRecoveryError({ code: 'project_recovery_busy' }) : androidBusy() ? androidBuildError({ code: 'android_build_busy' }) : iosBusy() ? iosArchiveError({ code: 'ios_archive_busy' }) : offlinePreflightError({ code: 'offline_preflight_busy' })); return; }
+    retireNotesService();
     bootstrapPending.current = true;
     const generation = ++bootGeneration.current;
     const helpGeneration = {};
@@ -532,6 +696,8 @@ export function App() {
       if (generation !== bootGeneration.current) return;
       pathService.current = { api: connection, info: appInfo };
       setInfo(appInfo);
+      await connectNotesService(connection);
+      if (generation !== bootGeneration.current) return;
       githubSetup.setConnection(connection, appInfo);
       environment.setConnection(connection, appInfo);
       releaseVersion.setConnection(connection, appInfo);
@@ -563,6 +729,7 @@ export function App() {
       }
     } catch (error) {
       if (generation === bootGeneration.current) {
+        retireNotesService();
         pathService.current = { api: null, info: null };
         connectionHandoffRef.current = null; connectionPortRef.current = null;
         githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubInputGroup.connect(null); githubInputGroup.setGuide(null);
@@ -572,10 +739,11 @@ export function App() {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); }
     }
-  }, [githubSetup, githubConnection, githubPreflight, githubRelease, githubInputGroup, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, offlinePreflight, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataValidation, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
+  }, [githubSetup, githubConnection, githubPreflight, githubRelease, githubInputGroup, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, offlinePreflight, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataValidation, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, requiredNotes, retireNotesService, connectNotesService]);
 
   // Synchronous original-editor notifications retire display eligibility only.
   // They never settle a pending whole-metadata passive request.
+  useEffect(() => requiredNotes.subscribe(metadataValidation.invalidate), [requiredNotes, metadataValidation]);
   useEffect(() => metadataText.subscribe(metadataValidation.invalidate), [metadataText, metadataValidation]);
   useEffect(() => metadataImages.subscribe(metadataValidation.invalidate), [metadataImages, metadataValidation]);
   useEffect(() => versionEdit.subscribe(metadataValidation.invalidate), [versionEdit, metadataValidation]);
@@ -601,7 +769,7 @@ export function App() {
 
   useEffect(() => {
     void bootstrap();
-    return () => { metadataValidation.beginConnection(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
+    return () => { requiredNotes.invalidateContext(); if (!requiredNotes.ownerReason() && !notesStatusPending.current) retireNotesService(); metadataValidation.beginConnection(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
   }, [bootstrap]);
 
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
@@ -639,7 +807,7 @@ export function App() {
     const warn = (event: BeforeUnloadEvent) => {
       versionEditControllerRef.current?.shutdownIntent();
       imageControllerRef.current?.shutdownIntent();
-      if (Object.values(workspaceRef.current.projects).some(isDirty) ||
+      if (notesControllerRef.current?.dirty() || Object.values(workspaceRef.current.projects).some(isDirty) ||
           versionEditControllerRef.current && versionProjectDirty(versionEditControllerRef.current.getSnapshot()) || metadataControllerRef.current && metadataProjectDirty(metadataControllerRef.current.getSnapshot().entries) ||
           diagnosticsControllerRef.current && diagnosticsOwnerReason(diagnosticsControllerRef.current.getSnapshot()) || savedCommandBusy()) {
         event.preventDefault();
@@ -666,6 +834,7 @@ export function App() {
   const chooseDisabled = chooseReason !== null;
 
   const loadSnapshot = async (projectId: string) => {
+    if (requiredNotes.snapshot().scope?.projectId === projectId) requiredNotes.invalidateContext();
     metadataValidation.snapshotIntent(projectId);
     metadataImages.snapshotIntent(projectId);
     versionEdit.snapshotIntent(projectId);
@@ -686,7 +855,11 @@ export function App() {
     } finally { passivePending.current -= 1; setPassivePending(passivePending.current); }
   };
 
-  const chooseProject = async () => {
+  const chooseProject = async (discardNotesConfirmed = false) => {
+    if (requiredNotes.ownerReason() || notesStatusPending.current) {
+      setNotesNotice('Keep the original required-note operation before selecting another project.'); return;
+    }
+    if (requiredNotes.dirty() && !discardNotesConfirmed) { setNotesConfirmation({ type: 'picker' }); return; }
     metadataValidation.selectionIntent();
     metadataImages.selectionIntent();
     versionEdit.selectionIntent();
@@ -696,6 +869,7 @@ export function App() {
     projectRecovery.selectionIntent();
     iosArchive.selectionIntent();
     if (!api || savedCommandBusy() || chooseDisabled || connectionPicking.current) return;
+    requiredNotes.invalidateContext();
     // Admission of the native picker retires the original GitHub context even
     // if selection later cancels/fails. Do not wait for a successful folder.
     connectionPicking.current = true; advanceConnectionContext(); githubConnection.setContext(null);
@@ -716,7 +890,7 @@ export function App() {
       const project = await api.chooseProject();
       if (!project) return;
       const alreadyLoaded = workspaceRef.current.projects[project.id]?.snapshot;
-      dispatch({ type: 'select', project });
+      if (!dispatch({ type: 'select', project }, discardNotesConfirmed)) return;
       if (!alreadyLoaded) await loadSnapshot(project.id);
     } catch (error) { setChooseError(apiError(error)); }
     finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); metadataValidation.setSelectionPending(false); metadataImages.setSelectionPending(false); versionEdit.setSelectionPending(false); diagnostics.setSelectionPending(false); offlinePreflight.setSelectionPending(false); androidBuild.setSelectionPending(false); projectRecovery.setSelectionPending(false); iosArchive.setSelectionPending(false); }
@@ -782,6 +956,201 @@ export function App() {
     if (session) dispatch({ type: 'edit', projectId: session.project.id, path, value });
   };
 
+  const currentNotesScope = (context: RequiredNoteContext): RequiredNotesScope | null => {
+    const current = workspaceRef.current, id = current.selectedId;
+    const entry = id && Object.hasOwn(current.projects, id) ? current.projects[id] : null;
+    const service = notesServiceRef.current, capabilities = service?.capabilities;
+    // A dirty configuration is NOT the saved configuration. Observation
+    // generation, not retained draft/baseline generation, binds saved context.
+    if (!entry || entry.snapshotRequest !== null || entry.snapshotPredatesSave || entry.snapshot?.config.state !== 'format-valid' ||
+        !entry.snapshot.config.data || !isU32(entry.observationGeneration) || bootstrapPending.current || connectionPicking.current ||
+        !service || service.api.mode !== 'native' || !capabilities || !isU32(service.generation) ||
+        !requiredNoteContexts(entry.snapshot.config.data).some((row) => sameRequiredNoteContext(row, context))) return null;
+    return { projectId: entry.project.id, projectName: entry.project.name, windowGeneration: capabilities.windowGeneration,
+      configGeneration: entry.observationGeneration, serviceGeneration: service.generation, context: structuredClone(context) };
+  };
+  const selectNotesContext = (context: RequiredNoteContext, discardConfirmed = false): boolean => {
+    if (notesStatusPending.current || requiredNotes.ownerReason()) {
+      setNotesNotice('The original required-note operation must settle before changing note context.'); return false;
+    }
+    const scope = currentNotesScope(context);
+    if (!scope) { setNotesNotice('Read current saved project settings and establish the real native window before selecting this note.'); return false; }
+    if (requiredNotes.dirty() && !discardConfirmed) { setNotesConfirmation({ type: 'context', context }); return false; }
+    if (!requiredNotes.setScope(scope, discardConfirmed)) return false;
+    notesEditServiceRef.current = null; notesImportServiceRef.current = null;
+    setNotesNotice(null); setNotesConfirmation(null);
+    return true;
+  };
+  const otherNotesOperationReason = (): string | null =>
+    savedCommandBusy(false, false, false, false, false, false, true) ??
+    savedCommandPrerequisiteReason(false, false, undefined, false, true);
+  const notesOperationReason = (kind: 'load' | 'validate' | 'import' | 'prepare' | 'apply'): string | null => {
+    const service = notesServiceRef.current, state = requiredNotes.snapshot();
+    if (!service || service.api.mode !== 'native' || !service.capabilities) return 'Real native required-note capabilities have not been established.';
+    const current = state.scope ? currentNotesScope(state.scope.context) : null;
+    if (!state.scope || !current || !sameRequiredNotesScope(state.scope, current) || state.stale)
+      return 'Select the current saved note context before starting this operation.';
+    const other = otherNotesOperationReason(); if (other) return other;
+    if (kind === 'load') return requiredNotesCapabilityMessage(service.capabilities.read) ??
+      (!service.api.observeRequiredNotes ? 'The native saved-note reader is unavailable.' : null);
+    if (kind === 'validate') return !service.api.validateRequiredNotes || pathService.current.api !== service.api ||
+      methodReason(pathService.current.info, 'required.notes.validate', 'native') !== null
+      ? 'The shared core required-note validator is unavailable.' : null;
+    if (kind === 'import') return requiredNotesCapabilityMessage(service.capabilities.import) ??
+      (!service.importListening || !service.api.importRequiredNotes || !service.api.requiredNotesImportStatus ?
+        'Original native text selection and its status channel must both be available.' : null);
+    return requiredNotesCapabilityMessage(service.capabilities.edit) ??
+      (!service.editListening || !service.api.prepareRequiredNotes || !service.api.applyRequiredNotes ||
+       !service.api.closeRequiredNotes || !service.api.requiredNotesStatus ?
+        'The original native review, Save, Close and status channel must all be available.' : null);
+  };
+  const dispatchRequiredNotes = async (request: RequiredNotesIntent): Promise<void> => {
+    const service = notesServiceRef.current, original = notesEditServiceRef.current;
+    const correlation = requiredNotes.originalEdit();
+    const current = currentNotesScope(request.scope.context);
+    const exactOriginal = !!original && !!correlation && original.requestId === correlation.requestId &&
+      original.windowGeneration === correlation.windowGeneration && original.serviceGeneration === request.scope.serviceGeneration &&
+      original.windowGeneration === request.scope.windowGeneration;
+    // Close is reconciliation of the ORIGINAL review, not fresh admission. It
+    // remains available after context invalidation or capability replacement.
+    const reason = request.kind === 'close' ?
+      (notesStatusPending.current ? 'Wait for the original required-note status query.' :
+        !exactOriginal || !original?.api.closeRequiredNotes ? 'The exact original review service is unavailable; no replacement was selected.' : null) :
+      notesOperationReason(request.kind) ??
+        (!service || service.generation !== request.scope.serviceGeneration ||
+         service.capabilities?.windowGeneration !== request.scope.windowGeneration ||
+         !current || !sameRequiredNotesScope(request.scope, current) ?
+          'The original selected note context changed before dispatch.' : null) ??
+        (request.kind === 'apply' && (!exactOriginal || original?.api !== service?.api) ?
+          'The original Prepare service is not the current admitted service. No replacement Save is allowed.' : null);
+    if (reason) { requiredNotes.unavailable(request); setNotesNotice(reason); return; }
+    // This is the sole one-use dispatch claim. No await, notification or other
+    // admission lies between the recheck, original binding and native invoke.
+    if (!requiredNotes.claimRequest(request)) return;
+    const target = request.kind === 'close' ? original!.api : service!.api;
+    if (request.kind === 'prepare' || request.kind === 'import') {
+      const binding = { api: target, requestId: request.id, windowGeneration: request.scope.windowGeneration,
+        serviceGeneration: request.scope.serviceGeneration };
+      if (request.kind === 'prepare') notesEditServiceRef.current = binding;
+      else notesImportServiceRef.current = binding;
+    }
+    setNotesNotice(null);
+    try {
+      let reply: unknown;
+      if (request.kind === 'load') reply = await target.observeRequiredNotes!({ ...request.input, windowGeneration: request.scope.windowGeneration });
+      else if (request.kind === 'validate') reply = await target.validateRequiredNotes!(request.input);
+      else if (request.kind === 'import') reply = await target.importRequiredNotes!({ requestId: request.id,
+        projectId: request.scope.projectId, windowGeneration: request.scope.windowGeneration, context: request.scope.context });
+      else if (request.kind === 'prepare') reply = await target.prepareRequiredNotes!({ ...request.input,
+        requestId: request.id, windowGeneration: request.scope.windowGeneration });
+      else if (request.kind === 'apply') reply = await target.applyRequiredNotes!({ ...request.input,
+        requestId: original!.requestId, windowGeneration: original!.windowGeneration });
+      else reply = await target.closeRequiredNotes!({ ...request.input,
+        requestId: original!.requestId, windowGeneration: original!.windowGeneration });
+      requiredNotes.complete(request, reply);
+    } catch (error) {
+      requiredNotes.fail(request);
+      setNotesNotice(requiredNotesError(error).message);
+    }
+  };
+  const checkOriginalNotes = async (kind: 'edit' | 'import'): Promise<void> => {
+    if (notesStatusPending.current) return;
+    const original = kind === 'edit' ? notesEditServiceRef.current : notesImportServiceRef.current;
+    const correlation = kind === 'edit' ? requiredNotes.originalEdit() : requiredNotes.originalImport();
+    if (!original || !correlation || original.requestId !== correlation.requestId || original.windowGeneration !== correlation.windowGeneration ||
+        (kind === 'edit' ? !original.api.requiredNotesStatus : !original.api.requiredNotesImportStatus)) {
+      setNotesNotice('The exact original required-note status service is unavailable. No replacement operation was queried.'); return;
+    }
+    notesStatusPending.current = true; setNotesStatusBusy(true); setNotesNotice(null);
+    try {
+      const raw = kind === 'edit' ? await original.api.requiredNotesStatus!(correlation) : await original.api.requiredNotesImportStatus!(correlation);
+      const retained = kind === 'edit' ? notesEditServiceRef.current : notesImportServiceRef.current;
+      const current = kind === 'edit' ? requiredNotes.originalEdit() : requiredNotes.originalImport();
+      if (retained !== original || !current || current.requestId !== correlation.requestId || current.windowGeneration !== correlation.windowGeneration) return;
+      if (kind === 'edit') {
+        const reply = parseRequiredNotesStatusReply(raw);
+        if (!reply || reply.requestId !== correlation.requestId || reply.status && reply.status.windowGeneration !== correlation.windowGeneration)
+          throw { code: 'required_notes_protocol' };
+        if (!reply.status) setNotesNotice('No original edit status was returned. Absence does not establish non-admission, closure or success.');
+        else if (!requiredNotes.acceptRoutineStatus(reply)) throw { code: 'required_notes_protocol' };
+      } else {
+        const reply = parseRequiredNotesImportStatusReply(raw);
+        if (!reply || reply.requestId !== correlation.requestId || reply.status && reply.status.windowGeneration !== correlation.windowGeneration)
+          throw { code: 'required_notes_protocol' };
+        if (!reply.status) setNotesNotice('No original import status was returned. Absence does not establish cleanup or restore imported text.');
+        else if (!requiredNotes.acceptImportStatus(reply)) throw { code: 'required_notes_protocol' };
+      }
+    } catch (error) { setNotesNotice(requiredNotesError(error).message); }
+    finally { notesStatusPending.current = false; setNotesStatusBusy(false); }
+  };
+  const notesGuide = parseRequiredNotesGuide(catalog?.requiredNotes);
+  const notesOptions = requiredNoteContexts(session?.snapshot?.config.state === 'format-valid' && !session.snapshotPredatesSave ? session.snapshot.config.data : null);
+  const notesReadReason = notesOperationReason('load'), notesValidateReason = notesOperationReason('validate');
+  const notesImportReason = notesOperationReason('import'), notesWriteReason = notesOperationReason('prepare');
+  const notesOwnerReason = requiredNotes.ownerReason();
+  const notesEditOriginal = requiredNotes.originalEdit(), notesImportOriginal = requiredNotes.originalImport();
+  const notesJournal = notesState.status?.coreOutcome?.journal;
+  const notesNeedsRecovery = notesJournal === 'recovery_required' || notesJournal === 'unknown';
+  const notesContextLabel = notesGuide?.fields.find((field) => field.id === notesState.scope?.context.kind)?.label ?? 'Required note';
+  const notesAttention = notesState.scope !== null && (requiredNotes.dirty() || notesState.pending !== null || notesState.status !== null ||
+    notesState.importStatus !== null || notesState.unsettled || notesEditOriginal !== null || notesImportOriginal !== null);
+  // This projection is intentionally content-free. No private DTO, destination,
+  // note text, baseline, content digest or raw error is copied outside Metadata.
+  const notesSummary = notesAttention ? <section className="notice notice-warning" aria-label="Original required-note operation">
+    <div><strong>{notesState.scope?.projectName} · {notesContextLabel}</strong>
+      {'locale' in notesState.scope!.context && <span> · {notesState.scope!.context.locale}</span>}
+      <p>{notesState.result === 'saved' ? 'Original local Save confirmed. Reload before another edit; no Store upload occurred.' :
+        notesState.result === 'unchanged' ? 'Original review confirmed no local file change. Reload before another edit.' :
+        notesOwnerReason ?? (requiredNotes.dirty() ? 'An unsaved required-note draft is retained in this window.' : 'Original required-note status retained.')}</p>
+      {notesState.status && <p>Native phase: {notesState.status.phase}. Resources: {notesState.status.coreOutcome?.resources ?? 'not reported'}.
+        Journal: {notesState.status.coreOutcome?.journal ?? 'not reported'}.</p>}
+      {notesState.importStatus && <p>Original text selection: {notesState.importStatus.phase}{notesState.importStatus.outcome ? ' · ' + notesState.importStatus.outcome : ''}.
+        A status-only result cannot restore text whose private reply was lost.</p>}
+      {notesNeedsRecovery && <p className="review-caution">The original note transaction still needs recovery or its journal state is unknown.
+        No persisted required-note recovery command is available in this version. Keep this attention and gate; Load, discard or a new service cannot settle it.</p>}
+      <div className="button-row">
+        {page !== 'metadata' && <button type="button" className="button small secondary" onClick={() => navigate('metadata')}>Open note editor</button>}
+        {notesEditOriginal && <button type="button" className="button small secondary" disabled={notesStatusBusy || !notesEditServiceRef.current?.api.requiredNotesStatus}
+          onClick={() => void checkOriginalNotes('edit')}>Check original edit status</button>}
+        {notesImportOriginal && <button type="button" className="button small secondary" disabled={notesStatusBusy || !notesImportServiceRef.current?.api.requiredNotesImportStatus}
+          onClick={() => void checkOriginalNotes('import')}>Check original text selection</button>}
+        {requiredNotes.canClose() && <button type="button" className="button small secondary" disabled={notesStatusBusy}
+          onClick={() => { const request = requiredNotes.beginClose(); if (request) void dispatchRequiredNotes(request); }}>Close original review; keep draft</button>}
+      </div>
+    </div>
+  </section> : null;
+  const notesEditor = <div>
+    {notesGuide ? <>
+      <section className="card" aria-label="Choose a required note">
+        <label className="field-label" htmlFor="required-note-context">Required note from saved settings</label>
+        <p className="save-note">Choose the audience and, for Android, a saved configured locale. Unsaved setting changes are not used; the core supplies the saved build after Load.</p>
+        <select id="required-note-context" disabled={notesOwnerReason !== null || notesStatusBusy || choosing || loading}
+          value={notesState.scope && notesOptions.some((row) => sameRequiredNoteContext(row, notesState.scope!.context)) ? requiredNoteContextKey(notesState.scope.context) : ''}
+          onChange={(event) => { const context = notesOptions.find((row) => requiredNoteContextKey(row) === event.currentTarget.value); if (context) selectNotesContext(context); }}>
+          <option value="" disabled>Select a configured note</option>
+          {notesOptions.map((context) => <option key={requiredNoteContextKey(context)} value={requiredNoteContextKey(context)}>
+            {notesGuide.fields.find((field) => field.id === context.kind)?.label}{'locale' in context ? ' · ' + context.locale : ''}
+          </option>)}
+        </select>
+        {notesGuide.fields.filter((field) => notesOptions.some((context) => context.kind === field.id)).map((field) =>
+          <span key={field.id} className="save-note">{field.label} <HelpButton content={field} onHelp={setHelp} /> </span>)}
+        {notesOptions.length === 0 && <p className="review-caution">Read current format-valid saved settings with an enabled Android locale or iOS before choosing a required note.</p>}
+        {session?.snapshotPredatesSave && <p className="review-caution">This settings observation predates a Save. Refresh it before selecting a required note.</p>}
+        {notesState.stale && notesState.scope && <div className="button-row"><button type="button" className="button secondary"
+          disabled={notesOwnerReason !== null || notesStatusBusy || !currentNotesScope(notesState.scope.context)}
+          onClick={() => selectNotesContext(notesState.scope!.context)}>Use current saved context</button></div>}
+        <p className="save-note">Apple contact and demo-account inputs already have separate credential forms. Notes are ordinary local repository text, not secure credential storage.</p>
+        <button type="button" className="button small secondary" onClick={() => navigate('credentials')}>Open existing review credential forms</button>
+      </section>
+      <RequiredNotesEditor controller={requiredNotes} guide={notesGuide} onRequest={(request) => void dispatchRequiredNotes(request)}
+        onCloseReview={(sessionId) => { const request = requiredNotes.beginClose(sessionId); if (request) void dispatchRequiredNotes(request); }} onHelp={setHelp}
+        readAvailable={notesReadReason === null} writeAvailable={notesWriteReason === null} importAvailable={notesImportReason === null}
+        validateAvailable={notesValidateReason === null} readReason={notesReadReason} writeReason={notesWriteReason}
+        importReason={notesImportReason} validateReason={notesValidateReason} />
+    </> : <section className="card" aria-label="Required release and review notes unavailable"><h3>Required release and review notes</h3>
+      <p>The bundled required-note guidance is unavailable. Restore the native service and guidance; no mock editor or picker has been substituted.</p></section>}
+  </div>;
+
   const projectPathStartReason = (): string | null => {
     const owner = projectPathOwnerReason(pathPickerRef.current); if (owner) return owner;
     if (bootstrapPending.current) return 'Application capabilities are being loaded. Text entry remains available.';
@@ -809,7 +1178,8 @@ export function App() {
     catch (error) { finish({ error }); }
   };
 
-  const draftRetained = (projectId: string) => editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
+  const draftRetained = (projectId: string) => (requiredNotes.snapshot().scope?.projectId === projectId &&
+    (requiredNotes.ownerReason() !== null || notesStatusPending.current)) || editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
 
   const editor = (metadataOnly = false) => <DraftEditor
     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
@@ -833,16 +1203,16 @@ export function App() {
   />;
 
   const workflowPanel = (detailed: boolean) => <GitHubWorkflowApply state={workflowState} controller={workflowEdit} setup={githubState} projects={workspace.projects} selectedId={workspace.selectedId} detailed={detailed}
-    onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('github'); }} onHelp={setHelp} />;
+    onShowProject={(projectId) => { if (dispatch({ type: 'switch', projectId })) navigate('github'); }} onHelp={setHelp} />;
   const showMetadataProject = (projectId: string, key?: string) => {
-    dispatch({ type: 'switch', projectId });
+    if (!dispatch({ type: 'switch', projectId })) return;
     if (key) metadataText.selectContext(key);
     navigate('metadata');
   };
   const showVersionProject = (projectId: string) => {
     if (connectionPicking.current || !Object.hasOwn(workspaceRef.current.projects, projectId) ||
         workspaceRef.current.projects[projectId]?.project.id !== projectId) return;
-    if (workspaceRef.current.selectedId !== projectId) dispatch({ type: 'switch', projectId });
+    if (workspaceRef.current.selectedId !== projectId && !dispatch({ type: 'switch', projectId })) return;
     navigate('dashboard');
   };
   const showRetainedEditProject = (attention: RetainedEditAttention) => {
@@ -851,7 +1221,7 @@ export function App() {
         projects[attention.projectId]?.project.id !== attention.projectId) return;
     // Preserve ordinary context retirement and drafts. This does not recover an
     // edit, reload its original outcome, or infer a public-text locale.
-    if (workspaceRef.current.selectedId !== attention.projectId) dispatch({ type: 'switch', projectId: attention.projectId });
+    if (workspaceRef.current.selectedId !== attention.projectId && !dispatch({ type: 'switch', projectId: attention.projectId })) return;
     navigate(attention.page);
   };
 
@@ -859,18 +1229,20 @@ export function App() {
     <a className="skip-link" href="#main-content">Skip to workspace</a>
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark"><Icon name="box" size={25} /></span><div>Mobile Release Kit<span>THE KIT FOR A CAREFUL LAUNCH</span></div></div>
-      <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved configuration, text and version drafts are retained" value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved config' : ''}{metadataProjectDirty(metadataState.entries, entry.project.id) ? ' • unsaved text' : ''}{versionProjectDirty(versionEditState, entry.project.id) ? ' • unsaved version' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
+      <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved configuration, public text and version drafts are retained; a required-note draft needs discard confirmation" disabled={notesOwnerReason !== null || notesStatusBusy || choosing} value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved config' : ''}{metadataProjectDirty(metadataState.entries, entry.project.id) ? ' • unsaved text' : ''}{versionProjectDirty(versionEditState, entry.project.id) ? ' • unsaved version' : ''}{notesState.scope?.projectId === entry.project.id && requiredNotes.dirty() ? ' • unsaved required note' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
       <nav aria-label="Workspace navigation">{(['workspace', 'release'] as const).map((group) => <div className="nav-group" key={group}><span className="nav-group-label">{group === 'workspace' ? 'WORKSPACE' : 'DELIVERY'}</span>{navigation.filter((entry) => entry.group === group).map((entry) => <button type="button" key={entry.id} className={`nav-item${entry.id === page ? ' active' : ''}`} aria-label={entry.label} aria-current={entry.id === page ? 'page' : undefined} onClick={() => navigate(entry.id)}><Icon name={entry.icon} size={19} /><span>{entry.label}</span></button>)}</div>)}</nav>
       <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{localEditingLabel}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>{`DESKTOP ${info?.appVersion ?? 'Not loaded'}`}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />Core-managed builds are disabled</span><Badge tone={preview || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : recoveryBusy() ? 'Project recovery owner retained' : androidBusy() ? 'Android build owner retained' : iosBusy() ? 'iOS archive owner retained' : preflightBusy() ? 'Saved offline-check owner retained' : diagnosticsState.status?.active ? 'Build-tool diagnostics active' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataImagesOwnerReason(metadataImagesState) ? 'Image operation retained' : metadataState.edit.status?.active ? 'Public-text session active' : versionEditState.edit.status?.active ? 'Saved-version session active' : localEditingLabel}</Badge></div></header>
+      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />Core-managed builds are disabled</span><Badge tone={preview || notesState.unsettled || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : notesOwnerReason ? 'Required-note original retained' : recoveryBusy() ? 'Project recovery owner retained' : androidBusy() ? 'Android build owner retained' : iosBusy() ? 'iOS archive owner retained' : preflightBusy() ? 'Saved offline-check owner retained' : diagnosticsState.status?.active ? 'Build-tool diagnostics active' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataImagesOwnerReason(metadataImagesState) ? 'Image operation retained' : metadataState.edit.status?.active ? 'Public-text session active' : versionEditState.edit.status?.active ? 'Saved-version session active' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Loading desktop capabilities and the core field catalogue…</span></div>}
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
+        {notesNotice && <div className="notice notice-warning" role="status"><Icon name="info" /><span>{notesNotice}</span></div>}
+        {notesSummary}
         {(pathPicker.pending || pathPicker.unverified || pathPicker.message) && <div className={`notice ${pathPicker.unverified ? 'notice-warning' : 'notice-info'}`} role={pathPicker.unverified ? 'alert' : 'status'}>
           <Icon name="info" /><span>{projectPathOwnerReason(pathPicker) ?? pathPicker.message}{pathPicker.pending ? ' If the original picker is still open, its Cancel button leaves the draft unchanged.' : ''}</span></div>}
         {info?.runtime.state !== 'available' && info && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>{info.runtime.state === 'disabled' ? 'The engine is disabled' : 'Bundled engine unavailable'}</strong><p>{info.runtime.reason ?? 'A trusted packaged runtime has not been supplied. The app will not select an ambient Python or a mock engine.'} Folder selection does not establish a project observation.</p></div></div>}
@@ -892,7 +1264,7 @@ export function App() {
         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
           onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => { const projectId = configEdit.getSnapshot().attempt?.binding.projectId; if (projectId) dispatch({ type: 'config-save-intent', projectId }); releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding); }}
-          onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
+          onShowProject={(projectId) => { if (dispatch({ type: 'switch', projectId })) navigate('settings'); }} onHelp={setHelp} />
         {page !== 'github' && workflowPanel(false)}
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page !== 'metadata' && <MetadataImagesOperation state={metadataImagesState} controller={metadataImages} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
@@ -905,7 +1277,7 @@ export function App() {
         {page === 'environment' && <Environment info={info} preview={preview} session={session} state={environmentState} controller={environment}
           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp} nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState)} />}
-        {page === 'metadata' && <Metadata catalog={catalog} validation={<SavedMetadataValidation state={metadataValidationState} controller={metadataValidation} onSettings={() => navigate('settings')} onVersion={() => navigate('dashboard')} />} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
+        {page === 'metadata' && <Metadata catalog={catalog} notesEditor={notesEditor} validation={<SavedMetadataValidation state={metadataValidationState} controller={metadataValidation} onSettings={() => navigate('settings')} onVersion={() => navigate('dashboard')} />} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
           connectionView={<><GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
@@ -942,6 +1314,18 @@ export function App() {
       </main>
     </div>
     <HelpDialog content={help} onClose={() => setHelp(null)} />
+    {notesConfirmation && <div className="review-caution" role="group" aria-label="Confirm required-note draft replacement">
+      <p>{notesConfirmation.type === 'context' ? 'Discard this unsaved local note draft and select the current saved note context?' :
+        notesConfirmation.type === 'picker' ? 'Opening another project may discard this unsaved note draft only after a different project is selected. Cancelling the picker keeps it.' :
+        'Discard this unsaved local note draft and switch projects? Saved files and other editors are not deleted.'}</p>
+      <div className="button-row"><button type="button" className="button secondary" onClick={() => setNotesConfirmation(null)}>Keep current draft</button>
+        <button type="button" className="button danger" disabled={notesOwnerReason !== null || notesStatusBusy || choosing} onClick={() => {
+          const confirmation = notesConfirmation; setNotesConfirmation(null);
+          if (confirmation.type === 'context') selectNotesContext(confirmation.context, true);
+          else if (confirmation.type === 'picker') void chooseProject(true);
+          else dispatch(confirmation.action, true);
+        }}>Confirm and continue</button></div>
+    </div>}
     {discardProject && <ConfirmDialog onCancel={() => setDiscardProject(null)}
       blockedReason={draftRetained(discardProject) ? 'An original native file-edit session is still active or unverified. Keep this draft; closing a review is not draft deletion.' : null}
       observationPredatesSave={workspace.projects[discardProject]?.snapshotPredatesSave ?? false}

@@ -59,7 +59,7 @@ fn source_failure_at(owner: &Arc<OriginalWork>, reason: Reason, at: Instant) {
     owner.stop();
 }
 pub(super) fn observe_failure(state: &mut DocumentState) -> bool {
-    let Some(slot) = state.slot.as_mut().filter(|slot| slot.operation.images()) else { return false; };
+    let Some(slot) = state.slot.as_mut().filter(|slot| slot.operation.images() || slot.operation.required_notes()) else { return false; };
     let failure = {
         let (mut latch, poisoned) = match slot.owner.image_failure.lock() {
             Ok(latch) => (latch, false), Err(error) => (error.into_inner(), true),
@@ -267,11 +267,12 @@ pub(super) fn refresh(state: &mut DocumentState) {
 // Count persistent session holdings conservatively (shared payloads may be
 // counted twice, never omitted). The old idle slot is retired by install/run_job
 // before any image bytes are allocated. Its controls cannot be recycled early.
-fn persistent_bytes(state: &DocumentState) -> Result<usize, Reason> {
+pub(super) fn persistent_bytes(state: &DocumentState) -> Result<usize, Reason> {
     let mut total = CONTROL_RESERVE + DOCUMENT_CONTROL_RESERVE;
     let mut add = |bytes: usize| -> Result<(), Reason> {
         total = total.checked_add(bytes).ok_or(Reason::Capacity)?; Ok(())
     };
+    add(state.required_notes.retained_bytes().ok_or(Reason::Capacity)?)?;
     add(state.records.capacity().checked_mul(std::mem::size_of::<Record>()).ok_or(Reason::Capacity)?)?;
     for record in &state.records {
         add(RECORD_METADATA_BYTES)?; add(record.key.id.0.capacity())?;

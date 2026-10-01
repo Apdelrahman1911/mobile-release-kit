@@ -284,7 +284,7 @@ mod linux {
     // The credential entry always selects Private; only the closed image entry
     // can select PublicImage, and both still require an actual regular file.
     #[derive(Clone, Copy)]
-    enum LeafPolicy { Private, PublicImage }
+    enum LeafPolicy { Private, PublicImage, RequiredNote }
     impl LeafPolicy {
         fn permits(self, identity: FileIdentity) -> bool {
             match self {
@@ -293,7 +293,7 @@ mod linux {
                 // excludes mount aliases from later target replacement too.
                 // Read permission is checked by the original read-only open;
                 // ordinary public 0644/0664 files need not be credential-private.
-                Self::PublicImage => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
+                Self::PublicImage | Self::RequiredNote => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
             }
         }
     }
@@ -524,7 +524,7 @@ mod linux {
         fn finish_public_images<T>(&mut self, result: Result<T, Reason>, stop: &mut dyn FnMut() -> bool,
             failed: &mut dyn FnMut(Reason)) -> Result<T, Reason> {
             let result = result.and_then(|value| { self.terminal_check(stop)?; Ok(value) });
-            // The image-only observer latches the original STOP/timestamp
+            // The fixed public-input observer latches the original STOP/timestamp
             // before ANY consuming close. It only writes a small OriginalWork
             // cell, never re-enters this source or the document mutex. A later
             // close/join cannot postpone the first observed failure deadline.
@@ -827,6 +827,52 @@ mod linux {
             budget.admit(batch.retained_bytes().and_then(|n| n.checked_add(controls)))?;
             Ok(batch)
         })();
+        book.finish_public_images(result, stop, failed)
+    }
+    /// One fixed text purpose, using the SAME source roster/check/close path.
+    /// No credential FileKind, copied source, image identity, renderer path or
+    /// normalization is introduced. Reading a note inside the project is safe:
+    /// this operation never writes to either the source or the project.
+    pub(crate) fn capture_required_note(book: &mut SourceBook, path: PathBuf, root: &RegisteredRoot,
+        kind: crate::required_notes_edit_protocol::Kind, stop: &mut dyn FnMut() -> bool,
+        failed: &mut dyn FnMut(Reason)) -> Result<String, Reason> {
+        let spell = parts(&path)?;
+        let (name, parents) = spell.split_last().ok_or(Reason::SourceRefused)?;
+        if !name.contains(&b'.') || !name.rsplit(|b| *b == b'.').next().is_some_and(|suffix| suffix.eq_ignore_ascii_case(b"txt")) {
+            return Err(Reason::UnsupportedFormat);
+        }
+        if path.capacity() > PATH_LIMIT || root.path.capacity() > PATH_LIMIT { return Err(Reason::Capacity); }
+        let expected_root = root.identity.posix()?;
+        let root_parts = parts(&root.path)?;
+        book.begin(roster_limit([root_parts.len(), parents.len()], 1)?, 0)?;
+        let result = (|| {
+            book.root(stop)?;
+            let chain = book.chain(&root_parts, stop)?;
+            if book.directory(*chain.last().ok_or(Reason::SourceRefused)?)? != expected_root { return Err(Reason::SourceChanged); }
+            let chain = book.chain(parents, stop)?;
+            let parent = *chain.last().ok_or(Reason::SourceRefused)?;
+            let leaf = book.child_policy(parent, name, true, LeafPolicy::RequiredNote, stop)?;
+            let file = match book.slots[leaf].identity { Some(Identity::File(file)) => file, _ => return Err(Reason::SourceRefused) };
+            let size = usize::try_from(file.size).map_err(|_| Reason::MaterialLimit)?;
+            if size > kind.byte_limit() { return Err(Reason::MaterialLimit); }
+            let capacity = size.checked_add(1).ok_or(Reason::MaterialLimit)?;
+            let mut bytes = Vec::new(); bytes.try_reserve_exact(capacity).map_err(|_| Reason::Capacity)?;
+            if bytes.capacity() > kind.byte_limit() + 1 { return Err(Reason::Capacity); }
+            bytes.resize(capacity, 0);
+            let mut used = 0usize;
+            loop {
+                checkpoint(stop)?;
+                let count = unistd::read(book.fd(leaf)?, &mut bytes[used..]).map_err(|_| Reason::SourceRefused)?;
+                checkpoint(stop)?;
+                if count == 0 { if used != size { return Err(Reason::SourceChanged); } break; }
+                used = used.checked_add(count).ok_or(Reason::SourceChanged)?;
+                if used > size { return Err(Reason::SourceChanged); }
+            }
+            bytes.truncate(size);
+            String::from_utf8(bytes).map_err(|_| Reason::UnsupportedFormat)
+        })();
+        // First failure is observed BEFORE consuming closes; failed/late close
+        // never returns private text or permits another source operation.
         book.finish_public_images(result, stop, failed)
     }
     pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>], stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
@@ -1178,6 +1224,13 @@ mod linux {
 pub(crate) use linux::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::capture_public_images;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use linux::capture_required_note;
+// Actual macOS/Windows purpose implementations are composed from their own
+// source lanes; this N-based capsule never substitutes POSIX/credential reads.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+pub(crate) fn capture_required_note(_: &mut SourceBook, _: PathBuf, _: &RegisteredRoot,
+    _: crate::required_notes_edit_protocol::Kind, _: &mut dyn FnMut() -> bool, _: &mut dyn FnMut(Reason)) -> Result<String, Reason> { Err(Reason::UnsupportedPlatform) }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::{probe_project_excluding_vault, probe_vault_exclusion};
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

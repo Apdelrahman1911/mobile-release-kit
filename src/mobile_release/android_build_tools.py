@@ -194,7 +194,8 @@ def _native_path(path: str) -> bool:
     # never directory discovery or ambient font/resolver configuration.
     return (path.startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
             or path in {"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/fonts/fonts.conf",
-                        "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"}
+                        "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf",
+                        "/run/systemd/resolve/stub-resolv.conf"}
             or any(_direct_file(path, directory, ".conf")
                    for directory in ("/etc/fonts/conf.avail/", "/usr/share/fontconfig/conf.avail/"))
             or any(_direct_file(path, f"/usr/share/fonts/truetype/{family}/", ".ttf")

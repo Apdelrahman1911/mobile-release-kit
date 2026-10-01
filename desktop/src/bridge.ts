@@ -1,3 +1,10 @@
+import { REQUIRED_NOTES_EVENT, REQUIRED_NOTES_IMPORT_EVENT, encodeRequiredNotesRequest, parseRequiredNoteValidation,
+  parseRequiredNotesCapabilities, parseRequiredNotesGuide, parseRequiredNotesImportEnvelope, parseRequiredNotesImportReply,
+  parseRequiredNotesImportStatusReply, parseRequiredNotesLoaded, parseRequiredNotesPreparedReply, parseRequiredNotesRoutineEnvelope,
+  parseRequiredNotesStatusReply, requiredNotesError, requiredNotesRequestFits } from './requiredNotesProtocol.ts';
+import type { RequiredNotesCommand } from './requiredNotesProtocol.ts';
+import { sameRequiredNoteContext } from './requiredNotes.ts';
+import type { RequiredNoteContext } from './requiredNotes.ts';
 import { parseSavedMetadataReport, savedMetadataError, savedMetadataRequestFits } from './metadataValidation.ts';
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
@@ -47,7 +54,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'github-input-group-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'github-input-group-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'mrk-required-notes-status' | 'mrk-required-notes-import-status', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -197,6 +204,21 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       return structuredClone(status);
     } catch (error) { throw workflowEditError(error); }
   };
+  const notesCall = async <T>(command: RequiredNotesCommand, value: unknown, parse: (value: unknown) => T | null,
+    matches?: (result: T, request: Record<string, unknown>) => boolean): Promise<T> => {
+    try {
+      if (mode !== 'native') throw { code: 'required_notes_unavailable' };
+      if (!requiredNotesRequestFits(command, value)) throw { code: 'required_notes_invalid_params' };
+      const request = structuredClone(value) as Record<string, unknown>;
+      const body = encodeRequiredNotesRequest(command, request);
+      if (!body) throw { code: 'required_notes_invalid_params' };
+      // Every notes command uses raw UTF-8 JSON IPC. The original native parser
+      // retains duplicate-aware admission; generic call/apiError is NOT used.
+      const result = parse(await invoke<unknown>(command, body));
+      if (!result || matches && !matches(result, request)) throw { code: 'required_notes_protocol' };
+      return result;
+    } catch (error) { throw requiredNotesError(error); }
+  };
   const metadataCall = async <T>(command: MetadataTextCommand, args: unknown, parse: (value: unknown) => T | null): Promise<T> => {
     try {
       if (!metadataTextRequestFits(command, args)) throw { code: 'MetadataTextRequestInvalid' };
@@ -273,7 +295,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       const githubSetup = parseCatalogGitHubSetup(result);
       if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
       return { ...result, githubSetup: structuredClone(githubSetup), credentialGuide: parseCatalogCredentialGuide(result),
-        githubConnection: parseGitHubConnectionHelp(result.githubConnection), metadataText: parseMetadataTextGuide(result.metadataText), releaseVersionEdit: parseVersionEditGuide(result.releaseVersionEdit) };
+        githubConnection: parseGitHubConnectionHelp(result.githubConnection), metadataText: parseMetadataTextGuide(result.metadataText), requiredNotes: parseRequiredNotesGuide(result.requiredNotes), releaseVersionEdit: parseVersionEditGuide(result.releaseVersionEdit) };
     },
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),
@@ -395,6 +417,42 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!report || report.platform !== input.platform) throw { code: 'metadata_validation_incomplete' };
         return report;
       } catch (error) { throw savedMetadataError(error); }
+    },
+    requiredNotesCapabilities: () => notesCall('required_notes_capabilities', {}, parseRequiredNotesCapabilities),
+    observeRequiredNotes: (request) => notesCall('required_notes_observe', request, parseRequiredNotesLoaded,
+      (result, input) => result.projectId === input.projectId && result.windowGeneration === input.windowGeneration &&
+        sameRequiredNoteContext(result.selection.context, input.context as RequiredNoteContext)),
+    validateRequiredNotes: (request) => notesCall('required_notes_validate', request, parseRequiredNoteValidation,
+      (result, input) => result.kind === (input.context as RequiredNoteContext).kind &&
+        result.rawByteCount === new TextEncoder().encode(input.text as string).byteLength),
+    importRequiredNotes: (request) => notesCall('required_notes_import', request, parseRequiredNotesImportReply,
+      (result, input) => result.requestId === input.requestId && result.status.windowGeneration === input.windowGeneration &&
+        result.status.projectId === input.projectId && sameRequiredNoteContext(result.status.context, input.context as RequiredNoteContext)),
+    prepareRequiredNotes: (request) => notesCall('required_notes_edit_prepare', request, parseRequiredNotesPreparedReply,
+      (result, input) => result.requestId === input.requestId && result.prepared.projectId === input.projectId &&
+        result.prepared.windowGeneration === input.windowGeneration && result.prepared.draftRevision === input.draftRevision &&
+        sameRequiredNoteContext(result.prepared.selection.context, input.context as RequiredNoteContext)),
+    applyRequiredNotes: (request) => notesCall('required_notes_edit_apply', request, parseRequiredNotesRoutineEnvelope,
+      (result, input) => result.requestId === input.requestId && result.status.windowGeneration === input.windowGeneration &&
+        result.status.sessionId === input.sessionId && result.status.planToken === input.planToken),
+    closeRequiredNotes: (request) => notesCall('required_notes_edit_close', request, parseRequiredNotesRoutineEnvelope,
+      (result, input) => result.requestId === input.requestId && result.status.windowGeneration === input.windowGeneration &&
+        result.status.sessionId === input.sessionId),
+    requiredNotesStatus: (request) => notesCall('required_notes_edit_status', request, parseRequiredNotesStatusReply,
+      (result, input) => result.requestId === input.requestId && (!result.status || result.status.windowGeneration === input.windowGeneration)),
+    requiredNotesImportStatus: (request) => notesCall('required_notes_import_status', request, parseRequiredNotesImportStatusReply,
+      (result, input) => result.requestId === input.requestId && (!result.status || result.status.windowGeneration === input.windowGeneration)),
+    subscribeRequiredNotes: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'required_notes_unavailable' };
+        return await listen(REQUIRED_NOTES_EVENT, (value) => onStatus(parseRequiredNotesRoutineEnvelope(value)));
+      } catch (error) { throw requiredNotesError(error); }
+    },
+    subscribeRequiredNotesImport: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'required_notes_unavailable' };
+        return await listen(REQUIRED_NOTES_IMPORT_EVENT, (value) => onStatus(parseRequiredNotesImportEnvelope(value)));
+      } catch (error) { throw requiredNotesError(error); }
     },
     observeMetadataText: (request) => metadataCall('metadata_text_observe', request, parseMetadataTextObservation),
     validateMetadataText: (request) => metadataCall('metadata_text_validate', request, parseMetadataTextValidation),

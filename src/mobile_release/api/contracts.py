@@ -813,6 +813,96 @@ class MetadataTextGuide(TypedDict):
     limits: MetadataTextGuideLimits
 
 
+RequiredNoteKind = Literal["android-build", "android-default", "ios-beta-review", "ios-app-review",
+                           "testflight-what-to-test"]
+
+
+class RequiredAndroidNoteContext(TypedDict):
+    kind: Literal["android-build", "android-default"]
+    locale: str
+
+
+class RequiredAppleNoteContext(TypedDict):
+    kind: Literal["ios-beta-review", "ios-app-review", "testflight-what-to-test"]
+
+
+RequiredNotesContext = RequiredAndroidNoteContext | RequiredAppleNoteContext
+
+
+class RequiredNoteIssue(TypedDict):
+    code: Literal["notes.missing", "notes.utf8", "notes.editor-byte-limit", "notes.android-content",
+                  "notes.android-length", "notes.android-policy", "notes.apple-empty", "notes.testflight-length",
+                  "metadata.empty-text", "metadata.nul", "metadata.placeholder", "metadata.secret-pattern",
+                  "metadata.length"]
+    message: str
+
+
+class RequiredNoteValidationResult(TypedDict):
+    schemaVersion: Literal[1]
+    kind: RequiredNoteKind
+    valid: bool
+    state: Literal["format-valid", "invalid"]
+    rawByteCount: int | None
+    characterCount: int | None
+    characterLimit: int | None
+    outboundCharacterCount: int | None
+    editorByteLimit: int
+    issues: list[RequiredNoteIssue]
+
+
+class RequiredNoteAbsent(TypedDict):
+    state: Literal["absent"]
+
+
+class RequiredNotePresent(MetadataContentDigest):
+    state: Literal["present"]
+
+
+class RequiredNotesBaseline(TypedDict):
+    config: MetadataContentDigest
+    version: MetadataContentDigest | None
+    note: RequiredNoteAbsent | RequiredNotePresent
+    counterpart: RequiredNoteAbsent | RequiredNotePresent | None
+
+
+class RequiredNoteEffective(TypedDict):
+    source: Literal["exact", "default", "missing"]
+    valid: bool
+
+
+class RequiredNotesSelection(TypedDict):
+    context: RequiredNotesContext
+    metadataRoot: str
+    destination: str
+    savedBuild: int | None
+    effective: RequiredNoteEffective | None
+
+
+class RequiredNoteOriginalPresent(TypedDict):
+    state: Literal["present"]
+    text: str
+
+
+class RequiredNotesObservationResult(TypedDict):
+    # Private direct-call DATA only; never routine status/events or Save evidence.
+    schemaVersion: Literal[1]
+    selection: RequiredNotesSelection
+    baseline: RequiredNotesBaseline
+    original: RequiredNoteAbsent | RequiredNoteOriginalPresent
+    validation: RequiredNoteValidationResult
+
+
+class RequiredNotesFieldHelp(MetadataTextHelpText):
+    requiredness: Literal["conditional"]
+    audience: Literal["public-play", "apple-review", "testflight-testers"]
+
+
+class RequiredNotesGuide(TypedDict):
+    schemaVersion: Literal[1]
+    fields: list[RequiredNotesFieldHelp]
+    actions: list[MetadataTextActionHelp]
+
+
 class ReleaseVersionHelpText(TypedDict):
     id: str
     label: str
@@ -846,6 +936,7 @@ class CatalogResult(TypedDict):
     credentialGuide: CredentialGuide | None
     metadata: dict[str, Any]
     metadataText: MetadataTextGuide | None
+    requiredNotes: RequiredNotesGuide | None
     releaseVersionEdit: ReleaseVersionEditGuide | None
     githubSetup: GitHubSetupHelp
     githubConnection: GitHubConnectionHelp | None

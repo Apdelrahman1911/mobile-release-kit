@@ -56,6 +56,8 @@ mod document_lifetime;
 mod windows_startup;
 mod edit_commands;
 mod metadata_text_commands;
+mod required_notes_commands;
+mod required_notes_edit_protocol;
 mod metadata_images_commands;
 mod release_version_edit_commands;
 mod github_commands;

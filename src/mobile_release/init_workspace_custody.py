@@ -12,6 +12,7 @@ import sys
 import threading
 import uuid
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
@@ -25,6 +26,7 @@ from .init_transaction import (InitApplyOutcome, InitConflict, InitOperationFail
 
 if TYPE_CHECKING:
     from .metadata_text import PublicTextSelection
+    from .required_notes import RequiredNotesSelection
     from .version_text import VersionSelection
     from .metadata_images import ImageObjectKey, SelectedImage
     from .metadata_images_custody import ImageTargets
@@ -47,7 +49,8 @@ class MetadataTargets:
     """
 
     __slots__ = ("_identity", "_lease", "_capture_workspace", "_selection", "_dependencies",
-                 "_raw", "_parents", "_parent_facts")
+                 "_raw", "_parents", "_parent_facts", "_dependency_limits", "_payload_limits",
+                 "_dependency_observations", "_transition_directories")
 
     def __new__(cls, *args: Any, **kwargs: Any):
         raise TypeError("metadata targets are bound only by the original lease")
@@ -68,7 +71,7 @@ class MetadataTargets:
         raise TypeError("metadata targets cannot be serialized")
 
     @property
-    def selection(self) -> PublicTextSelection:
+    def selection(self) -> PublicTextSelection | RequiredNotesSelection:
         return self._selection
 
     @property
@@ -80,14 +83,33 @@ class MetadataTargets:
         return self._selection.directories
 
     @property
+    def dependency_paths(self) -> tuple[str, ...]:
+        return tuple(row[0] for row in self._dependencies)
+
+    @property
+    def dependency_limits(self) -> tuple[int, ...]:
+        return self._dependency_limits
+
+    @property
+    def dependency_observations(self) -> tuple[ObservedFile, ...]:
+        return self._dependency_observations
+
+    @property
+    def payload_limits(self) -> tuple[int, ...]:
+        return self._payload_limits
+
+    @property
+    def transition_directories(self) -> tuple[str, ...]:
+        # Only original-absent target parents shared with the readonly counterpart.
+        return self._transition_directories
+
+    @property
     def observation_paths(self) -> tuple[str, ...]:
-        from .metadata_text import DEPENDENCY_PATHS
-        return (*DEPENDENCY_PATHS, *self.paths)
+        return (*self.dependency_paths, *self.paths)
 
     @property
     def observation_limits(self) -> tuple[int, ...]:
-        from .metadata_text import DEPENDENCY_LIMITS, MAX_TEXT_BYTES
-        return (*DEPENDENCY_LIMITS, *((MAX_TEXT_BYTES,) * len(self.paths)))
+        return (*self.dependency_limits, *self.payload_limits)
 
     @property
     def dependency_only_parents(self) -> dict[str, dict[str, int] | None]:
@@ -149,14 +171,27 @@ class VersionTargets:
         return self._selection.directories
 
     @property
-    def observation_paths(self) -> tuple[str, ...]:
+    def dependency_paths(self) -> tuple[str, ...]:
         from .version_text import DEPENDENCY_PATHS
-        return (*DEPENDENCY_PATHS, *self.paths)
+        return DEPENDENCY_PATHS
+
+    @property
+    def dependency_limits(self) -> tuple[int, ...]:
+        from .version_text import DEPENDENCY_LIMITS
+        return DEPENDENCY_LIMITS
+
+    @property
+    def payload_limits(self) -> tuple[int, ...]:
+        from .version_text import MAX_VERSION_BYTES
+        return (MAX_VERSION_BYTES,) * len(self.paths)
+
+    @property
+    def observation_paths(self) -> tuple[str, ...]:
+        return (*self.dependency_paths, *self.paths)
 
     @property
     def observation_limits(self) -> tuple[int, ...]:
-        from .version_text import DEPENDENCY_LIMITS, MAX_VERSION_BYTES
-        return (*DEPENDENCY_LIMITS, *((MAX_VERSION_BYTES,) * len(self.paths)))
+        return (*self.dependency_limits, *self.payload_limits)
 
     @property
     def dependency_only_parents(self) -> dict[str, dict[str, int] | None]:
@@ -221,7 +256,7 @@ class RootedRevision:
         return tuple(path for path in self._profile.directories if parents[path] is None)
 
     @property
-    def metadata_selection(self) -> PublicTextSelection:
+    def metadata_selection(self) -> PublicTextSelection | RequiredNotesSelection:
         if self._profile is not TypedEditProfile.METADATA_TEXT or type(self._metadata_targets) is not MetadataTargets:
             raise _failure("invalid_params")
         return self._metadata_targets.selection
@@ -353,18 +388,42 @@ class LockedInitScope:
         self.closed = True
 
 
+class _LeasePurpose(Enum):
+    """Private construction intent, never renderer or detached selection DATA."""
+    REQUIRED_NOTES = "required_notes"
+
+
 class InitRootLease:
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in {"_profile", "_purpose"} and name in self.__dict__:
+            raise AttributeError("the original lease profile and purpose are immutable")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in {"_profile", "_purpose"}:
+            raise AttributeError("the original lease profile and purpose are immutable")
+        object.__delattr__(self, name)
+
     def __init__(self, root: Path, *, cancellation: DefaultCancellation,
                  profile: TypedEditProfile = TypedEditProfile.CONFIGURATION,
                  registered_identity: dict[str, int] | None = None,
-                 image_recovery: bool = False) -> None:
+                 image_recovery: bool = False,
+                 purpose: _LeasePurpose | None = None) -> None:
+        if "_profile" in self.__dict__ or "_purpose" in self.__dict__:
+            raise _failure("invalid_params")
         if type(cancellation) is not DefaultCancellation or type(profile) is not TypedEditProfile:
+            raise _failure("invalid_params")
+        if purpose is not None and (type(purpose) is not _LeasePurpose
+                                    or profile is not TypedEditProfile.METADATA_TEXT):
             raise _failure("invalid_params")
         if type(image_recovery) is not bool or image_recovery and profile is not TypedEditProfile.METADATA_IMAGES:
             raise _failure("invalid_params")
         cancellation._check_owner()
         if threading.current_thread() is not threading.main_thread():
             raise _failure("invalid_params")
+        # Latch the exact pair before any acquisition. Neither target binding
+        # nor a later context selection can turn a public lease into notes.
+        self._profile, self._purpose = profile, purpose
         if profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                        TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
             if (type(registered_identity) is not dict
@@ -380,7 +439,6 @@ class InitRootLease:
             if registered_identity is not None:
                 raise _failure("invalid_params")
             self._registered_identity = None
-        self._profile = profile
         self.root, self.guard = root, cancellation
         self.directory = _Directory(root, cancellation, edit_checkpoints=True)
         self._scopes: list[LockedInitScope] = []
@@ -418,7 +476,9 @@ class InitRootLease:
             raise _failure("unsupported_platform")
         if (self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                              TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES)
-                and not sys.platform.startswith("linux")):
+                and not sys.platform.startswith("linux")
+                and not (sys.platform == "darwin" and self._profile is TypedEditProfile.METADATA_TEXT
+                         and self._purpose is _LeasePurpose.REQUIRED_NOTES)):
             raise _failure("unsupported_platform")
         try:
             value = str(self.root)
@@ -481,9 +541,11 @@ class InitRootLease:
                               dependencies: tuple[ObservedFile, ...],
                               platform: object, locale: object) -> MetadataTargets:
         """Derive once from the original fixed config/ignore observations."""
+        if self._profile is not TypedEditProfile.METADATA_TEXT or self._purpose is not None:
+            raise _failure("invalid_params")
         from .config_payloads import sufficient_ignore_rules
         from .metadata import check_metadata_text
-        from .metadata_text import (DEPENDENCY_LIMITS, DEPENDENCY_PATHS,
+        from .metadata_text import (DEPENDENCY_LIMITS, DEPENDENCY_PATHS, MAX_TEXT_BYTES,
                                     MetadataTextInputError, public_text_selection)
         self.check()
         scope = self._active
@@ -520,6 +582,102 @@ class InitRootLease:
         for name, value in (
             ("_identity", targets), ("_lease", self), ("_capture_workspace", workspace), ("_selection", selection),
             ("_dependencies", tuple((item.path, tuple(sorted(item.before.items())), item.data) for item in dependencies)),
+            ("_dependency_limits", DEPENDENCY_LIMITS), ("_payload_limits", (MAX_TEXT_BYTES,) * len(selection.paths)),
+            ("_dependency_observations", dependencies), ("_transition_directories", ()),
+            ("_raw", tuple(sorted(workspace._raw_observations.items()))),
+            ("_parents", tuple((path, tuple(sorted(value.items())) if value is not None else None)
+                              for path, value in sorted(workspace.parents.items()))),
+            ("_parent_facts", tuple(sorted(workspace._parent_facts.items()))),
+        ):
+            object.__setattr__(targets, name, value)
+        self._metadata_targets = targets
+        workspace._metadata_targets = targets
+        return targets
+
+    def bind_required_notes_targets(self, workspace: InitWorkspace,
+                                    dependencies: tuple[ObservedFile, ...], context: object) -> MetadataTargets:
+        """Capture one closed note and its readonly context in the original scope.
+
+        Only this lease derives/captures the extra version/counterpart inventory.
+        No detached selection, supplied path or dependency count is admitted.
+        """
+        if (self._profile is not TypedEditProfile.METADATA_TEXT
+                or self._purpose is not _LeasePurpose.REQUIRED_NOTES):
+            raise _failure("invalid_params")
+        from .config import MAX_VERSION_BYTES
+        from .config_payloads import sufficient_ignore_rules
+        from .metadata import ANDROID_NOTE_MAX_BYTES
+        from .metadata_text import DEPENDENCY_LIMITS, DEPENDENCY_PATHS
+        from .required_notes import (RequiredNotesInputError, notes_configuration, required_note_selection)
+        self.check()
+        scope = self._active
+        if (self._profile is not TypedEditProfile.METADATA_TEXT or scope is None
+                or scope.workspace is not workspace or type(workspace) is not InitWorkspace
+                or workspace._typed_profile is not self._profile or self._revision is not None
+                or self._metadata_targets is not None or workspace._metadata_targets is not None
+                or type(dependencies) is not tuple or len(dependencies) != len(DEPENDENCY_PATHS)
+                or any(type(item) is not ObservedFile or item.path != path
+                       or workspace._captured.get(path) is not item
+                       for item, path in zip(dependencies, DEPENDENCY_PATHS))
+                or set(workspace._captured) != set(DEPENDENCY_PATHS)
+                or set(workspace._raw_observations) != set(DEPENDENCY_PATHS)
+                or set(workspace.parents) != {"release"}
+                or set(workspace._parent_facts) != {"release"}):
+            raise _failure("invalid_params")
+        config, ignore = dependencies
+        if config.before is None or type(config.data) is not bytes or not 0 < len(config.data) <= DEPENDENCY_LIMITS[0]:
+            raise _failure("invalid_config")
+        if (ignore.before is None or type(ignore.data) is not bytes
+                or len(ignore.data) > DEPENDENCY_LIMITS[1]
+                or not sufficient_ignore_rules(ignore.data, METADATA_IGNORE_LINES)):
+            raise _failure("ignore_conflict")
+        try:
+            configured = notes_configuration(config.data.decode("utf-8"), context)
+        except UnicodeError:
+            raise _failure("invalid_config") from None
+        except RequiredNotesInputError as error:
+            raise _failure("invalid_params" if error.reason == "invalid_params" else "invalid_config") from None
+        extra: tuple[ObservedFile, ...] = ()
+        limits = DEPENDENCY_LIMITS
+        version = None
+        if configured.version is not None:
+            version = workspace.observe(configured.version.source, limit=MAX_VERSION_BYTES)
+            extra = (version,)
+            limits = (*limits, MAX_VERSION_BYTES)
+        try:
+            selection = required_note_selection(configured, None if version is None else version.data)
+        except RequiredNotesInputError as error:
+            raise _failure("invalid_params" if error.reason == "invalid_params" else "invalid_config") from None
+        if selection.counterpart_path is not None:
+            counterpart = workspace.observe(selection.counterpart_path, limit=ANDROID_NOTE_MAX_BYTES)
+            extra = (*extra, counterpart)
+            limits = (*limits, ANDROID_NOTE_MAX_BYTES)
+        complete = (*dependencies, *extra)
+        expected = (*DEPENDENCY_PATHS,
+                    *((selection.version_source,) if selection.version_source is not None else ()),
+                    *((selection.counterpart_path,) if selection.counterpart_path is not None else ()))
+        parents = {"release"}
+        for path in expected:
+            parts = path.split("/")
+            parents.update("/".join(parts[:depth]) for depth in range(1, len(parts)))
+        if (len(complete) != len(limits) or tuple(item.path for item in complete) != expected
+                or any(type(item) is not ObservedFile or workspace._captured.get(item.path) is not item
+                       for item in complete)
+                or set(workspace._captured) != set(expected)
+                or set(workspace._raw_observations) != set(expected)
+                or set(workspace.parents) != parents or set(workspace._parent_facts) != parents):
+            raise _failure("invalid_params")
+        transitions = tuple(path for path in selection.directories
+                            if selection.counterpart_path is not None
+                            and selection.counterpart_path.startswith(path + "/")
+                            and path in workspace.parents and workspace.parents[path] is None)
+        targets = object.__new__(MetadataTargets)
+        for name, value in (
+            ("_identity", targets), ("_lease", self), ("_capture_workspace", workspace), ("_selection", selection),
+            ("_dependencies", tuple((item.path, None if item.before is None else tuple(sorted(item.before.items())),
+                                      item.data) for item in complete)),
+            ("_dependency_limits", limits), ("_payload_limits", (selection.editor_byte_limit,)),
+            ("_dependency_observations", complete), ("_transition_directories", transitions),
             ("_raw", tuple(sorted(workspace._raw_observations.items()))),
             ("_parents", tuple((path, tuple(sorted(value.items())) if value is not None else None)
                               for path, value in sorted(workspace.parents.items()))),
@@ -604,20 +762,20 @@ class InitRootLease:
             if type(targets) is not MetadataTargets:
                 raise _failure("invalid_params")
             targets._check_workspace(workspace)
-            return targets.observation_paths, targets.observation_limits, {"release", *targets.directories}
+            return targets.observation_paths, targets.observation_limits, {*targets.dependency_only_parents, *targets.directories}
         if self._profile is TypedEditProfile.RELEASE_VERSION:
             targets = self._version_targets
             if type(targets) is not VersionTargets:
                 raise _failure("invalid_params")
             targets._check_workspace(workspace)
-            return targets.observation_paths, targets.observation_limits, {"release", *targets.directories}
+            return targets.observation_paths, targets.observation_limits, {*targets.dependency_only_parents, *targets.directories}
         if self._profile is TypedEditProfile.METADATA_IMAGES:
             from .metadata_images_custody import ImageTargets
             targets = self._image_targets
             if type(targets) is not ImageTargets:
                 raise _failure("invalid_params")
             targets._check_workspace(workspace)
-            return targets.observation_paths, targets.observation_limits, {"release", *targets.directories}
+            return targets.observation_paths, targets.observation_limits, {*targets.dependency_only_parents, *targets.directories}
         if self._profile in (TypedEditProfile.CONFIGURATION, TypedEditProfile.GITHUB_WORKFLOWS):
             return self._profile.paths, self._profile.observation_limits, set(self._profile.directories)
         raise _failure("invalid_params")
@@ -663,6 +821,8 @@ class InitRootLease:
         if self._profile is TypedEditProfile.METADATA_IMAGES and revision._image_targets is not self._image_targets:
             raise _failure("invalid_params")
         paths, limits, _ = self._observation_roster(workspace)
+        if len(paths) != len(limits) or len(paths) != len(revision._files):
+            raise _failure("invalid_params")
         workspace.parents = {path: dict(value) if value is not None else None
                              for path, value in revision._parents}
         try:

@@ -218,6 +218,8 @@ fn main() {
             "github_workflow_edit_close", "github_workflow_edit_status",
             "metadata_validate", "metadata_text_observe", "metadata_text_validate", "metadata_text_edit_open", "metadata_text_edit_prepare",
             "metadata_text_edit_apply", "metadata_text_edit_close", "metadata_text_edit_status",
+            "required_notes_capabilities", "required_notes_observe", "required_notes_validate", "required_notes_import",
+            "required_notes_edit_prepare", "required_notes_edit_apply", "required_notes_edit_close", "required_notes_edit_status", "required_notes_import_status",
             "metadata_images_catalog", "metadata_images_choose", "metadata_images_selection_status", "metadata_images_selection_cancel",
             "metadata_images_edit_open", "metadata_images_recovery_open", "metadata_images_edit_prepare",
             "metadata_images_edit_apply", "metadata_images_edit_close", "metadata_images_edit_status",

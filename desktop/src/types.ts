@@ -1,3 +1,5 @@
+import type { RequiredNotesApi } from './requiredNotesProtocol.ts';
+import type { RequiredNotesGuide } from './requiredNotes.ts';
 import type { SavedMetadataApi } from './metadataValidation.ts';
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
@@ -124,6 +126,8 @@ export interface Catalog {
   credentialGuide: CredentialGuide | null;
   metadata: MetadataRules | null;
   metadataText: MetadataTextGuide | null;
+  // Absent only on old/preview catalogues; the native parser returns guide|null.
+  requiredNotes?: RequiredNotesGuide | null;
   releaseVersionEdit: VersionEditGuide | null;
   githubSetup: GitHubSetupHelp;
   githubConnection: GitHubConnectionHelp | null;
@@ -387,7 +391,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, GitHubInputGroupApi, SavedMetadataApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, GitHubInputGroupApi, SavedMetadataApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi, RequiredNotesApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

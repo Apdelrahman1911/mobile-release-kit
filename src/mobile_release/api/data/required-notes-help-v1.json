@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "fields": [
+    {
+      "id": "android-build",
+      "label": "Google Play notes for this saved build",
+      "audience": "public-play",
+      "requiredness": "conditional",
+      "requiredWhen": "When the saved Android build needs its own notes, or no valid default exists. Every enabled Android locale needs valid effective notes.",
+      "what": "The public change summary for the exact saved Android build.",
+      "why": "Google Play uses this file instead of default notes whenever this build-specific file exists.",
+      "where": "Write the changes supplied by your release team. Save the release version first, then select a configured Android locale. You do not need to create a folder or filename.",
+      "format": "UTF-8; at most 500 Unicode characters including spaces and line endings (2000-byte read bound). Original bytes are kept.",
+      "failure": "An empty, invalid or unsafe exact-build note blocks release; a valid default does not hide it. Fix this note, then validate again."
+    },
+    {
+      "id": "android-default",
+      "label": "Default Google Play release notes",
+      "audience": "public-play",
+      "requiredness": "conditional",
+      "requiredWhen": "For a saved Android locale when its exact saved-build note is absent.",
+      "what": "Reusable public release copy used only when the current build has no exact note file.",
+      "why": "Lets releases reuse approved text without silently replacing existing build-specific notes.",
+      "where": "Write approved release copy, choose the saved Android locale, then review and Save here. The screen tells you if an exact note shadows this default.",
+      "format": "UTF-8; 500 Unicode characters including all whitespace. The application keeps your original bytes and handles the filename.",
+      "failure": "Saving a valid default cannot fix an invalid exact-build file. Use Notes for this saved build when the exact file needs correction. If an unused default file is present, full core metadata preflight still validates it; fix an invalid default even when an exact note is selected."
+    },
+    {
+      "id": "ios-beta-review",
+      "label": "Apple beta review notes",
+      "audience": "apple-review",
+      "requiredness": "conditional",
+      "requiredWhen": "Required by enabled iOS metadata checks; later used for Apple beta review and external testing.",
+      "what": "Instructions for the Apple team reviewing your TestFlight beta, not the public App Store change log.",
+      "why": "Helps reviewers understand special setup or features they should exercise.",
+      "where": "Ask your release or QA team for reviewer instructions. Use the separate Apple review contact and demo-account credential fields for contact information and credentials.",
+      "format": "UTF-8 nonempty instructions. The current core has no field-specific character limit; this editor accepts at most 32 KiB. Local format-valid is not Apple acceptance.",
+      "failure": "Missing/placeholder instructions block metadata preparation. These are local repository text files, not protected credential storage; never include passwords or private keys."
+    },
+    {
+      "id": "ios-app-review",
+      "label": "Apple App Review notes",
+      "audience": "apple-review",
+      "requiredness": "conditional",
+      "requiredWhen": "Required by enabled iOS metadata checks; later used for App Store review.",
+      "what": "Instructions for the Apple team reviewing the production app. They are separate from beta review and public iOS release notes.",
+      "why": "Explains review setup, non-obvious features and how to exercise the app.",
+      "where": "Get production-review instructions from the release/QA team. Configure review contact and demo-account credentials separately in their dedicated fields.",
+      "format": "UTF-8 nonempty text; no field-specific character limit in the current core. The local editor cap is 32 KiB, not a promised Apple Store limit.",
+      "failure": "Missing or placeholder notes block metadata checks. Do not store credentials here: the notes are ordinary local repository text even though their Store audience is reviewers."
+    },
+    {
+      "id": "testflight-what-to-test",
+      "label": "TestFlight: what to test",
+      "audience": "testflight-testers",
+      "requiredness": "conditional",
+      "requiredWhen": "Required by enabled iOS metadata checks; later used when configuring external TestFlight testing.",
+      "what": "Instructions describing what invited testers should try in this build.",
+      "why": "Tells testers which changes need feedback. The current toolkit uses the same fixed instructions for configured iOS locales.",
+      "where": "Ask your release/QA team for the test plan, then write or import a UTF-8 text file here. It is different from App Review notes and the public App Store change log.",
+      "format": "At most 4000 characters under the core preflight and Apple-bound trimming rules, and 64 KiB of original UTF-8 bytes. Fastlane sanitizes outbound text; Save keeps the original bytes.",
+      "failure": "Empty, oversized or placeholder instructions block the operation. Local validation does not contact TestFlight or prove provider acceptance."
+    }
+  ],
+  "actions": [
+    {
+      "id": "load",
+      "label": "Load this required note",
+      "requiredness": "optional",
+      "requiredWhen": "When you explicitly choose this local editing action.",
+      "what": "Reads only the selected saved note and required configuration/version dependencies.",
+      "why": "Shows the saved starting text without a terminal or manual file copying.",
+      "where": "Select your project and the note kind; for Android also select a saved locale.",
+      "format": "Explicit local read; private note contents remain in this selected editor, not routine status/history.",
+      "failure": "A changed, unreadable, sensitive or unsafe input is refused. No read error is treated as a missing file."
+    },
+    {
+      "id": "validate",
+      "label": "Check note format",
+      "requiredness": "optional",
+      "requiredWhen": "When you explicitly choose this local editing action.",
+      "what": "Checks this in-memory draft with the existing core note policy.",
+      "why": "Finds meaningful text/length/placeholder errors before a write or Store step.",
+      "where": "Write instructions or import a text file, then choose Check format.",
+      "format": "No files are changed and no Store is contacted. Format-valid is not release readiness.",
+      "failure": "Correct the reported field and check again. A changed draft makes an earlier result stale."
+    },
+    {
+      "id": "review",
+      "label": "Review the local file change",
+      "requiredness": "optional",
+      "requiredWhen": "When you explicitly choose this local editing action.",
+      "what": "Prepares an original-owner-bound before/after view without applying it.",
+      "why": "Lets you confirm exactly one note and any required missing directories before Save.",
+      "where": "Use Review change after a successful current draft validation.",
+      "format": "Binds the saved configuration, Android build/fallback state and original note. It cannot be reused for a different draft.",
+      "failure": "A stale or conflicting saved file/build requires a new Load and review; unrelated files are preserved."
+    },
+    {
+      "id": "save",
+      "label": "Save the reviewed note",
+      "requiredness": "optional",
+      "requiredWhen": "When you explicitly choose this local editing action.",
+      "what": "Applies only the exact approved local text change through the existing owner.",
+      "why": "Registers the note in the correct configured location without manual renaming or copying.",
+      "where": "Review before/after and confirm Save this note.",
+      "format": "One-use approval. Store upload/publishing is a separate operation; original bytes and existing safety checks are preserved.",
+      "failure": "A timeout, cleanup uncertainty or partial failure is not success. Do not retry blindly; settle the original operation and follow the recovery guidance."
+    },
+    {
+      "id": "import",
+      "label": "Import a UTF-8 text file",
+      "requiredness": "optional",
+      "requiredWhen": "When you explicitly choose this local editing action.",
+      "what": "Uses the operating system file picker to copy selected text into this in-memory draft.",
+      "why": "Avoids manual copying into project folders or running registration commands.",
+      "where": "Choose a .txt file on your computer using Select text file. The original file is never moved or modified.",
+      "format": "Exactly one bounded regular UTF-8 file. After selection, core validation runs immediately. Replacing an existing draft needs confirmation; Save remains separate.",
+      "failure": "Cancellation, invalid text, a changed/unreadable file or size refusal leaves your existing draft intact. No generic filesystem path is accepted from the UI."
+    },
+    {
+      "id": "discard",
+      "label": "Discard this note draft",
+      "requiredness": "optional",
+      "requiredWhen": "When you explicitly choose this local editing action.",
+      "what": "Releases the selected editor draft after confirmation.",
+      "why": "Lets you leave without accidentally saving unpublished changes.",
+      "where": "Choose Discard draft, then confirm; an active original save must settle separately first.",
+      "format": "A local UI action only. It never deletes saved notes, public locale drafts or signing files.",
+      "failure": "Cannot discard while an original operation is still unsettled. Resolve its status first; no other task or process is stopped."
+    }
+  ]
+}

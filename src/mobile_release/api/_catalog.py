@@ -224,6 +224,7 @@ def catalog() -> CatalogResult:
     from ._github_setup import github_setup_help
     from ._github_connection import github_connection_help
     from ._metadata_text import metadata_text_help
+    from ._required_notes import required_notes_help
 
     schema, fields = _resource("project.schema.json"), _resource("field-help.json")
     if not isinstance(schema, dict) or schema.get("$id") != "urn:mobile-release-kit:schema:project:1" or not isinstance(fields, list):
@@ -251,6 +252,12 @@ def catalog() -> CatalogResult:
             raise
         text_guide = None
     try:
+        notes_guide = required_notes_help()
+    except ApiError as error:
+        if error.code != "resource_unavailable":
+            raise
+        notes_guide = None
+    try:
         version_guide = release_version_edit_help()
     except ApiError as error:
         if error.code != "resource_unavailable":
@@ -263,6 +270,7 @@ def catalog() -> CatalogResult:
         "githubSetup": github_setup_help(),
         "githubConnection": connection_guide,
         "metadataText": text_guide,
+        "requiredNotes": notes_guide,
         "releaseVersionEdit": version_guide,
         "metadata": {
             "requiredLocaleText": {platform: list(names) for platform, names in REQUIRED_LOCALE_TEXT.items()},
