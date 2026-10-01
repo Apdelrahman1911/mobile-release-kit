@@ -38,7 +38,7 @@ def _data_module():
 
 D = _data_module()
 SCOPE = "android-same-vm-private-material-v1"
-POLICY_SHA256 = "b785a69a9856d4ab333fed6383921601a85f1d340778e799982d59fea9a2627f"
+POLICY_SHA256 = "51f6a65c6f683c129bba862f9c0cc74035834f1731a409d37493da54134ba210"
 DATA = Path(__file__).with_name("android_material_data")
 DOCS = {"manifest": ("android-toolchain.json", 4 << 20),
         "osContract": ("os-contract.json", 1 << 20), "sources": ("source-rows.json", 4 << 20)}
@@ -359,6 +359,34 @@ def _input_rules(value):
     D.need(len(all_paths) == len(set(all_paths)), "Android fixed host input roles collide")
     for name in all_paths:
         _absolute(name)
+    if "_retained" not in value and _hosted_selected(value):
+        # Hosted canonical OS paths already have one explicit source authority.
+        # Validate the serialized delta and canonical rows before expanding;
+        # set union must never conceal malformed or duplicated source input.
+        # Match the existing namespace child grammar before any file binding.
+        for children in inputs["directories"].values():
+            D.need(type(children) is list and len(children) <= 512
+                   and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_.+@\-]{1,255}", name)
+                           and name not in (".", "..") for name in children)
+                   and children == sorted(set(children)), "Android fixed directory membership differs")
+        canonical = rules.get("files")
+        D.need(type(canonical) is list and 0 < len(canonical) <= 256,
+               "Android canonical OS input extent differs")
+        names = []
+        for row in canonical:
+            _keys(row, {"path", "origin"}, "Android canonical OS input row differs")
+            _absolute(row["path"])
+            D.need(type(row["origin"]) is dict, "Android canonical OS input origin differs")
+            names.append(row["path"])
+        D.need(names == sorted(set(names)), "Android canonical OS input order differs")
+        D.need(set(inputs["files"]).isdisjoint(names),
+               "Android hosted input delta repeats a canonical OS path")
+        expanded = sorted([*inputs["files"], *names])
+        D.need(len(expanded) <= 512, "Android expanded host input extent differs")
+        all_paths = [*expanded, *inputs["directories"], *inputs["absences"]]
+        D.need(len(all_paths) == len(set(all_paths)), "Android fixed host input roles collide")
+        return {"files": expanded, "directories": deepcopy(inputs["directories"]),
+                "absences": list(inputs["absences"])}
     return inputs
 
 
@@ -990,6 +1018,9 @@ def _host_state(value, host, deadline):
     preparation_paths = {"/usr/bin/bash", "/usr/bin/dpkg-deb", "/usr/bin/python3.12", "/usr/bin/fc-cat", "/usr/bin/fc-list"}
     if "_retained" not in value:
         preparation_paths.add("/usr/bin/curl")
+        if _hosted_selected(value):
+            # Fixed preparation DATA, not runtime OS or executable roles.
+            preparation_paths.update({"/etc/ca-certificates.conf", STOCK_PEM})
     D.need(type(rules["preparationFiles"]) is list and len(rules["preparationFiles"]) == len(preparation_paths)
            and {r["path"] for r in rules["preparationFiles"]} == preparation_paths,
            "Android fixed preparation tools/TLS source roster differs")
@@ -1096,9 +1127,9 @@ def _provider_control(value):
                and set(baseline["postJliModules"]) <= set(control["postJliModules"]),
                "Local Android provider selection drops or alters a retained tool route")
     D.need(control["schemaVersion"] == 1 and control["classification"] == PROVIDER_CLASSIFICATION
-           and (87 <= len(control["toolObjects"]) <= 128 if local else len(control["toolObjects"]) == 87)
+           and (87 <= len(control["toolObjects"]) <= 128 if local else len(control["toolObjects"]) == 88)
            and len(control["nestedObjects"]) == 6
-           and (40 <= len(control["osLibraries"]) <= 128 if local else len(control["osLibraries"]) == 40)
+           and (40 <= len(control["osLibraries"]) <= 128 if local else len(control["osLibraries"]) == 53)
            and len(control["programs"]) == 8
            and control["expectedGlobalAbsences"] == ["libtinfo.so.5"]
            and control["java"] == "jdk/bin/java" and control["jvm"] == "jdk/lib/server/libjvm.so"
@@ -2627,12 +2658,14 @@ def _documents(value, context, files, os_contract, *, instance=None, source_rows
     D.need(0 < len(files) <= 16384 and len(set(paths)) == len(files)
            and 0 < len(os_contract["files"]) <= 256 and len(os_contract["aliases"]) <= 128,
            "Android complete tool+OS count bound")
-    os_directories = {str(parent) for row in os_contract["files"] for parent in _absolute(row["path"]).parents}
+    os_directories = {str(parent) for row in [*os_contract["files"], *os_contract["aliases"]]
+                      for parent in _absolute(row["path"]).parents}
     # Fixed publication root has five original ancestors including itself.
-    # One manifest, all tool/OS objects and directories, one serial iterator;
+    # One manifest, all tool/OS objects, alias descriptors and their parents,
+    # plus one serial iterator; directory custody is deduplicated below.
     # the shared / and /opt ancestors need no second descriptor.
     shared = {"/", "/opt", "/opt/mobile-release-kit", "/opt/mobile-release-kit/android"}
-    D.need(5 + 1 + len(parents) + len(files) + len(os_contract["files"])
+    D.need(5 + 1 + len(parents) + len(files) + len(os_contract["files"]) + len(os_contract["aliases"])
            + len(os_directories - shared) + 1 <= 32768, "Android complete descriptor roster bound")
     total = sum(row["size"] for row in files) + sum(row["size"] for row in os_contract["files"])
     D.need(0 < total <= TOTAL_LIMIT and all(type(row["size"]) is int and 0 <= row["size"] <= FILE_LIMIT

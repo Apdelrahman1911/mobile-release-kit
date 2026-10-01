@@ -561,7 +561,11 @@ class AndroidHostProfileContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(data).hexdigest(), P.PROVIDER_SHA256)
         control = json.loads(data)
         self.assertEqual((len(control["osLibraries"]), len(control["toolObjects"])), (53, 88))
-        self.assertIsNone(json.loads((SOURCE / "desktop/tools/android_material_data/policy.json").read_bytes())["hostPolicy"])
+        # Observer DATA remains unqualified even after its exact supplier
+        # closure is promoted into the separately reviewed hosted policy.
+        self.assertFalse(control["nativeSelectionProven"])
+        self.assertFalse(control["symbolBindingProven"])
+        self.assertEqual((SOURCE / "desktop/tools/android_material_data/providers.json").read_bytes(), data)
 
     def test_workflow_batches_sdk_data_and_preserves_five_lifecycle_pins(self):
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()

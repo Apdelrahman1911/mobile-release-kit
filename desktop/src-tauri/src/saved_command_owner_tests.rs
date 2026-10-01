@@ -350,7 +350,7 @@ fn recovery_core_terminal_is_provisional_and_never_mints_a_review_before_origina
 }
 
 #[test]
-fn signed_android_keeps_original_android_deadlines_and_separate_native_gate() {
+fn signed_android_keeps_original_android_deadlines_and_ordinary_selection() {
     let start = Instant::now(); let context = Context::AndroidBuild(android_wire::tests::signed_context());
     let clocks = Clocks::for_context(&context, start);
     assert!(context.any_signed() && context.signed_android() && !context.signed_ios());
@@ -359,8 +359,8 @@ fn signed_android_keeps_original_android_deadlines_and_separate_native_gate() {
     let failure = start + Duration::from_secs(2);
     assert_eq!(clocks.settlement(Some(failure)), failure + SETTLEMENT);
     assert_eq!(context.frame_limit(), 11); assert_eq!(Context::AndroidBuild(android_wire::tests::context()).frame_limit(), 8);
-    assert!(!ANDROID_SIGNED_NATIVE_QUALIFIED);
     let owner = application(SavedCommandDomain::AndroidBuild);
+    assert_eq!(owner.inner.ios_mode_qualified(&context, None), owner.inner.android_installed_selected(None));
     assert!(!owner.inner.ios_mode_qualified(&context, None));
     assert!(!application(SavedCommandDomain::OfflinePreflight).inner.ios_mode_qualified(&context, None));
     let source = include_str!("saved_command_owner.rs");
@@ -479,6 +479,8 @@ fn android_normal_selection_requires_first_owner_and_original_live_document_with
     let first = SavedCommandOwner::android_build(runtime.clone(), toolchain.clone());
     let second = SavedCommandOwner::android_build(runtime.clone(), toolchain.clone());
     let document = Arc::new(()); let replacement = Arc::new(());
+    let signed = Context::AndroidBuild(android_wire::tests::signed_context());
+    assert!(!first.inner.ios_mode_qualified(&signed, None));
     assert!(!ANDROID_NATIVE_QUALIFIED && !ANDROID_RUNTIME_QUALIFIED && !ANDROID_TOOLCHAIN_QUALIFIED);
     assert!(!first.inner.qualified()); // Even complete compile DATA needs its real binding.
     second.bind_original_android_document(&replacement);
@@ -487,6 +489,9 @@ fn android_normal_selection_requires_first_owner_and_original_live_document_with
     assert!(first.android_original_document_matches(&document));
     assert!(!first.android_original_document_matches(&replacement));
     assert_eq!(first.inner.qualified(), selected);
+    assert_eq!(first.inner.ios_mode_qualified(&signed, None), selected);
+    assert!(!second.inner.ios_mode_qualified(&signed, None));
+    assert!(!peer.inner.ios_mode_qualified(&signed, None));
     assert_eq!(first.android_normal_selected(&document), selected);
     assert_eq!(first.clone().android_normal_selected(&document), selected);
     assert!(!first.android_normal_selected(&replacement));
@@ -495,6 +500,7 @@ fn android_normal_selection_requires_first_owner_and_original_live_document_with
     drop(document);
     first.bind_original_android_document(&replacement);
     assert!(!first.inner.qualified() && !first.android_original_document_matches(&replacement));
+    assert!(!first.inner.ios_mode_qualified(&signed, None));
     drop(first);
     let later = SavedCommandOwner::android_build(runtime, toolchain);
     later.bind_original_android_document(&replacement);

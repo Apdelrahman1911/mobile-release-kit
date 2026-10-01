@@ -30,8 +30,8 @@ bounded `fc-cat` cache membership with `fc-list` full paths on the same VM.
 This establishes consumer correspondence, not cache-generation provenance;
 both original inputs and captured outputs must remain unchanged on readback.
 
-`providers.json` binds 87 actual tool ELF records, six nested GNU/Linux JNI
-members, 40 OS library suppliers and eight helper/font consumers. The graph is
+`providers.json` binds 88 actual tool ELF records, six nested GNU/Linux JNI
+members, 53 OS library suppliers and eight helper/font consumers. The graph is
 per launch and load phase: inherited RPATH, direct RUNPATH and loaded SONAMEs
 are not a global provider dictionary. The GNU post-JLI global JVM phase does
 not authorize unrelated SDK launches. The SDK-private ABI5 pair cannot satisfy
@@ -57,32 +57,55 @@ TrimStringAdapter/License classes establish the licence normalization; the
 pre-existing receipt must contain24333f8a63b6825ea9c5514f83c2829b004d1fee. The
 adapter preserves actual pre-existing receipt bytes; it never accepts terms.
 
-The current-use join requires six protected originals: the selected image report,
-that existing receipt, and both selected packages' local `package.xml` and
-`source.properties`. Exact image/source, API/revision/type and normalized licence
-correspondence is recomputed by the material owner with the original bounds,
-deadline, close and POST checks. Its `provider-preinstalled-sdk-current-use-v1`
-classification does **not** establish who installed the SDK, who accepted terms,
-or licence entitlement. `producerExecutionProven` and `newConsent` remain false.
-Caller-provided approval fields, stale proofs, writable originals or a copied
-receipt cannot satisfy this join. All four generated material roles and the
-private0400 receipt staging remain required.
+The hosted current-use join independently pins five existing SDK DATA files
+and the fixed runner-image/source-recipe identity, then checks the unchanged
+copies and manifest in the protected
+`/opt/mobile-release-kit/qualification-inputs/android-saved3-v1` snapshot. The
+consumer roster contains its five SDK files, manifest, image report and all
+seven exact snapshot directories, never the writable source SDK paths.
+`hosted-provider-sdk-data-snapshot-v1` distinguishes this source-pinned snapshot
+from the separate preinstalled and retained routes. Fresh parsing and original
+readback remain mandatory; `producerExecutionProven` and `newConsent` are false.
+No terms are accepted and no package installer runs. Authenticated original
+StopPost restores the three fixed network configuration objects; standalone
+JSON or a workflow step result cannot authorize settlement.
 
-## Remaining target fact gate
+## Finite hosted source policy and remaining native gate
 
-`hostPolicy` is deliberately null. The existing host-material route still must
-establish the complete target supplier/version/helper/font/configuration/alias
-closure, Java CA input/consumer correspondence, resolver/configuration boundaries,
-and the six-original current-use SDK join. Jansi/fileevents selected
-origins, ncurses fallback and same-VM native member/helper settlement still need
-their applicable source/native evidence. Portable supplier facts
-must not be confused with same-VM generated observations. No unreviewed host
-snapshot or VPS hash is promoted merely by supplying a hash-shaped value.
+`hostPolicy` now contains the reviewed finite hosted supplier/configuration
+rules: 166 canonical runtime OS files, 81 exact aliases and eight preparation
+inputs (six programs plus the exact CA configuration/PEM DATA suppliers).
+The CA DATA remain protected, source-hash/mode checked preparation inputs;
+they are not executable roles or runtime OS grammar additions. The generated
+JKS is still a separate required tool leaf. Font cache and loader cache rows
+remain current-VM correspondence rules, not historical output bytes.
 
-The helper refuses before acquisition/creation while this policy is absent.
-The Rust default remains an absent Android profile; both output executables
-consume the same explicit, bounded OS input only after admitted preparation.
-Ordinary Android qualification flags remain false.
+For this hosted-only route, `inputs.files` stores the 96 selected/preparation
+delta paths. The existing input binder validates them and derives the complete
+262-file roster from the 166 explicitly listed canonical OS rows before any
+reads. Raw overlap, malformed/duplicated canonical rows, expanded overflow and
+cross-role collisions refuse. The 22 exact directories and one absence remain
+separate. Retained/nonhosted input semantics are unchanged; retained runtime
+and its publication pins remain null. All original 64KiB policy, count, byte,
+descriptor and overlapping-space bounds remain enforced. The fixed Linux
+loader pair admits only the exact /lib64 -> usr/lib64 source link and its
+/usr/lib64/ld-linux-x86-64.so.2 companion, anchored at the listed regular
+/usr/lib/x86_64-linux-gnu loader. Its otherwise alias-only directory is retained
+before destination lookup; no arbitrary alias-directory destinations are
+introduced. Alias descriptors and all alias-source parents are included in
+the same complete pre-creation descriptor budget.
+
+This SOURCE policy and the matching twelve preparation-source pins only make
+the existing hosted preparation eligible. They are not native qualification,
+producer finality, legal entitlement or release permission. Ordinary signed
+Android selection now requires the original live document, installed runtime
+and compiled toolchain, with separate per-session signing-material ownership,
+deadlines, cancellation and retirement checks unchanged. The three actual
+saved-signing cases and same-VM font/loader consumers still require independent
+execution and result acceptance at the exact source tuple. Jansi/fileevents
+selected origins, ncurses fallback and native member/helper finality cannot be
+inferred from a DATA profile. Desktop remains NOT READY until its outstanding
+verification and protected delivery obligations are completed.
 
 The metadata-only workflow now reads just the six SDK originals, five network
 configuration roles and the exact resolver target when applicable. It skips the

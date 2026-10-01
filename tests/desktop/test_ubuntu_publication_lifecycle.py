@@ -5517,6 +5517,63 @@ class AndroidPublicationContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "document bytes differ"):
                 L._android_publication_plan(raw)
 
+    def test_fixed_loader_directory_pair_and_alias_ancestry_match_native_contract(self):
+        loader = "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+        def documents(fault=None):
+            def change(manifest, contract, sources):
+                if fault != "missing-file":
+                    contract["files"].append({"path": loader, "size": 1, "sha256": "b" * 64, "mode": 0o755})
+                contract["files"].sort(key=lambda row: row["path"])
+                pair = [{"path": "/lib64", "target": "usr/lib64", "canonical": "/usr/lib64"},
+                        {"path": "/usr/lib64/ld-linux-x86-64.so.2",
+                         "target": "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2", "canonical": loader}]
+                if fault == "missing-parent":
+                    pair.pop(0)
+                elif fault == "missing-child":
+                    pair.pop()
+                elif fault == "parent-target":
+                    pair[0]["target"] = "/usr/lib64"
+                elif fault == "child-target":
+                    pair[1]["target"] = "../lib/foreign.so"
+                elif fault == "child-canonical":
+                    pair[1].update(target="../bin/dash", canonical="/usr/bin/dash")
+                elif fault == "changed-parent-without-child":
+                    pair.pop()
+                    pair[0].update(target="usr/bin", canonical="/usr/bin")
+                elif fault in ("borrowed-directory", "preexisting-directory-target"):
+                    pair.append({"path": "/usr/other-loader", "target": "lib64", "canonical": "/usr/lib64"})
+                    if fault == "preexisting-directory-target":
+                        contract["files"].append({"path": "/usr/lib64/regular.so", "size": 1, "sha256": "b" * 64, "mode": 0o755})
+                        contract["files"].sort(key=lambda row: row["path"])
+                elif fault == "unlisted-directory":
+                    pair[0].update(target="usr/other", canonical="/usr/other")
+                elif fault == "cycle":
+                    pair[0]["path"] = "/usr/lib64"
+                elif fault in ("alias-parent", "casefold-parent"):
+                    pair.append({"path": "/usr/lib64" if fault == "alias-parent" else "/usr/LIB64",
+                                 "target": "/usr/lib", "canonical": "/usr/lib"})
+                contract["aliases"].extend(pair)
+                if fault == "reversed":
+                    contract["aliases"].reverse()
+                manifest["osProfile"]["files"] = deepcopy(contract["files"])
+            raw, materials, data = self.data(change)
+            contract = json.loads(raw["osContract"])
+            data["totals"].update(osFiles=len(contract["files"]), osAliases=len(contract["aliases"]),
+                                  osBytes=sum(row["size"] for row in contract["files"]))
+            return raw, materials, data
+        for fault in (None, "reversed", "preexisting-directory-target", "missing-parent", "missing-child", "missing-file",
+                      "parent-target", "child-target", "child-canonical", "unlisted-directory",
+                      "changed-parent-without-child", "borrowed-directory", "cycle", "alias-parent", "casefold-parent"):
+            raw, materials, data = documents(fault)
+            with self.subTest(fault=fault), patch.object(L, "SHELL_ANDROID_MATERIALS", materials), \
+                 patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+                if fault in (None, "reversed", "preexisting-directory-target"):
+                    self.assertEqual(len(L._android_publication_plan(raw)["aliases"]),
+                                     4 if fault == "preexisting-directory-target" else 3)
+                else:
+                    with self.assertRaises(ValueError):
+                        L._android_publication_plan(raw)
+
     def test_resolver_contract_matches_material_and_rust_exact_file_alias(self):
         canonical = "/run/systemd/resolve/stub-resolv.conf"
         def documents(alias, include_file=True):

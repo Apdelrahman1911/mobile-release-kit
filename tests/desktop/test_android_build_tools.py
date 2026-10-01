@@ -897,9 +897,10 @@ class OriginalLifetimeDataTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(raw).hexdigest(), digest)
             return raw
 
-        policy = json.loads(source_bytes("policy.json", 3215,
-            "b785a69a9856d4ab333fed6383921601a85f1d340778e799982d59fea9a2627f"))
-        self.assertIsNone(policy["hostPolicy"])
+        policy = json.loads(source_bytes("policy.json", 61607,
+            "51f6a65c6f683c129bba862f9c0cc74035834f1731a409d37493da54134ba210"))
+        self.assertEqual(policy["hostPolicy"]["generated"]["sdkLicense"]["classification"],
+                         "hosted-provider-sdk-data-snapshot-v1")
         pin = policy["documents"]["layout.json.gz"]
         compressed = source_bytes("layout.json.gz", pin["size"], pin["sha256"])
         with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:

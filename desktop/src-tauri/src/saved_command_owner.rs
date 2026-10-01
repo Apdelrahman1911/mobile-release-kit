@@ -24,8 +24,6 @@ use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntim
 const ANDROID_NATIVE_QUALIFIED: bool = false;
 const ANDROID_RUNTIME_QUALIFIED: bool = false;
 const ANDROID_TOOLCHAIN_QUALIFIED: bool = false;
-// An unsigned observation or importer/supplier receipt cannot qualify signing.
-const ANDROID_SIGNED_NATIVE_QUALIFIED: bool = false;
 const RECOVERY_NATIVE_QUALIFIED: bool = false;
 const RECOVERY_RUNTIME_QUALIFIED: bool = false;
 const RECOVERY_WORK: Duration = Duration::from_secs(120);
@@ -1631,7 +1629,8 @@ impl Inner {
             && self.runtime.project_recovery_installed_profile_available()
     }
     fn ios_mode_qualified(&self, context: &Context, original: Option<&Session>) -> bool {
-        if context.domain() != self.domain || context.signed_android() && !ANDROID_SIGNED_NATIVE_QUALIFIED { return false; }
+        if context.domain() != self.domain
+            || context.signed_android() && !self.android_installed_selected(None) { return false; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         {
             let Ok(slot) = self.ios_observation.lock() else { return false; };

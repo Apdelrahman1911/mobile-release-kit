@@ -51,7 +51,7 @@ DIRECTORIES = {
     str(SDK_ROOT / "build-tools/35.0.0"): ["package.xml", "source.properties"],
 }
 # Exact resource-free parser dependencies, not runtime/profile admission.
-PARSER_SOURCE_PINS = {'android_material_preparation.py': {'size': 179679, 'sha256': 'd1ed90b2bd6520bc6db6b546a55d16d1f0c78f8e14a22079dee33462b6a6d465'}, 'conventional_runtime_data.py': {'size': 19198, 'sha256': 'b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5'}, 'android_material_data/policy.json': {'size': 3215, 'sha256': 'b785a69a9856d4ab333fed6383921601a85f1d340778e799982d59fea9a2627f'}}
+PARSER_SOURCE_PINS = {'android_material_preparation.py': {'size': 182020, 'sha256': '2e4c5fcad38417a76a39a2ee752d868ef77dd77ef6d4ac0baacb8c843b282041'}, 'conventional_runtime_data.py': {'size': 19198, 'sha256': 'b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5'}, 'android_material_data/policy.json': {'size': 61607, 'sha256': '51f6a65c6f683c129bba862f9c0cc74035834f1731a409d37493da54134ba210'}}
 FIELDS = ("sourceCommit", "runId", "runAttempt", "job")
 LIMIT = 256 << 10
 CHUNK = 64 << 10

@@ -172,8 +172,32 @@ fn parse_os_contract(raw: &[u8], anchor: &str) -> Option<OsContract> {
     for f in &d.files { total = total.checked_add(f.size)?; if total > TOTAL_LIMIT { return None; } }
     let mut targets = directories(&d.files, true)?;
     targets.extend(d.files.iter().map(|f| f.path.clone()));
-    let folded_targets: BTreeSet<_> = targets.iter().map(|name| name.to_ascii_lowercase()).collect();
     let regular_files: BTreeSet<_> = d.files.iter().map(|f| f.path.as_str()).collect();
+    // This fixed two-link loader relation needs one real directory which is
+    // not an ancestor of a canonical regular file. No general alias graph.
+    let loader_directory = d.aliases.iter().any(|a| a.path == "/lib64"
+        || a.path == "/usr/lib64/ld-linux-x86-64.so.2");
+    if loader_directory {
+        if !regular_files.contains("/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2")
+            || !d.aliases.iter().any(|a| a.path == "/lib64" && a.target == "usr/lib64" && a.canonical == "/usr/lib64")
+            || !d.aliases.iter().any(|a| a.path == "/usr/lib64/ld-linux-x86-64.so.2"
+                && a.target == "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+                && a.canonical == "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2") { return None; }
+    }
+    // Alias-source parents are collision/custody inputs, not new canonical
+    // destinations. A regular file or another alias cannot be their parent.
+    let mut collision_targets = targets.clone();
+    for a in &d.aliases {
+        if !path(&a.path, true) || !path(&a.canonical, true) { return None; }
+        let mut name = a.path.as_str();
+        while let Some((parent, _)) = name.rsplit_once('/') {
+            if parent.is_empty() { break; }
+            if regular_files.contains(parent) { return None; }
+            collision_targets.insert(parent.to_owned()); name = parent;
+        }
+    }
+    let folded_targets: BTreeSet<_> = collision_targets.iter().map(|name| name.to_ascii_lowercase()).collect();
+    if collision_targets.len() > 8192 || folded_targets.len() != collision_targets.len() { return None; }
     let mut names = BTreeSet::new();
     for a in &d.aliases {
         let loader_alias = a.canonical.starts_with("/usr/")
@@ -188,7 +212,9 @@ fn parse_os_contract(raw: &[u8], anchor: &str) -> Option<OsContract> {
             && matches!(a.target.as_str(), "/run/systemd/resolve/stub-resolv.conf" | "../run/systemd/resolve/stub-resolv.conf")
             && regular_files.contains(a.canonical.as_str());
         if !names.insert(a.path.to_ascii_lowercase()) || folded_targets.contains(&a.path.to_ascii_lowercase())
-            || !targets.contains(&a.canonical) || !(loader_alias || font_alias || resolver_alias)
+            || !(targets.contains(&a.canonical) || loader_directory && a.path == "/lib64"
+                && a.target == "usr/lib64" && a.canonical == "/usr/lib64")
+            || !(loader_alias || font_alias || resolver_alias)
             || alias_destination(a).as_deref() != Some(a.canonical.as_str()) { return None; }
     }
     Some(OsContract { id: d.id, sha256: anchor.into(), files: d.files, aliases: d.aliases })
@@ -298,6 +324,11 @@ mod native {
                 if canonical.insert(f.path.clone(), slot).is_some() { return Err(Failure::Inventory); }
             }
             for alias in &self.profile.os.aliases {
+                if alias.path == "/lib64" && alias.canonical == "/usr/lib64" {
+                    // parse_os_contract admitted only the complete fixed pair.
+                    // Retain its real protected directory before alias lookup.
+                    os_directory(&mut self.originals, &mut canonical, system, "/usr/lib64", end, stop)?;
+                }
                 let destination = *canonical.get(&alias.canonical).ok_or(Failure::Manifest)?;
                 let (parent, name) = alias.path.rsplit_once('/').ok_or(Failure::Manifest)?;
                 let parent = os_directory(&mut self.originals, &mut canonical, system, if parent.is_empty() { "/" } else { parent }, end, stop)?;
@@ -633,6 +664,66 @@ mod pure_tests {
         assert!(parse_os_contract(&os, &digest(&os)).is_some());
         os.push(b' ');
         assert!(parse_os_contract(&os, &digest(&os)).is_none());
+    }
+    #[test]
+    fn fixed_loader_alias_pair_requires_regular_terminus_and_original_directory_path() {
+        let loader = "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2";
+        let mut data = os_data();
+        data["files"].as_array_mut().unwrap().push(json!({
+            "path":loader,"size":1,"sha256":"a".repeat(64),"mode":493}));
+        data["files"].as_array_mut().unwrap().sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        data["aliases"].as_array_mut().unwrap().extend([
+            json!({"path":"/lib64","target":"usr/lib64","canonical":"/usr/lib64"}),
+            json!({"path":"/usr/lib64/ld-linux-x86-64.so.2",
+                "target":"../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2","canonical":loader})]);
+        assert!(os_valid(&data));
+        let mut reversed = data.clone(); reversed["aliases"].as_array_mut().unwrap().reverse();
+        assert!(os_valid(&reversed)); // Source ordering does not manufacture a destination.
+        for fault in ["missing-parent", "missing-child", "missing-file", "parent-target",
+            "child-target", "child-canonical", "unlisted-directory", "changed-parent-without-child",
+            "borrowed-directory", "cycle", "alias-parent", "casefold-parent"] {
+            let mut changed = data.clone();
+            match fault {
+                "missing-parent" => { changed["aliases"].as_array_mut().unwrap().remove(1); },
+                "missing-child" => { changed["aliases"].as_array_mut().unwrap().remove(2); },
+                "missing-file" => { changed["files"].as_array_mut().unwrap().retain(|row| row["path"] != loader); },
+                "parent-target" => changed["aliases"][1]["target"] = json!("/usr/lib64"),
+                "child-target" => changed["aliases"][2]["target"] = json!("../lib/foreign.so"),
+                "child-canonical" => {
+                    changed["aliases"][2]["target"] = json!("../bin/dash");
+                    changed["aliases"][2]["canonical"] = json!("/usr/bin/dash");
+                },
+                "changed-parent-without-child" => {
+                    changed["aliases"].as_array_mut().unwrap().remove(2);
+                    changed["aliases"][1]["target"] = json!("usr/bin");
+                    changed["aliases"][1]["canonical"] = json!("/usr/bin");
+                },
+                "borrowed-directory" => changed["aliases"].as_array_mut().unwrap().push(
+                    json!({"path":"/usr/other-loader","target":"lib64","canonical":"/usr/lib64"})),
+                "unlisted-directory" => {
+                    changed["aliases"][1]["canonical"] = json!("/usr/other");
+                    changed["aliases"][1]["target"] = json!("usr/other");
+                },
+                "cycle" => changed["aliases"][1]["path"] = json!("/usr/lib64"),
+                "alias-parent" => changed["aliases"].as_array_mut().unwrap().push(
+                    json!({"path":"/usr/lib64","target":"/usr/lib","canonical":"/usr/lib"})),
+                _ => changed["aliases"].as_array_mut().unwrap().push(
+                    json!({"path":"/usr/LIB64","target":"/usr/lib","canonical":"/usr/lib"})),
+            }
+            assert!(!os_valid(&changed), "{fault}");
+        }
+        // Existing file-derived directory destinations keep their old authority.
+        let mut derived = data.clone();
+        derived["files"].as_array_mut().unwrap().push(json!({
+            "path":"/usr/lib64/regular.so","size":1,"sha256":"a".repeat(64),"mode":493}));
+        derived["files"].as_array_mut().unwrap().sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        derived["aliases"].as_array_mut().unwrap().push(
+            json!({"path":"/usr/other-loader","target":"lib64","canonical":"/usr/lib64"}));
+        assert!(os_valid(&derived));
+        let source = include_str!("android_toolchain.rs");
+        let native = source.split_once("fn inspect_inner(").unwrap().1.split_once("pub(crate) fn binding_data(").unwrap().0;
+        assert!(native.find("system, \"/usr/lib64\", end, stop").unwrap()
+            < native.find("canonical.get(&alias.canonical)").unwrap());
     }
     #[test]
     fn os_alias_contract_requires_exact_retained_canonical_destinations() {

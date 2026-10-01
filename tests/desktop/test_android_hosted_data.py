@@ -38,7 +38,10 @@ def fixture():
     inputs = {H.SOURCE_SDK + "/" + name: {"size": 1, "sha256": "a" * 64} for name in H.SOURCE_INPUTS}
     files = sorted([H.IMAGE, str(H.MANIFEST), *(str(H.SDK_ROOT / name) for name in H.SOURCE_INPUTS),
                     *H.CONFIGURATION])
-    value = {"hostPolicy": {"inputs": {"files": files, "directories": deepcopy(H.DIRECTORIES), "absences": []},
+    # One inert canonical supplier exercises the explicit hosted delta route.
+    value = {"hostPolicy": {"files": [{"path": "/inert/canonical-os",
+        "origin": {"kind": "supplier", "size": 1, "sha256": "c" * 64, "mode": 0o444}}],
+        "inputs": {"files": files, "directories": deepcopy(H.DIRECTORIES), "absences": []},
         "generated": {"sdkLicense": {
             "path": str(H.SDK_ROOT / "licenses/android-sdk-license"), "classification": H.ORIGIN,
             "imagePath": H.IMAGE, "sourceRecipe": deepcopy(M.SDK_SOURCE_RECIPE),
@@ -72,6 +75,16 @@ class HostedAndroidDataContracts(unittest.TestCase):
              patch.object(H.os, "mkdir", side_effect=AssertionError("no output at import")), \
              patch.object(H.os, "rename", side_effect=AssertionError("no namespace effect at import")):
             module("android_hosted_data")
+
+    def test_parser_source_pins_match_all_reviewed_sources(self):
+        expected_names = {"android_material_preparation.py", "conventional_runtime_data.py",
+                          "android_material_data/policy.json"}
+        self.assertEqual(set(H.PARSER_SOURCE_PINS), expected_names)
+        for name in sorted(expected_names):
+            with self.subTest(source=name):
+                raw = (SOURCE / "desktop/tools" / name).read_bytes()
+                self.assertEqual(H.PARSER_SOURCE_PINS[name],
+                    {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
 
     def test_missing_exact_policy_refuses_before_source_read_or_output(self):
         api = M._hosted_api()
@@ -134,6 +147,96 @@ class HostedAndroidDataContracts(unittest.TestCase):
             self.assertEqual(M._sdk_receipt_path({"classification": "local-retained-sdk-current-use-v1"}),
                              "/opt/android-sdk/licenses/android-sdk-license")
         helper.receipt_state.assert_called_once()
+
+    def test_hosted_input_delta_binds_canonical_originals_without_mutating_source(self):
+        value = fixture()
+        original = deepcopy(value)
+        raw = value["hostPolicy"]["inputs"]
+        canonical = value["hostPolicy"]["files"][0]["path"]
+        expanded = M._input_rules(value)
+        self.assertEqual(expanded["files"], sorted([*raw["files"], canonical]))
+        self.assertIsNot(expanded, raw)
+        self.assertIsNot(expanded["files"], raw["files"])
+        self.assertIsNot(expanded["absences"], raw["absences"])
+        self.assertIsNot(expanded["directories"], raw["directories"])
+        expanded["directories"][str(H.ROOT)].append("changed-in-returned-copy-only")
+        self.assertEqual(value, original)
+        bind = Mock(side_effect=lambda path, **options: {"size": 1})
+        with patch.object(M, "_HOSTED_MODULE", None), \
+             patch.object(M, "policy", return_value=value), patch.object(M, "_protected_binding"), \
+             patch.object(M, "_protected_namespace"), patch.object(M, "_provider_host_inputs"), \
+             patch.object(M, "_sdk_receipt_state", return_value={}):
+            bound = M.android_host_inputs({}, {"files": {}}, bind_path=bind, deadline=time.monotonic() + 5)
+        self.assertIn(canonical, bound["bindings"]["files"])
+        self.assertEqual(set(bound["bindings"]["files"]), set(raw["files"]) | {canonical})
+        self.assertEqual(value, original)
+
+    def test_hosted_input_expansion_rejects_conflicts_and_overflow_before_reader(self):
+        for fault in ("duplicate", "unsorted", "row-fields", "origin-type", "relative-path",
+                      "raw-overlap", "directory-role", "absence-role", "expanded-overflow", "canonical-overflow",
+                      "directory-list", "directory-member", "directory-duplicate", "directory-unsorted",
+                      "directory-extent", "directory-dot", "directory-parent", "directory-separator", "directory-long"):
+            value = fixture()
+            host = value["hostPolicy"]
+            name = host["files"][0]["path"]
+            if fault == "duplicate":
+                host["files"].append(deepcopy(host["files"][0]))
+            elif fault == "unsorted":
+                host["files"].append({**host["files"][0], "path": "/a/earlier"})
+            elif fault == "row-fields":
+                host["files"][0].pop("origin")
+            elif fault == "origin-type":
+                host["files"][0]["origin"] = None
+            elif fault == "relative-path":
+                host["files"][0]["path"] = "../outside"
+            elif fault == "raw-overlap":
+                host["inputs"]["files"] = sorted([*host["inputs"]["files"], name])
+            elif fault == "directory-role":
+                host["inputs"]["directories"][name] = []
+            elif fault == "absence-role":
+                host["inputs"]["absences"] = [name]
+            elif fault == "expanded-overflow":
+                host["inputs"]["files"] = ["/inert/delta" + format(index, "03") for index in range(512)]
+            elif fault == "canonical-overflow":
+                host["files"] = [{**host["files"][0], "path": "/inert/os" + format(index, "03")} for index in range(257)]
+            else:
+                host["inputs"]["directories"][str(H.ROOT)] = {
+                    "directory-list": {}, "directory-member": [{}], "directory-duplicate": ["a", "a"],
+                    "directory-unsorted": ["z", "a"],
+                    "directory-extent": ["child" + format(index, "03") for index in range(513)],
+                    "directory-dot": ["."], "directory-parent": [".."],
+                    "directory-separator": ["nested/member"], "directory-long": ["a" * 256]}[fault]
+            original = deepcopy(value)
+            bind = Mock(side_effect=AssertionError("no reader before complete input validation"))
+            with self.subTest(fault=fault), patch.object(M, "policy", return_value=value), \
+                 self.assertRaises(M.D.Refused):
+                M.android_host_inputs({}, {"files": {}}, bind_path=bind, deadline=time.monotonic() + 5)
+            bind.assert_not_called()
+            self.assertEqual(value, original)
+
+    def test_hosted_delta_never_changes_nonhosted_or_explicit_retained_interpretation(self):
+        nonhosted = fixture()
+        nonhosted["hostPolicy"]["generated"]["sdkLicense"]["classification"] = M.SDK_RECEIPT_CLASSIFICATION
+        expected = deepcopy(nonhosted["hostPolicy"]["inputs"])
+        nonhosted["hostPolicy"]["files"] = None  # Unused by the historical input representation.
+        self.assertEqual(M._input_rules(nonhosted), expected)
+        retained = fixture()
+        retained_inputs = {"files": ["/inert/retained-original"], "directories": {}, "absences": []}
+        retained["_retained"] = {"runtime": {"host": {"inputs": retained_inputs}}}
+        retained["hostPolicy"]["files"] = None  # Active hosted baseline never overrides explicit retained state.
+        self.assertEqual(M._input_rules(retained), retained_inputs)
+
+    def test_enabled_hosted_policy_keeps_complete_snapshot_and_canonical_input_roster(self):
+        value = M.policy()
+        host = value["hostPolicy"]
+        self.assertEqual(H.rule(M._hosted_api(), value), host["generated"]["sdkLicense"])
+        self.assertEqual((len(host["files"]), len(host["aliases"]), len(host["preparationFiles"])), (166, 81, 8))
+        inputs = M._input_rules(value)
+        self.assertEqual((len(host["inputs"]["files"]), len(inputs["files"]),
+                          len(inputs["directories"]), len(inputs["absences"])), (96, 262, 22, 1))
+        self.assertTrue(set(host["inputs"]["files"]).isdisjoint(row["path"] for row in host["files"]))
+        self.assertTrue({row["path"] for row in host["files"]} <= set(inputs["files"]))
+        self.assertTrue(set(host["generated"]["sdkLicense"]["provisioning"]["sourceInputs"]).isdisjoint(inputs["files"]))
 
     def test_fixed_configuration_is_complete_and_keeps_only_actual_loopback_choice(self):
         end = time.monotonic() + 5
@@ -417,7 +520,12 @@ class HostedAndroidDataContracts(unittest.TestCase):
         self.assertIn("android_hosted_data.py prepare", source)
         self.assertIn("android_hosted_data.py observe-sdk", source)
         self.assertNotIn("android_hosted_data.py settle", source)
-        self.assertIsNone(L.ANDROID_PREPARATION_PINS)
+        pins = L._android_source_pins()
+        self.assertEqual(len(pins), 12)
+        for name, expected in pins.items():
+            with self.subTest(preparation_source=name):
+                raw = (SOURCE / name).read_bytes()
+                self.assertEqual(expected, (len(raw), hashlib.sha256(raw).hexdigest()))
         self.assertIsNone(L.ANDROID_RETAINED_PREPARATION_PINS)
 
 

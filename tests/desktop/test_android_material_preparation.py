@@ -200,6 +200,43 @@ class AndroidMaterialDataTests(unittest.TestCase):
             for name, nodes in row["elf"]["versionNeeds"].items():
                 self.assertLessEqual(set(nodes), set(fonts["providers"][name]["elf"]["versionDefinitions"]))
 
+    def test_hosted_ca_preparation_data_keeps_exact_originals_without_runtime_authority(self):
+        value = M.policy()
+        rules = value["hostPolicy"]
+        preparation = {row["path"]: row for row in rules["preparationFiles"]}
+        ca = {"/etc/ca-certificates.conf", M.STOCK_PEM}
+        programs = {"/usr/bin/bash", "/usr/bin/dpkg-deb", "/usr/bin/python3.12",
+                    "/usr/bin/fc-cat", "/usr/bin/fc-list", "/usr/bin/curl"}
+        self.assertEqual(set(preparation), ca | programs)
+        self.assertTrue(ca <= set(M._input_rules(value)["files"]))
+        self.assertTrue(ca.isdisjoint(row["path"] for row in rules["files"]))
+        self.assertTrue(all(preparation[name]["mode"] & 0o111 == 0 for name in ca))
+        self.assertEqual(value["helpers"], ["echo", "sed", "tr", "uname", "xargs"])
+        self.assertTrue(ca.isdisjoint(value["roles"].values()))
+        # Inert originals exercise the actual exact-row checks, then stop before
+        # the independent font/runtime boundary. This is not native admission.
+        rules["suppliersSha256"] = M._sha(M.D.canonical({}))
+        original_host = {"graph": {"runtimeData": {"suppliers": {}}},
+                         "bindings": {"files": deepcopy(preparation)}}
+        with patch.object(M, "_provider_state", return_value={}), \
+             patch.object(M, "_protected_binding", side_effect=lambda row, _: deepcopy(row)), \
+             patch.object(M, "_font_state", side_effect=M.D.Refused("inert-stop-before-font-originals")):
+            with self.assertRaisesRegex(M.D.Refused, "inert-stop-before-font-originals"):
+                M._host_state(value, original_host, time.monotonic() + 5)
+        for name in sorted(ca):
+            for fault in ("sha256", "mode", "missing"):
+                host = deepcopy(original_host)
+                if fault == "missing":
+                    host["bindings"]["files"].pop(name)
+                else:
+                    host["bindings"]["files"][name][fault] = "0" * 64 if fault == "sha256" else 0o755
+                with self.subTest(path=name, fault=fault), patch.object(M, "_provider_state", return_value={}), \
+                     patch.object(M, "_protected_binding", side_effect=lambda row, _: deepcopy(row)), \
+                     patch.object(M, "_font_state") as fonts, \
+                     self.assertRaisesRegex(M.D.Refused, "original preparation tool/TLS bytes differ"):
+                    M._host_state(value, host, time.monotonic() + 5)
+                fonts.assert_not_called()
+
     def test_changed_control_is_refused_before_decompression(self):
         policy = M.policy()
         with tempfile.TemporaryDirectory(prefix="mrk-android-inert-") as folder:
@@ -270,6 +307,24 @@ class AndroidMaterialDataTests(unittest.TestCase):
             row["size"] = 512 << 20
         with self.assertRaisesRegex(M.D.Refused, r"tool\+OS byte bound"):
             M._documents(policy, context, files, inert_os())
+
+    def test_alias_descriptors_and_parent_directories_share_complete_document_bound(self):
+        value = M.policy()
+        files = [{"path": "sdk/d" + format(index, "05") + "/file", "size": 1,
+                  "sha256": "a" * 64, "mode": 0o444} for index in range(16377)]
+        contract = inert_os()
+        contract["aliases"] = [{"path": "/usr/bin/link" + str(index), "target": "dash",
+                                "canonical": "/usr/bin/dash"} for index in range(3)]
+        # Exactly 32768 descriptors, including the three actual alias handles.
+        M._documents(value, inert_context(), files, contract)
+        for fault in ("alias-descriptor", "alias-parent"):
+            changed = deepcopy(contract)
+            if fault == "alias-descriptor":
+                changed["aliases"].append({"path": "/usr/bin/link3", "target": "dash", "canonical": "/usr/bin/dash"})
+            else:
+                changed["aliases"][2].update(path="/usr/lib64/link2", target="../bin/dash")
+            with self.subTest(fault=fault), self.assertRaisesRegex(M.D.Refused, "descriptor roster bound"):
+                M._documents(value, inert_context(), files, changed)
 
     def test_real_public_serialization_has_no_private_path_or_unknown_payload(self):
         _, materials, publication = M._documents(M.policy(), inert_context(), inert_files(), inert_os())

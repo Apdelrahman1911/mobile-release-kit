@@ -105,13 +105,25 @@ def provider_stage(folder, fault=None):
 
 
 class AndroidProviderDataTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        # Start each graph test cold and restore the original cache references
+        # on success, test failure, or partial setup before per-test finality.
+        self.enterContext(patch.object(M, "_PROVIDER_ELF_DATA", None))
+        self.enterContext(patch.object(M, "_PROVIDER_LOADER_DATA", None))
+
     def test_complete_fixed_source_walk_keeps_phases_abi5_and_native_obligations_separate(self):
         value = M.policy(); control = M._provider_control(value)
         files = {row["path"]: row for row in M._control(value, "layout.json.gz")["files"]}
         for name, row in control["toolObjects"].items(): self.assertEqual(row["file"], files[name])
         graph = M._provider_graph(control, files)
-        self.assertEqual(len(graph["contexts"]), 119)
-        self.assertEqual(len(graph["globalNames"]), 40)
+        contexts = (len(control["launches"]) + sum(name.startswith("jdk/bin/") for name in control["launches"])
+                    + len(control["postJliModules"]) + len(control["nestedObjects"]) + len(control["programs"]))
+        self.assertEqual(contexts, 120)
+        self.assertEqual(len(graph["contexts"]), contexts)
+        self.assertEqual(len(graph["globalNames"]), 53)
+        self.assertTrue(any(row["entry"] == "jdk/lib/libatk-wrapper.so" and row["phase"] == "jdk-module"
+                            for row in graph["contexts"]))
         self.assertFalse(graph["nativeSelectionProven"]); self.assertFalse(graph["symbolBindingProven"])
         self.assertEqual(control["nativeSelectorObligations"],
                          ["jansi-selected-origin", "fileevents-gnu-selected-origin", "same-vm-native-member-and-helper-finality"])
@@ -125,6 +137,20 @@ class AndroidProviderDataTests(unittest.TestCase):
         self.assertFalse(any(row["name"] == "libjvm.so" and row["phase"] == "startup" for row in graph["edges"]))
         jna = [row for row in control["nestedObjects"] if "jna-5.6.0.jar" in row["jar"]["path"]]
         self.assertEqual(jna[0]["elf"]["soname"], "../build/libjnidispatch.so")
+
+    def test_complete_graph_requires_added_accessibility_provider_and_original_module(self):
+        value = M.policy()
+        inventory = {row["path"] for row in M._control(value, "layout.json.gz")["files"]}
+        for fault in ("provider", "tool-original", "module-phase"):
+            control = M._provider_control(value)
+            if fault == "provider":
+                control["osLibraries"].pop("libatk-bridge-2.0.so.0")
+            elif fault == "tool-original":
+                control["toolObjects"].pop("jdk/lib/libatk-wrapper.so")
+            else:
+                control["postJliModules"].remove("jdk/lib/libatk-wrapper.so")
+            with self.subTest(fault=fault), self.assertRaises(M.D.Refused):
+                M._provider_graph(control, inventory)
 
     def test_rpath_is_inherited_but_runpath_is_direct_and_overrides_rpath(self):
         control = context_data(); tools = control["toolObjects"]
@@ -216,6 +242,7 @@ class AndroidProviderDataTests(unittest.TestCase):
 
     def test_complete_generated_and_os_union_refuses_before_creation_or_acquisition(self):
         value = M.policy(); context = F.inert_context(); end = time.monotonic() + 30
+        value["hostPolicy"] = None  # This fixture isolates document extent, not hosted provenance.
         original = {"runnerUid": 123, "runnerGid": 456, "source": "/source", "root": "/inert/compiler", "deadline": str(end)}
         check = SimpleNamespace(root=Path(original["root"]), end=end, failed=False, private_command=Mock())
         generated = {role: {"size": size, "sha256": "a" * 64} for role, size in (("javaTrustStore", 1 << 20), ("sdkLicense", 41))}
@@ -223,7 +250,8 @@ class AndroidProviderDataTests(unittest.TestCase):
         contract["files"] = [{**row, "path": "/usr/lib/inert" + str(index) + ".so", "size": 40 << 20}
                              for index, row in enumerate(contract["files"])]
         with patch.object(M, "_context", return_value=original), patch.object(M.os, "getuid", return_value=123), \
-             patch.object(M.os, "getgid", return_value=456), patch.object(M, "_host_state", return_value=(contract, generated)), \
+             patch.object(M.os, "getgid", return_value=456), patch.object(M, "policy", return_value=value), \
+             patch.object(M, "_host_state", return_value=(contract, generated)), patch.object(M, "_stock_trust_state", return_value={}), \
              patch.object(M.Path, "mkdir") as mkdir, patch.object(M, "_space") as capacity, patch.object(M, "_download") as acquire:
             with self.assertRaisesRegex(M.D.Refused, r"tool\+OS byte bound"):
                 M.prepare(check, Path("/source"), Path("/inert/mrk-android-material-17-2"), context=context, host={})
@@ -278,9 +306,10 @@ class AndroidProviderDataTests(unittest.TestCase):
                              "androidLoader": {"/etc/ld.so.preload": {"absent": True}}}}
         with patch.object(M, "_protected_binding", side_effect=lambda row, _: {key: row[key] for key in ("path", "size", "sha256", "mode")}), \
              patch.object(M, "_protected_namespace") as namespace, patch.object(M, "_provider_boundary") as boundary:
-            state = M._provider_state(value, host, time.monotonic() + 30)
+            deadline = time.monotonic() + 30
+            state = M._provider_state(value, host, deadline)
             self.assertTrue({"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d/libc.conf"} <= set(state["osFiles"]))
-            namespace.assert_called_once_with({"inert": "directory"}, "/etc/ld.so.conf.d", children=["libc.conf"])
+            namespace.assert_called_once_with({"inert": "directory"}, "/etc/ld.so.conf.d", children=["libc.conf"], deadline=deadline)
             boundary.side_effect = M.D.Refused("original alternative changed")
             with self.assertRaisesRegex(M.D.Refused, "original alternative changed"):
                 M._provider_state(value, host, time.monotonic() + 30)
@@ -289,16 +318,18 @@ class AndroidProviderDataTests(unittest.TestCase):
                 M._provider_state(value, host, time.monotonic() + 30)
 
     def test_cache_alias_and_expected_global_absence_cannot_admit_alternatives(self):
-        control, state, diagnostics, cache = loader_data()
-        self.assertTrue(M._provider_loader_proof(control, state, diagnostics, cache)["candidates"])
-        for fault in ("alias", "missing-original", "global-abi5", "cache-location", "extra-original"):
-            changed, capture = deepcopy(state), cache
-            if fault == "alias": changed["alternatives"]["/lib/x86_64-linux-gnu/libc.so.6"]["identity"][1] = 5
-            elif fault == "missing-original": del changed["alternatives"]["/lib/x86_64-linux-gnu/libc.so.6"]
-            elif fault == "global-abi5": changed["alternatives"]["/lib/x86_64-linux-gnu/libtinfo.so.5"] = {"path": "/sdk/private/libtinfo.so.5"}
-            elif fault == "cache-location": capture = cache.replace(b"/usr/lib/x86_64-linux-gnu/libc.so.6", b"/unbound/libc.so.6")
-            else: changed["alternatives"]["/other/libc.so.6"] = {"absent": True}
-            with self.subTest(fault=fault), self.assertRaises(ValueError): M._provider_loader_proof(control, changed, diagnostics, capture)
+        with patch.object(M, "_PROVIDER_ELF_DATA", None), \
+             patch.object(M, "_PROVIDER_LOADER_DATA", None):
+            control, state, diagnostics, cache = loader_data()
+            self.assertTrue(M._provider_loader_proof(control, state, diagnostics, cache)["candidates"])
+            for fault in ("alias", "missing-original", "global-abi5", "cache-location", "extra-original"):
+                changed, capture = deepcopy(state), cache
+                if fault == "alias": changed["alternatives"]["/lib/x86_64-linux-gnu/libc.so.6"]["identity"][1] = 5
+                elif fault == "missing-original": del changed["alternatives"]["/lib/x86_64-linux-gnu/libc.so.6"]
+                elif fault == "global-abi5": changed["alternatives"]["/lib/x86_64-linux-gnu/libtinfo.so.5"] = {"path": "/sdk/private/libtinfo.so.5"}
+                elif fault == "cache-location": capture = cache.replace(b"/usr/lib/x86_64-linux-gnu/libc.so.6", b"/unbound/libc.so.6")
+                else: changed["alternatives"]["/other/libc.so.6"] = {"absent": True}
+                with self.subTest(fault=fault), self.assertRaises(ValueError): M._provider_loader_proof(control, changed, diagnostics, capture)
 
     def test_fixed_consumers_settle_originals_and_readback_does_not_launch(self):
         with tempfile.TemporaryDirectory(prefix="mrk-provider-owner-inert-") as folder:

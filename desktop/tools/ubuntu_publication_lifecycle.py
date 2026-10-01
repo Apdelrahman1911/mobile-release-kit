@@ -1207,13 +1207,30 @@ def _android_publication_plan(raw, *, retained=False):
          and helpers == sorted(set(helpers)) and {"sed", "uname", "xargs"} <= set(helpers), "Android helper roster differs")
     need(all(any(row["path"] == command and row["size"] > 0 and row["mode"] & 0o111 for row in os_files)
              for command in ["/usr/bin/dash", *("/usr/bin/" + name for name in helpers)]), "Android helper OS body missing")
-    os_names = {row["path"] for row in os_files}
-    os_names |= {str(parent) for name in os_names.copy() for parent in Path(name).parents}
-    seen_aliases = set()
+    regular_os = {row["path"] for row in os_files}
+    os_names = regular_os | {str(parent) for name in regular_os for parent in Path(name).parents}
+    alias_parents = set()
     for alias in aliases:
         need(type(alias) is dict and set(alias) == {"path", "target", "canonical"}
              and type(alias["target"]) is str and 0 < len(alias["target"]) <= 512, "Android OS alias fields differ")
         _android_absolute(alias["path"]); _android_absolute(alias["canonical"])
+        alias_parents.update(str(parent) for parent in Path(alias["path"]).parents)
+    # Match only the fixed source-reviewed two-link x86_64 loader relation.
+    # Other alias parents are collision inputs, never canonical authority.
+    fixed_loader_pair = any(alias["path"] in {"/lib64", "/usr/lib64/ld-linux-x86-64.so.2"} for alias in aliases)
+    if fixed_loader_pair:
+        need("/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" in regular_os
+             and {"path": "/lib64", "target": "usr/lib64", "canonical": "/usr/lib64"} in aliases
+             and {"path": "/usr/lib64/ld-linux-x86-64.so.2",
+                  "target": "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                  "canonical": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"} in aliases,
+             "Android fixed loader alias pair differs")
+    collision_names = os_names | alias_parents
+    folded_names = {name.casefold() for name in collision_names}
+    need(not regular_os & alias_parents and len(collision_names - {"/"}) <= 8192
+         and len(folded_names) == len(collision_names), "Android OS alias ancestry collision")
+    seen_aliases = set()
+    for alias in aliases:
         destination = [] if alias["target"].startswith("/") else alias["path"].split("/")[1:-1]
         for part in alias["target"].removeprefix("/").split("/"):
             if part == "..":
@@ -1237,8 +1254,10 @@ def _android_publication_plan(raw, *, retained=False):
                           and alias["canonical"] == "/run/systemd/resolve/stub-resolv.conf"
                           and alias["target"] in {"/run/systemd/resolve/stub-resolv.conf", "../run/systemd/resolve/stub-resolv.conf"}
                           and alias["canonical"] in {row["path"] for row in os_files})
-        need((loader_alias or font_alias or resolver_alias) and alias["path"] not in os_names and alias["path"].casefold() not in seen_aliases
-             and alias["canonical"] in os_names and "/" + "/".join(destination) == alias["canonical"],
+        need((loader_alias or font_alias or resolver_alias) and alias["path"].casefold() not in folded_names and alias["path"].casefold() not in seen_aliases
+             and (alias["canonical"] in os_names or fixed_loader_pair and alias["path"] == "/lib64"
+                  and alias["target"] == "usr/lib64" and alias["canonical"] == "/usr/lib64")
+             and "/" + "/".join(destination) == alias["canonical"],
              "Android OS alias escapes its exact canonical contract")
         seen_aliases.add(alias["path"].casefold())
     need(type(retained) is bool, "Android publication source route differs")
@@ -2369,7 +2388,20 @@ ANDROID_SAVED_DATA_PINS = {
 # Filled only from the coherent source-reviewed preparation helper, original
 # ELF parser/dependency and six exact DATA documents. Missing pins refuse the dynamic Android path; legacy
 # non-Android source/owner imports remain unchanged.
-ANDROID_PREPARATION_PINS = None
+ANDROID_PREPARATION_PINS = {
+    'desktop/tools/android_hosted_data.py': (48031, 'd6e0008646f7db0381d9419e0949509b06876e028244f9f93072b734dec2e893'),
+    'desktop/tools/android_material_data/archives.json.gz': (753628, 'b96037026b7896f809bcd927aed49c00e8056b54f9ca569e8c0cf9efa18dcb5a'),
+    'desktop/tools/android_material_data/fonts.json': (36466, '6af0223192bd9b9e242aca9694aaaa1935791989d6f71bdc1366b28abebac20b'),
+    'desktop/tools/android_material_data/layout.json.gz': (640182, '7b5437c8cde83019cd46ce5fe368f84bf2092e74d8ed49c6f6b9a83324d06c40'),
+    'desktop/tools/android_material_data/policy.json': (61607, '51f6a65c6f683c129bba862f9c0cc74035834f1731a409d37493da54134ba210'),
+    'desktop/tools/android_material_data/providers.json': (110770, 'edd6b7fb76b042d5b86b35ac258a80ee27e42ed912fbd646c717e491c293c8c6'),
+    'desktop/tools/android_material_data/suppliers.json': (190977, '19cb151c3038b65ffeee18fde1e3ef4fc764b45121573274fc539aa6ebb52ce8'),
+    'desktop/tools/android_material_preparation.py': (182020, '2e4c5fcad38417a76a39a2ee752d868ef77dd77ef6d4ac0baacb8c843b282041'),
+    'desktop/tools/ci_foundation.py': (1282894, 'e55bdcb0666355fa8cd0a7125c699c2d6fcd67da713b1946b97c64c2f9f06498'),
+    'desktop/tools/ci_ubuntu_publication.py': (464756, 'a07414f79ba61a9b1d67574cf6420e8fbcd3f1425a79f958054b335fe52f5b40'),
+    'desktop/tools/stock_trust_correspondence.py': (8573, 'da8b42b53f52a623db3bff362c1320ec2246558dae5a737264d45d8b93293bce'),
+    'desktop/tools/ubuntu_stock_ca_policy.json': (29829, '633273a983d53a4a493b96d949f35f2a82bcd9752f0239bb7e8f62e8d4c70f5c'),
+}
 # Independently filled only after the actual local runtime profile is accepted.
 # A refused hosted selector never selects this route.
 ANDROID_RETAINED_PREPARATION_PINS = None
