@@ -806,21 +806,27 @@ class UnitOwner:
             self.cgroup_operation = "events-stat"
             need(identity(os.fstat(owner["eventsFd"]))[:5] == owner["eventsIdentity"],
                  "Original cgroup.events descriptor changed")
-            self.cgroup_operation = "events-seek"
-            os.lseek(owner["eventsFd"], 0, os.SEEK_SET)
-            self.cgroup_operation = "events-read"
             try:
+                self.cgroup_operation = "events-seek"
+                os.lseek(owner["eventsFd"], 0, os.SEEK_SET)
+                self.cgroup_operation = "events-read"
                 raw = os.read(owner["eventsFd"], 4097)
             except OSError as error:
+                operation = self.cgroup_operation  # Preserve the actual failing syscall.
                 if error.errno != errno.ENODEV or owner.get("stopAttempted") is not True:
                     raise
-                # kernfs may deactivate the original events object while its
-                # held directory still reports a historical nonzero link count.
-                # Only this READ result plus the original parent/name absence
-                # witness proves retirement. A successful systemctl is not proof.
-                self.cgroup_read_errno = errno.ENODEV
+                # kernfs can reject either seek or read after deactivating the
+                # original events object, while its directory retains a stale
+                # nonzero link count. Neither errno nor a successful systemctl
+                # alone proves retirement: keep the exact original-parent/name
+                # absence witness. A failed seek never counts as an actual read.
+                if operation == "events-read":
+                    self.cgroup_read_errno = errno.ENODEV
                 self.retired_name_absent(owner)
-                owner["retirementReadErrno"] = errno.ENODEV
+                owner["retirementOperation"] = operation
+                owner["retirementErrno"] = errno.ENODEV
+                if operation == "events-read":
+                    owner["retirementReadErrno"] = errno.ENODEV
                 return False, "retired"
             need(len(raw) <= 4096, "Original cgroup.events bound")
             rows = dict(line.split(" ", 1) for line in raw.decode("ascii").splitlines())

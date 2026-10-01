@@ -567,18 +567,55 @@ class OwnerFailureContracts(unittest.TestCase):
             mock.call(book["name"], dir_fd=902, follow_symlinks=False)] * 2)
         self.assertEqual(parent.call_count, 3)
         self.assertEqual(book["retirementReadErrno"], O.errno.ENODEV)
+        self.assertEqual(book["retirementOperation"], "events-read")
+        self.assertEqual(book["retirementErrno"], O.errno.ENODEV)
         self.assertIsNone(manager.cgroup_failure)
         self.assertIn("build", manager.live)  # Observation is not settlement.
         manager.control.assert_not_called()
 
-    def test_retirement_refuses_replacement_parent_drift_seek_and_other_read_errors(self):
+    def test_retired_original_events_seek_keeps_read_unexecuted_and_prior_failure(self):
+        for prior_failure in (None,
+                {"operation": "events-read", "errno": O.errno.EIO, "eventsReadErrno": None}):
+            with self.subTest(prior_failure=prior_failure is not None):
+                manager, book, observed = self.cgroup_fixture()
+                manager.cgroup_failure = prior_failure
+                manager.cgroup_read_errno = O.errno.ENODEV  # A prior read is not this seek.
+                book["mainBeforeStop"] = self.original()
+                absent = FileNotFoundError(O.errno.ENOENT, "synthetic original name absent")
+                with mock.patch.object(O.os, "fstat", side_effect=lambda fd: observed[fd]), \
+                     mock.patch.object(O.os, "lseek",
+                         side_effect=OSError(O.errno.ENODEV, "synthetic retired seek")) as seek, \
+                     mock.patch.object(O.os, "read") as read, \
+                     mock.patch.object(O.os, "stat", side_effect=absent) as named, \
+                     mock.patch.object(O.Path, "lstat", return_value=observed[902]) as parent:
+                    self.assertEqual(manager.populated(book), (False, "retired"))
+                seek.assert_called_once_with(901, 0, os.SEEK_SET)
+                read.assert_not_called()
+                self.assertEqual(named.call_args_list, [
+                    mock.call(book["name"], dir_fd=902, follow_symlinks=False)] * 2)
+                self.assertEqual(parent.call_count, 3)
+                self.assertEqual(book["retirementOperation"], "events-seek")
+                self.assertEqual(book["retirementErrno"], O.errno.ENODEV)
+                self.assertNotIn("retirementReadErrno", book)
+                self.assertIsNone(manager.cgroup_read_errno)
+                self.assertIs(manager.cgroup_failure, prior_failure)
+                self.assertEqual(book["mainBeforeStop"]["ExecMainStatus"], "17")
+                self.assertIn("build", manager.live)  # Retirement is not worker success or settlement.
+                self.assertTrue(all(key in book for key in ("cgroupFd", "eventsFd", "cgroupParentFd")))
+                manager.control.assert_not_called()
+
+    def test_retirement_refuses_replacement_parent_drift_and_other_seek_or_read_errors(self):
         cases = (
             ("original name remains", "present", None, O.errno.ENODEV, True, ValueError),
             ("replacement name", "replacement", None, O.errno.ENODEV, True, ValueError),
             ("parent drift", "drift", None, O.errno.ENODEV, True, ValueError),
-            ("seek is not read", "absent", O.errno.ENODEV, O.errno.ENODEV, True, OSError),
+            ("other seek errno", "absent", O.errno.EIO, O.errno.ENODEV, True, OSError),
             ("other read errno", "absent", None, O.errno.EIO, True, OSError),
             ("before stop attempt", "absent", None, O.errno.ENODEV, False, OSError),
+            ("seek replacement name", "replacement", O.errno.ENODEV, None, True, ValueError),
+            ("seek parent drift", "drift", O.errno.ENODEV, None, True, ValueError),
+            ("seek before stop attempt", "absent", O.errno.ENODEV, None, False, OSError),
+            ("seek name reappears", "reappears", O.errno.ENODEV, None, True, ValueError),
         )
         for label, named_kind, seek_errno, read_errno, attempted, expected in cases:
             with self.subTest(case=label):
@@ -591,22 +628,35 @@ class OwnerFailureContracts(unittest.TestCase):
                     parent.st_ino += 10
                 named_result = observed[900] if named_kind == "present" else replacement
                 absent = FileNotFoundError(O.errno.ENOENT, "synthetic absence")
+                named_effect = ([absent, replacement] if named_kind == "reappears" else
+                    None if named_kind in ("present", "replacement") else absent)
                 with mock.patch.object(O.os, "fstat", side_effect=lambda fd: observed[fd]), \
                      mock.patch.object(O.os, "lseek",
                          side_effect=OSError(seek_errno, "synthetic seek") if seek_errno else None), \
-                     mock.patch.object(O.os, "read", side_effect=OSError(read_errno, "synthetic read")) as read, \
+                     mock.patch.object(O.os, "read",
+                         side_effect=OSError(read_errno, "synthetic read") if read_errno else None) as read, \
                      mock.patch.object(O.os, "stat", return_value=named_result,
-                         side_effect=None if named_kind in ("present", "replacement") else absent) as named, \
+                         side_effect=named_effect) as named, \
                      mock.patch.object(O.Path, "lstat", return_value=parent), \
                      self.assertRaises(expected):
                     manager.populated(book)
+                self.assertNotIn("retirementOperation", book)
+                self.assertNotIn("retirementErrno", book)
                 self.assertNotIn("retirementReadErrno", book)
                 self.assertIn("build", manager.live)
                 self.assertIsNotNone(manager.cgroup_failure)
                 if seek_errno:
                     read.assert_not_called()
-                if seek_errno or read_errno != O.errno.ENODEV or not attempted or named_kind == "drift":
+                    self.assertIsNone(manager.cgroup_failure["eventsReadErrno"])
+                failed_errno = seek_errno if seek_errno else read_errno
+                if failed_errno != O.errno.ENODEV or not attempted or named_kind == "drift":
                     named.assert_not_called()
+                if failed_errno != O.errno.ENODEV or not attempted:
+                    self.assertEqual(manager.cgroup_failure, {
+                        "operation": "events-seek" if seek_errno else "events-read",
+                        "errno": failed_errno, "eventsReadErrno": None})
+                if named_kind == "reappears":
+                    self.assertEqual(named.call_count, 2)
                 manager.control.assert_not_called()
 
     def test_partial_cgroup_admission_consumes_every_acquired_fd_and_keeps_first_error(self):
