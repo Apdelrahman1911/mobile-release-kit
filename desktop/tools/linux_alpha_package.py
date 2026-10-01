@@ -8,6 +8,7 @@ No application, runtime Python, Store API, release workflow or installer runs.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
@@ -46,6 +47,11 @@ STARTUP_PHASES = frozenset((
 ))
 PARENT_REFUSALS = frozenset((
     "protected-parent-not-directory", "protected-parent-owner", "protected-parent-mode",
+))
+CGROUP_OPERATIONS = frozenset((
+    "parent-open", "parent-bind", "directory-open", "directory-bind",
+    "events-open", "events-bind", "directory-stat", "events-stat",
+    "events-seek", "events-read", "retired-parent-bind", "retired-name-absence",
 ))
 
 
@@ -678,6 +684,7 @@ class UnitOwner:
         self.environment = plain_environment(task / "owner/home", task / "owner/tmp")
         self.live, self.results, self.pending, self.errors = {}, [], set(), []
         self.clients, self.phase, self.role = [], "initialization", None
+        self.cgroup_operation, self.cgroup_read_errno, self.cgroup_failure = None, None, None
 
     def control(self, argv, **kwargs):
         return manager_command(argv, environment=self.environment, cwd=self.task / "owner", receipts=self.clients, **kwargs)
@@ -701,17 +708,127 @@ class UnitOwner:
              "Original unit invocation changed")
         return current
 
+    def remember_cgroup_failure(self, error):
+        # Keep only the first actual failing observation, not exception text,
+        # paths, or a later cleanup error that could mask the original fault.
+        if self.cgroup_failure is None:
+            number = error.errno if isinstance(error, OSError) else None
+            self.cgroup_failure = {
+                "operation": self.cgroup_operation,
+                "errno": number if type(number) is int and 1 <= number <= 4095 else None,
+                "eventsReadErrno": self.cgroup_read_errno,
+            }
+
+    def bind_cgroup(self, name, current):
+        """Retain the original parent/name and both original cgroup objects."""
+        need(current["ControlGroup"] == "/system.slice/" + name, "Original cgroup path differs")
+        parent_path = Path("/sys/fs/cgroup/system.slice")
+        acquired = {}
+        self.cgroup_read_errno = None
+        try:
+            self.cgroup_operation = "parent-open"
+            acquired["cgroupParentFd"] = os.open(parent_path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            self.cgroup_operation = "parent-bind"
+            parent = os.fstat(acquired["cgroupParentFd"])
+            need(stat.S_ISDIR(parent.st_mode) and parent.st_uid == parent.st_gid == 0
+                 and identity(parent)[:5] == identity(parent_path.lstat())[:5],
+                 "Original cgroup parent changed")
+            self.cgroup_operation = "directory-open"
+            acquired["cgroupFd"] = os.open(name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=acquired["cgroupParentFd"])
+            self.cgroup_operation = "directory-bind"
+            original = os.fstat(acquired["cgroupFd"])
+            need(stat.S_ISDIR(original.st_mode) and original.st_uid == original.st_gid == 0
+                 and identity(original) == identity(os.stat(name,
+                     dir_fd=acquired["cgroupParentFd"], follow_symlinks=False)),
+                 "Original unit cgroup changed")
+            self.cgroup_operation = "events-open"
+            acquired["eventsFd"] = os.open("cgroup.events",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=acquired["cgroupFd"])
+            self.cgroup_operation = "events-bind"
+            events = os.fstat(acquired["eventsFd"])
+            need(stat.S_ISREG(events.st_mode) and events.st_uid == events.st_gid == 0
+                 and events.st_dev == original.st_dev
+                 and identity(events) == identity(os.stat("cgroup.events",
+                     dir_fd=acquired["cgroupFd"], follow_symlinks=False)),
+                 "Original cgroup.events changed")
+            return {"name": name, "initial": current, **acquired,
+                    "cgroupIdentity": (original.st_dev, original.st_ino),
+                    "eventsIdentity": identity(events)[:5],
+                    "cgroupParentIdentity": identity(parent)[:5],
+                    "cgroupParentPath": parent_path}
+        except BaseException as error:
+            self.remember_cgroup_failure(error)
+            # Every actually acquired descriptor is consumed, even if an
+            # earlier admission check or another consuming close failed.
+            for key in ("eventsFd", "cgroupFd", "cgroupParentFd"):
+                descriptor = acquired.pop(key, None)
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError as close_error:
+                        self.errors.append(close_error.errno)
+            raise
+
+    def retired_name_absent(self, owner):
+        # This latch proves only that the original invocation was matched and
+        # its no-resubmit stop attempt began. It is NOT a launched/successful
+        # stop receipt. Earlier submission/deadline/client failures stay sticky.
+        need(owner.get("stopAttempted") is True, "Retirement was not a stop-settlement observation")
+        for index in range(3):
+            self.cgroup_operation = "retired-parent-bind"
+            parent = os.fstat(owner["cgroupParentFd"])
+            need(identity(parent)[:5] == owner["cgroupParentIdentity"]
+                 == identity(owner["cgroupParentPath"].lstat())[:5],
+                 "Original retirement parent changed")
+            if index == 2:
+                break
+            self.cgroup_operation = "retired-name-absence"
+            try:
+                os.stat(owner["name"], dir_fd=owner["cgroupParentFd"], follow_symlinks=False)
+            except FileNotFoundError as error:
+                if error.errno != errno.ENOENT:
+                    raise
+            else:
+                # Never reopen, adopt or signal a replacement at this name.
+                raise Refused("Original retired cgroup name is still present")
+
     def populated(self, owner):
-        value = os.fstat(owner["cgroupFd"])
-        need((value.st_dev, value.st_ino) == owner["cgroupIdentity"], "Original cgroup descriptor changed")
-        if value.st_nlink == 0:
-            return False, "retired"
-        os.lseek(owner["eventsFd"], 0, os.SEEK_SET)
-        raw = os.read(owner["eventsFd"], 4097)
-        need(len(raw) <= 4096, "Original cgroup.events bound")
-        rows = dict(line.split(" ", 1) for line in raw.decode("ascii").splitlines())
-        need(rows.get("populated") in ("0", "1"), "Original cgroup population is unknown")
-        return rows["populated"] == "1", "empty" if rows["populated"] == "0" else "populated"
+        self.cgroup_read_errno = None
+        try:
+            self.cgroup_operation = "directory-stat"
+            value = os.fstat(owner["cgroupFd"])
+            need((value.st_dev, value.st_ino) == owner["cgroupIdentity"], "Original cgroup descriptor changed")
+            if value.st_nlink == 0:
+                return False, "retired"
+            self.cgroup_operation = "events-stat"
+            need(identity(os.fstat(owner["eventsFd"]))[:5] == owner["eventsIdentity"],
+                 "Original cgroup.events descriptor changed")
+            self.cgroup_operation = "events-seek"
+            os.lseek(owner["eventsFd"], 0, os.SEEK_SET)
+            self.cgroup_operation = "events-read"
+            try:
+                raw = os.read(owner["eventsFd"], 4097)
+            except OSError as error:
+                if error.errno != errno.ENODEV or owner.get("stopAttempted") is not True:
+                    raise
+                # kernfs may deactivate the original events object while its
+                # held directory still reports a historical nonzero link count.
+                # Only this READ result plus the original parent/name absence
+                # witness proves retirement. A successful systemctl is not proof.
+                self.cgroup_read_errno = errno.ENODEV
+                self.retired_name_absent(owner)
+                owner["retirementReadErrno"] = errno.ENODEV
+                return False, "retired"
+            need(len(raw) <= 4096, "Original cgroup.events bound")
+            rows = dict(line.split(" ", 1) for line in raw.decode("ascii").splitlines())
+            need(rows.get("populated") in ("0", "1"), "Original cgroup population is unknown")
+            return rows["populated"] == "1", "empty" if rows["populated"] == "0" else "populated"
+        except BaseException as error:
+            self.remember_cgroup_failure(error)
+            raise
 
     def stop_original(self, role, *, main=None):
         owner = self.live[role]
@@ -737,7 +854,7 @@ class UnitOwner:
             need(time.monotonic_ns() < owner["stopDeadlineNs"], "Original cgroup did not become empty/retired")
             time.sleep(0.05)
         errors = []
-        for key in ("eventsFd", "cgroupFd"):
+        for key in ("eventsFd", "cgroupFd", "cgroupParentFd"):
             try:
                 os.close(owner.pop(key))
             except OSError as error:
@@ -746,7 +863,8 @@ class UnitOwner:
         self.errors.extend(errors)
         record = {"role": role, "initial": owner["initial"], "mainBeforeStop": owner["mainBeforeStop"],
                   "stopAttempted": True, "stopDeadlineNs": owner["stopDeadlineNs"],
-                  "originalCgroupFinality": state, "closed": not errors}
+                  "originalCgroupFinality": state, "closed": not errors,
+                  "retirementReadErrno": owner.get("retirementReadErrno")}
         self.results.append(record)
         need(not errors, "Original cgroup descriptor close failed")
         return record
@@ -807,18 +925,7 @@ class UnitOwner:
              and int(current["MainPID"]) > 1 and current["ControlGroup"] == "/system.slice/" + name
              and current["Restart"] == "no" and current["KillMode"] == "control-group"
              and current["RemainAfterExit"] == "yes", "Original started worker unit differs")
-        cgroup_path = Path("/sys/fs/cgroup") / current["ControlGroup"].removeprefix("/")
-        descriptor = os.open(cgroup_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            original = os.fstat(descriptor)
-            need(stat.S_ISDIR(original.st_mode) and original.st_uid == 0
-                 and identity(original) == identity(cgroup_path.lstat()), "Original unit cgroup changed")
-            events = os.open("cgroup.events", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=descriptor)
-        except BaseException:
-            os.close(descriptor)
-            raise
-        owner = {"name": name, "initial": current, "cgroupFd": descriptor, "eventsFd": events,
-                 "cgroupIdentity": (original.st_dev, original.st_ino)}
+        owner = self.bind_cgroup(name, current)
         self.live[role] = owner
         self.pending.remove(name)
         need(self.populated(owner)[0], "Original GO worker is absent from its cgroup")
@@ -1414,10 +1521,24 @@ def remove_owned_tree(path, task, *, all_final):
 
 
 
+def public_cgroup_diagnostic(value):
+    """Only a closed operation tag and actual numeric OS observations."""
+    if (type(value) is not dict or set(value) != {"operation", "errno", "eventsReadErrno"}
+            or type(value["operation"]) is not str or value["operation"] not in CGROUP_OPERATIONS
+            or not (value["errno"] is None or type(value["errno"]) is int and 1 <= value["errno"] <= 4095)
+            or not (value["eventsReadErrno"] is None
+                    or type(value["eventsReadErrno"]) is int and value["eventsReadErrno"] == errno.ENODEV)):
+        return None
+    return {key: value[key] for key in ("operation", "errno", "eventsReadErrno")}
+
+
 def failure_summary(task, manager, failure, phase, role, finality):
     """Small public diagnostic projection; original captures stay private."""
     value = {"schema": "mrk-ubuntu-alpha-failure-v1", "phase": phase, "role": role,
              "errorClass": type(failure).__name__, "originalFinality": finality}
+    cgroup_observation = public_cgroup_diagnostic(manager.cgroup_failure)
+    if cgroup_observation is not None:
+        value["cgroupObservation"] = cgroup_observation
     if manager.clients:
         value["lastManagerClient"] = {key: manager.clients[-1][key] for key in (
             "program", "exit", "joined", "eof", "withinDeadline", "outputOverflow", "final",
@@ -1426,6 +1547,9 @@ def failure_summary(task, manager, failure, phase, role, finality):
         last = next((row for row in reversed(manager.results) if row["role"] == role), manager.results[-1])
         value["unit"] = {"role": last["role"], "finality": last["originalCgroupFinality"],
                          "closed": last["closed"]}
+        retirement_errno = last.get("retirementReadErrno")
+        if type(retirement_errno) is int and retirement_errno == errno.ENODEV:
+            value["unit"]["retirementReadErrno"] = retirement_errno
         original = last.get("mainBeforeStop")
         if original is not None:
             value["unit"]["result"] = original["Result"]
@@ -1594,7 +1718,7 @@ def route(args):
             # An uncertain domain remains uncertain: consume only our retained
             # descriptors, never stop a replacement or call this cleanup success.
             descriptor_errors = []
-            for key in ("eventsFd", "cgroupFd"):
+            for key in ("eventsFd", "cgroupFd", "cgroupParentFd"):
                 descriptor = original.pop(key, None)
                 if descriptor is not None:
                     try:
@@ -1603,7 +1727,9 @@ def route(args):
                         descriptor_errors.append(error.errno)
             manager.errors.extend(descriptor_errors)
             manager.results.append({"role": role, "initial": original["initial"],
-                "originalCgroupFinality": "unknown", "closed": not descriptor_errors})
+                "mainBeforeStop": original.get("mainBeforeStop"),
+                "originalCgroupFinality": "unknown", "closed": not descriptor_errors,
+                "retirementReadErrno": original.get("retirementReadErrno")})
         finality = not manager.live and not manager.pending and not manager.errors and all(row["final"] for row in manager.clients)
         # Retain original small logs/captures, not the compiler/cache gigabytes.
         if finality:

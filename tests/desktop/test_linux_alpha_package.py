@@ -520,7 +520,7 @@ class OwnerFailureContracts(unittest.TestCase):
         initial = self.original(MainPID="1234", SubState="running", Result="success",
                                 ExecMainCode="0", ExecMainStatus="0", ExecMainExitTimestampMonotonic="0")
         owner.live["build"] = {"name": initial["Id"], "initial": initial,
-            "eventsFd": 901, "cgroupFd": 900, "cgroupIdentity": (1, 2)}
+            "eventsFd": 901, "cgroupFd": 900, "cgroupParentFd": 902, "cgroupIdentity": (1, 2)}
         owner.show = mock.Mock(return_value=observed)
         owner.control = mock.Mock()
         owner.populated = mock.Mock(return_value=(False, "retired"))
@@ -536,6 +536,147 @@ class OwnerFailureContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             O.unit_values(raw.replace(b"not-found", b"loaded"), allow_absent=True)
 
+    def cgroup_fixture(self):
+        manager = self.manager(self.original())
+        del manager.populated  # Exercise the actual original-FD observation.
+        def info(inode, mode, links):
+            return SimpleNamespace(st_dev=1, st_ino=inode, st_mode=mode,
+                st_uid=0, st_gid=0, st_nlink=links, st_size=0,
+                st_mtime_ns=1, st_ctime_ns=1)
+        observed = {900: info(2, stat.S_IFDIR | 0o755, 2),
+                    901: info(3, stat.S_IFREG | 0o444, 1),
+                    902: info(4, stat.S_IFDIR | 0o755, 8)}
+        book = manager.live["build"]
+        book.update(cgroupParentFd=902, cgroupParentPath=Path("/sys/fs/cgroup/system.slice"),
+            cgroupParentIdentity=O.identity(observed[902])[:5],
+            eventsIdentity=O.identity(observed[901])[:5], stopAttempted=True)
+        return manager, book, observed
+
+    def test_retired_original_events_read_requires_retained_parent_and_absent_name(self):
+        manager, book, observed = self.cgroup_fixture()
+        absent = FileNotFoundError(O.errno.ENOENT, "synthetic original name absent")
+        with mock.patch.object(O.os, "fstat", side_effect=lambda fd: observed[fd]), \
+             mock.patch.object(O.os, "lseek") as seek, \
+             mock.patch.object(O.os, "read", side_effect=OSError(O.errno.ENODEV, "synthetic retired kernfs")) as read, \
+             mock.patch.object(O.os, "stat", side_effect=absent) as named, \
+             mock.patch.object(O.Path, "lstat", return_value=observed[902]) as parent:
+            self.assertEqual(manager.populated(book), (False, "retired"))
+        seek.assert_called_once_with(901, 0, os.SEEK_SET)
+        read.assert_called_once_with(901, 4097)
+        self.assertEqual(named.call_args_list, [
+            mock.call(book["name"], dir_fd=902, follow_symlinks=False)] * 2)
+        self.assertEqual(parent.call_count, 3)
+        self.assertEqual(book["retirementReadErrno"], O.errno.ENODEV)
+        self.assertIsNone(manager.cgroup_failure)
+        self.assertIn("build", manager.live)  # Observation is not settlement.
+        manager.control.assert_not_called()
+
+    def test_retirement_refuses_replacement_parent_drift_seek_and_other_read_errors(self):
+        cases = (
+            ("original name remains", "present", None, O.errno.ENODEV, True, ValueError),
+            ("replacement name", "replacement", None, O.errno.ENODEV, True, ValueError),
+            ("parent drift", "drift", None, O.errno.ENODEV, True, ValueError),
+            ("seek is not read", "absent", O.errno.ENODEV, O.errno.ENODEV, True, OSError),
+            ("other read errno", "absent", None, O.errno.EIO, True, OSError),
+            ("before stop attempt", "absent", None, O.errno.ENODEV, False, OSError),
+        )
+        for label, named_kind, seek_errno, read_errno, attempted, expected in cases:
+            with self.subTest(case=label):
+                manager, book, observed = self.cgroup_fixture()
+                book["stopAttempted"] = attempted
+                parent = copy.copy(observed[902])
+                replacement = copy.copy(observed[900])
+                replacement.st_ino += 10
+                if named_kind == "drift":
+                    parent.st_ino += 10
+                named_result = observed[900] if named_kind == "present" else replacement
+                absent = FileNotFoundError(O.errno.ENOENT, "synthetic absence")
+                with mock.patch.object(O.os, "fstat", side_effect=lambda fd: observed[fd]), \
+                     mock.patch.object(O.os, "lseek",
+                         side_effect=OSError(seek_errno, "synthetic seek") if seek_errno else None), \
+                     mock.patch.object(O.os, "read", side_effect=OSError(read_errno, "synthetic read")) as read, \
+                     mock.patch.object(O.os, "stat", return_value=named_result,
+                         side_effect=None if named_kind in ("present", "replacement") else absent) as named, \
+                     mock.patch.object(O.Path, "lstat", return_value=parent), \
+                     self.assertRaises(expected):
+                    manager.populated(book)
+                self.assertNotIn("retirementReadErrno", book)
+                self.assertIn("build", manager.live)
+                self.assertIsNotNone(manager.cgroup_failure)
+                if seek_errno:
+                    read.assert_not_called()
+                if seek_errno or read_errno != O.errno.ENODEV or not attempted or named_kind == "drift":
+                    named.assert_not_called()
+                manager.control.assert_not_called()
+
+    def test_partial_cgroup_admission_consumes_every_acquired_fd_and_keeps_first_error(self):
+        for failure_at in ("events-open", "events-bind"):
+            with self.subTest(failure_at=failure_at):
+                manager, book, observed = self.cgroup_fixture()
+                manager.live.clear()
+                manager.errors.append(O.errno.ENOSPC)  # An earlier cleanup failure remains sticky.
+                error = OSError(O.errno.EIO, "private synthetic admission failure")
+                opened = [902, 900, error if failure_at == "events-open" else 901]
+                def fstat(fd):
+                    if fd == 901:
+                        raise error
+                    return observed[fd]
+                count = 2 if failure_at == "events-open" else 3
+                with mock.patch.object(O.os, "open", side_effect=opened), \
+                     mock.patch.object(O.os, "fstat", side_effect=fstat), \
+                     mock.patch.object(O.Path, "lstat", return_value=observed[902]), \
+                     mock.patch.object(O.os, "stat", return_value=observed[900]), \
+                     mock.patch.object(O.os, "close",
+                         side_effect=[OSError(O.errno.EBADF, "synthetic close")] + [None] * (count - 1)) as close:
+                    with self.assertRaises(OSError) as caught:
+                        manager.bind_cgroup(book["name"], book["initial"])
+                self.assertIs(caught.exception, error)
+                self.assertEqual(close.call_args_list,
+                    [mock.call(fd) for fd in ([900, 902] if count == 2 else [901, 900, 902])])
+                self.assertEqual(manager.errors, [O.errno.ENOSPC, O.errno.EBADF])
+                self.assertEqual(manager.live, {})
+                self.assertEqual(manager.cgroup_failure,
+                    {"operation": failure_at, "errno": O.errno.EIO, "eventsReadErrno": None})
+
+    def test_expired_pre_submission_attempt_is_not_a_submitted_stop_or_success(self):
+        terminal = self.original()
+        manager = self.manager(terminal)
+        manager.configuration["deadlineNs"] = 0
+        with mock.patch.object(O.time, "monotonic_ns", return_value=30_000_000_000), \
+             mock.patch.object(O.os, "close") as close:
+            with self.assertRaisesRegex(ValueError, "before submission") as original_failure:
+                manager.stop_original("build", main=terminal)
+            self.assertTrue(manager.live["build"]["stopAttempted"])
+            manager.control.assert_not_called()
+            manager.show.side_effect = AssertionError("must not re-adopt an attempted original")
+            result = manager.stop_original("build")
+        self.assertIsInstance(original_failure.exception, ValueError)
+        self.assertEqual(result["mainBeforeStop"]["ExecMainStatus"], "17")
+        self.assertEqual(result["originalCgroupFinality"], "retired")
+        self.assertEqual(close.call_args_list, [mock.call(901), mock.call(900), mock.call(902)])
+        manager.control.assert_not_called()
+
+    def test_unknown_finality_retains_original_outcome_and_closed_syscall_diagnostic(self):
+        manager = self.manager(self.original())
+        manager.results.append({"role": "build", "originalCgroupFinality": "unknown",
+            "closed": True, "mainBeforeStop": self.original()})
+        manager.cgroup_failure = {"operation": "events-read", "errno": O.errno.EIO, "eventsReadErrno": None}
+        marker = "/private/never-publish-this synthetic credential"
+        value = O.failure_summary(Path("/contract-task"), manager, OSError(O.errno.EIO, marker),
+                                  "worker-build", "build", False)
+        self.assertFalse(value["originalFinality"])
+        self.assertEqual(value["unit"]["exitStatus"], "17")
+        self.assertEqual(value["unit"]["result"], "exit-code")
+        self.assertEqual(value["cgroupObservation"], manager.cgroup_failure)
+        self.assertNotIn(marker, json.dumps(value))
+        for altered in (
+            {"operation": marker, "errno": O.errno.EIO, "eventsReadErrno": None},
+            {"operation": [], "errno": O.errno.EIO, "eventsReadErrno": None},
+            {"operation": "events-read", "errno": True, "eventsReadErrno": None},
+            {"operation": "events-read", "errno": O.errno.EIO, "eventsReadErrno": O.errno.EIO},
+        ):
+            self.assertIsNone(O.public_cgroup_diagnostic(altered))
+
     def test_original_failure_is_preserved_before_stop_and_replacement_is_not_stopped(self):
         terminal = self.original()
         owner = self.manager(terminal)
@@ -545,7 +686,7 @@ class OwnerFailureContracts(unittest.TestCase):
         self.assertEqual(result["mainBeforeStop"]["ExecMainStatus"], "17")
         self.assertEqual(result["originalCgroupFinality"], "retired")
         self.assertTrue(result["closed"])
-        self.assertEqual(close.call_args_list, [mock.call(901), mock.call(900)])
+        self.assertEqual(close.call_args_list, [mock.call(901), mock.call(900), mock.call(902)])
         self.assertEqual(owner.live, {})
         replaced = self.manager(self.original(InvocationID="b" * 32))
         with mock.patch.object(O.os, "close") as close, self.assertRaises(ValueError):
@@ -556,10 +697,10 @@ class OwnerFailureContracts(unittest.TestCase):
     def test_original_close_failure_is_consumed_once_and_cannot_gate_package_success(self):
         terminal = self.original()
         owner = self.manager(terminal)
-        with mock.patch.object(O.os, "close", side_effect=[OSError(5, "injected close"), None]) as close:
+        with mock.patch.object(O.os, "close", side_effect=[OSError(5, "injected close"), None, None]) as close:
             with self.assertRaises(ValueError):
                 owner.stop_original("build", main=terminal)
-        self.assertEqual(close.call_args_list, [mock.call(901), mock.call(900)])
+        self.assertEqual(close.call_args_list, [mock.call(901), mock.call(900), mock.call(902)])
         self.assertEqual(owner.live, {})
         self.assertEqual(owner.errors, [5])
         self.assertFalse(owner.results[0]["closed"])
@@ -627,7 +768,7 @@ class OwnerFailureContracts(unittest.TestCase):
         self.assertEqual(owner.show.call_count, 1)
         self.assertEqual(result["stopDeadlineNs"], stop_deadline)
         self.assertEqual(result["mainBeforeStop"]["ExecMainStatus"], "17")
-        self.assertEqual(close.call_args_list, [mock.call(901), mock.call(900)])
+        self.assertEqual(close.call_args_list, [mock.call(901), mock.call(900), mock.call(902)])
 
     def test_manager_original_capture_success_and_all_failure_paths_are_finite_owned_and_closed(self):
         cases = [
