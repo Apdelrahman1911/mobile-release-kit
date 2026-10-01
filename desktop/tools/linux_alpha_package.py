@@ -37,10 +37,74 @@ MAX_CAPTURE = 16 << 20
 MAX_SECONDS = 2700
 ROLES = ("acquire", "build", "package")
 GENERATED = ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen", "desktop/src-tauri/permissions")
+TASK_PARENT = Path("/var/lib")
+TASK_PATTERN = r"/var/lib/mrk-alpha-[1-9][0-9]{0,17}-[1-9][0-9]{0,3}-[0-9a-f]{24}"
+STARTUP_PHASES = frozenset((
+    "host-identity", "workflow-identity", "workflow-coordinates", "ubuntu-release",
+    "cgroup-v2", "protected-task-parent", "task-nonce", "create-task-directory",
+    "create-task-subdirectories", "resource-pressure", "initialize-manager",
+))
+PARENT_REFUSALS = frozenset((
+    "protected-parent-not-directory", "protected-parent-owner", "protected-parent-mode",
+))
 
 
 class Refused(ValueError):
     pass
+
+
+class ParentRefused(Refused):
+    def __init__(self, reason):
+        if reason not in PARENT_REFUSALS:
+            raise ValueError("Unknown protected-parent invariant")
+        self.reason = reason
+        super().__init__(reason)
+
+
+def startup_diagnostic(phase, error, *, task_directory_may_exist=False):
+    """Closed failure DATA, never exception text, paths or a cleanup claim.
+
+    Call only before the first manager/worker command has been attempted.
+    Partial directory creation is possible, including an exclusive-name
+    collision; this record neither adopts nor removes anything at that name.
+    """
+    if isinstance(error, ParentRefused) and error.reason in PARENT_REFUSALS:
+        reason = error.reason
+    elif isinstance(error, Refused):
+        reason = "predicate-refused"
+    elif isinstance(error, PermissionError):
+        reason = "permission-denied"
+    elif isinstance(error, FileExistsError):
+        reason = "already-exists"
+    elif isinstance(error, FileNotFoundError):
+        reason = "not-found"
+    elif isinstance(error, InterruptedError):
+        reason = "interrupted"
+    elif isinstance(error, OSError):
+        reason = "os-error"
+    else:
+        reason = "unexpected"
+    return {
+        "schema": "mrk-ubuntu-alpha-startup-failure-v1",
+        "phase": phase if type(phase) is str and phase in STARTUP_PHASES else "startup-internal",
+        "reason": reason, "taskWorkerStartAttempted": False,
+        "taskDirectoryMayExist": task_directory_may_exist is not False,
+    }
+
+
+def write_startup_diagnostic(phase, error, *, task_directory_may_exist=False):
+    # Logging must not replace the original startup failure if stderr itself
+    # is unavailable. The caller still raises that original exception.
+    try:
+        sys.stderr.write(canonical(startup_diagnostic(
+            phase, error, task_directory_may_exist=task_directory_may_exist)).decode("ascii") + "\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def task_path(value):
+    return type(value) is str and re.fullmatch(TASK_PATTERN, value) is not None
 
 
 def need(condition, message):
@@ -811,8 +875,323 @@ def make_directory(path, mode=0o700, uid=0, gid=0):
 def protected_parent(path):
     for selected in [*reversed(path.parents), path]:
         value = selected.lstat()
-        need(stat.S_ISDIR(value.st_mode) and value.st_uid == value.st_gid == 0
-             and not value.st_mode & 0o7022, "Task parent is not protected")
+        if not stat.S_ISDIR(value.st_mode):
+            raise ParentRefused("protected-parent-not-directory")
+        if value.st_uid != 0 or value.st_gid != 0:
+            raise ParentRefused("protected-parent-owner")
+        if value.st_mode & 0o7022:
+            raise ParentRefused("protected-parent-mode")
+
+HOSTED_DATA_BASES = {
+    "documentation": "/usr/share/doc",
+    "common-license": "/usr/share/common-licenses",
+    "egl": "/usr/share/glvnd/egl_vendor.d",
+    "applications": "/usr/share/applications",
+}
+
+
+def hosted_data_path(value, domain, *, directory=False, common_names=()):
+    """Only the closed distro DATA surface, never executable/tool/cache paths."""
+    if type(value) is not str or domain not in HOSTED_DATA_BASES:
+        return False
+    base = HOSTED_DATA_BASES[domain]
+    if directory:
+        return value == base and domain in {"egl", "applications"}
+    relative = value.removeprefix(base + "/") if value.startswith(base + "/") else ""
+    if domain == "documentation":
+        return re.fullmatch(r"[a-z0-9][a-z0-9+.-]+/copyright", relative) is not None
+    if domain == "common-license":
+        return relative in common_names
+    return domain == "egl" and re.fullmatch(r"[A-Za-z0-9_.+-]+\.json", relative) is not None
+
+
+def hosted_data_mode_transition(before, after, mode):
+    """The one permitted original-inode transition is canonical mode/ctime."""
+    stable = (0, 1, 3, 4, 5, 6, 7)
+    return (type(before) is tuple and type(after) is tuple and len(before) == len(after) == 9
+            and before[3] == before[4] == after[3] == after[4] == 0
+            and (stat.S_ISDIR(before[2]) and mode == 0o755 or stat.S_ISREG(before[2]) and mode == 0o644)
+            and all(before[index] == after[index] for index in stable)
+            and after[2] == stat.S_IFMT(before[2]) | mode and after[8] >= before[8])
+
+
+class HostedDistroData:
+    """Held originals for one fresh hosted VM's finite distro DATA mode setup.
+
+    This is not a general repair API. The caller has already admitted the exact
+    disposable workflow and must not have started any project worker. No bytes,
+    owners, symlink targets, membership or executable paths may be changed.
+    """
+    def __init__(self, common_names):
+        self.common_names = frozenset(common_names)
+        self.entries, self.total, self.mode_attempts = {}, 0, 0
+
+    def _body(self, row):
+        os.lseek(row["fd"], 0, os.SEEK_SET)
+        chunks, count = [], 0
+        while block := os.read(row["fd"], 65536):
+            count += len(block)
+            need(count <= row["identity"][6] <= 2 << 20, "Hosted DATA read bound")
+            chunks.append(block)
+        need(count == row["identity"][6], "Hosted DATA original read length differs")
+        return b"".join(chunks)
+
+    def _named(self, row):
+        return identity(os.stat(row["name"], dir_fd=row["parent"], follow_symlinks=False)
+                        if row["parent"] is not None else Path("/").lstat())
+
+    def _post_one(self, row):
+        need(identity(os.fstat(row["fd"])) == row["identity"] == self._named(row),
+             "Hosted DATA original identity changed")
+        if "children" in row:
+            need(sorted(os.listdir(row["fd"])) == row["children"], "Hosted DATA directory roster changed")
+        if "target" in row:
+            need(os.readlink(row["name"], dir_fd=row["parent"]) == row["target"],
+                 "Hosted DATA original alias changed")
+        if "body" in row:
+            need(self._body(row) == row["body"], "Hosted DATA original bytes changed")
+        need(identity(os.fstat(row["fd"])) == row["identity"] == self._named(row),
+             "Hosted DATA changed during postcheck")
+
+    def _node(self, path, parent, name):
+        if path in self.entries:
+            row = self.entries[path]
+            self._post_one(row)
+            return row
+        need(len(self.entries) < 128, "Hosted DATA original count bound")
+        before = (os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  if parent is not None else Path("/").lstat())
+        need(before.st_uid == before.st_gid == 0 and not before.st_mode & 0o7000,
+             "Hosted DATA must already be root-owned ordinary distro input")
+        kind = ("directory" if stat.S_ISDIR(before.st_mode) else
+                "file" if stat.S_ISREG(before.st_mode) else
+                "link" if stat.S_ISLNK(before.st_mode) else None)
+        need(kind is not None and (kind == "directory" or before.st_nlink == 1),
+             "Hosted DATA special or multiply-linked entry")
+        need((path == "/usr/share" or path.startswith("/usr/share/")) or kind == "directory" and not before.st_mode & 0o7022,
+             "Hosted DATA cannot repair other ancestry")
+        flags = os.O_CLOEXEC | os.O_NOFOLLOW
+        flags |= os.O_PATH if kind == "link" else os.O_RDONLY | os.O_NONBLOCK
+        if kind == "directory":
+            flags |= os.O_DIRECTORY
+        descriptor = os.open(name if parent is not None else "/", flags, dir_fd=parent)
+        row = {"path": path, "parent": parent, "name": name, "fd": descriptor,
+               "identity": identity(before), "original": identity(before), "kind": kind}
+        self.entries[path] = row  # Every successful open is in the consuming-close book.
+        need(identity(os.fstat(descriptor)) == row["identity"] == self._named(row),
+             "Hosted DATA original changed before open")
+        if kind == "directory":
+            row["children"] = sorted(os.listdir(descriptor))
+            need(len(row["children"]) <= 16384
+                 and all(type(item) is str and 0 < len(item) <= 255 for item in row["children"]),
+                 "Hosted DATA directory roster bound")
+        elif kind == "link":
+            row["target"] = os.readlink(name, dir_fd=parent)
+            need(0 < len(row["target"]) <= 4096 and "\0" not in row["target"],
+                 "Hosted DATA alias bound")
+        else:
+            need(0 <= before.st_size <= 2 << 20, "Hosted DATA file bound")
+            self.total += before.st_size
+            need(self.total <= 16 << 20, "Hosted DATA aggregate byte bound")
+            row["body"] = self._body(row)
+        self._post_one(row)
+        return row
+
+    def bind(self, selected, domain, *, directory=False):
+        selected = str(selected)
+        need(hosted_data_path(selected, domain, directory=directory, common_names=self.common_names),
+             "Hosted DATA selection is outside the closed surface")
+        original, redirects = selected, 0
+        while True:
+            parts, parent, current = Path(selected).parts[1:], self._node("/", None, "/"), ""
+            redirected = False
+            for index, name in enumerate(parts):
+                current += "/" + name
+                row = self._node(current, parent["fd"], name)
+                if row["kind"] == "link":
+                    redirects += 1
+                    need(redirects <= 16, "Hosted DATA alias count bound")
+                    target_parts = row["target"].split("/")
+                    base_parts = list(parts[:index])  # All are already-held real ancestors.
+                    if row["target"].startswith("/"):
+                        base_parts, target_parts = [], target_parts[1:]
+                    else:
+                        while target_parts and target_parts[0] == "..":
+                            need(bool(base_parts), "Hosted DATA alias traverses above held root")
+                            base_parts.pop()
+                            target_parts.pop(0)
+                    # Never collapse a/..: a may itself be an unobserved alias.
+                    # Only leading .. through held real ancestors is admissible.
+                    need(bool(target_parts) and all(part not in {"", ".", ".."} for part in target_parts),
+                         "Hosted DATA alias target is not canonical")
+                    selected = "/" + "/".join(base_parts + target_parts + list(parts[index + 1:]))
+                    need(hosted_data_path(selected, domain, directory=directory, common_names=self.common_names),
+                         "Hosted DATA alias escapes its closed distro surface")
+                    redirected = True
+                    break
+                need(row["kind"] == ("directory" if index < len(parts) - 1 or directory else "file"),
+                     "Hosted DATA selected kind differs")
+                parent = row
+            if not redirected:
+                return row | {"selectedPath": original}
+
+    def post(self):
+        for row in self.entries.values():
+            self._post_one(row)
+
+    def normalize(self):
+        self.post()  # No mutation until every selected original has been admitted.
+        for row in self.entries.values():
+            if not (row["path"] == "/usr/share" or row["path"].startswith("/usr/share/")) or row["kind"] == "link":
+                continue
+            mode = 0o755 if row["kind"] == "directory" else 0o644
+            if stat.S_IMODE(row["identity"][2]) == mode:
+                continue
+            self._post_one(row)
+            self.mode_attempts += 1  # A failing fchmod may already have taken effect.
+            os.fchmod(row["fd"], mode)
+            after = identity(os.fstat(row["fd"]))
+            need(hosted_data_mode_transition(row["identity"], after, mode),
+                 "Hosted DATA mode operation changed another original property")
+            row["identity"] = after
+            self._post_one(row)
+        self.post()
+
+    def receipt(self):
+        rows = []
+        for row in self.entries.values():
+            value = {"path": row["path"], "kind": row["kind"],
+                     "beforeMode": oct(stat.S_IMODE(row["original"][2])),
+                     "afterMode": oct(stat.S_IMODE(row["identity"][2]))}
+            if "body" in row:
+                value.update(size=len(row["body"]), sha256=hashlib.sha256(row["body"]).hexdigest())
+            if "children" in row:
+                value.update(childrenSha256=hashlib.sha256(canonical(row["children"])).hexdigest(),
+                             childCount=len(row["children"]))
+            if "target" in row:
+                value["target"] = row["target"]
+            rows.append(value)
+        return sorted(rows, key=lambda row: row["path"])
+
+    def finish(self):
+        errors = []
+        try:
+            self.post()
+        except BaseException:
+            errors.append("hosted-data-post")
+        for row in reversed(list(self.entries.values())):
+            descriptor, row["fd"] = row["fd"], None
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except BaseException:
+                errors.append("hosted-data-close")
+        return errors
+
+
+def prepare_hosted_distro_data(manager, D):
+    """Normalize only trusted fresh-image DATA before original OS bindings.
+
+    runner-images makes /usr/share recursively writable. Canonical DATA modes
+    are prepared on this disposable job VM, not on developer/shared machines.
+    This is neither content authentication after untrusted execution nor a
+    relaxation of protected_host_file/shell_host_binding or their postchecks.
+    """
+    need(os.getuid() == os.geteuid() == 0 and sys.platform == "linux"
+         and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+         and os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
+         and os.environ.get("GITHUB_REPOSITORY") == REPOSITORY
+         and not manager.live and not manager.pending and not manager.results,
+         "Hosted distro DATA setup requires the original pre-worker disposable VM")
+    scope, failure, output = HostedDistroData(D.U.COMMON_LICENSES), None, None
+    packages = {}
+
+    def command(_label, argv, **options):
+        return manager.control(argv, **options)
+
+    def package_owner(path):
+        result = manager.control(["/usr/bin/dpkg-query", "-S", path], timeout=15, limit=4096)
+        name, separator, member = result.stdout.decode("ascii").rstrip("\n").rpartition(": ")
+        need(result.stderr == b"" and result.stdout.count(b"\n") == 1 and separator
+             and member == path and re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::amd64)?", name),
+             "Hosted distro DATA member ownership is ambiguous")
+        if name not in packages:
+            fields = "\t".join("$" + "{" + key + "}" for key in (
+                "binary:Package", "db:Status-Status", "Version", "Architecture", "source:Package", "source:Version")) + "\n"
+            result = manager.control(["/usr/bin/dpkg-query", "-W", "-f=" + fields, name], timeout=15, limit=4096)
+            values = result.stdout.decode("ascii").rstrip("\n").split("\t")
+            need(result.stderr == b"" and result.stdout.count(b"\n") == 1 and len(values) == 6
+                 and values[0].split(":")[0] == name.split(":")[0] and values[1] == "installed"
+                 and values[3] in {"amd64", "all"} and re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", values[4])
+                 and all(re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]*", values[index]) for index in (2, 5)),
+                 "Hosted distro DATA supplier tuple differs")
+            packages[name] = {"binaryPackage": values[0], "version": values[2], "architecture": values[3],
+                              "sourcePackage": values[4], "sourceVersion": values[5]}
+        return packages[name]
+
+    try:
+        support = D.support_inputs(command)
+        references, copyrights = set(), []
+        for name in sorted({row["package"] for row in support["support"].values()}):
+            package = support["packages"][name]
+            need(package["sourcePackage"] in {"glibc", "gcc-13", "gcc-14"},
+                 "Hosted compiler support source is outside the reviewed Ubuntu profile")
+            path = "/usr/share/doc/" + package["binaryPackage"].split(":")[0] + "/copyright"
+            selected = scope.bind(path, "documentation")
+            supplier = package_owner(selected["path"])
+            need(all(supplier[key] == package[key] for key in ("sourcePackage", "sourceVersion")),
+                 "Hosted copyright is not from its actual linked support source")
+            found = {item.decode("ascii").rstrip(".")
+                     for item in re.findall(D.U.COMMON_LICENSE_PATTERN, selected["body"])}
+            need(found <= set(D.U.COMMON_LICENSES), "Hosted copyright common-license reference differs")
+            references |= found
+            copyrights.append({"selectedPath": path, "canonicalPath": selected["path"],
+                               "supportPackage": package, "supplier": supplier, "commonReferences": sorted(found)})
+        for name in sorted(references):
+            selected = scope.bind("/usr/share/common-licenses/" + name, "common-license")
+            supplier = package_owner(selected["path"])
+            need(supplier["binaryPackage"].split(":")[0] == supplier["sourcePackage"] == "base-files",
+                 "Hosted common license is not original distro DATA")
+        egl = scope.bind("/usr/share/glvnd/egl_vendor.d", "egl", directory=True)
+        need(0 < len(egl["children"]) <= 32, "Hosted EGL selector roster bound")
+        for name in egl["children"]:
+            selected = scope.bind(egl["path"] + "/" + name, "egl")
+            supplier = package_owner(selected["path"])
+            need(supplier["binaryPackage"].split(":")[0] == "libegl-mesa0"
+                 and supplier["sourcePackage"] == "mesa", "Hosted EGL selector is not reviewed Mesa DATA")
+            value = D.D.decode(selected["body"], 64 << 10)
+            need(type(value) is dict and set(value) == {"file_format_version", "ICD"}
+                 and value["file_format_version"] == "1.0.0" and type(value["ICD"]) is dict
+                 and set(value["ICD"]) == {"library_path"} and value["ICD"]["library_path"] == "libEGL_mesa.so.0",
+                 "Hosted EGL selector does not name the actual reviewed Mesa provider")
+        scope.bind("/usr/share/applications", "applications", directory=True)
+        scope.normalize()
+        D.support_unchanged(support)
+        output = {"schema": "mrk-ubuntu-alpha-hosted-data-preparation-v1",
+                  "scope": "fresh-disposable-hosted-vm-before-project-workers",
+                  "sourceSha": os.environ["GITHUB_SHA"], "modeChanges": scope.mode_attempts,
+                  "files": scope.receipt(), "copyrights": copyrights,
+                  "packages": packages, "bytesUnchanged": True, "ownershipUnchanged": True,
+                  "membershipUnchanged": True, "originalsClosed": False}
+    except BaseException as error:
+        failure = error
+    finally:
+        errors = scope.finish()
+        manager.errors.extend(errors)
+        if errors and failure is None:
+            failure = Refused("Hosted distro DATA finality is incomplete")
+    if failure is not None:
+        # No rollback/retry: the disposable job stops; unchanged guards remain.
+        try:
+            sys.stderr.write(canonical({"schema": "mrk-ubuntu-alpha-hosted-data-preparation-failure-v1",
+                "modeChangeAttempted": scope.mode_attempts > 0, "postOrCloseErrors": len(errors),
+                "projectWorkerStartAttempted": False}).decode("ascii") + "\n")
+        except (OSError, ValueError):
+            pass
+        raise failure
+    output["originalsClosed"] = True
+    return output
 
 
 def snapshot_source(original, destination, configuration, manager):
@@ -1079,40 +1458,63 @@ def failure_summary(task, manager, failure, phase, role, finality):
     return value
 
 
+def prepare_route(args):
+    phase, task_directory_may_exist = "host-identity", False
+    try:
+        need(os.getuid() == os.geteuid() == 0 and sys.platform == "linux", "Hosted Linux owner required")
+        phase = "workflow-identity"
+        need(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and os.environ.get("RUNNER_OS") == "Linux"
+             and os.environ.get("RUNNER_ARCH") == "X64" and os.environ.get("GITHUB_REPOSITORY") == REPOSITORY
+             and os.environ.get("GITHUB_REF") == REF and os.environ.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch")
+             and os.environ.get("GITHUB_SHA") == args.source_sha
+             and os.environ.get("GITHUB_WORKFLOW_SHA") == args.source_sha
+             and os.environ.get("GITHUB_WORKFLOW_REF") == REPOSITORY + "/" + WORKFLOW + "@" + REF,
+             "Only the exact reviewed nonrelease GitHub-hosted dispatch is allowed")
+        phase = "workflow-coordinates"
+        need(re.fullmatch(r"[0-9a-f]{40}", args.source_sha) and re.fullmatch(r"[1-9][0-9]{0,17}", args.run_id)
+             and re.fullmatch(r"[1-9][0-9]{0,3}", args.attempt), "Original workflow coordinates differ")
+        phase = "ubuntu-release"
+        release = Path("/etc/os-release").read_text()
+        need(re.search(r'^ID=ubuntu$', release, re.M) and re.search(r'^VERSION_ID="24\.04"$', release, re.M),
+             "This alpha producer supports only Ubuntu 24.04")
+        phase = "cgroup-v2"
+        need(Path("/sys/fs/cgroup/cgroup.controllers").is_file(), "Unified cgroup v2 is required")
+        phase = "protected-task-parent"
+        protected_parent(TASK_PARENT)
+        phase = "task-nonce"
+        nonce = os.urandom(12).hex()
+        task = TASK_PARENT / ("mrk-alpha-" + args.run_id + "-" + args.attempt + "-" + nonce)
+        phase = "create-task-directory"
+        task_directory_may_exist = True
+        make_directory(task, 0o755)
+        phase = "create-task-subdirectories"
+        for name in ("owner", "private", "control", "public"):
+            make_directory(task / name, 0o755 if name in ("public", "control") else 0o700)
+        for name in ("home", "tmp"):
+            make_directory(task / "owner" / name)
+        phase = "resource-pressure"
+        pressure(task)
+        phase = "initialize-manager"
+        configuration = {
+            "schema": "mrk-ubuntu-alpha-owner-v1", "sourceSha": args.source_sha,
+            "runId": args.run_id, "attempt": args.attempt, "nonce": nonce,
+            "deadlineNs": time.monotonic_ns() + MAX_SECONDS * 1_000_000_000,
+            "units": {role: "mrk-alpha-" + nonce + "-" + role + ".service" for role in ROLES},
+            "accounts": {}, "githubTooling": {
+                "MRK_GITHUB_PREFLIGHT_TOOLING_SHA": ALPHA_TOOLING_SHA,
+                "MRK_GITHUB_RELEASE_TOOLING_SHA": ALPHA_TOOLING_SHA},
+        }
+        manager = UnitOwner(task, configuration)
+        return task, configuration, manager
+    except BaseException as error:
+        write_startup_diagnostic(phase, error, task_directory_may_exist=task_directory_may_exist)
+        raise
+
+
 def route(args):
-    need(os.getuid() == os.geteuid() == 0 and sys.platform == "linux", "Hosted Linux owner required")
-    need(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and os.environ.get("RUNNER_OS") == "Linux"
-         and os.environ.get("RUNNER_ARCH") == "X64" and os.environ.get("GITHUB_REPOSITORY") == REPOSITORY
-         and os.environ.get("GITHUB_REF") == REF and os.environ.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch")
-         and os.environ.get("GITHUB_SHA") == args.source_sha
-         and os.environ.get("GITHUB_WORKFLOW_SHA") == args.source_sha
-         and os.environ.get("GITHUB_WORKFLOW_REF") == REPOSITORY + "/" + WORKFLOW + "@" + REF,
-         "Only the exact reviewed nonrelease GitHub-hosted dispatch is allowed")
-    need(re.fullmatch(r"[0-9a-f]{40}", args.source_sha) and re.fullmatch(r"[1-9][0-9]{0,17}", args.run_id)
-         and re.fullmatch(r"[1-9][0-9]{0,3}", args.attempt), "Original workflow coordinates differ")
-    release = Path("/etc/os-release").read_text()
-    need(re.search(r'^ID=ubuntu$', release, re.M) and re.search(r'^VERSION_ID="24\.04"$', release, re.M),
-         "This alpha producer supports only Ubuntu 24.04")
-    need(Path("/sys/fs/cgroup/cgroup.controllers").is_file(), "Unified cgroup v2 is required")
-    protected_parent(Path("/opt"))
-    nonce = os.urandom(12).hex()
-    task = Path("/opt") / ("mrk-alpha-" + args.run_id + "-" + args.attempt + "-" + nonce)
-    make_directory(task, 0o755)
-    for name in ("owner", "private", "control", "public"):
-        make_directory(task / name, 0o755 if name in ("public", "control") else 0o700)
-    for name in ("home", "tmp"):
-        make_directory(task / "owner" / name)
-    pressure(task)
-    configuration = {
-        "schema": "mrk-ubuntu-alpha-owner-v1", "sourceSha": args.source_sha,
-        "runId": args.run_id, "attempt": args.attempt, "nonce": nonce,
-        "deadlineNs": time.monotonic_ns() + MAX_SECONDS * 1_000_000_000,
-        "units": {role: "mrk-alpha-" + nonce + "-" + role + ".service" for role in ROLES},
-        "accounts": {}, "githubTooling": {
-            "MRK_GITHUB_PREFLIGHT_TOOLING_SHA": ALPHA_TOOLING_SHA,
-            "MRK_GITHUB_RELEASE_TOOLING_SHA": ALPHA_TOOLING_SHA},
-    }
-    manager, accounts, source_record, build, package, failure = UnitOwner(task, configuration), [], None, None, None, None
+    task, configuration, manager = prepare_route(args)
+    nonce = configuration["nonce"]
+    accounts, source_record, build, package, failure = [], None, None, None, None
     try:
         manager.phase = "create-build-account"
         builder = create_account(manager, "mrkab" + nonce[:12])
@@ -1126,6 +1528,9 @@ def route(args):
         manager.phase = "current-runtime-controls"
         D = load_data(task / "source")
         D.current_controls(task / "source")
+        manager.phase = "prepare-hosted-distro-data"
+        hosted_data = prepare_hosted_distro_data(manager, D)
+        write_new(task / "public/hosted-data-preparation.json", canonical(hosted_data))
         for relative in GENERATED:
             parent = task / "source" / relative
             make_directory(parent, 0o700, builder["uid"], builder["gid"])
@@ -1332,7 +1737,7 @@ def main():
         signal.signal(name, interrupted)
     try:
         if args.command == "worker":
-            need(re.fullmatch(r"/opt/mrk-alpha-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{24}", str(args.task)),
+            need(task_path(str(args.task)),
                  "Worker task path differs")
             worker(args.task, args.role)
         else:

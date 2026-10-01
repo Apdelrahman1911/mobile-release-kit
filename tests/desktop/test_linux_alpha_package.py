@@ -10,10 +10,12 @@ import copy
 from contextlib import ExitStack
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import stat
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -302,6 +304,203 @@ class CompilerAndDependencyContracts(unittest.TestCase):
             A.shlibdeps_relations(raw, b"dpkg-shlibdeps: warning: symbol unresolved\n")
         with self.assertRaises(ValueError):
             A.shlibdeps_relations(raw + b"hidden second record\n", b"")
+
+
+class HostedDistroDataContracts(unittest.TestCase):
+    def test_mode_only_data_transition_requires_original_identity_and_complete_roster(self):
+        before = (10, 20, stat.S_IFDIR | 0o777, 0, 0, 2, 4096, 100, 200)
+        after = before[:2] + (stat.S_IFDIR | 0o755,) + before[3:8] + (201,)
+        self.assertTrue(O.hosted_data_mode_transition(before, after, 0o755))
+        for index in (0, 1, 3, 4, 5, 6, 7):
+            with self.subTest(changed_identity=index):
+                changed = list(after)
+                changed[index] += 1
+                self.assertFalse(O.hosted_data_mode_transition(before, tuple(changed), 0o755))
+        self.assertFalse(O.hosted_data_mode_transition(before, after[:-1] + (199,), 0o755))
+        self.assertFalse(O.hosted_data_mode_transition(before, after, 0o644))
+        file_before = (10, 21, stat.S_IFREG | 0o777, 0, 0, 1, 6, 100, 200)
+        file_after = file_before[:2] + (stat.S_IFREG | 0o644,) + file_before[3:8] + (201,)
+        self.assertTrue(O.hosted_data_mode_transition(file_before, file_after, 0o644))
+
+        # Synthetic original descriptors only: no real chmod/read/close occurs.
+        scope = O.HostedDistroData({"GPL", "GPL-3"})
+        state = {501: before, 502: file_before}
+        children, bodies = {501: ["doc"]}, {502: b"notice"}
+        scope.entries = {
+            "/usr/share": {"path": "/usr/share", "fd": 501, "kind": "directory",
+                           "original": before, "identity": before, "children": ["doc"]},
+            "/usr/share/doc/libc6/copyright": {
+                "path": "/usr/share/doc/libc6/copyright", "fd": 502, "kind": "file",
+                "original": file_before, "identity": file_before, "body": b"notice"},
+        }
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                  "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        scope._named = lambda row: state[row["fd"]]
+        scope._body = lambda row: bodies[row["fd"]]
+
+        def chmod(descriptor, mode):
+            current = state[descriptor]
+            state[descriptor] = (current[:2] + (stat.S_IFMT(current[2]) | mode,)
+                                 + current[3:8] + (current[8] + 1,))
+
+        with mock.patch.object(O.os, "fstat", side_effect=lambda fd: SimpleNamespace(**dict(zip(fields, state[fd])))), \
+                mock.patch.object(O.os, "listdir", side_effect=lambda fd: children[fd]), \
+                mock.patch.object(O.os, "fchmod", side_effect=chmod) as mutation, \
+                mock.patch.object(O.os, "close") as close:
+            scope.normalize()
+            self.assertEqual(mutation.call_args_list, [mock.call(501, 0o755), mock.call(502, 0o644)])
+            self.assertEqual(scope.mode_attempts, 2)
+            scope.post()
+            children[501] = ["doc", "unexpected"]
+            with self.assertRaises(O.Refused):
+                scope.post()
+            children[501] = ["doc"]
+            bodies[502] = b"change"
+            with self.assertRaises(O.Refused):
+                scope.post()
+            bodies[502] = b"notice"
+            self.assertEqual(scope.finish(), [])
+            self.assertEqual(close.call_args_list, [mock.call(502), mock.call(501)])
+
+    def test_data_preparation_rejects_escaped_alias_and_collects_consuming_close_errors(self):
+        self.assertTrue(O.hosted_data_path("/usr/share/doc/libgcc-13-dev/copyright", "documentation"))
+        self.assertTrue(O.hosted_data_path("/usr/share/common-licenses/GPL-3", "common-license",
+                                         common_names={"GPL-3"}))
+        self.assertTrue(O.hosted_data_path("/usr/share/glvnd/egl_vendor.d/50_mesa.json", "egl"))
+        self.assertTrue(O.hosted_data_path("/usr/share/applications", "applications", directory=True))
+        for path, domain in (
+                ("/usr/share/applications/never.json", "applications"),
+                ("/opt/node/bin/node", "documentation"), ("/usr/share/doc/../copyright", "documentation"),
+                ("/usr/share/doc/libc6/other", "documentation"), ("/usr/share/common-licenses/not-reviewed", "common-license"),
+                ("/usr/share/glvnd/egl_vendor.d/subdir/50_mesa.json", "egl")):
+            with self.subTest(path=path):
+                self.assertFalse(O.hosted_data_path(path, domain, common_names={"GPL-3"}))
+        scope, visited = O.HostedDistroData({"GPL-3"}), []
+
+        def node(path, _parent, _name):
+            visited.append(path)
+            if path == "/usr/share/doc/libgcc-13-dev":
+                return {"kind": "link", "target": alias_target}
+            return {"kind": "file" if path.endswith("/copyright") else "directory", "fd": 601, "path": path}
+        scope._node = node
+        # normpath(hop/../gcc-13-base) is in-domain, but a live hop alias
+        # can make it resolve elsewhere. Refuse before any target acquisition.
+        for alias_target in ("../../../opt/unrelated", "hop/../gcc-13-base",
+                             "/usr/share/doc/hop/../gcc-13-base", "./gcc-13-base", "gcc-13-base/"):
+            with self.subTest(alias_target=alias_target):
+                visited.clear()
+                with self.assertRaises(O.Refused):
+                    scope.bind("/usr/share/doc/libgcc-13-dev/copyright", "documentation")
+                self.assertEqual(visited, ["/", "/usr", "/usr/share", "/usr/share/doc",
+                                           "/usr/share/doc/libgcc-13-dev"])
+        for alias_target in ("gcc-13-base", "../doc/gcc-13-base", "/usr/share/doc/gcc-13-base"):
+            with self.subTest(canonical_alias=alias_target):
+                selected = scope.bind("/usr/share/doc/libgcc-13-dev/copyright", "documentation")
+                self.assertEqual(selected["path"], "/usr/share/doc/gcc-13-base/copyright")
+
+        scope.entries = {"one": {"fd": 611}, "two": {"fd": 612}}
+        scope.post = mock.Mock(side_effect=O.Refused("injected original post failure"))
+        with mock.patch.object(O.os, "close", side_effect=[OSError("injected close"), None]) as close:
+            self.assertEqual(scope.finish(), ["hosted-data-post", "hosted-data-close"])
+            self.assertEqual(close.call_args_list, [mock.call(612), mock.call(611)])
+            self.assertTrue(all(row["fd"] is None for row in scope.entries.values()))
+            scope.finish()
+            self.assertEqual(close.call_count, 2)
+
+
+class StartupContracts(unittest.TestCase):
+    def test_fixed_protected_task_root_and_parent_invariants_are_not_relaxed(self):
+        correct = "/var/lib/mrk-alpha-36868013001-1-" + "a" * 24
+        self.assertTrue(O.task_path(correct))
+        for value in (correct.replace("/var/lib", "/opt"), correct + "/child",
+                      correct + "\n", correct.replace("-1-", "-0-"), "/var/lib/../lib/" + correct.rsplit("/", 1)[1]):
+            with self.subTest(path=value):
+                self.assertFalse(O.task_path(value))
+        self.assertEqual(O.TASK_PARENT, Path("/var/lib"))
+        safe = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+        with mock.patch.object(O.Path, "lstat", return_value=safe):
+            O.protected_parent(O.TASK_PARENT)
+        for changes, reason in (
+                ({"st_mode": stat.S_IFREG | 0o644}, "protected-parent-not-directory"),
+                ({"st_uid": 1000}, "protected-parent-owner"),
+                ({"st_gid": 1000}, "protected-parent-owner"),
+                ({"st_mode": stat.S_IFDIR | 0o777}, "protected-parent-mode")):
+            with self.subTest(invariant=reason, changes=changes):
+                value = SimpleNamespace(**(vars(safe) | changes))
+                with mock.patch.object(O.Path, "lstat", return_value=value), self.assertRaises(O.ParentRefused) as caught:
+                    O.protected_parent(O.TASK_PARENT)
+                self.assertEqual(caught.exception.reason, reason)
+
+    def test_real_startup_failure_never_dispatches_workers_or_discloses_exception_text(self):
+        args = SimpleNamespace(source_sha="a" * 40, run_id="36868013001", attempt="1")
+        environment = {
+            "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+            "GITHUB_REPOSITORY": O.REPOSITORY, "GITHUB_REF": O.REF, "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SHA": args.source_sha, "GITHUB_WORKFLOW_SHA": args.source_sha,
+            "GITHUB_WORKFLOW_REF": O.REPOSITORY + "/" + O.WORKFLOW + "@" + O.REF,
+        }
+        marker = "private-fixture-exception-and-path"
+        for phase, reason, may_exist in (
+                ("host-identity", "predicate-refused", False),
+                ("workflow-identity", "predicate-refused", False),
+                ("protected-task-parent", "protected-parent-mode", False),
+                ("create-task-directory", "already-exists", True),
+                ("create-task-subdirectories", "permission-denied", True),
+                ("resource-pressure", "predicate-refused", True),
+                ("initialize-manager", "unexpected", True)):
+            with self.subTest(phase=phase), ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(O.os.environ, environment, clear=True))
+                stack.enter_context(mock.patch.object(O.sys, "platform", "linux"))
+                stack.enter_context(mock.patch.object(O.os, "getuid", return_value=1000 if phase == "host-identity" else 0))
+                stack.enter_context(mock.patch.object(O.os, "geteuid", return_value=0))
+                stack.enter_context(mock.patch.object(O.Path, "read_text", return_value='ID=ubuntu\nVERSION_ID="24.04"\n'))
+                stack.enter_context(mock.patch.object(O.Path, "is_file", return_value=True))
+                stack.enter_context(mock.patch.object(O.os, "urandom", return_value=b"a" * 12))
+                parent = stack.enter_context(mock.patch.object(O, "protected_parent"))
+                mkdir = stack.enter_context(mock.patch.object(O, "make_directory"))
+                pressure = stack.enter_context(mock.patch.object(O, "pressure"))
+                manager = stack.enter_context(mock.patch.object(O, "UnitOwner"))
+                account = stack.enter_context(mock.patch.object(O, "create_account"))
+                spawn = stack.enter_context(mock.patch.object(O.subprocess, "Popen"))
+                diagnostic = io.StringIO()
+                stack.enter_context(mock.patch.object(O.sys, "stderr", diagnostic))
+                failure = None
+                if phase == "workflow-identity":
+                    O.os.environ["GITHUB_REF"] = marker
+                elif phase == "protected-task-parent":
+                    failure = O.ParentRefused("protected-parent-mode")
+                    parent.side_effect = failure
+                elif phase == "create-task-directory":
+                    failure = FileExistsError(marker)
+                    mkdir.side_effect = failure
+                elif phase == "create-task-subdirectories":
+                    failure = PermissionError(marker)
+                    mkdir.side_effect = [None, failure]
+                elif phase == "resource-pressure":
+                    failure = O.Refused(marker)
+                    pressure.side_effect = failure
+                elif phase == "initialize-manager":
+                    failure = RuntimeError(marker)
+                    manager.side_effect = failure
+                with self.assertRaises(BaseException) as caught:
+                    O.route(args)
+                if failure is not None:
+                    self.assertIs(caught.exception, failure)
+                output = diagnostic.getvalue()
+                self.assertEqual(json.loads(output), {
+                    "schema": "mrk-ubuntu-alpha-startup-failure-v1", "phase": phase, "reason": reason,
+                    "taskWorkerStartAttempted": False, "taskDirectoryMayExist": may_exist,
+                })
+                self.assertNotIn(marker, output)
+                self.assertEqual(output.count("\n"), 1)
+                account.assert_not_called()
+                spawn.assert_not_called()
+                if phase != "initialize-manager":
+                    manager.assert_not_called()
+        self.assertEqual(O.startup_diagnostic(marker, RuntimeError(marker)), {
+            "schema": "mrk-ubuntu-alpha-startup-failure-v1", "phase": "startup-internal",
+            "reason": "unexpected", "taskWorkerStartAttempted": False, "taskDirectoryMayExist": False,
+        })
 
 
 class OwnerFailureContracts(unittest.TestCase):
