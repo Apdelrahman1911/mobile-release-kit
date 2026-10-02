@@ -12,12 +12,22 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::System::SystemServices as SS;
 
 const TARGET: &str = "x86_64-pc-windows-msvc";
-const MANIFEST: usize = 7;
 const MANIFEST_LIMIT: usize = 1024 * 1024;
 const OPERATION: Duration = Duration::from_secs(180);
 
+// Explicit fixed tables, never inferred from input count or manifest presence.
+#[cfg(not(feature = "current-runtime"))]
+pub const PUBLICATION_PAYLOAD_COUNT: usize = 47;
+#[cfg(feature = "current-runtime")]
+pub const PUBLICATION_PAYLOAD_COUNT: usize = 53;
+#[cfg(not(feature = "current-runtime"))]
+pub const PUBLICATION_MANIFEST_INDEX: usize = 7;
+#[cfg(feature = "current-runtime")]
+pub const PUBLICATION_MANIFEST_INDEX: usize = 12;
+
 /// Literal DATA roster, not caller-selected destinations or executable authority.
-pub const PUBLICATION_PAYLOADS: [&str; 47] = [
+#[cfg(not(feature = "current-runtime"))]
+pub const PUBLICATION_PAYLOADS: [&str; PUBLICATION_PAYLOAD_COUNT] = [
     "android_build_bootstrap.py",
     "config_edit_bootstrap.py",
     "core.zip",
@@ -27,6 +37,64 @@ pub const PUBLICATION_PAYLOADS: [&str; 47] = [
     "github_connection_bootstrap.py",
     "manifest.json",
     "offline_preflight_bootstrap.py",
+    "python/LICENSE.txt",
+    "python/MRK-EMBEDDED-NOTICES.txt",
+    "python/_asyncio.pyd",
+    "python/_bz2.pyd",
+    "python/_ctypes.pyd",
+    "python/_decimal.pyd",
+    "python/_elementtree.pyd",
+    "python/_hashlib.pyd",
+    "python/_lzma.pyd",
+    "python/_multiprocessing.pyd",
+    "python/_overlapped.pyd",
+    "python/_queue.pyd",
+    "python/_remote_debugging.pyd",
+    "python/_socket.pyd",
+    "python/_sqlite3.pyd",
+    "python/_ssl.pyd",
+    "python/_uuid.pyd",
+    "python/_wmi.pyd",
+    "python/_zoneinfo.pyd",
+    "python/_zstd.pyd",
+    "python/libcrypto-3.dll",
+    "python/libffi-8.dll",
+    "python/libssl-3.dll",
+    "python/libtommath.dll",
+    "python/pyexpat.pyd",
+    "python/python.cat",
+    "python/python.exe",
+    "python/python3.dll",
+    "python/python314._pth",
+    "python/python314.dll",
+    "python/python314.zip",
+    "python/pythonw.exe",
+    "python/select.pyd",
+    "python/sqlite3.dll",
+    "python/unicodedata.pyd",
+    "python/vcruntime140.dll",
+    "python/vcruntime140_1.dll",
+    "python/winsound.pyd",
+];
+
+/// Complete current12 bootstrap roster; supplier bytes and the notice stay fixed.
+#[cfg(feature = "current-runtime")]
+pub const PUBLICATION_PAYLOADS: [&str; PUBLICATION_PAYLOAD_COUNT] = [
+    "android_build_bootstrap.py",
+    "config_edit_bootstrap.py",
+    "core.zip",
+    "engine_bootstrap.py",
+    "environment_bootstrap.py",
+    "github-ca.pem",
+    "github_connection_bootstrap.py",
+    "github_input_group_bootstrap.py",
+    "github_preflight_bootstrap.py",
+    "github_release_bootstrap.py",
+    "github_runner_prerequisite_bootstrap.py",
+    "ios_archive_bootstrap.py",
+    "manifest.json",
+    "offline_preflight_bootstrap.py",
+    "project_recovery_bootstrap.py",
     "python/LICENSE.txt",
     "python/MRK-EMBEDDED-NOTICES.txt",
     "python/_asyncio.pyd",
@@ -338,18 +406,18 @@ impl Order {
     fn live(&self, stage: Stage) -> Result<()> { need(!self.failed && !self.unknown && self.stage == stage) }
     fn copied(&mut self, index: usize, proof: CopyProof) -> Result<()> {
         self.live(Stage::Copying)?;
-        need(index == self.copies && index < PUBLICATION_PAYLOADS.len() && proof.complete())?;
+        need(index == self.copies && index < PUBLICATION_PAYLOAD_COUNT && proof.complete())?;
         self.copies += 1; Ok(())
     }
     fn seal(&mut self) -> Result<()> {
         self.live(Stage::Copying)?;
-        need(self.copies == PUBLICATION_PAYLOADS.len() && self.inventories)?;
+        need(self.copies == PUBLICATION_PAYLOAD_COUNT && self.inventories)?;
         self.stage = Stage::Sealing; Ok(())
     }
     fn expose(&mut self) -> Result<()> {
         self.live(Stage::Sealing)?;
-        need(self.copies == PUBLICATION_PAYLOADS.len() && self.inventories
-            && self.sealed_files == PUBLICATION_PAYLOADS.len() && self.python_closed)?;
+        need(self.copies == PUBLICATION_PAYLOAD_COUNT && self.inventories
+            && self.sealed_files == PUBLICATION_PAYLOAD_COUNT && self.python_closed)?;
         // BEFORE SetKernelObjectSecurity, never inferred from its return.
         self.exposure = true; self.stage = Stage::ExposureAttempted; Ok(())
     }
@@ -409,7 +477,9 @@ impl ObservedScalarLength {
 }
 fn observed_query(call: Call) -> &'static str {
     match call {
-        Call::Architecture => "architecture", Call::Folder => "folder",
+        Call::Architecture => "architecture", Call::Folder | Call::FolderX86 => "folder",
+        #[cfg(feature = "installer-selection")]
+        Call::CommonPrograms => "folder",
         Call::WindowsDirectory => "windows-directory", Call::SystemDirectory => "system-directory",
         Call::Mapping => "mapping", Call::DriveType => "drive-type", Call::Open(_) => "nt-create",
         Call::ProcessToken(_) => "process-token", Call::ThreadToken(_) => "thread-token", Call::Close(_) => "close",
@@ -656,7 +726,7 @@ pub struct Publication {
     source_root: Option<usize>, source_python: Option<usize>, mrk: Option<usize>,
     output_dirs: Vec<usize>, version: Option<usize>, python: Option<usize>,
     manifest: Vec<u8>, manifest_original: Option<usize>, manifest_facts: Option<Facts>,
-    sizes: Option<[u64; 47]>, transfer: Option<Transfer>, copied: Vec<Copied>, settlement_attempted: bool,
+    sizes: Option<[u64; PUBLICATION_PAYLOAD_COUNT]>, transfer: Option<Transfer>, copied: Vec<Copied>, settlement_attempted: bool,
     copy_failure: Cell<Option<PublicationCopyObservation>>,
 }
 // SAFETY: only the serialized owner moves. All native arguments/output cells
@@ -699,6 +769,24 @@ impl Publication {
             output_dirs: Vec::new(), version: None, python: None,
             manifest: Vec::new(), manifest_original: None, manifest_facts: None,
             sizes: None, transfer: None, copied: Vec::new(), settlement_attempted: false, copy_failure: Cell::new(None) })
+    }
+
+    /// Private early-test installer integration, never a new standalone entry.
+    /// Call on the subobject retained by the original InstallOwner before its
+    /// first native operation. No later endpoint can extend the original 180s
+    /// constructor bound; expiry/failure/Unknown is never cleared or rebased.
+    /// This method grants no source/staging capability and performs no native IO.
+    #[allow(dead_code)] // Used only by the separately integrated early-test owner.
+    pub(crate) fn limit_to_installer_endpoint(&mut self, endpoint: Instant) -> Result<()> {
+        self.step(|this| {
+            need(cfg!(feature = "current-runtime") && this.book.never_started()
+                && this.order.stage == Stage::Fresh && this.installer.is_none()
+                && this.location.is_none() && this.directories.is_empty()
+                && this.creations.is_empty() && this.target_creation.is_none()
+                && this.sizes.is_none() && this.transfer.is_none() && this.copied.is_empty())?;
+            this.end = this.end.min(endpoint);
+            this.tick()
+        })
     }
     fn tick(&mut self) -> Result<()> {
         self.expired |= Instant::now() >= self.end;
@@ -1029,7 +1117,7 @@ impl Publication {
         else { self.new_dir(parent, name) } // collision during creation is terminal, never adoption
     }
     fn open_source(&mut self, index: usize) -> Result<(usize, Facts)> {
-        self.with_role(if index == MANIFEST { R::Manifest } else { R::Owner }, |this| {
+        self.with_role(if index == PUBLICATION_MANIFEST_INDEX { R::Manifest } else { R::Owner }, |this| {
         let (parent, name) = this.payload_parent(index, true)?;
         let entries = this.directories[parent].entries.as_ref().ok_or(Error::State)?;
         let entry = selected_entry_in(entries, name, this.book.admission.at(O::Directory))?.ok_or_else(|| this.book.admission.at(O::Directory).unsafe_at(C::SourceEntry))?;
@@ -1095,7 +1183,7 @@ impl Publication {
                 exact_names_in(&python_entries, true, this.book.admission.at(O::Inventory).role(R::Python))?;
             }
             this.source_dirs = vec![input, target, root, python];
-            let (manifest, facts) = this.open_source(MANIFEST)?;
+            let (manifest, facts) = this.open_source(PUBLICATION_MANIFEST_INDEX)?;
             this.book.admission.role.set(R::Manifest);
             this.book.admission.at(O::Read).need(facts.metadata.size > 0 && facts.metadata.size <= MANIFEST_LIMIT as u64, C::ManifestSize)?;
             this.manifest_original = Some(manifest); this.manifest_facts = Some(facts.clone());
@@ -1119,10 +1207,10 @@ impl Publication {
     }
     /// The safe app has authenticated D/Q, all37 suppliers and this exact roster.
     /// Sizes count BOTH source and readback under the original aggregate budget.
-    pub fn create_once(&mut self, sizes: [u64; 47]) -> Result<()> {
+    pub fn create_once(&mut self, sizes: [u64; PUBLICATION_PAYLOAD_COUNT]) -> Result<()> {
         self.step(|this| {
             this.order.live(Stage::Manifest)?;
-            need(sizes[MANIFEST] == this.manifest.len() as u64 && sizes.iter().all(|n| *n <= MAX_FILE_BYTES))?;
+            need(sizes[PUBLICATION_MANIFEST_INDEX] == this.manifest.len() as u64 && sizes.iter().all(|n| *n <= MAX_FILE_BYTES))?;
             let total = sizes.iter().try_fold(0u64, |sum, n| sum.checked_add(*n).ok_or(Error::Bounds))?;
             need(total.checked_mul(2).is_some_and(|n| n <= MAX_TOTAL_BYTES))?;
             this.sizes = Some(sizes); this.recheck_installer()?; this.recheck_location()?;
@@ -1141,9 +1229,9 @@ impl Publication {
     }
     pub fn start_copy(&mut self, index: usize) -> Result<()> {
         self.step(|this| {
-            this.order.live(Stage::Copying)?; need(this.transfer.is_none() && index == this.order.copies && index < 47)?;
+            this.order.live(Stage::Copying)?; need(this.transfer.is_none() && index == this.order.copies && index < PUBLICATION_PAYLOAD_COUNT)?;
             let size = this.sizes.as_ref().ok_or(Error::State)?[index];
-            let (source, source_facts) = if index == MANIFEST {
+            let (source, source_facts) = if index == PUBLICATION_MANIFEST_INDEX {
                 (this.manifest_original.ok_or(Error::State)?, this.manifest_facts.clone().ok_or(Error::State)?)
             } else { this.open_source(index)? };
             need(source_facts.metadata.size == size && this.checked(source, AuthorityScope::ImmutableVersion)? == source_facts)?;
@@ -1174,7 +1262,7 @@ impl Publication {
             need(t.stage == TransferStage::Copy)?;
             let (index, source, writer, copied) = (t.index, t.source, t.writer, t.copied);
             let size = this.sizes.as_ref().ok_or(Error::State)?[index];
-            let chunk = if index == MANIFEST {
+            let chunk = if index == PUBLICATION_MANIFEST_INDEX {
                 // Cache came from this original's genuine successful EOF; never
                 // a second filename/source, reread, seek or synthetic EOF receipt.
                 need(this.book.slot(source)?.read_ended && this.book.slot(source)?.read_bytes == size)?;
@@ -1271,7 +1359,7 @@ impl Publication {
     }
 
     fn inventories(&mut self) -> Result<()> {
-        need(self.transfer.is_none() && self.copied.len() == 47)?;
+        need(self.transfer.is_none() && self.copied.len() == PUBLICATION_PAYLOAD_COUNT)?;
         for copied in &self.copied {
             need(copied.proof.complete() && self.closed(copied.source) && self.closed(copied.writer) && self.closed(copied.readback))?;
         }
@@ -1375,7 +1463,7 @@ impl Publication {
                     this.seal_directory(index, false)?;
                 }
             }
-            for index in 0..PUBLICATION_PAYLOADS.len() { this.seal_file(index)?; }
+            for index in 0..PUBLICATION_PAYLOAD_COUNT { this.seal_file(index)?; }
             this.seal_directory(python, false)?;
             this.close(this.directories[python].current())?; this.order.python_closed = true;
             need(this.copied.iter().all(|c| c.sealed_closed && c.control.is_some_and(|slot| this.closed(slot))))?;
@@ -1830,7 +1918,21 @@ mod tests {
             assert_eq!(exact_names_in(&[], false, trace.at(O::Inventory)), exact_names(&[], false));
             admission_fault(&trace, R::Version, O::Inventory, C::RosterMissing, None);
         }
-        need(PUBLICATION_PAYLOADS.len() == 47 && PUBLICATION_PAYLOADS[MANIFEST] == "manifest.json")?;
+        need(CURRENT_RUNTIME_ROSTER == cfg!(feature = "current-runtime"))?;
+        let (count, manifest_index, bootstrap_count) = if CURRENT_RUNTIME_ROSTER { (53, 12, 12) } else { (47, 7, 6) };
+        need(PUBLICATION_PAYLOAD_COUNT == count && PUBLICATION_MANIFEST_INDEX == manifest_index
+            && PUBLICATION_PAYLOADS.len() == count && PUBLICATION_PAYLOADS[manifest_index] == "manifest.json")?;
+        need(PUBLICATION_PAYLOADS.iter().filter(|path| path.ends_with("_bootstrap.py")).count() == bootstrap_count)?;
+        for path in ["project_recovery_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py",
+            "github_release_bootstrap.py", "github_input_group_bootstrap.py", "github_runner_prerequisite_bootstrap.py"] {
+            need(PUBLICATION_PAYLOADS.contains(&path) == CURRENT_RUNTIME_ROSTER)?;
+        }
+        for path in ["engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+            "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py"] {
+            need(PUBLICATION_PAYLOADS.contains(&path))?;
+        }
+        need(image_payload(PUBLICATION_PAYLOAD_COUNT - 1).is_ok()
+            && image_payload(PUBLICATION_PAYLOAD_COUNT).is_err() && image_payload(usize::MAX).is_err())?;
         need(PUBLICATION_PAYLOADS.windows(2).all(|p| p[0] < p[1]))?;
         need(PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/")).count() == 38)?;
         for (i, path) in PUBLICATION_PAYLOADS.iter().enumerate() {
@@ -2131,9 +2233,12 @@ mod tests {
             need(order.copied(0, bad).is_err() && order.seal().is_err() && order.expose().is_err())?;
         }
         let mut order = Order::new(); order.stage = Stage::Copying;
-        for i in 0..47 { order.copied(i, proof())?; }
+        for i in 0..PUBLICATION_PAYLOAD_COUNT { order.copied(i, proof())?; }
+        need(order.copies == PUBLICATION_PAYLOAD_COUNT)?;
+        need(order.copied(PUBLICATION_PAYLOAD_COUNT, proof()).is_err())?;
+        need(order.copied(PUBLICATION_PAYLOAD_COUNT - 1, proof()).is_err())?;
         need(order.seal().is_err())?; order.inventories = true; order.seal()?;
-        need(order.expose().is_err())?; order.sealed_files = 47;
+        need(order.expose().is_err())?; order.sealed_files = PUBLICATION_PAYLOAD_COUNT;
         need(order.expose().is_err())?; order.python_closed = true; order.expose()?;
         need(order.completed(true).is_err())?; order.stage = Stage::RootClosed;
         need(order.completed(false).is_err())?; order.completed(true)?;
@@ -2142,6 +2247,56 @@ mod tests {
             if after { order.stage = Stage::ExposureAttempted; order.exposure = true; }
             order.fail(true); order.fail(false);
             need(order.unknown && order.exposure == after && order.expose().is_err() && order.completed(true).is_err())?;
+        }
+        // Reuse this selector: the historical harness counts raw #[test]
+        // declarations, so current-only cases must not create extra names.
+        #[cfg(feature = "current-runtime")]
+        {
+            {
+                // Constructor/clock/state DATA only: no native token/path/file operation.
+                let mut owner = Publication::new(&"a".repeat(64))?;
+                let original = owner.end;
+                let later = original.checked_add(Duration::from_secs(60)).ok_or(Error::Bounds)?;
+                owner.limit_to_installer_endpoint(later)?;
+                assert_eq!(owner.end, original);
+                let earlier = original.checked_sub(Duration::from_secs(60)).ok_or(Error::Bounds)?;
+                owner.limit_to_installer_endpoint(earlier)?;
+                assert_eq!(owner.end, earlier);
+                let past = Instant::now().checked_sub(Duration::from_secs(1)).ok_or(Error::Bounds)?;
+                assert_eq!(owner.limit_to_installer_endpoint(past), Err(Error::Bounds));
+                assert!(owner.expired && owner.order.failed);
+                assert_eq!(owner.end, past);
+                assert_eq!(owner.limit_to_installer_endpoint(later), Err(Error::State));
+                assert_eq!(owner.end, past);
+                assert!(!owner.published_and_settled());
+                assert!(!owner.occupied_target_and_settled());
+                assert!(!owner.possibly_exposed());
+            }
+            {
+                let mut entered = Publication::new(&"a".repeat(64))?;
+                let original = entered.end;
+                let earlier = original.checked_sub(Duration::from_secs(60)).ok_or(Error::Bounds)?;
+                entered.book.started = true; // Inert state fixture, not a native call.
+                assert_eq!(entered.limit_to_installer_endpoint(earlier), Err(Error::Unsafe));
+                assert_eq!(entered.end, original);
+                assert!(entered.order.failed);
+                let mut unknown = Publication::new(&"a".repeat(64))?;
+                let original = unknown.end;
+                unknown.book.mark_interrupted();
+                assert_eq!(unknown.limit_to_installer_endpoint(earlier), Err(Error::Unknown));
+                assert_eq!(unknown.end, original);
+                assert!(unknown.order.failed && unknown.order.unknown);
+                assert!(!unknown.published_and_settled());
+            }
+        }
+        #[cfg(not(feature = "current-runtime"))]
+        {
+            let mut historical = Publication::new(&"a".repeat(64))?;
+            let original = historical.end;
+            let earlier = original.checked_sub(Duration::from_secs(60)).ok_or(Error::Bounds)?;
+            assert_eq!(historical.limit_to_installer_endpoint(earlier), Err(Error::Unsafe));
+            assert_eq!(historical.end, original);
+            assert!(historical.order.failed && !historical.possibly_exposed());
         }
         Ok(())
     }

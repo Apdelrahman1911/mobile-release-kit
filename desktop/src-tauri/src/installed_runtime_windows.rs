@@ -469,6 +469,9 @@ impl WindowsVersionBook {
                 self.native.required_notes_loader_selection().ok_or(InspectionFailure::Binding)?)
                 .map_err(|_| InspectionFailure::Inventory);
         }
+        #[cfg(feature = "windows-current-runtime")]
+        return inventory.current_passive_loader_inventory().map_err(|_| InspectionFailure::Inventory);
+        #[cfg(not(feature = "windows-current-runtime"))]
         inventory.passive_loader_inventory().map_err(|_| InspectionFailure::Inventory)
     }
     fn retain_payload(&self, path: &str) -> bool {
@@ -1702,6 +1705,75 @@ mod tests {
 
     #[test]
     fn passive_slots_cannot_transfer_partial_inspection_or_settled_books() {
+        assert_eq!(native::CURRENT_RUNTIME_ROSTER, cfg!(feature = "windows-current-runtime"));
+        assert_eq!(SELECTED, ["python/python.exe", "engine_bootstrap.py", "core.zip"]);
+        for path in SELECTED { assert!(retained_path(path)); }
+        for path in ["project_recovery_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py",
+            "github_release_bootstrap.py", "github_input_group_bootstrap.py", "github_runner_prerequisite_bootstrap.py"] {
+            assert!(!retained_path(path)); // Hash/read/close serially; no new retained loader capability.
+        }
+        // Roster-shape DATA only: deliberately no supplier hashes or manifest
+        // admission receipt. This exercises the actual normal-book dispatch
+        // without acquiring an original or claiming installed/native success.
+        let original = WindowsVersionBook::new();
+        let supplier = [
+            "python/LICENSE.txt",
+            "python/MRK-EMBEDDED-NOTICES.txt",
+            "python/_asyncio.pyd",
+            "python/_bz2.pyd",
+            "python/_ctypes.pyd",
+            "python/_decimal.pyd",
+            "python/_elementtree.pyd",
+            "python/_hashlib.pyd",
+            "python/_lzma.pyd",
+            "python/_multiprocessing.pyd",
+            "python/_overlapped.pyd",
+            "python/_queue.pyd",
+            "python/_remote_debugging.pyd",
+            "python/_socket.pyd",
+            "python/_sqlite3.pyd",
+            "python/_ssl.pyd",
+            "python/_uuid.pyd",
+            "python/_wmi.pyd",
+            "python/_zoneinfo.pyd",
+            "python/_zstd.pyd",
+            "python/libcrypto-3.dll",
+            "python/libffi-8.dll",
+            "python/libssl-3.dll",
+            "python/libtommath.dll",
+            "python/pyexpat.pyd",
+            "python/python.cat",
+            "python/python.exe",
+            "python/python3.dll",
+            "python/python314._pth",
+            "python/python314.dll",
+            "python/python314.zip",
+            "python/pythonw.exe",
+            "python/select.pyd",
+            "python/sqlite3.dll",
+            "python/unicodedata.pyd",
+            "python/vcruntime140.dll",
+            "python/vcruntime140_1.dll",
+            "python/winsound.pyd",
+        ];
+        let historical = ["android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem", "github_connection_bootstrap.py", "offline_preflight_bootstrap.py"];
+        let current = ["android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem", "github_connection_bootstrap.py", "github_input_group_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "github_runner_prerequisite_bootstrap.py", "ios_archive_bootstrap.py", "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py"];
+        for (current_roster, root) in [(false, historical.as_slice()), (true, current.as_slice())] {
+            let files: Vec<_> = root.iter().chain(supplier.iter()).map(|path| crate::runtime::PayloadFile {
+                path: (*path).to_owned(), size: 1, sha256: "0".repeat(64),
+            }).collect();
+            let inventory = Inventory {
+                payload_bytes: files.len() as u64, directories: BTreeSet::from(["python".to_owned()]),
+                manifest: crate::runtime::Manifest {
+                    schema_version: 1, protocol: crate::protocol::PROTOCOL,
+                    core_version: crate::runtime::CORE_VERSION.to_owned(), target: windows_version::TARGET.to_owned(),
+                    core_sha256: "0".repeat(64), protocol_sha256: "0".repeat(64), inventory_sha256: "0".repeat(64), files,
+                },
+            };
+            assert_eq!(inventory.manifest.files.len(), if current_roster { 52 } else { 46 });
+            assert_eq!(original.admit_loader_inventory(&inventory).is_ok(), current_roster == cfg!(feature = "windows-current-runtime"));
+            assert!(original.never_started() && original.native.never_started() && original.records.is_empty());
+        }
         let mut slots = PassiveRuntimeSlots::new();
         assert!(slots.never_started() && slots.no_child_effect());
         assert!(slots.transfer_once().is_err() && slots.capability().is_err());

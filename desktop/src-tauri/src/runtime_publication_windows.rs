@@ -7,12 +7,13 @@
 #![forbid(unsafe_code)]
 
 use std::{collections::BTreeSet, sync::{Mutex, OnceLock}};
-use mrk_windows_installed_native::{CloseOutcome, Error as NativeError, Publication, PublicationFrameObservation, PublicationAdmissionObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};
+use mrk_windows_installed_native::{CloseOutcome, Error as NativeError, Publication, PublicationFrameObservation,
+    PublicationAdmissionObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS,
+    PUBLICATION_PAYLOAD_COUNT, PUBLICATION_MANIFEST_INDEX};
 use sha2::{Digest, Sha256};
 use crate::runtime::windows_version::{Inventory, VersionSpec, MANIFEST_BYTES, TARGET};
 
 static OWNER: OnceLock<Mutex<Publication>> = OnceLock::new();
-const MANIFEST: usize = 7;
 const FILE_LIMIT: u64 = 512 * 1024 * 1024;
 const TOTAL_READ_LIMIT: u64 = 1024 * 1024 * 1024;
 
@@ -61,7 +62,7 @@ impl PublicationFailure {
     }
     fn copy_observation_allowed(self) -> bool {
         self.phase == FailurePhase::FinishCopy && self.native == Some(NativeError::Unsafe)
-            && self.ordinal.is_some_and(|index| index < 47)
+            && self.ordinal.is_some_and(|index| index < PUBLICATION_PAYLOAD_COUNT)
     }
     fn class(self) -> &'static str {
         match self.native {
@@ -87,7 +88,7 @@ impl PublicationError {
         let mut line = String::with_capacity(192);
         line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="); line.push_str(phase);
         line.push_str(";class="); line.push_str(class); line.push_str(";ordinal=");
-        if let Some(index) = ordinal.filter(|index| *index < 47) {
+        if let Some(index) = ordinal.filter(|index| *index < PUBLICATION_PAYLOAD_COUNT) {
             if index >= 10 { line.push(char::from(b'0' + (index / 10) as u8)); }
             line.push(char::from(b'0' + (index % 10) as u8));
         } else { line.push_str("none"); }
@@ -127,7 +128,7 @@ fn hex(bytes: &[u8]) -> String {
     result
 }
 
-struct Expected { sizes: [u64; 47], hashes: [String; 47] }
+struct Expected { sizes: [u64; PUBLICATION_PAYLOAD_COUNT], hashes: [String; PUBLICATION_PAYLOAD_COUNT] }
 impl Expected {
     fn decode(spec: &VersionSpec, bytes: &[u8]) -> Checked<Self> {
         // The existing VersionSpec hashes before JSON and retains Q/core/target,
@@ -139,16 +140,16 @@ impl Expected {
     }
     fn roster(inventory: &Inventory, manifest_size: u64, manifest_hash: &str) -> Checked<Self> {
         require(manifest_size > 0 && manifest_size <= MANIFEST_BYTES
-            && inventory.manifest.files.len() + 1 == PUBLICATION_PAYLOADS.len()
+            && inventory.manifest.files.len() + 1 == PUBLICATION_PAYLOAD_COUNT
             && inventory.directories == BTreeSet::from(["python".to_owned()]))?;
         let actual: BTreeSet<&str> = inventory.manifest.files.iter().map(|row| row.path.as_str())
             .chain(std::iter::once("manifest.json")).collect();
         let expected: BTreeSet<&str> = PUBLICATION_PAYLOADS.into_iter().collect();
-        require(actual == expected && actual.len() == PUBLICATION_PAYLOADS.len())?;
-        let mut sizes = [0; 47];
+        require(actual == expected && actual.len() == PUBLICATION_PAYLOAD_COUNT)?;
+        let mut sizes = [0; PUBLICATION_PAYLOAD_COUNT];
         let mut hashes = std::array::from_fn(|_| String::new());
         for (i, path) in PUBLICATION_PAYLOADS.iter().enumerate() {
-            if i == MANIFEST {
+            if i == PUBLICATION_MANIFEST_INDEX {
                 require(*path == "manifest.json")?;
                 sizes[i] = manifest_size; hashes[i] = manifest_hash.to_owned();
             } else {
@@ -172,7 +173,7 @@ fn produce(owner: &mut Publication, spec: &VersionSpec) -> Result<(), Publicatio
     let manifest = owner.admit_once().map_err(|error| PublicationFailure::native(FailurePhase::Admit, None, error))?;
     let expected = Expected::decode(spec, &manifest).map_err(|_| PublicationFailure::policy(FailurePhase::Decode, None))?;
     owner.create_once(expected.sizes).map_err(|error| PublicationFailure::native(FailurePhase::Create, None, error))?;
-    for index in 0..PUBLICATION_PAYLOADS.len() {
+    for index in 0..PUBLICATION_PAYLOAD_COUNT {
         let ordinal = Some(index);
         owner.start_copy(index).map_err(|error| PublicationFailure::native(FailurePhase::StartCopy, ordinal, error))?;
         let mut count = 0u64;
@@ -214,9 +215,19 @@ pub fn publish_fixed() -> Result<(), PublicationError> {
     // replace, retry, repair or settle the original owner behind this static.
     let mut original = OWNER.get().ok_or(PublicationError::OwnerUnavailable)?
         .lock().map_err(|_| PublicationError::OwnerUnavailable)?;
+    publish_registered(&mut original, &spec)
+}
+
+/// One ORIGINAL result/settlement path for standalone and future private install
+/// integration. Module-private deliberately: accepting these Rust references is
+/// not a registration or staged-input capability. The eventual installer facade
+/// must enter only through its actually registered native owner and private
+/// admitted stage token, after the earlier aggregate endpoint has been applied.
+/// No public caller can use this to bypass publish_fixed's actual argv guard.
+fn publish_registered(original: &mut Publication, spec: &VersionSpec) -> Result<(), PublicationError> {
     // Keep BOTH original deadline-sensitive postconditions and their short-circuit.
     // A later finality/settlement observation cannot replace produce's first cause.
-    let cause = match produce(&mut original, &spec) {
+    let cause = match produce(original, spec) {
         Ok(()) if original.published_and_settled() => return Ok(()),
         Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),
         Err(first) => first,
@@ -258,9 +269,18 @@ mod tests {
     fn no_argument_entry_and_literal_release_shape() {
         assert!(no_arguments(1)); assert!(!no_arguments(0)); assert!(!no_arguments(2));
         assert_eq!(TARGET, "x86_64-pc-windows-msvc");
-        assert_eq!(PUBLICATION_PAYLOADS[MANIFEST], "manifest.json");
+        let current = cfg!(feature = "windows-current-runtime");
+        assert_eq!(mrk_windows_installed_native::CURRENT_RUNTIME_ROSTER, current);
+        assert_eq!((PUBLICATION_PAYLOAD_COUNT, PUBLICATION_MANIFEST_INDEX), if current { (53, 12) } else { (47, 7) });
+        assert_eq!(PUBLICATION_PAYLOADS.len(), PUBLICATION_PAYLOAD_COUNT);
+        assert_eq!(PUBLICATION_PAYLOADS[PUBLICATION_MANIFEST_INDEX], "manifest.json");
         assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/")).count(), 38);
-        assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.ends_with("_bootstrap.py")).count(), 6);
+        assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.ends_with("_bootstrap.py")).count(), if current { 12 } else { 6 });
+        let expected = Expected::roster(&roster_fixture(), 2, &"d".repeat(64)).unwrap();
+        assert_eq!(expected.sizes.len(), PUBLICATION_PAYLOAD_COUNT);
+        assert_eq!(expected.hashes.len(), PUBLICATION_PAYLOAD_COUNT);
+        assert_eq!(expected.sizes[PUBLICATION_MANIFEST_INDEX], 2);
+        assert_eq!(expected.hashes[PUBLICATION_MANIFEST_INDEX], "d".repeat(64));
         // Reuse this already-selected policy test; do not create a filtered-out test.
         for (error, phase) in [(PublicationError::Invocation, "invocation"), (PublicationError::Profile, "profile"),
             (PublicationError::AlreadyStarted, "already-started"), (PublicationError::OwnerUnavailable, "owner-unavailable")] {
@@ -298,10 +318,10 @@ mod tests {
             // The same closed gate controls both the owner snapshot and formatter.
             // No public factory fabricates native diagnostic values for this crate.
             for native in [NativeError::Unavailable, NativeError::Unsafe, NativeError::Bounds, NativeError::State, NativeError::Unknown] {
-                for ordinal in [None, Some(0), Some(2), Some(9), Some(10), Some(46), Some(47), Some(usize::MAX)] {
+                for ordinal in [None, Some(0), Some(2), Some(9), Some(10), Some(46), Some(47), Some(52), Some(53), Some(usize::MAX)] {
                     let cause = PublicationFailure::native(phase, ordinal, native);
                     let allowed = phase == FailurePhase::FinishCopy && native == NativeError::Unsafe
-                        && ordinal.is_some_and(|index| index < 47);
+                        && ordinal.is_some_and(|index| index < PUBLICATION_PAYLOAD_COUNT);
                     assert_eq!(cause.admission_observation_allowed(), phase == FailurePhase::Admit && native == NativeError::Unsafe);
                     assert_eq!(cause.copy_observation_allowed(), allowed);
                     assert!(!(cause.admission_observation_allowed() && cause.copy_observation_allowed()));
@@ -323,12 +343,14 @@ mod tests {
         }
         for (native, class) in [(NativeError::Unavailable, "unavailable"), (NativeError::Unsafe, "unsafe"),
             (NativeError::Bounds, "bounds"), (NativeError::State, "state"), (NativeError::Unknown, "unknown")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(46), native), possibly_exposed: true, originals_unknown: false, frame: None, admission: None, copy: Some(copy) };
-            assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-next;class={class};ordinal=46;possiblyExposed=true;originalsUnknown=false\n")));
+            let last = PUBLICATION_PAYLOAD_COUNT - 1;
+            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(last), native), possibly_exposed: true, originals_unknown: false, frame: None, admission: None, copy: Some(copy) };
+            assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-next;class={class};ordinal={last};possiblyExposed=true;originalsUnknown=false\n")));
             assert!(error.copy_diagnostic_line().is_none());
         }
         for (ordinal, encoded) in [(None, "none"), (Some(0), "0"), (Some(9), "9"), (Some(10), "10"),
-            (Some(46), "46"), (Some(47), "none"), (Some(usize::MAX), "none")] {
+            (Some(46), "46"), (Some(47), if current { "47" } else { "none" }),
+            (Some(52), if current { "52" } else { "none" }), (Some(53), "none"), (Some(usize::MAX), "none")] {
             let error = PublicationError::Failed { cause: PublicationFailure::policy(FailurePhase::CopyCount, ordinal), possibly_exposed: true, originals_unknown: true, frame: None, admission: None, copy: Some(copy) };
             let line = error.diagnostic_line().unwrap();
             assert_eq!(line, format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-count;class=policy;ordinal={encoded};possiblyExposed=true;originalsUnknown=true\n"));
@@ -364,15 +386,31 @@ mod tests {
     fn roster_refuses_extras_omissions_case_aliases_and_extra_directories() {
         let digest = "d".repeat(64);
         assert!(Expected::roster(&roster_fixture(), 1, &digest).is_ok());
-        for missing in 0..46 {
+        for missing in 0..PUBLICATION_PAYLOAD_COUNT - 1 {
             let mut inventory = roster_fixture(); inventory.manifest.files.remove(missing);
             assert!(Expected::roster(&inventory, 1, &digest).is_err());
         }
         let mut extra = roster_fixture();
         extra.manifest.files.push(PayloadFile { path: "extra".to_owned(), size: 0, sha256: digest.clone() });
         assert!(Expected::roster(&extra, 1, &digest).is_err());
-        let mut alias = roster_fixture(); alias.manifest.files[0].path.make_ascii_uppercase();
-        assert!(Expected::roster(&alias, 1, &digest).is_err());
+        for index in 0..PUBLICATION_PAYLOAD_COUNT - 1 {
+            let mut alias = roster_fixture(); alias.manifest.files[index].path.make_ascii_uppercase();
+            assert!(Expected::roster(&alias, 1, &digest).is_err());
+        }
+        // Wrong complete roster is not a fallback, even with a plausible count/hash.
+        let extra_bootstraps = ["project_recovery_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py",
+            "github_release_bootstrap.py", "github_input_group_bootstrap.py", "github_runner_prerequisite_bootstrap.py"];
+        let mut other = roster_fixture();
+        if cfg!(feature = "windows-current-runtime") {
+            other.manifest.files.retain(|file| !extra_bootstraps.contains(&file.path.as_str()));
+        } else {
+            for path in extra_bootstraps {
+                other.manifest.files.push(PayloadFile { path: path.to_owned(), size: 1, sha256: digest.clone() });
+            }
+            other.manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
+        }
+        other.payload_bytes = other.manifest.files.len() as u64;
+        assert!(Expected::roster(&other, 1, &digest).is_err());
         let mut directory = roster_fixture(); directory.directories.insert("empty".to_owned());
         assert!(Expected::roster(&directory, 1, &digest).is_err());
     }

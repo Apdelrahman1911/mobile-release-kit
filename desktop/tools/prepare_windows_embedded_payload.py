@@ -128,12 +128,13 @@ def github_ca_bytes(source: Path) -> bytes:
     return data
 
 
-def _source_payloads(source: Path, github_ca: bytes) -> list[tuple[str, bytes]]:
-    """Snapshot only current core, six bootstraps and the separately pinned CA."""
-    fixed_files = len(runtime_preparation.BOOTSTRAPS) + 1
+def _source_payloads(source: Path, github_ca: bytes, *, current: bool = False) -> list[tuple[str, bytes]]:
+    """Snapshot the selected fixed bootstraps, current core and separately pinned CA."""
+    bootstrap_names = runtime_preparation.CURRENT_BOOTSTRAPS if current else runtime_preparation.BOOTSTRAPS
+    fixed_files = len(bootstrap_names) + 1
     package = runtime_preparation._root(source / "src/mobile_release")
-    # The full projection adds src/, src/mobile_release/, desktop/ and seven
-    # desktop leaves to the core census. Reserve that overhead before output.
+    # The full projection adds src/, src/mobile_release/, desktop/ and every
+    # selected desktop leaf. Reserve that exact overhead before output.
     candidates = runtime_preparation.files(package, reserve_entries=3 + fixed_files)
     require(candidates and len(candidates) + fixed_files <= runtime_preparation.MAX_FILES
             and all(path.suffix in {".py", ".json", ".pem"} for path in candidates),
@@ -145,7 +146,7 @@ def _source_payloads(source: Path, github_ca: bytes) -> list[tuple[str, bytes]]:
         total += len(content)
         payloads["src/mobile_release/" + path.relative_to(package).as_posix()] = content
     desktop = runtime_preparation._root(source / "desktop")
-    for name in runtime_preparation.BOOTSTRAPS:
+    for name in bootstrap_names:
         payloads["desktop/" + name] = runtime_preparation.read_checked(
             desktop / name, limit=runtime_preparation.MAX_BOOTSTRAP_BYTES)
     payloads["desktop/" + runtime_preparation.GITHUB_CA_NAME] = github_ca
@@ -226,6 +227,16 @@ def check_supplier_copy(python: Path, notices: bytes) -> None:
 
 
 def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
+    """Historical six-bootstrap projection; no installation or qualification."""
+    return _prepare(source, archive, runtime, current=False)
+
+
+def prepare_current(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
+    """Explicit current roster; requires a matching current producer/consumer."""
+    return _prepare(source, archive, runtime, current=True)
+
+
+def _prepare(source: Path, archive: Path, runtime: Path, *, current: bool) -> dict[str, str]:
     # Notice rejection and complete immutable input admission happen BEFORE any
     # output. Do not reopen the archive pathname after hashing. Input04 already
     # bounded both ZIP layers/headers/ZIP64/overlaps; the complete digest fixes
@@ -248,7 +259,7 @@ def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
         except FileNotFoundError:
             continue
         raise PreparationError("Windows preparation never merges or replaces an existing output")
-    payloads = _source_payloads(source, github_ca)
+    payloads = _source_payloads(source, github_ca, current=current)
     with io.BytesIO(data) as original, zipfile.ZipFile(original, "r", allowZip64=False) as supplier:
         entries = member_roster(supplier)
         pins = {name: (size, digest) for name, size, digest in MEMBERS}
@@ -273,7 +284,8 @@ def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
         with (python / NOTICE_NAME).open("xb") as output:
             require(output.write(notices) == len(notices), "Windows notice copy was incomplete")
         check_supplier_copy(python, notices)
-    prepared = runtime_preparation.prepare(projection, runtime, TARGET)
+    selected = runtime_preparation.prepare_current if current else runtime_preparation.prepare
+    prepared = selected(projection, runtime, TARGET)
     # These are preparation bindings, not a new execution/provenance grant. The
     # existing CI receipt adds source/run/attempt and original native observations.
     return {**prepared, "inputSha256": ZIP_SHA256,
@@ -287,9 +299,14 @@ def main() -> None:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
+    parser.add_argument(
+        "--bootstrap-roster", choices=("historical", "current"), default="historical",
+        help="Current requires the separately selected current app/producer; the default preserves the historical roster.",
+    )
     args = parser.parse_args()
     try:
-        print(json.dumps(prepare(args.source, args.archive, args.runtime_root), sort_keys=True))
+        selected = prepare_current if args.bootstrap_roster == "current" else prepare
+        print(json.dumps(selected(args.source, args.archive, args.runtime_root), sort_keys=True))
     except (OSError, ValueError, KeyError, UnicodeError, zipfile.BadZipFile):
         parser.exit(1, "Windows preparation refused. Inputs and any partial output were preserved; no runtime was executed or qualified.\n")
 

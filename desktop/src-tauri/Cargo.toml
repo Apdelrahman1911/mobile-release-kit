@@ -52,6 +52,8 @@ development-runtime = []
 # Selects the standalone privileged publisher, not any execution qualification.
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
+# Explicit current12/53 roster DATA only; normal app/producer select it separately.
+windows-current-runtime = ["mrk-windows-installed-native/current-runtime"]
 # Unwired fixed-input caller only; no bootstrap, process or install entry.
 windows-installer-acquisition = ["mrk-windows-installed-native/installer-acquisition"]
 # Fixed DATA/acquisition + dormant direct publication core; no bootstrap or activation.

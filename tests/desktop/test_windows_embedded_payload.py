@@ -195,6 +195,72 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
                 self.assertEqual((runtime / "manifest.json").read_bytes(), manifest_bytes)
                 self.assertEqual(archive.read_bytes(), raw)
 
+        # New product selection is explicit. Extra current source files do not
+        # silently change the historical entry, and both paths use the same
+        # immutable supplier/notice/CA admission and the existing common preparer.
+        historical = payload.runtime_preparation.BOOTSTRAPS
+        complete = payload.runtime_preparation.CURRENT_BOOTSTRAPS
+        self.assertEqual((len(historical), len(complete)), (6, 12))
+        for current in (False, True):
+            with self.subTest(current=current), tempfile.TemporaryDirectory(prefix="mrk-windows-payload-data-") as name:
+                root = Path(name)
+                source, archive, raw, notice, pins = fixture(root)
+                for bootstrap in complete:
+                    if bootstrap not in historical:
+                        (source / "desktop" / bootstrap).write_bytes(b"# INERT current bootstrap, never executed\n")
+                original_source = tree_facts(source)
+                runtime, projection = root / "runtime", root / payload.SOURCE_PROJECTION_NAME
+                with synthetic_pins(raw, notice, pins), patch.object(
+                        payload.runtime_preparation, "prepare", wraps=payload.runtime_preparation.prepare) as old, patch.object(
+                        payload.runtime_preparation, "prepare_current", wraps=payload.runtime_preparation.prepare_current) as new:
+                    selected = payload.prepare_current if current else payload.prepare
+                    result = selected(source, archive, runtime)
+                    called, unused = (new, old) if current else (old, new)
+                    called.assert_called_once_with(projection, runtime, payload.TARGET)
+                    unused.assert_not_called()
+                    payload.check_supplier_copy(runtime / "python", notice)
+                chosen = complete if current else historical
+                manifest_bytes = (runtime / "manifest.json").read_bytes()
+                manifest = json.loads(manifest_bytes)
+                self.assertEqual(len(manifest["files"]), 52 if current else 46)
+                expected = {*chosen, "core.zip", "github-ca.pem", "manifest.json",
+                            *("python/" + item[0] for item in pins), "python/" + payload.NOTICE_NAME}
+                self.assertEqual({path.relative_to(runtime).as_posix()
+                                  for path in payload.runtime_preparation.files(runtime)}, expected)
+                self.assertEqual(len(expected), 53 if current else 47)
+                for entry in manifest["files"]:
+                    body = (runtime / entry["path"]).read_bytes()
+                    self.assertEqual((len(body), hashlib.sha256(body).hexdigest()), (entry["size"], entry["sha256"]))
+                for bootstrap in complete:
+                    for target in (runtime / bootstrap, projection / "desktop" / bootstrap):
+                        if bootstrap in chosen:
+                            self.assertEqual(target.read_bytes(), (source / "desktop" / bootstrap).read_bytes())
+                        else:
+                            self.assertFalse(target.exists())
+                self.assertEqual(result["manifestSha256"], hashlib.sha256(manifest_bytes).hexdigest())
+                self.assertEqual(result["qualification"], "prepared-not-native-verified")
+                self.assertEqual(tree_facts(source), original_source)
+                self.assertEqual(archive.read_bytes(), raw)
+
+        # Missing any newly required entry must fail before source/runtime output
+        # and must never fall back to the historical common preparer.
+        for missing in (name for name in complete if name not in historical):
+            with self.subTest(missing_current=missing), tempfile.TemporaryDirectory(prefix="mrk-windows-payload-data-") as name:
+                root = Path(name)
+                source, archive, raw, notice, pins = fixture(root)
+                for bootstrap in complete:
+                    if bootstrap not in historical and bootstrap != missing:
+                        (source / "desktop" / bootstrap).write_bytes(b"# INERT current bootstrap, never executed\n")
+                original_tree = tree_facts(root)
+                with synthetic_pins(raw, notice, pins), patch.object(
+                        payload.runtime_preparation, "prepare") as old, patch.object(
+                        payload.runtime_preparation, "prepare_current") as new:
+                    with self.assertRaises(FileNotFoundError):
+                        payload.prepare_current(source, archive, root / "runtime")
+                    old.assert_not_called()
+                    new.assert_not_called()
+                self.assertEqual(tree_facts(root), original_tree)
+
     def test_current_checkout_source_projection_does_not_modify_inputs(self):
         # Real current checkout layout/core as opaque bytes; only supplier pins
         # change. No core import, supplier execution, acquisition or Git command.

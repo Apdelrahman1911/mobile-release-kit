@@ -12,6 +12,8 @@ path = "src/lib.rs"
 
 # Fixed privileged package producer only; never a consumer/runtime capability.
 [features]
+# Explicit current12/53 roster DATA only; does not enable publication or methods.
+current-runtime = []
 runtime-publication = []
 # Unwired image-only filesystem primitives; no installed writer qualification.
 image-writer = []

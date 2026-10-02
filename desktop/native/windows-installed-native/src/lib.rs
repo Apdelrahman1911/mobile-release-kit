@@ -15,6 +15,15 @@
 #![allow(unsafe_code)] // Small audited boundary; the application still forbids unsafe.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+// Current normal/publisher roster cannot borrow historical edit, acquisition or
+// observer profiles. Desktop UI/dialogs alone remain independent and available.
+#[cfg(all(feature = "current-runtime", any(feature = "image-writer", feature = "required-notes",
+    feature = "installer-acquisition", feature = "windows-installed-observation")))]
+compile_error!("current-runtime cannot be combined with historical edit, installer-acquisition or observation profiles");
+
+/// Compile-selected roster DATA, available without publication; not a method grant.
+pub const CURRENT_RUNTIME_ROSTER: bool = cfg!(feature = "current-runtime");
+
 use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomPinned;
 use std::mem::{offset_of, size_of, ManuallyDrop};
@@ -74,9 +83,9 @@ pub use qualification_result::ObserverDiagnostic;
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 pub use qualification_result::{normal_ui_project, mutate_normal_ui_fixture, verify_normal_ui_fixture,
     UI_FIXTURE_CONFIG, UI_FIXTURE_CONFIG_AFTER, UI_FIXTURE_SOURCE, UI_FIXTURE_VERSION, UI_FIXTURE_KEEP};
-#[cfg(any(feature = "runtime-publication", feature = "installer-acquisition"))]
+#[cfg(feature = "installer-acquisition")]
 mod installer_primitives;
-#[cfg(any(feature = "runtime-publication", feature = "installer-acquisition"))]
+#[cfg(feature = "installer-acquisition")]
 mod installer_input_data;
 #[cfg(feature = "installer-acquisition")]
 mod installer_acquisition;
@@ -111,7 +120,8 @@ pub use installer_input_data::PUBLICATION_PAYLOADS;
 #[cfg(feature = "runtime-publication")]
 mod publication;
 #[cfg(feature = "runtime-publication")]
-pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};
+pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation,
+    PUBLICATION_PAYLOADS, PUBLICATION_PAYLOAD_COUNT, PUBLICATION_MANIFEST_INDEX};
 pub use decode::{DirectoryEntry, FileIdentity, Metadata};
 pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIdentity};
 

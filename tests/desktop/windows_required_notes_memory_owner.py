@@ -54,6 +54,53 @@ class MemoryGuardRefused(RuntimeError):
     pass
 
 
+
+class _FailureData:
+    """First-failure scalars only; never exception text, traceback or a capability."""
+
+    def __init__(self):
+        self.first = None
+
+    def record(self, stage, module, selector, source, line, category, guard=None):
+        if self.first is None:
+            self.first = (stage, module, selector, source, line, category, guard)
+
+    def line(self):
+        value = self.first
+        if type(value) is not tuple or len(value) != 7:
+            return None
+        stage, module, selector, source, line, category, guard = value
+        if (type(stage) is not str or stage not in ("import", "selection", "suite", "postcheck")
+                or type(category) is not str or category not in
+                ("guard", "assertion", "import", "module-not-found", "type", "value", "contract", "other")
+                or guard is not None and (type(guard) is not str or guard not in
+                    ("capability", "unselected-import", "io-or-loader-audit", "foreign-call",
+                     "memory-extent", "native-provider-import", "original-owner-bound", "fixture-output"))):
+            return None
+        for item, maximum in ((module, 1), (selector, 62), (source, 770), (line, 2 << 20)):
+            if item is not None and (type(item) is not int or not 0 <= item <= maximum):
+                return None
+        if ((source is None) != (line is None) or line == 0
+                or selector is not None and module is None):
+            return None
+        number = lambda item: "none" if item is None else str(item)
+        text = ("MRK_WINDOWS_NOTES_MEMORY_FAILURE_V1=stage=" + stage
+                + ";module=" + number(module) + ";selector=" + number(selector)
+                + ";source=" + number(source) + ";line=" + number(line)
+                + ";category=" + category + ";guard=" + ("none" if guard is None else guard) + "\n")
+        # A Windows text stream may expand the one LF to CRLF; still at most256B.
+        return text if text.isascii() and len(text) <= 255 else None
+
+
+def _failure_category(error_type):
+    # Exact known class identities, never __name__, str, repr or subclass hooks.
+    for known, label in ((MemoryGuardRefused, "guard"), (AssertionError, "assertion"),
+                         (ModuleNotFoundError, "module-not-found"), (ImportError, "import"),
+                         (TypeError, "type"), (ValueError, "value"), (driver.CheckFailure, "contract")):
+        if error_type is known:
+            return label
+    return "other"
+
 def main() -> int:
     original_clock, original_trace = time.monotonic, sys.settrace
     original_stdout, original_stderr = sys.stdout.write, sys.stderr.write
@@ -105,6 +152,17 @@ def main() -> int:
     require("desktop" not in sys.modules, "Notes bootstrap namespace was already imported")
     sys.modules["desktop"] = desktop
 
+    # Stable ordinals over the already captured module names, never path output.
+    source_positions = {filenames[name]: (ordinal, contents[name].count(b"\n") + 1)
+                        for ordinal, name in enumerate(sorted(contents))}
+    failure = _FailureData()
+    failure_stage, failure_module, failure_selector = "import", None, None
+    failure_source = failure_line = None
+
+    def remember(category, guard=None):
+        failure.record(failure_stage, failure_module, failure_selector,
+                       failure_source, failure_line, category, guard)
+
     violations = []
     enabled = False
     memory_depth = 0
@@ -114,6 +172,7 @@ def main() -> int:
     def refuse(label):
         if not violations:
             violations.append(label)
+        remember("guard", label)
         raise MemoryGuardRefused("Notes scripted-memory capability refused")
 
     def denied(*args, **kwargs):
@@ -224,11 +283,14 @@ def main() -> int:
         return original_import(name, globals, locals, fromlist, level)
 
     def trace(frame, event, argument):
-        nonlocal line_events
+        nonlocal line_events, failure_source, failure_line
         if event == "line":
             line_events += 1
             if line_events > 8000000 or (line_events % 2048 == 0 and original_clock() >= deadline):
                 return refuse("original-owner-bound")
+            position = source_positions.get(frame.f_code.co_filename)
+            if position is not None and 0 < frame.f_lineno <= position[1]:
+                failure_source, failure_line = position[0], frame.f_lineno
         return trace
 
     class Quiet:
@@ -248,10 +310,13 @@ def main() -> int:
     sys.stdout = sys.stderr = Quiet()
     enabled = True
     try:
-        cases, identifiers = [], []
-        for part in selected["python"]:
+        cases, identifiers, case_modules = [], [], []
+        for module_ordinal, part in enumerate(selected["python"]):
+            failure_stage, failure_module, failure_selector = "import", module_ordinal, None
             module = importlib.import_module(part["module"])
+            failure_stage = "selection"
             for selection in part["selectors"]:
+                failure_selector = len(cases)
                 cls = module.__dict__.get(selection["class"])
                 require(isinstance(cls, type) and issubclass(cls, unittest.TestCase)
                         and cls.__module__ == part["module"] and not getattr(cls, "__unittest_skip__", False),
@@ -265,24 +330,57 @@ def main() -> int:
                 case = cls(selection["test"])
                 identifiers.append(case.id())
                 cases.append(case)
+                case_modules.append(module_ordinal)
         require(len(cases) == len(set(identifiers)) == 63, "Notes guarded Python selected count differs")
         observed_ids = []
 
         class Result(unittest.TestResult):
             def startTest(self, test):
+                nonlocal failure_module, failure_selector
+                failure_selector = len(observed_ids)
+                failure_module = case_modules[failure_selector] if failure_selector < len(case_modules) else None
                 observed_ids.append(test.id())
                 super().startTest(test)
 
+            def stopTest(self, test):
+                nonlocal failure_module, failure_selector
+                try:
+                    super().stopTest(test)
+                finally:
+                    failure_module = failure_selector = None
+
+            def addError(self, test, error):
+                remember(_failure_category(error[0]))
+                super().addError(test, error)
+
+            def addFailure(self, test, error):
+                remember(_failure_category(error[0]))
+                super().addFailure(test, error)
+
+            def addSubTest(self, test, subtest, error):
+                if error is not None:
+                    remember(_failure_category(error[0]))
+                super().addSubTest(test, subtest, error)
+
         result = Result()
+        failure_stage, failure_module, failure_selector = "suite", None, None
         unittest.TestSuite(cases).run(result)
+        failure_stage = "postcheck"
         require(observed_ids == identifiers and result.testsRun == 63 and not result.shouldStop
                 and not any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccess))
                 and not violations and original_clock() < deadline,
                 "Notes original guarded Python contracts did not pass")
-    except BaseException:
+    except BaseException as error:
         original_trace(None)  # Capability audit stays installed even on a failed fixture.
-        original_stderr("Notes scripted-memory owner failed; no native or shipping success is implied.\n")
-        stderr_flush()
+        try:
+            remember(_failure_category(type(error)))
+            diagnostic = failure.line() or ""
+            diagnostic += "Notes scripted-memory owner failed; no native or shipping success is implied.\n"
+            if original_stderr(diagnostic) != len(diagnostic):
+                return 1
+            stderr_flush()
+        except BaseException:
+            return 1  # Emission failure never grants success, retries or replaces first DATA.
         return 1
     original_trace(None)  # Keep the capability audit installed through original process exit.
     # The bootstrap fixture DOES call bootstrap.main(), with sys/os/time,

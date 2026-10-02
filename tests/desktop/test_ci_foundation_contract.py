@@ -11515,15 +11515,33 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), frame.as_bytes());", failure)
         self.assertEqual(binary.count("std::io::Write::write_all"), 2)  # one attempt per line, not an atomic combined write
         producer = bridge.split("fn produce(", 1)[1].split("\n/// No arguments", 1)[0]
-        entry = bridge.split("pub fn publish_fixed()", 1)[1].split("\n#[cfg(test)]", 1)[0]
+        entry = bridge.split("pub fn publish_fixed()", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(bridge.count("\nfn publish_registered("), 1)
+        self.assertNotIn("pub fn publish_registered", bridge)
+        settlement = bridge.split("\nfn publish_registered(", 1)[1].split("\n#[cfg(test)]", 1)[0]
+        registration = (
+            "if !no_arguments(std::env::args_os().take(2).count()) { return Err(PublicationError::Invocation); }",
+            "let spec = VersionSpec::compiled().map_err(|_| PublicationError::Profile)?;",
+            "let owner = Publication::new(spec.manifest_sha256()).map_err(|_| PublicationError::Profile)?;",
+            "OWNER.set(Mutex::new(owner)).map_err(|_| PublicationError::AlreadyStarted)?;",
+            "let mut original = OWNER.get().ok_or(PublicationError::OwnerUnavailable)?",
+            ".lock().map_err(|_| PublicationError::OwnerUnavailable)?;",
+            "publish_registered(&mut original, &spec)",
+        )
+        offsets = [entry.index(part) for part in registration]
+        self.assertEqual(offsets, sorted(offsets))
+        for part in registration: self.assertEqual(entry.count(part), 1)
+        self.assertNotIn("produce(", entry)
+        for forbidden in ("OWNER", "std::env::", "Publication::new(", "VersionSpec::compiled("):
+            self.assertNotIn(forbidden, settlement)
         self.assertEqual(producer.count("owner.published_and_settled()"), 1)
-        self.assertEqual(entry.count("original.published_and_settled()"), 1)
+        self.assertEqual(settlement.count("original.published_and_settled()"), 1)
         self.assertIn("require(owner.published_and_settled()).map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None))", producer)
-        self.assertIn("let cause = match produce(&mut original, &spec) {\n"
+        self.assertIn("let cause = match produce(original, spec) {\n"
                       "        Ok(()) if original.published_and_settled() => return Ok(()),\n"
                       "        Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),\n"
-                      "        Err(first) => first,", entry)
-        ordered = [entry.index(part) for part in ("let cause = match produce(",
+                      "        Err(first) => first,", settlement)
+        ordered = [settlement.index(part) for part in ("let cause = match produce(",
             "let frame = if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown)",
             "Some(original.retained_frame_observation())",
             "let admission = if cause.admission_observation_allowed()",
@@ -11535,17 +11553,17 @@ class WindowsReaderGateTests(unittest.TestCase):
             "let originals_unknown = settlement == CloseOutcome::Unknown;",
             "Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission, copy })")]
         self.assertEqual(ordered, sorted(ordered))
-        self.assertEqual(entry.count("original.retained_frame_observation()"), 1)
-        self.assertEqual(entry.count("original.retained_admission_observation()"), 1)
-        self.assertEqual(entry.count("original.retained_copy_observation()"), 1)
+        self.assertEqual(settlement.count("original.retained_frame_observation()"), 1)
+        self.assertEqual(settlement.count("original.retained_admission_observation()"), 1)
+        self.assertEqual(settlement.count("original.retained_copy_observation()"), 1)
         self.assertIn("self.phase == FailurePhase::Admit && self.native == Some(NativeError::Unsafe)", bridge)
         copy_gate = bridge.split("fn copy_observation_allowed(self)", 1)[1].split("    fn class(self)", 1)[0]
         self.assertIn("self.phase == FailurePhase::FinishCopy && self.native == Some(NativeError::Unsafe)", copy_gate)
-        self.assertIn("&& self.ordinal.is_some_and(|index| index < 47)", copy_gate)
+        self.assertIn("&& self.ordinal.is_some_and(|index| index < PUBLICATION_PAYLOAD_COUNT)", copy_gate)
         self.assertIn("copy: Option<PublicationCopyObservation>", bridge)
         formatter = bridge.split("pub fn diagnostic_line(self)", 1)[1].split("type Checked<T>", 1)[0]
         self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="', formatter)
-        self.assertIn("ordinal.filter(|index| *index < 47)", formatter)
+        self.assertIn("ordinal.filter(|index| *index < PUBLICATION_PAYLOAD_COUNT)", formatter)
         self.assertIn("if line.len() <= 256 { Some(line) } else { None }", formatter)
         self.assertIn("Self::OccupiedTargetSettled => return None", formatter)
         self.assertIn("Self::Failed { cause, copy: Some(copy), .. }", formatter)
@@ -11646,7 +11664,8 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("restricted == 0", source)
         self.assertIn("frame.scalar.get().cast(), 4, frame.count.get()", source)
         query = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
-        self.assertIn("pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};", query)
+        self.assertIn("pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation,\n"
+                      "    PUBLICATION_PAYLOADS, PUBLICATION_PAYLOAD_COUNT, PUBLICATION_MANIFEST_INDEX};", query)
         self.assertEqual(query.count("self.completion_unknown("), 6)
         ordered_open = (
             "if !valid_handle(handle) { return self.completion_unknown(CompletionRefusal::OpenInvalidHandle); }",

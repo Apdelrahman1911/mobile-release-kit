@@ -1,5 +1,8 @@
 //! Fixed packaged runtime selection. No production PATH, environment, source, or
 //! failed-launch fallback. Verification runs in an owned blocking task, not UI IO.
+#[cfg(all(feature = "windows-current-runtime", feature = "development-runtime"))]
+compile_error!("windows-current-runtime requires the installed profile, never development-runtime");
+
 use std::{collections::BTreeSet, fs::{self, File, Metadata}, io::Read, path::{Component, Path, PathBuf}, time::Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -3311,12 +3314,19 @@ pub(crate) mod windows_version {
     pub(crate) const SELECTED: [&str; 3] = ["python/python.exe", "engine_bootstrap.py", "core.zip"];
     pub(crate) const BLOCK_SIZE: usize = 64 * 1024;
     pub(crate) const MANIFEST_BYTES: u64 = MANIFEST_LIMIT;
-    // This fixed supplier/publication lane retains its six-bootstrap roster.
-    // Current product payload completeness must not redefine its anchored manifest.
+    // Historical and current are explicit compile-selected DATA rosters. A new
+    // current package never changes the historical manifest or global resources.
     const HISTORICAL_REQUIRED_RUNTIME_RESOURCES: [&str; 9] = [
         "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
         "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
         "github_connection_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
+    ];
+    const CURRENT_REQUIRED_RUNTIME_RESOURCES: [&str; 15] = [
+        "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
+        "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
+        "github_connection_bootstrap.py", "github_input_group_bootstrap.py", "github_preflight_bootstrap.py",
+        "github_release_bootstrap.py", "github_runner_prerequisite_bootstrap.py", "ios_archive_bootstrap.py",
+        "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
     ];
 
     /// Pure selection DATA. A five-method qualification candidate is never
@@ -3464,17 +3474,44 @@ pub(crate) mod windows_version {
         passive_method(name) && name != "project.snapshot"
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Roster { Historical, Current }
+    impl Roster {
+        fn compiled() -> Self {
+            if cfg!(feature = "windows-current-runtime") { Self::Current } else { Self::Historical }
+        }
+        fn agrees_with_native(self, current: bool) -> bool { (self == Self::Current) == current }
+        fn required(self) -> &'static [&'static str] {
+            match self {
+                Self::Historical => &HISTORICAL_REQUIRED_RUNTIME_RESOURCES,
+                Self::Current => &CURRENT_REQUIRED_RUNTIME_RESOURCES,
+            }
+        }
+    }
+
     #[derive(Debug)]
-    pub(crate) struct VersionSpec { manifest_sha256: String, protocol_sha256: String }
+    pub(crate) struct VersionSpec { manifest_sha256: String, protocol_sha256: String, roster: Roster }
     impl VersionSpec {
         pub(crate) fn compiled() -> Result<Self, BridgeError> {
-            Self::bindings(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            let roster = Roster::compiled();
+            // Cargo feature unification cannot silently retag the safe consumer.
+            // This compares compile DATA only, before any original native effects.
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            if !roster.agrees_with_native(mrk_windows_installed_native::CURRENT_RUNTIME_ROSTER) {
+                return Err(unavailable());
+            }
+            Self::bindings_for(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR, roster)
         }
         fn bindings(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> Result<Self, BridgeError> {
+            // Existing historical DATA fixtures remain explicit, even in a current build.
+            Self::bindings_for(target, manifest, protocol, Roster::Historical)
+        }
+        fn bindings_for(target: &str, manifest: Option<&str>, protocol: Option<&str>, roster: Roster) -> Result<Self, BridgeError> {
             if target != TARGET { return Err(unavailable()); }
             Ok(Self {
                 manifest_sha256: manifest.filter(|s| sha(s)).ok_or_else(unavailable)?.to_owned(),
                 protocol_sha256: protocol.filter(|s| sha(s)).ok_or_else(unavailable)?.to_owned(),
+                roster,
             })
         }
         pub(crate) fn components(&self) -> [&str; 4] {
@@ -3521,7 +3558,7 @@ pub(crate) mod windows_version {
             // Derived directories, not undeclared empty folders; actual native
             // entry accounting also includes prefix and . / .. observations.
             if nodes.len() > ENTRY_COUNT { return Err(unavailable()); }
-            for required in HISTORICAL_REQUIRED_RUNTIME_RESOURCES {
+            for &required in self.roster.required() {
                 let required = if required == PYTHON_RESOURCE { SELECTED[0] } else { required };
                 if find_file(&manifest.files, required).is_none() { return Err(unavailable()); }
             }
@@ -3562,6 +3599,22 @@ pub(crate) mod windows_version {
         pub(crate) fn passive_loader_inventory(&self) -> Result<(), BridgeError> {
             let root = ["android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py",
                 "environment_bootstrap.py", "github-ca.pem", "github_connection_bootstrap.py", "offline_preflight_bootstrap.py"];
+            if self.directories != BTreeSet::from(["python".to_owned()])
+                || self.manifest.files.len() != root.len() + SUPPLIER.len() + 1
+                || self.manifest.files.iter().any(|file| {
+                    if let Some(name) = file.path.strip_prefix("python/") {
+                        name != "MRK-EMBEDDED-NOTICES.txt" && !SUPPLIER.iter().any(|(allowed, _, _)| name == *allowed)
+                    } else { !root.contains(&file.path.as_str()) }
+                }) { return Err(unavailable()); }
+            Ok(())
+        }
+        /// Separate current passive roster: all12 bootstraps, core, CA, unchanged
+        /// supplier37 and its notice. No bridge, loader input or new method grant.
+        pub(crate) fn current_passive_loader_inventory(&self) -> Result<(), BridgeError> {
+            let root = ["android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py",
+                "environment_bootstrap.py", "github-ca.pem", "github_connection_bootstrap.py", "github_input_group_bootstrap.py",
+                "github_preflight_bootstrap.py", "github_release_bootstrap.py", "github_runner_prerequisite_bootstrap.py",
+                "ios_archive_bootstrap.py", "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py"];
             if self.directories != BTreeSet::from(["python".to_owned()])
                 || self.manifest.files.len() != root.len() + SUPPLIER.len() + 1
                 || self.manifest.files.iter().any(|file| {
@@ -3651,11 +3704,12 @@ pub(crate) mod windows_version {
     mod tests {
         use super::*;
         use serde_json::{json, Value};
-        fn fixture() -> Value {
+        fn fixture() -> Value { fixture_for(Roster::Historical) }
+        fn fixture_for(roster: Roster) -> Value {
             let mut files: Vec<PayloadFile> = SUPPLIER.iter().map(|(name, size, hash)| PayloadFile {
                 path: format!("python/{name}"), size: *size, sha256: (*hash).to_owned(),
             }).collect();
-            for required in HISTORICAL_REQUIRED_RUNTIME_RESOURCES {
+            for &required in roster.required() {
                 if required != PYTHON_RESOURCE {
                     files.push(PayloadFile { path: required.to_owned(), size: 1, sha256: "a".repeat(64) });
                 }
@@ -3678,6 +3732,10 @@ pub(crate) mod windows_version {
         fn parse(value: &mut Value) -> Result<Inventory, BridgeError> {
             let bytes = encode(value); spec(&bytes).decode(&bytes)
         }
+        fn parse_for(value: &mut Value, roster: Roster) -> Result<Inventory, BridgeError> {
+            let bytes = encode(value);
+            VersionSpec::bindings_for(TARGET, Some(&digest(&bytes)), Some(&"b".repeat(64)), roster)?.decode(&bytes)
+        }
         fn row(path: &str, size: u64) -> Value { json!({"path":path,"size":size,"sha256":"a".repeat(64)}) }
 
         #[test]
@@ -3695,6 +3753,36 @@ pub(crate) mod windows_version {
             assert!(!progress.complete());
             progress.observe("python", InventoryKind::Directory).unwrap();
             assert!(progress.complete());
+
+            assert_eq!(HISTORICAL_REQUIRED_RUNTIME_RESOURCES.len(), 9);
+            assert_eq!(CURRENT_REQUIRED_RUNTIME_RESOURCES.len(), 15);
+            assert_eq!(SELECTED, ["python/python.exe", "engine_bootstrap.py", "core.zip"]);
+            assert_eq!(spec(&encode(&mut fixture())).roster, Roster::Historical);
+            assert_eq!(Roster::compiled(), if cfg!(feature = "windows-current-runtime") { Roster::Current } else { Roster::Historical });
+            for roster in [Roster::Historical, Roster::Current] {
+                let current = roster == Roster::Current;
+                assert!(roster.agrees_with_native(current));
+                assert!(!roster.agrees_with_native(!current));
+                assert_eq!(roster.required().iter().filter(|path| path.ends_with("_bootstrap.py")).count(), if current { 12 } else { 6 });
+                let mut value = fixture_for(roster);
+                value["files"].as_array_mut().unwrap().push(row("python/MRK-EMBEDDED-NOTICES.txt", 1));
+                let bytes = encode(&mut value);
+                let bound = VersionSpec::bindings_for(TARGET, Some(&digest(&bytes)), Some(&"b".repeat(64)), roster).unwrap();
+                assert_eq!(bound.roster, roster);
+                let inventory = bound.decode(&bytes).unwrap();
+                assert_eq!(inventory.manifest.files.len(), if current { 52 } else { 46 });
+                assert_eq!(inventory.directories, BTreeSet::from(["python".to_owned()]));
+                assert_eq!(inventory.passive_loader_inventory().is_ok(), !current);
+                assert_eq!(inventory.current_passive_loader_inventory().is_ok(), current);
+                let mut progress = inventory.progress();
+                progress.observe("manifest.json", InventoryKind::File).unwrap();
+                for file in &inventory.manifest.files { progress.observe(&file.path, InventoryKind::File).unwrap(); }
+                assert!(!progress.complete());
+                progress.observe("python", InventoryKind::Directory).unwrap();
+                assert!(progress.complete());
+                assert!(progress.observe("python", InventoryKind::Directory).is_err());
+                assert!(progress.observe("extra", InventoryKind::File).is_err());
+            }
         }
         #[test]
         fn windows_passive_inventory_excludes_all_additional_startup_inputs() {
@@ -3707,6 +3795,44 @@ pub(crate) mod windows_version {
                 let mut changed = value.clone();
                 changed["files"].as_array_mut().unwrap().push(row(extra, 1));
                 assert!(parse(&mut changed).unwrap().passive_loader_inventory().is_err());
+            }
+            for roster in [Roster::Historical, Roster::Current] {
+                let current = roster == Roster::Current;
+                let admit = |inventory: Inventory| if current {
+                    inventory.current_passive_loader_inventory()
+                } else { inventory.passive_loader_inventory() };
+                // The complete supplier notice is separately required by both exact profiles.
+                assert!(parse_for(&mut fixture_for(roster), roster).and_then(admit).is_err());
+                let mut exact = fixture_for(roster);
+                exact["files"].as_array_mut().unwrap().push(row("python/MRK-EMBEDDED-NOTICES.txt", 1));
+                assert!(parse_for(&mut exact, roster).and_then(admit).is_ok());
+                // Every selected bootstrap/core/CA/Python member, not only a count.
+                for &required in roster.required() {
+                    let path = if required == PYTHON_RESOURCE { SELECTED[0] } else { required };
+                    let mut missing = exact.clone();
+                    missing["files"].as_array_mut().unwrap().retain(|file| file["path"] != path);
+                    assert!(parse_for(&mut missing, roster).is_err(), "omitted {path}");
+                    let mut alias = exact.clone();
+                    alias["files"].as_array_mut().unwrap().iter_mut().find(|file| file["path"] == path).unwrap()["path"]
+                        = json!(path.to_ascii_uppercase());
+                    assert!(parse_for(&mut alias, roster).and_then(admit).is_err(), "case alias {path}");
+                }
+                for extra in ["pyvenv.cfg", "python/pyvenv.cfg", "python/python._pth", "python/python.exe.local",
+                    "python/python.exe.manifest", "python/DLLs/python3.dll", "python/sitecustomize.py", "python/extra.pth",
+                    "python/mrk_image_writer_native.dll", "extra_bootstrap.py", "nested/extra"] {
+                    let mut changed = exact.clone();
+                    changed["files"].as_array_mut().unwrap().push(row(extra, 1));
+                    assert!(parse_for(&mut changed, roster).and_then(admit).is_err());
+                }
+                let other = if current { Roster::Historical } else { Roster::Current };
+                let mut wrong = fixture_for(other);
+                wrong["files"].as_array_mut().unwrap().push(row("python/MRK-EMBEDDED-NOTICES.txt", 1));
+                assert!(parse_for(&mut wrong, roster).and_then(admit).is_err());
+                let mut notice_alias = exact.clone();
+                notice_alias["files"].as_array_mut().unwrap().iter_mut()
+                    .find(|file| file["path"] == "python/MRK-EMBEDDED-NOTICES.txt").unwrap()["path"]
+                    = json!("python/mrk-embedded-notices.txt");
+                assert!(parse_for(&mut notice_alias, roster).and_then(admit).is_err());
             }
         }
         #[cfg(feature = "windows-metadata-images-loader")]
@@ -3753,6 +3879,20 @@ pub(crate) mod windows_version {
                 assert!(VersionSpec::bindings(TARGET, anchor, Some(&"b".repeat(64))).is_err());
             }
             assert!(VersionSpec::bindings("x86_64-unknown-linux-gnu", Some(&digest(&valid)), Some(&"b".repeat(64))).is_err());
+            for roster in [Roster::Historical, Roster::Current] {
+                let valid = encode(&mut fixture_for(roster));
+                let hash = digest(&valid);
+                let bound = VersionSpec::bindings_for(TARGET, Some(&hash), Some(&"b".repeat(64)), roster).unwrap();
+                assert!(bound.decode(&valid[..valid.len() - 1]).is_err());
+                assert!(VersionSpec::bindings_for(TARGET, None, Some(&"b".repeat(64)), roster).is_err());
+                assert!(VersionSpec::bindings_for(TARGET, Some(&hash), None, roster).is_err());
+                assert!(VersionSpec::bindings_for("x86_64-unknown-linux-gnu", Some(&hash), Some(&"b".repeat(64)), roster).is_err());
+                for (key, invalid) in [("target", json!("x86_64-unknown-linux-gnu")), ("coreVersion", json!("9.9.9")),
+                    ("protocolSha256", json!("c".repeat(64))), ("coreSha256", json!("c".repeat(64)))] {
+                    let mut changed = fixture_for(roster); changed[key] = invalid;
+                    assert!(parse_for(&mut changed, roster).is_err());
+                }
+            }
         }
         #[test]
         fn windows_manifest_rejects_case_aliases_and_file_directory_conflicts() {
@@ -3781,6 +3921,18 @@ pub(crate) mod windows_version {
                 file["sha256"] = json!("0".repeat(64));
                 assert!(parse(&mut changed).is_err());
             }
+            for roster in [Roster::Historical, Roster::Current] {
+                for (name, _, _) in SUPPLIER {
+                    let path = format!("python/{name}");
+                    let mut missing = fixture_for(roster);
+                    missing["files"].as_array_mut().unwrap().retain(|file| file["path"] != path);
+                    assert!(parse_for(&mut missing, roster).is_err());
+                    let mut changed = fixture_for(roster);
+                    changed["files"].as_array_mut().unwrap().iter_mut()
+                        .find(|file| file["path"] == path).unwrap()["sha256"] = json!("0".repeat(64));
+                    assert!(parse_for(&mut changed, roster).is_err());
+                }
+            }
         }
         #[test]
         fn windows_manifest_budgets_include_manifest_not_only_payload() {
@@ -3797,6 +3949,22 @@ pub(crate) mod windows_version {
             assert!(parse(&mut oversized).is_err());
             let huge = vec![b' '; MANIFEST_LIMIT as usize + 1];
             assert!(spec(&huge).decode(&huge).is_err());
+            // Generic inspected DATA retains the same ceilings for current too;
+            // exact passive admission separately rejects every additional row.
+            let mut current = fixture_for(Roster::Current);
+            while current["files"].as_array().unwrap().len() < FILE_COUNT - 1 {
+                let index = current["files"].as_array().unwrap().len();
+                current["files"].as_array_mut().unwrap().push(row(&format!("extra-{index:04}"), 0));
+            }
+            let inventory = parse_for(&mut current, Roster::Current).unwrap();
+            assert!(inventory.current_passive_loader_inventory().is_err());
+            current["files"].as_array_mut().unwrap().push(row("extra-final", 0));
+            assert!(parse_for(&mut current, Roster::Current).is_err());
+            let mut oversized = fixture_for(Roster::Current);
+            oversized["files"].as_array_mut().unwrap().extend([row("large-a", FILE_LIMIT), row("large-b", FILE_LIMIT)]);
+            assert!(parse_for(&mut oversized, Roster::Current).is_err());
+            assert!(VersionSpec::bindings_for(TARGET, Some(&digest(&huge)), Some(&"b".repeat(64)), Roster::Current)
+                .unwrap().decode(&huge).is_err());
         }
         #[test]
         fn windows_six_method_data_does_not_enable_any_production_profile() {
