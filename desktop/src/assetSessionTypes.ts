@@ -63,11 +63,12 @@ export interface CredentialAssessment {
   };
 }
 export interface AssetStatus {
-  schemaVersion: 2;
+  schemaVersion: 3;
   statusRevision: number;
   mode: 'closed' | 'session' | 'encrypted';
   persistence: { state: 'uninitialized' | 'locked' | 'unlocked' | 'initializing' | 'mutating' | 'interrupted' | 'unknown'; reason: AssetReason; keyAccess: 'locked' | 'read-only' | 'read-write' } | null;
   capability: { available: boolean; reason: AssetReason };
+  modes: { session: { available: boolean; reason: AssetReason }; encrypted: { available: boolean; reason: AssetReason } };
   context: ({ revision: number; projectId: string } & AssetScope) | null;
   operation: {
     operationId: number; operation: AssetOperationName; phase: AssetPhase; reason: AssetReason;

@@ -1,8 +1,8 @@
 # Ordinary macOS application: external UI scenario
 
 This is one **external XCTest UI target**, not a second application engine or an
-in-process observer. It does not change the ordinary Rust app, its core,
-runtime profile, confirmations, owner or cleanup policy.
+in-process observer. It uses the ordinary Rust app's real runtime profile,
+confirmations, owners and cleanup policy, not a test-only route around them.
 
 ## Admitted environment
 
@@ -164,3 +164,79 @@ assets. Even after a successful UI journey, **cleanExitStatus remains null and
 allWorkerFinality remains unestablished**. Signing, release execution,
 Store mutation, physical-Mac behavior and whole-product readiness are not
 proved by this fixture.
+
+## Synthetic encrypted-credential journey (separate selection)
+
+Select only
+`MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials`
+after the original installation/readback and basic normal-launch gate. Reuse
+the same built runner; unrelated metadata/image journeys are not prerequisites.
+This is the **enabled private candidate's acceptance case**, not evidence that
+it has already run. The ordinary Mac persistence selector must be enabled in
+the actual tested application, with its original Supervisor/document and fixed
+helper pins intact. Selected-helper reports describe that different mechanism;
+they do not substitute for this ordinary UI journey. Other platform, signed-iOS
+and distribution qualification gates are unchanged.
+
+The bundled `Fixtures/normal-persistence-v1.json` has a closed11-file roster,
+under11KiB encoded and under8KiB decoded. It contains a saved synthetic iOS
+candidate/signing configuration, inert project metadata, a preservation
+sentinel, and two original files **outside** the selected project. The P12 and
+profile are the existing signature-less DER canary envelopes, not usable Apple
+signing assets. Originals are0600, directories0700. The app's real assessment
+must say **Configured only**, with native/service checks not run and release
+readiness unknown. This journey never archives, signs or accesses a Store.
+
+Through ordinary native pickers and accessible controls, it:
+
+1. Opens uninitialized storage; reviews and explicitly creates the encrypted
+   vault. Only then submits the iOS/candidate/build-signing context.
+2. Selects each inert original, prepares the actual assessment/save review and
+   confirms saving. Saved records must be unassigned and not checked for stored
+   use. Each needs its own **Assess and assign → Assign** confirmation.
+3. Changes to the admitted Store-only context and back, without any Store
+   command. Earlier assignments stay unavailable until explicitly reassigned.
+4. Locks, reopens and explicitly unlocks the same store. Reloaded records remain
+   unassessed/unassigned until separate new assessments and Bind confirmations.
+5. Begins replacement and cancels the native picker. The chosen-file original
+   owns a vault lease: its STOP conservatively closes the **whole session**.
+   Require known original settlement, no exposed assignments and unchanged
+   ciphertext, then reopen/unlock explicitly. Unknown settlement is a failure,
+   not permission to continue or silently restore assignments.
+6. Replaces only the current P12 revision with the same preserved inert source
+   and different fictional fields. Only that ciphertext changes; revision1
+   becomes2 and fresh assessment/Bind is required. Separately reviews and
+   deletes only the profile, preserving the P12 assignment and unrelated files.
+7. Locks, preserves the original mutation receipt, checks files and quits using
+   the real File menu. Every mutation requires known-applied/confirmed/known;
+   idle status alone does not establish success.
+
+Before **any application launch**, the harness retains NoFollow ancestors and
+requires `/Users/runner/Library/Application Support/dev.mobile-release-kit.desktop`
+absent, including dangling links and bounded case/normalization collisions.
+Existing state is never adopted, erased or repaired. After the app creates its
+real store, bounded readback requires0700 directories and0600 single-link,
+zero-flags files, no aliases and no unexpected mutation/candidate leaves.
+The initialized control roster is `vault-lock` (0bytes),
+**`initialization-reservation` (48bytes, permanent)** and `vault-header`
+(104bytes), plus at most two `record-<32 lowercase hex>` leaves. The permanent
+reservation is an intentional engine invariant, not leftover mutation debris.
+Readback is at most64KiB total/32KiB per leaf; unchanged identities/bytes and
+absence of known plaintext canaries are accounting, not cryptographic proof.
+
+Passwords are fictional DATA typed into the normal secure field, never read
+back or put on the clipboard. No Keychain enumeration/unlock/repair, custom
+app-data location, observer argument, DOM injection or permission grant is
+used. Native provider refusal ends the case; user consent is not a repair.
+Retain the tiny project/store and synthetic protected-key row for disposable
+job retirement; never erase possibly-live recovery state. Harness-owned FDs
+are consumed once, independently of failed app cleanup.
+
+Use one nonrenewable300-second allowance and a seven-minute workflow ceiling.
+Require the original XCTest command to succeed with exactly one passed test,
+zero failures/skips, and exact application/harness/helper bindings. Export only
+closed stage/count/result facts for this private-input journey, not raw test
+logs, screenshots, password keystrokes or xcresult contents. Session reopening
+is **not application-restart/upgrade continuity**. Original POSIX exit and all
+worker finality remain unavailable to XCTest UI observation; native owners,
+helper/provider and filesystem qualification remain separate obligations.

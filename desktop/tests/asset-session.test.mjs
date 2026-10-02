@@ -18,7 +18,9 @@ const D = 'd'.repeat(32);
 const context = { revision: 1, projectId: 'project-a', platform: 'android', stage: 'candidate', purpose: 'full' };
 const fields = { provider: 'inert-provider-canary', serviceAccount: 'inert-account-canary' };
 function status(revision = 0, patch = {}) {
-  return { schemaVersion: 2, statusRevision: revision, persistence: null, mode: 'session', capability: { available: true, reason: 'none' },
+  const capability = patch.capability ?? { available: true, reason: 'none' };
+  return { schemaVersion: 3, statusRevision: revision, persistence: null, mode: 'session', capability,
+    modes: { session: { ...capability }, encrypted: { ...capability } },
     context: { ...context }, operation: null, records: [], assignments: [], ...patch };
 }
 function vaultStatus(revision = 0, patch = {}) {
@@ -866,6 +868,16 @@ test('Android, Apple and ASC UI reuse the original write-only lifetime without f
   assert.match(component, /Admitted Linux or Apple-silicon Mac sessions can collect supported Android inputs and ASC P8/);
   assert.match(component, /Windows import and binary plist are unavailable/);
   assert.doesNotMatch(component, /Windows import, ASC P8 and binary plist are unavailable/);
+  assert.match(component, /Encrypted storage availability for this exact build is shown above; Windows encrypted storage is unavailable/);
+  assert.doesNotMatch(component, /Mac\/Windows encrypted storage (?:is|are) unavailable/);
+  for (const label of ['Private-input storage controls', 'Original private-input operation',
+    'Private-input operation action', 'Private-input operation phase', 'Private-input operation settlement',
+    'Private-input storage effect', 'Private-input storage durability', 'Private-input storage cleanup',
+    'Private-input review target', 'Private-input record revision']) {
+    assert.ok(component.includes(`aria-label="${label}"`), `ordinary accessibility missing: ${label}`);
+  }
+  assert.ok(component.includes('aria-label={`Private input · ${recordLabel}`}'));
+  assert.match(component, /role="group" aria-label="Explicit private-input review"/);
   assert.doesNotMatch(component, /type="file"|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b/);
 });
 
@@ -895,7 +907,56 @@ test('an overtaking event cannot replace the review carried by the original comm
   } finally { h.controller.dispose(); }
 });
 
-test('v2 encrypted descriptors have their own finite bounds and cannot masquerade as session or payload authority', () => {
+test('schema3 requires honest separate mode capabilities and does not infer encrypted authority from session availability', () => {
+  const modes = { session: { available: true, reason: 'none' }, encrypted: { available: false, reason: 'unqualified' } };
+  const memoryOnly = status(0, { modes });
+  assert.ok(parseAssetStatus(memoryOnly)); assert.equal(assetStorageWritable(memoryOnly), true);
+  assert.equal(assetStorageWritable(vaultStatus(0, { modes })), false);
+  for (const mutate of [
+    (s) => { s.schemaVersion = 2; }, (s) => { delete s.modes; },
+    (s) => { delete s.modes.encrypted; }, (s) => { s.modes.unrestricted = { available: true, reason: 'none' }; },
+    (s) => { s.modes.encrypted = { available: true, reason: 'unqualified' }; },
+    (s) => { s.modes.encrypted = { available: false, reason: 'none' }; },
+    (s) => { s.modes.session = { available: false, reason: 'unqualified' }; },
+    (s) => { s.capability = { available: false, reason: 'document-lost' }; s.modes.session = { ...s.capability }; s.modes.encrypted = { available: true, reason: 'none' }; },
+  ]) { const value = structuredClone(memoryOnly); mutate(value); assert.equal(parseAssetStatus(value), null); }
+});
+
+test('an unavailable encrypted mode sends no vault IPC and leaves memory, status and original cleanup available', async () => {
+  const modes = { session: { available: true, reason: 'none' }, encrypted: { available: false, reason: 'unqualified' } };
+  const h = harness(status(0, { mode: 'closed', context: null, modes }));
+  try {
+    await h.controller.connect(h.api); const before = h.calls.length;
+    assert.equal(h.controller.open('encrypted'), false); assert.equal(h.controller.prepareInitialize(), false); assert.equal(h.controller.unlock(), false);
+    assert.equal(h.calls.length, before);
+    await h.controller.checkStatus(); assert.equal(h.calls.length, before + 1);
+    assert.equal(h.controller.open(), true); assert.deepEqual(h.latest('open').args, { mode: 'session' });
+    h.latest('open').resolve(status(1, { context: null, modes })); await settle();
+    h.latest('context').resolve(status(2, { modes })); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent, true);
+    assert.equal(assetStorageReason(h.controller.getSnapshot()), null);
+    assert.equal(h.controller.lock(), true); h.latest('lock').resolve(status(3, { mode: 'closed', context: null, modes })); await settle();
+    assert.equal(h.controller.getSnapshot().status.mode, 'closed');
+  } finally { h.controller.dispose(); }
+  for (const persistence of [
+    { state: 'uninitialized', reason: 'vault-uninitialized', keyAccess: 'locked' },
+    { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' },
+  ]) {
+    const h = harness(vaultStatus(0, { context: null, persistence, modes }));
+    try {
+      await h.controller.connect(h.api); const before = h.calls.length;
+      assert.equal(h.controller.prepareInitialize(), false); assert.equal(h.controller.unlock(), false);
+      h.controller.submitContext(); await settle(); assert.equal(h.calls.length, before);
+      assert.match(assetStorageReason(h.controller.getSnapshot()), /requested native capability/);
+      await h.controller.checkStatus(); assert.equal(h.calls.length, before + 1);
+      assert.equal(h.controller.lock(), true);
+      h.latest('lock').resolve(vaultStatus(1, { context: null, modes, persistence: { state: 'locked', reason: 'none', keyAccess: 'locked' } })); await settle();
+      assert.equal(h.calls.some((call) => ['open', 'initialize-review', 'unlock', 'context'].includes(call.command)), false);
+    } finally { h.controller.dispose(); }
+  }
+});
+
+test('v3 encrypted descriptors have their own finite bounds and cannot masquerade as session or payload authority', () => {
   const records = Array.from({ length: 128 }, (_, index) => vaultRecord({ recordId: (index + 1).toString(16).padStart(32, '0'), label: 'x'.repeat(128) }));
   const input = vaultStatus(1, { records });
   assert.equal(assetJsonFits(input, 32768), false, 'the encrypted cap must not accidentally retain the smaller session cap');
@@ -960,7 +1021,7 @@ test('storage effect, durability and cleanup survive redacted closure but never 
     assert.equal(parseAssetStatus(status(4, { operation: operation({ operation: name, phase: 'idle', assessment: null, preview: null }) })), null);
 });
 
-test('closed v2 statuses redact material even without a storage receipt and reject invented storage modes', () => {
+test('closed v3 statuses redact material even without a storage receipt and reject invented storage modes', () => {
   const closed = status(5, { mode: 'closed', context: null });
   assert.deepEqual(parseAssetStatus(closed), closed);
   const redacted = operation({ operation: 'lock', phase: 'idle', assessment: null, preview: null });
@@ -1169,6 +1230,9 @@ test('encrypted live help keeps user labels nonsecret and saving distinct from a
   assert.match(sessionControlHelp(guide, 'save', 'encrypted').format, /Saved means not assigned.*stored payload has not yet been checked/);
   assert.match(sessionControlHelp(guide, 'assign', 'encrypted').format, /actual stored revision/);
   assert.match(sessionControlHelp(guide, 'lock', 'encrypted').what, /preserve encrypted records/);
+  assert.match(sessionControlHelp(guide, 'mode', 'encrypted').where, /unavailable vault does not disable.*memory-only/);
+  assert.match(sessionControlHelp(guide, 'unlock', 'encrypted').where, /already be unlocked.*Keychain Access/);
+  assert.match(sessionControlHelp(guide, 'unlock', 'encrypted').format, /without asking for a Keychain prompt.*creating or unlocking a Keychain.*no plaintext fallback/);
   assert.equal(sessionTargetLabel(guide, { type: 'vault', change: 'initialize' }, []), 'New encrypted private-input vault');
   const subject = { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 };
   assert.match(sessionTargetLabel(guide, subject, [vaultRecord({ label: '<nonsecret text>' })], 'encrypted'), /<nonsecret text> · item 1 · revision 1/);

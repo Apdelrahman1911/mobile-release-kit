@@ -1514,6 +1514,197 @@ jobs:
           finally: os.close(fd)
           print("One normal-app launch/Cancel/navigation/Quit UI scenario passed; POSIX exit and all-worker finality remain unavailable.")
           PY_UI_RESULT
+      - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
+        id: normal_persistence_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
+        timeout-minutes: 7
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # The default app-data absence is admitted by the original test BEFORE launch.
+          # Real ordinary controls; no observer argument, Keychain repair or retry.
+          set +e
+          clean /usr/bin/xcodebuild test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/persistence-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
+            -disableAutomaticPackageResolution \
+            > "$MRK_MACOS_WORK/normal-ui/persistence-test.log" 2>&1
+          test_status=$?
+          set -e
+          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/persistence-test.status"
+          # Never export the raw XCTest tail: it can contain secure-field keystrokes.
+          # These finite stage/count facts are diagnostics, not test/finality receipts.
+          "$MRK_PYTHON" -I -S -B - <<'PY_PERSISTENCE_DIAGNOSTICS'
+          import json, os, re, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"]) / "normal-ui"
+          path = root / "persistence-test.log"
+          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+          try:
+              before = os.fstat(fd)
+              if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                      or before.st_mode & 0o022 or not 0 <= before.st_size <= 16 * 1024 * 1024):
+                  raise ValueError("fixed UI diagnostic log shape refused")
+              offset = max(0, before.st_size - 262144)
+              os.lseek(fd, offset, os.SEEK_SET)
+              with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(262145)
+              identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                                    s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+              if (len(data) != before.st_size - offset or identity(before) != identity(os.fstat(fd))
+                      or identity(before) != identity(os.stat(path, follow_symlinks=False))):
+                  raise ValueError("fixed UI diagnostic log changed")
+          finally: os.close(fd)
+          stages = {"persistence-" + name for name in ("admission", "launch", "project-and-initialize",
+              "save-and-bind-p12", "save-and-bind-profile", "context-invalidation", "lock-reopen-rebind",
+              "replacement-cancel", "replace-current-record", "delete-and-quit")}
+          events = []
+          for raw in data.splitlines():
+              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]+);result=(started|passed|failed)(;laterStages=not-run)?", raw.strip())
+              if match and match[1].decode("ascii") in stages:
+                  events.append({"stage": match[1].decode("ascii"), "result": match[2].decode("ascii")})
+              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_QUERY=stage:([a-z0-9-]+);buttons:([0-9]{1,3});textFields:([0-9]{1,3});comboBoxes:([0-9]{1,3});sheets:([0-9]{1,2})", raw.strip())
+              if match and match[1].decode("ascii") in stages:
+                  counts = list(map(int, match.groups()[1:]))
+                  if all(value <= 256 for value in counts[:3]) and counts[3] <= 16:
+                      events.append({"stage": match[1].decode("ascii"), "roleCounts": counts})
+              if len(events) > 64: raise ValueError("fixed UI diagnostic event bound")
+          result = {"schemaVersion": 1, "scope": "normal-persistence-ui-diagnostics-only",
+                    "boundedTailBytes": len(data), "originalLogBytes": before.st_size, "events": events,
+                    "nativeSuccessInferred": False, "rawTextExported": False}
+          fd = os.open(root / "persistence-diagnostics.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "w", closefd=False) as output:
+                  json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          PY_PERSISTENCE_DIAGNOSTICS
+          [[ "$test_status" == 0 ]]
+      - name: Bind the single persistence journey to original XCTest and app-helper evidence
+        id: normal_persistence_ui_result
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
+            --path "$MRK_MACOS_WORK/normal-ui/persistence-test.xcresult" --compact \
+            > "$MRK_MACOS_WORK/normal-ui/persistence-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/persistence-summary.stderr"
+          summary_status=$?
+          set -e
+          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/persistence-summary.status"
+          [[ "$summary_status" == 0 ]]
+          "$MRK_PYTHON" -I -S -B - <<'PY_PERSISTENCE_RESULT'
+          import hashlib, json, os, re, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          def read(path, limit):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                          or before.st_mode & 0o022 or not 0 <= before.st_size <= limit):
+                      raise ValueError("persistence result input shape refused")
+                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                  identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                                        s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                  if (len(data) != before.st_size or identity(before) != identity(os.fstat(fd))
+                          or identity(before) != identity(os.stat(path, follow_symlinks=False))):
+                      raise ValueError("persistence result input changed")
+                  return data
+              finally: os.close(fd)
+          def unique(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value: raise ValueError("duplicate result field")
+                  value[key] = item
+              return value
+          def document(path, limit=65536):
+              return json.loads(read(root / path, limit), object_pairs_hook=unique)
+          preview = document("preview/PREVIEW.json")
+          if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
+                  or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
+                  or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                  or preview["platform"] != "macOS26-arm64" or preview["instrumented"] is not False
+                  or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
+              raise ValueError("persistence UI result is not bound to this original normal package")
+          basic = document("normal-ui/result.json")
+          if (basic["scope"] != "normal-app-launch-cancel-navigation-quit-ui-only"
+                  or basic["applicationSourceCommit"] != preview["sourceCommit"] or basic["harnessSourceCommit"] != preview["sourceCommit"]
+                  or basic["runId"] != preview["runId"] or basic["runAttempt"] != preview["runAttempt"]
+                  or basic["signedAppBinarySha256"] != preview["signedAppBinarySha256"]
+                  or basic["packageSha256"] != preview["packageSha256"]
+                  or basic["launchRenderCancelNavigationQuitUI"] != "passed"
+                  or basic["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"):
+              raise ValueError("persistence journey requires this original accepted basic UI gate")
+          helper = document("vault-helper-signing.json")
+          app = document("app-result.json")
+          if (helper["source"] != preview["sourceCommit"] or helper["workflowSource"] != preview["sourceCommit"]
+                  or helper["runId"] != preview["runId"] or helper["runAttempt"] != preview["runAttempt"]
+                  or helper["helperSha256"] != os.environ["MRK_MACOS_VAULT_HELPER_SHA256"]
+                  or not re.fullmatch(r"[0-9a-f]{64}", helper["helperSha256"])
+                  or type(helper["helperBytes"]) is not int or not 0 < helper["helperBytes"] <= 32 * 1024 * 1024
+                  or str(helper["helperBytes"]) != os.environ["MRK_MACOS_VAULT_HELPER_BYTES"]
+                  or app["vaultHelperSha256"] != helper["helperSha256"]
+                  or app["appBinarySha256BeforeSigning"] != preview["normalBinaryBeforeSigningSha256"]):
+              raise ValueError("persistence UI helper differs from this original app build and package")
+          for name in ("build", "persistence-test", "persistence-summary"):
+              if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
+                  raise ValueError("original persistence native command did not pass")
+          summary_bytes = read(root / "normal-ui/persistence-summary.raw.json", 262144)
+          summary = json.loads(summary_bytes, object_pairs_hook=unique)
+          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
+              raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
+                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
+          result = {"schemaVersion": 1, "scope": "normal-app-synthetic-persistent-credentials-ui",
+                    "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
+                    "sourceTree": preview["sourceTree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
+                    "runId": preview["runId"], "runAttempt": preview["runAttempt"], "platform": preview["platform"],
+                    "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
+                    "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
+                    "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
+                    "signedAppBinarySha256": preview["signedAppBinarySha256"],
+                    "vaultHelperSha256": helper["helperSha256"], "vaultHelperBytes": helper["helperBytes"], "toolchain": toolchain,
+                    "originalCommandStatuses": {"sharedBuild": 0, "persistenceTest": 0, "persistenceSummary": 0},
+                    "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials",
+                    "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
+                    "normalPersistenceSelected": True, "syntheticPersistenceCRUDUI": "passed",
+                    "applicationStateAfterNormalQuit": "notRunning", "applicationRestart": "not-run",
+                    "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
+                    "signingOrStoreValidated": False, "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+          fd = os.open(root / "normal-ui/persistence-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "w", closefd=False) as output:
+                  json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          print("One ordinary synthetic persistence UI journey passed; restart, signing and all-worker finality remain unproved.")
+          PY_PERSISTENCE_RESULT
       - name: Use the normal app to select a project and persist reviewed local edits and images
         id: normal_project_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
@@ -1690,6 +1881,10 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/sdk-version.txt
             ${{ steps.work.outputs.root }}/normal-ui/sdk-build.txt
             ${{ steps.work.outputs.root }}/normal-ui/result.json
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-summary.status
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-result.json
             ${{ steps.work.outputs.root }}/normal-ui/project-test.status
             ${{ steps.work.outputs.root }}/normal-ui/project-test.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/project-summary.status
@@ -1761,7 +1956,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -1795,7 +1990,7 @@ jobs:
                   or binding["frontendAbsentAtAdmission"] is not True or not shutil.rmtree.avoids_symlink_attacks):
               raise ValueError("task cleanup original refused")
           for path in (root / "cargo-target", root / "vault-helper-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
-                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/tmp",
+                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/tmp",
                        root / "data-contracts/tmp"):
               try: selected = os.lstat(path)
               except FileNotFoundError: continue
@@ -1803,6 +1998,7 @@ jobs:
                   raise ValueError("task cleanup output refused")
               shutil.rmtree(path)
           for name in ("build.log", "test.log", "summary.raw.json", "summary.stderr",
+                       "persistence-test.log", "persistence-summary.raw.json", "persistence-summary.stderr",
                        "project-test.log", "project-summary.raw.json", "project-summary.stderr"):
               path = root / "normal-ui" / name
               try: selected = os.lstat(path)

@@ -221,12 +221,23 @@ enum AssignmentAvailability { Available, Unavailable }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetStatus {
-    schema_version: u8, status_revision: u32, mode: &'static str, capability: Capability,
+    schema_version: u8, status_revision: u32, mode: &'static str, capability: Capability, modes: StorageCapabilities,
     persistence: Option<PersistenceStatus>,
     context: Option<ContextStatus>, operation: Option<OperationStatus>, records: Vec<RecordStatus>, assignments: Vec<Assignment>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 struct Capability { available: bool, reason: Reason }
+#[derive(Serialize)]
+struct StorageCapabilities { session: Capability, encrypted: Capability }
+impl StorageCapabilities {
+    fn projection(reason: Reason, persistence_qualified: bool) -> Self {
+        let session = Capability { available: reason == Reason::None, reason };
+        let encrypted = if reason == Reason::None && !persistence_qualified {
+            Capability { available: false, reason: Reason::Unqualified }
+        } else { session };
+        Self { session, encrypted }
+    }
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistenceStatus { state: &'static str, reason: Reason, key_access: &'static str }
@@ -1433,9 +1444,13 @@ mod lookup_memory {
         fn vault_key(&mut self, value: &Arc<crate::vault_crypto::VaultKey>) -> Result<(), Problem> {
             if self.vault_keys.insert(value)? { self.add(value.retained_bytes())?; self.add(ARC_CELLS)?; } Ok(())
         }
+        fn vault_loan(&mut self, value: &vault::BoundLoan) -> Result<(), Problem> {
+            self.context(&value.context)?; self.payload(&value.payload)?; self.vault_store(&value.store)?; self.vault_key(&value.key)
+        }
         fn vault_session(&mut self, value: &vault::Session) -> Result<(), Problem> {
             self.add(value.data_bytes().ok_or(Problem::Capacity)?)?; self.vault_store(value.store())?;
-            if let Some(key) = value.key() { self.vault_key(key)?; } Ok(())
+            if let Some(key) = value.key() { self.vault_key(key)?; }
+            for loan in value.bound.iter().flatten() { self.vault_loan(loan)?; } Ok(())
         }
         fn staged(&mut self, staged: &Staged) -> Result<(), Problem> {
             match staged {
@@ -1462,6 +1477,7 @@ mod lookup_memory {
             self.add(std::mem::size_of::<Slot>())?;
             if let Some(assessment) = &slot.assessment { self.assessment(assessment)?; }
             if let Some(payload) = &slot.vault.loaded { self.payload(payload)?; }
+            if let Some(loan) = &slot.vault.previous_bound { self.vault_loan(loan)?; }
             if let Some(store) = &slot.vault.lease { self.vault_store(store)?; }
             if let Some(label) = &slot.vault.label { self.add(label.capacity())?; }
             if let Some(context) = &slot.context { self.context(context)?; }
@@ -1488,6 +1504,7 @@ mod lookup_memory {
             if let Some(vault) = &retirement.vault.session { self.vault_session(vault)?; }
             for key in retirement.vault.keys.iter().flatten() { self.vault_key(key)?; }
             if let Some(payload) = &retirement.vault.loaded { self.payload(payload)?; }
+            for loan in retirement.vault.bound.iter().flatten().chain(retirement.vault.previous_bound.iter()) { self.vault_loan(loan)?; }
             if let Some(candidate) = &retirement.candidate { self.candidate(candidate)?; }
             if let Some(staged) = &retirement.staged { self.staged(staged)?; }
             if let Some(payload) = &retirement.payload { self.payload(payload)?; }
@@ -1913,6 +1930,12 @@ impl DocumentBinding {
         #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.github_fixture_permitted() { return true; }
         false
+    }
+    fn persistence_qualified(&self) -> bool {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        { vault::qualified(self) }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        { false }
     }
     fn native_qualified(&self) -> bool {
         if NATIVE_QUALIFIED { return true; }
@@ -3105,16 +3128,21 @@ impl DocumentBinding {
         if changed { self.bump(state); }
     }
     fn snapshot(&self, state: &DocumentState) -> AssetStatus {
-        Self::status_data(state, self.native_qualified())
+        Self::status_data_modes(state, self.native_qualified(), self.persistence_qualified())
     }
     // A projection of retained DATA only. This Boolean is never native
     // admission; every operation uses the original document/profile gates.
+    #[cfg(test)]
     fn status_data(state: &DocumentState, native_qualified: bool) -> AssetStatus {
+        Self::status_data_modes(state, native_qualified, false)
+    }
+    fn status_data_modes(state: &DocumentState, native_qualified: bool, persistence_qualified: bool) -> AssetStatus {
         // A saturated public sequence is one stable final redacted snapshot.
         // Internal originals may still settle for exit; no wrapped/new epoch is
         // offered to a renderer to compare against the exhausted authority.
         if state.exhausted {
-            return AssetStatus { schema_version: 2, status_revision: u32::MAX, mode: "closed", persistence: None, capability: Capability { available: false, reason: Reason::CleanupUnknown },
+            return AssetStatus { schema_version: 3, status_revision: u32::MAX, mode: "closed", persistence: None, capability: Capability { available: false, reason: Reason::CleanupUnknown },
+                modes: StorageCapabilities::projection(Reason::CleanupUnknown, false),
                 context: None, operation: None, records: Vec::new(), assignments: Vec::new() };
         }
         let redacted = !state.lifetime.original_bound() || state.unknown;
@@ -3136,8 +3164,9 @@ impl DocumentBinding {
                 && preview_subject_valid(state, slot, preview)).map(|preview| PreviewStatus {
                 token: preview.token.clone(), action: preview.action, subject: preview.subject.clone(),
                 expires_in_ms: u32::try_from(slot.review_end.map_or(Duration::ZERO, |end| end.saturating_duration_since(Instant::now())).as_millis()).unwrap_or(u32::MAX) }) } });
-        AssetStatus { schema_version: 2, status_revision: state.revision, mode: asset_mode(state), persistence: persistence_status(state),
+        AssetStatus { schema_version: 3, status_revision: state.revision, mode: asset_mode(state), persistence: persistence_status(state),
             capability: Capability { available: capability_reason == Reason::None, reason: capability_reason },
+            modes: StorageCapabilities::projection(capability_reason, persistence_qualified),
             context: if private_redacted { None } else { state.context.as_ref().map(|context| ContextStatus { revision: context.revision, project_id: context.project_id.clone(),
                 platform: context.platform, stage: context.stage, purpose: context.purpose }) }, operation,
             records: if redacted || asset_mode(state) == "closed" { Vec::new() } else if encrypted_mode(state) { encrypted_summaries(state) } else { state.records.iter().map(|record| RecordStatus { storage: "session", label: None,
@@ -3271,6 +3300,8 @@ fn vault_retirement_data(_value: &Retirement) -> bool {
     { false }
 }
 fn assignment_available(state: &DocumentState, assignment: &Assignment) -> bool {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    if encrypted_mode(state) && !vault::assignment_current(state, assignment) { return false; }
     assignment.availability == AssignmentAvailability::Available
         && (!cfg!(all(target_os = "macos", target_arch = "aarch64"))
             || state.context.as_ref().is_some_and(|context| context.revision == assignment.context_revision
@@ -3721,7 +3752,7 @@ impl DocumentBinding {
         if evidence_family.is_some_and(|family| evidence_route_gate(&state, family).is_err()) { return; }
         self.expire(&mut state, Instant::now());
         if state.retiring { return; }
-        #[cfg(all(feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         match vault::start_cleanup(self, &mut state) {
             Ok(Some(start)) => { drop(state); let _ = start.send(()); return; },
             Ok(None) => {},
@@ -3998,7 +4029,7 @@ impl DocumentBinding {
             self.observe_android_source_slot(&state);
             self.bump(&mut state);
         }
-        #[cfg(all(feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(all(feature = "desktop-shell", any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         {
             let mut state = self.lock();
             match vault::start_cleanup(self, &mut state) {
@@ -4176,9 +4207,20 @@ impl DocumentBinding {
                     || !context_ok {
                     slot.stop(Reason::ContextStale, Instant::now()); slot.error = Some(AssetError::new(Reason::ContextStale).into()); return;
                 }
-                if let Some(existing) = state.assignments.iter_mut().find(|existing| existing.kind == assignment.kind) { *existing = assignment; }
-                else if state.assignments.len() < 8 { state.assignments.push(assignment); }
-                else { slot.stop(Reason::Capacity, Instant::now()); return; }
+                let existing = state.assignments.iter().position(|existing| existing.kind == assignment.kind);
+                if existing.is_none() && (state.assignments.len() >= 8 || state.assignments.try_reserve_exact(1).is_err()) {
+                    slot.stop(Reason::Capacity, Instant::now()); return;
+                }
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                if encrypted_mode(state) {
+                    if let Err(reason) = vault::bind_payload(state, slot, &assignment) {
+                        slot.stop(reason, Instant::now()); slot.error = Some(AssetError::new(reason).into()); return;
+                    }
+                }
+                // Same document lock; every failure/capacity check preceded the
+                // retained loan. This assignment move cannot allocate or fail.
+                if let Some(index) = existing { state.assignments[index] = assignment; }
+                else { state.assignments.push(assignment); }
                 slot.phase = Phase::Idle; slot.settlement = Settlement::Known; slot.discard = true;
             }
             Staged::Refused(reason) => {

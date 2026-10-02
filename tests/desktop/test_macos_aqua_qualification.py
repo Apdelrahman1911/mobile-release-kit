@@ -114,6 +114,15 @@ def project_selection_row(value, reason="project-result-path", step="ProjectSett
             + context_row(value) + b"MRK_MACOS_AQUA=failed\n")
 
 
+def bootstrap_context_data():
+    return {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None,
+            "bootstrap": {"source": "first-failure-record", "step": "Bootstrap", "attached": True,
+                          "initialNavigation": True, "started": True, "loaded": True,
+                          "info": False, "catalog": False, "capability": True, "methods": 0,
+                          "reloadRequested": False, "reloadNavigation": False, "lossSeen": False,
+                          "originalWindowAdmitted": True}}
+
+
 def action_context_data(step="CancelProject", *, site=None, domain="objc-exception", error="io"):
     action, kind, panel_id, call_site = {
         "CancelProject": ("project-cancel", "project", 1, "project-cancel"),
@@ -333,7 +342,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(label), 1)
         position = workflow.index(label)
         self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
-        for later in ("Compile headless Mac libraries and run thirteen exact DATA regressions first",
+        for later in ("Compile headless Mac libraries and run twenty exact DATA regressions first",
                       "Fail fast on native Scripts ownership and package format (never Installer)",
                       "Download only the exact accepted M archive (no rebuild or fallback)",
                       "Compile the fixed debug actual-main observer and normal embedded frontend once",
@@ -357,7 +366,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertNotIn("discover(", step)
         self.assertNotIn("loadTestsFrom", step)
 
-        headless_label = "      - name: Compile headless Mac libraries and run thirteen exact DATA regressions first\n"
+        headless_label = "      - name: Compile headless Mac libraries and run twenty exact DATA regressions first\n"
         self.assertEqual(workflow.count(headless_label), 1)
         self.assertLess(workflow.index(headless_label), workflow.index(
             "      - name: Fail fast on native Scripts ownership and package format (never Installer)\n"))
@@ -382,16 +391,23 @@ class AquaDataTests(unittest.TestCase):
             "ios_toolchain::tests::fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup",
             "asset_session::tests::macos_input_context_matrix_keeps_platform_kinds_and_ios_signing_separate",
             "asset_session::tests::macos_cached_record_preview_publication_and_old_context_cannot_bypass_kind_gate",
+            "asset_session::vault::tests::explicit_vault_loans_supply_two_signing_inputs_and_preserve_actual_borrowed_backing_on_lock",
+            "asset_session::vault::tests::bound_loan_publication_refuses_changed_lineage_or_unsettled_original_without_taking_payload",
+            "asset_session::vault::tests::loan_currentness_rejects_equal_counter_replacement_new_context_registry_and_reassignment",
+            "asset_session::vault::tests::reassigned_loan_census_is_not_refunded_before_off_lock_retirement_and_restore_preserves_it",
+            "asset_session::vault::tests::schema_three_advertises_storage_modes_without_opening_or_probing_a_vault",
+            "asset_session::vault::tests::encrypted_projection_redacts_locked_read_only_and_mutating_authority",
+            "runtime::persistence_selection_keeps_original_document_and_fixed_helper_pin_bounds",
         ))
         native_names = headless.split("          native_names = (\n", 1)[1].split("          )\n", 1)[0]
         self.assertCountEqual(M.re.findall(r'"([^"]+)"', native_names), (
             "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
             "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
         ))
-        self.assertIn('"scope": "eleven-main-and-two-native-macos-headless-data-regressions"', headless)
+        self.assertIn('"scope": "eighteen-main-and-two-native-macos-headless-data-regressions"', headless)
         table = headless.split("          libraries = (\n", 1)[1].split("          )\n", 1)[0]
         self.assertEqual(table,
-            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 11, "headless"),\n'
+            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 18, "headless"),\n'
             '              ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",\n'
             '               ["default"], native_names, 2, "headless-native"),\n')
         for required in ("if len(targets) != 2:", "for role, directory, package, library, features, test_names, count, prefix in libraries:",
@@ -767,6 +783,89 @@ class AquaDataTests(unittest.TestCase):
             self.assertIsNone(M.failure_step(bad, b""))
         self.assertIsNone(M.failure_step(good, prefix + b"?malformed\n"))
         self.assertIsNone(M.failure_step(good, bytearray()))
+
+    def test_bootstrap_first_failure_data_is_optional_closed_and_not_finality(self):
+        good = bootstrap_context_data()
+        for reason in M.BOOTSTRAP_FAILURE_REASONS:
+            row = project_selection_row(good, reason, "Bootstrap")
+            self.assertEqual(M.failure_context(b"", row), good)
+            self.assertEqual(M.failure_reason(b"", row), reason)
+            with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+                M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
+        # A later report Step is not the nested first-failure sample's time.
+        self.assertEqual(M.failure_context(b"", project_selection_row(good, "bootstrap-info-duplicate", "Environment")), good)
+        for count in (10, 64):
+            accepted = deepcopy(good); accepted["bootstrap"].update(info=True, catalog=True, methods=count)
+            self.assertEqual(M.failure_context(b"", project_selection_row(accepted, "bootstrap-info-duplicate", "Bootstrap")), accepted)
+        for admitted in (None, False):
+            unknown = deepcopy(good); unknown["bootstrap"]["originalWindowAdmitted"] = admitted
+            self.assertEqual(M.failure_context(b"", project_selection_row(unknown, "bootstrap-window-result", "Bootstrap")), unknown)
+        historical = deepcopy(good); del historical["bootstrap"]
+        for reason in ("observer-invariant", "bootstrap-info-methods-shape", "bootstrap-tick-main-thread"):
+            row = project_selection_row(historical, reason, "Bootstrap")
+            self.assertEqual(M.failure_context(b"", row), historical)
+        row = project_selection_row(good, "bootstrap-info-available-count", "Bootstrap")
+        with inert_exception_owner(stderr=row) as call:
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            report = M.diagnostic(caught.exception, None, fixtures)
+            self.assertEqual(report["innerFailureContext"], good)
+            self.assertEqual(report["invocationFinality"], "unknown")
+            self.assertFalse(report["originalCallReturned"])
+            self.assertEqual(fixtures.reads, [])
+
+    def test_bootstrap_failure_data_rejects_unbound_contradictory_and_open_shapes(self):
+        good = bootstrap_context_data()
+        variants = []
+        for key, bad in (("source", "later-record"), ("step", "PRIVATE"), ("attached", 1),
+                         ("methods", True), ("methods", -1), ("methods", 65), ("methods", 10),
+                         ("info", True), ("catalog", True), ("started", False),
+                         ("originalWindowAdmitted", 1), ("reloadNavigation", True), ("lossSeen", True)):
+            value = deepcopy(good); value["bootstrap"][key] = bad; variants.append(value)
+        value = deepcopy(good); value["bootstrap"]["privatePath"] = "PRIVATE"; variants.append(value)
+        value = deepcopy(good); del value["bootstrap"]["loaded"]; variants.append(value)
+        value = deepcopy(good); value["bootstrap"] = None; variants.append(value)
+        for source in (None, "prearm-open-progress", "first-failure-record"):
+            value = deepcopy(good); value["snapshotSource"] = source; variants.append(value)
+        for value in variants:
+            row = project_selection_row(value, "bootstrap-info-available-count", "Bootstrap")
+            self.assertIsNone(M.failure_context(b"", row))
+        for reason in ("observer-invariant", "bootstrap-unknown", "PRIVATE"):
+            self.assertIsNone(M.failure_context(b"", project_selection_row(good, reason, "Bootstrap")))
+        row = project_selection_row(good, "bootstrap-info-available-count", "Bootstrap")
+        for malformed in (context_row(good), row.replace(b"MRK_MACOS_AQUA_FAILURE_STEP=Bootstrap\n", b""),
+                          row + b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\n",
+                          row.replace(b'"methods":0', b'"methods":0,"methods":0'), row + context_row(good)):
+            self.assertIsNone(M.failure_context(b"", malformed))
+
+    def test_bootstrap_source_keeps_original_guard_order_and_one_first_winner(self):
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        labels = M.re.findall(r'"([a-z_-]+)"', observer.split("const FAILURE_REASONS: &[&str] = &[", 1)[1].split("];", 1)[0])
+        self.assertEqual(set(labels), M.FAILURE_REASONS)
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertLess(len(labels), 255)
+        latch = observer.split("fn latch_bootstrap(", 1)[1].split("// Original appInfo predicates", 1)[0]
+        self.assertIn("if latch_failure(first, failed, reason) && bootstrap_failure_reason(reason) { *detail = Some(sample); }", latch)
+        self.assertNotIn("compare_exchange", latch)
+        callback = observer.split("pub(super) fn app_info(", 1)[1].split("pub(super) fn catalog(", 1)[0]
+        order = ("bootstrap-info-methods-shape", "bootstrap-info-actions-shape", "let failure = bootstrap_app_info_failure(",
+                 "self.record()", "if let Some(reason) = failure", "bootstrap-info-duplicate", "bootstrap-info-reload", "r.info = true;")
+        self.assertEqual([callback.index(v) for v in order], sorted(callback.index(v) for v in order))
+        catalog = observer.split("pub(super) fn catalog(", 1)[1].split("pub(super) fn project_result(", 1)[0]
+        order = ("let failure = bootstrap_catalog_failure(", "self.record()", "bootstrap-catalog-info-order",
+                 "bootstrap-catalog-duplicate", "if let Some(reason) = failure", "bootstrap-catalog-reload", "r.catalog = true;")
+        self.assertEqual([catalog.index(v) for v in order], sorted(catalog.index(v) for v in order))
+        for body in (latch, callback, catalog):
+            for forbidden in ("try_lock", "thread::spawn", "Instant::now", "run_on_main_thread", "ns_window(", "observe_panel("):
+                self.assertNotIn(forbidden, body)
+        snapshot = observer.split("struct FailureSnapshot", 1)[1].split("fn failure_context(", 1)[0]
+        self.assertIn("bootstrap: r.bootstrap_failure", snapshot)
+        self.assertIn("self.bootstrap = None;", snapshot.split("fn at_expiry(", 1)[1].split("fn frame(", 1)[0])
+        self.assertIn('self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason))', snapshot)
+        self.assertIn('edit::bounded(&failure_context(&self), 8192)', snapshot)
+        self.assertIn('(frame.len() <= 8448).then_some(frame)', snapshot)
+        self.assertIn("if !bootstrap_diagnostic_data_checks() { return false; }", observer)
 
     def test_failure_context_is_closed_nullable_and_not_a_receipt(self):
         good = context_data()
@@ -2201,7 +2300,7 @@ class AquaDataTests(unittest.TestCase):
         for forbidden in ("run_on_main_thread", "get_window(", "get_webview_window(", "with_webview(",
                           ".clone()", "Instant::now()", "Duration::", "thread::spawn", "std::mem::forget"):
             self.assertNotIn(forbidden, body)
-        self.assertIn('if returned.result != "ok" { self.fail(); }', body)
+        self.assertIn('if returned.result != "ok" { self.fail_bootstrap(&mut r, "bootstrap-window-result"); }', body)
         publication = observer.split("fn publish_original_window(", 1)[1].split("struct NativeActionSample", 1)[0]
         self.assertIn("if slot.is_some_and(|s| s.admitted) { return; }", publication)
         self.assertIn("returned.admitted = needed && timely && !failed && returned.positive();", publication)
@@ -2268,7 +2367,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("crate::asset_session::assert_project_selection_gate_contract();", checks)
         self.assertIn("crate::runtime::RuntimeConfig::packaged(", checks)
         self.assertIn("!profile.project_selection_profile_available() || profile.project_path_selection_profile_available()", checks)
-        self.assertIn("|| profile.evidence_selection_profile_available() { return false; }", checks)
+        self.assertIn("|| !profile.evidence_selection_profile_available() { return false; }", checks)
         self.assertNotIn(".resolve(", checks)
         main = observer.split("pub(crate) fn main()", 1)[1]
         for native_entry in ("Fixture::capture(", "Observation::new(", "observe(&q)"):
@@ -2314,7 +2413,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("pub(super) fn quit_original(case: Case) -> u32 { case.session_final_original().unwrap_or(0) }", session)
         for branch in ("Step::OpenProject => (self.case.selected_id(),PanelKind::Project)",
                        'Step::Session(session::Step::Native(i)) => (self.case.input_id(i).ok_or("native-step")?,PanelKind::File)',
-                       "Step::Quit => (self.case.quit_id(),PanelKind::Quit)",
+                       "Step::Quit => (self.quit_id(),PanelKind::Quit)",
                        "Step::CancelProject => PanelAction::ProjectCancel",
                        "Step::Session(session::Step::Native(i)) if self.case.input_id(i).is_some() && !self.case.input_accepted(i) => PanelAction::FileCancel"):
             self.assertIn(branch, body)
@@ -6420,7 +6519,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Select fixed frontend compiler",
             "Record exact source and actual tool bindings only after route admission",
             "Check current owner pins before native preparation",
-            "Compile headless Mac libraries and run thirteen exact DATA regressions first",
+            "Compile headless Mac libraries and run twenty exact DATA regressions first",
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Acquire and verify the two fixed Android support archives as DATA",
             "Download only the exact accepted M archive (no rebuild or fallback)",
@@ -8603,6 +8702,25 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
 
 class ShippingVaultHelperAquaDataTests(unittest.TestCase):
     """SOURCE/parser/custody DATA, never native Keychain or helper qualification."""
+
+    def test_enabled_candidate_selector_is_reported_honestly_without_native_finality_substitution(self):
+        root = PATH.parents[2]
+        runtime = (root / "desktop/src-tauri/src/runtime.rs").read_text()
+        observer = (root / "desktop/src-tauri/src/installed_shell_observation_macos_vault.rs").read_text()
+        self.assertIn("INSTALLED_MAC_PERSISTENCE_QUALIFIED: bool = true;", runtime)
+        self.assertIn('"normalPersistenceEnabled":crate::runtime::INSTALLED_MAC_PERSISTENCE_QUALIFIED', observer)
+        self.assertIn("if !self.final_originals", observer)
+        self.assertIn("!control.completed()", observer)
+        for case in M.VAULT_HELPER_CASES:
+            for negative in (False, True) if case != M.VAULT_HELPER_CASES[1] else (False,):
+                report = M._expected_vault_helper(case, negative=negative)
+                self.assertIs(report["normalPersistenceEnabled"], True)
+                self.assertEqual(report["mechanism"], "original-document-shipping-helper-v1")
+                self.assertEqual(M._vault_helper_report(report, case), report)
+                for value in (False, 0, 1, None, "true"):
+                    malformed = deepcopy(report); malformed["normalPersistenceEnabled"] = value
+                    with self.subTest(case=case, negative=negative, value=value), self.assertRaises(M.Refused):
+                        M._vault_helper_report(malformed, case)
 
     def test_closed_scope_uses_disjoint_real_home_route_and_original_invocation(self):
         self.assertEqual(M.selected_cases(M.VAULT_HELPER_SCOPE), M.VAULT_HELPER_CASES)

@@ -316,7 +316,8 @@ test('project-path IPC keeps exact bounded bindings and rejects malformed or pri
 test('shared-slot project-path status cannot supply credential authority or use credential cancellation', async () => {
   const operation = { operationId: 3, operation: 'choose-project-path', phase: 'picking', reason: 'none', source: 'not-run', settlement: 'pending', storageOutcome: null,
     selectionToken: null, assessment: null, preview: null };
-  const status = { schemaVersion: 2, statusRevision: 1, persistence: null, mode: 'session', capability: { available: true, reason: 'none' }, context: null,
+  const status = { schemaVersion: 3, statusRevision: 1, persistence: null, mode: 'session', capability: { available: true, reason: 'none' }, context: null,
+    modes: { session: { available: true, reason: 'none' }, encrypted: { available: false, reason: 'unqualified' } },
     operation, records: [], assignments: [] };
   assert.deepEqual(parseAssetStatus(status), status);
   const token = 'a'.repeat(32);

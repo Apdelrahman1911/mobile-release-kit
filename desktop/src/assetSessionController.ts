@@ -99,6 +99,8 @@ export function assetContextReason(state: AssetDisplayState): string | null {
 }
 export function assetStorageReason(state: AssetDisplayState): string | null {
   if (assetStorageWritable(state.status)) return null;
+  const status = state.status;
+  if (status && status.mode !== 'closed' && !status.modes[status.mode].available) return ASSET_REASON_HELP[status.modes[status.mode].reason];
   const persistence = state.status?.persistence;
   if (persistence) return persistence.reason !== 'none' ? ASSET_REASON_HELP[persistence.reason] :
     persistence.state === 'mutating' || persistence.state === 'initializing' ? 'The original vault operation is still pending. Wait for its effect, durability and cleanup status before another action.' :
@@ -347,19 +349,19 @@ export class AssetSessionController {
     return true;
   }
   open(mode: 'session' | 'encrypted' = 'session'): boolean {
-    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'closed' || !this.idle()) return false;
+    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'closed' || !this.state.status.modes[mode].available || !this.idle()) return false;
     if (mode === 'session') return this.run('open', () => this.api!.openAssetSession());
     return this.run('open-vault', () => this.api!.openAssetSession('encrypted'), this.phase({ type: 'vault', change: 'open' }, 'open-vault', null));
   }
   prepareInitialize(): boolean {
-    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'encrypted' ||
+    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'encrypted' || !this.state.status.modes.encrypted.available ||
         this.state.status.persistence?.state !== 'uninitialized' || this.state.status.persistence.keyAccess !== 'locked' || !this.idle()) return false;
     this.reviewCeiling = null;
     return this.run('prepare-initialize', () => this.api!.prepareVaultInitialize(), this.phase({ type: 'vault', change: 'initialize' }, 'prepare-initialize', 'initialize'));
   }
   unlock(): boolean {
     const persistence = this.state.status?.persistence;
-    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'encrypted' || persistence?.keyAccess !== 'locked' ||
+    if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'encrypted' || !this.state.status.modes.encrypted.available || persistence?.keyAccess !== 'locked' ||
         !['locked', 'interrupted'].includes(persistence.state) || !this.idle()) return false;
     return this.run('unlock', () => this.api!.unlockVault(), this.phase({ type: 'vault', change: 'unlock' }, 'unlock', null));
   }

@@ -725,7 +725,7 @@ fn source_idle(document: &DocumentBinding, id: u32, reason: &str) -> bool {
     if edit::bounded(&status, 16 * 1024).is_err() { return false; }
     let Ok(value) = serde_json::to_value(status) else { return false; };
     let operation = &value["operation"];
-    value["schemaVersion"] == 2 && value["mode"] == "closed" && value["capability"]["available"] == false
+    value["schemaVersion"] == 3 && value["mode"] == "closed" && value["capability"]["available"] == false
         && value["capability"]["reason"].as_str().is_some_and(|reason| matches!(reason, "unsupported-platform" | "document-lost" | "shutdown"))
         && value["context"].is_null() && value["records"].as_array().is_some_and(Vec::is_empty)
         && value["assignments"].as_array().is_some_and(Vec::is_empty)

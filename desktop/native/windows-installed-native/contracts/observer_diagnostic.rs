@@ -153,15 +153,15 @@ fn refusal_and_snapshots_do_not_hold_record_across_diagnostic_io() {
 }
 
 #[test]
-fn normal_ui_source_idle_matches_v2_and_keeps_cancel_finality_guards() {
+fn normal_ui_source_idle_matches_v3_and_keeps_cancel_finality_guards() {
     // SOURCE contract only: no native status, dialog, process or runtime is made.
     let session = include_str!("../../../src-tauri/src/asset_session.rs");
     let producer = between(session, "fn status_data(", "pub(crate) fn status(");
-    assert_eq!(producer.matches("schema_version: 2").count(), 2);
-    assert!(!producer.contains("schema_version: 1"));
+    assert_eq!(producer.matches("schema_version: 3").count(), 2);
+    assert!(!producer.contains("schema_version: 1") && !producer.contains("schema_version: 2"));
     let consumer = between(OBSERVER, "fn source_idle(", "// Synchronous expressions");
-    assert!(consumer.contains(r#"value["schemaVersion"] == 2 && value["mode"] == "closed""#));
-    assert!(!consumer.contains(r#"value["schemaVersion"] == 1"#));
+    assert!(consumer.contains(r#"value["schemaVersion"] == 3 && value["mode"] == "closed""#));
+    assert!(!consumer.contains(r#"value["schemaVersion"] == 1"#) && !consumer.contains(r#"value["schemaVersion"] == 2"#));
     for guard in [
         "let status = document.status();", "edit::bounded(&status, 16 * 1024)",
         r#"value["capability"]["available"] == false"#,

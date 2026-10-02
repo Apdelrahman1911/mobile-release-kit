@@ -374,6 +374,15 @@ pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = true;
 // Ordinary fixed Mac session selection. This does not replace installed-runtime,
 // original-document, exact context/kind or native source-custody qualification.
 pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = true;
+// Reviewed private ordinary-persistence candidate. This production selection
+// still requires the original installed Supervisor/document and helper pins.
+// These exact enabled bytes/configuration need native acceptance before delivery;
+// compiler/DATA or selected-helper evidence alone is not that acceptance.
+pub(crate) const INSTALLED_MAC_PERSISTENCE_QUALIFIED: bool = true;
+fn persistence_helper_pins(hash: Option<&str>, size: Option<&str>) -> bool {
+    hash.is_some_and(sha) && size.and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|bytes| bytes > 0 && bytes <= 32 * 1024 * 1024)
+}
 // Project registration and signing-file selection do not qualify the separate
 // project-relative field picker. Actual AppKit/APFS acceptance remains owed.
 pub(crate) const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = false;
@@ -1249,6 +1258,17 @@ impl RuntimeConfig {
     }
     pub(crate) fn installed_session_available(&self, identity: &std::sync::Arc<()>) -> bool {
         self.installed_session_profile(Some(identity))
+    }
+    // Eligibility DATA only: no filesystem, helper launch or Keychain probe.
+    // This shares the ONE original Supervisor/document binding, not a second
+    // claim. Actual helper/code/store/provider custody is rechecked per operation.
+    pub(crate) fn installed_persistence_available(&self, identity: &std::sync::Arc<()>) -> bool {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        { INSTALLED_MAC_PERSISTENCE_QUALIFIED && !cfg!(feature = "windows-runtime-publisher")
+            && self.installed_session_profile(Some(identity))
+            && persistence_helper_pins(option_env!("MRK_MACOS_VAULT_HELPER_SHA256"), option_env!("MRK_MACOS_VAULT_HELPER_BYTES")) }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        { let _ = identity; false }
     }
     fn installed_method_available(&self, name: &str) -> bool {
         #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
@@ -3551,4 +3571,32 @@ pub(crate) mod windows_version {
             assert!(runtime.resolve(Instant::now()).is_err());
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn persistence_selection_keeps_original_document_and_fixed_helper_pin_bounds() {
+    use std::sync::Arc;
+    let hash = "b".repeat(64);
+    assert!(persistence_helper_pins(Some(&hash), Some("1")));
+    assert!(persistence_helper_pins(Some(&hash), Some("33554432")));
+    for (digest, size) in [(None, Some("1")), (Some("invalid"), Some("1")), (Some(hash.as_str()), None),
+        (Some(hash.as_str()), Some("0")), (Some(hash.as_str()), Some("33554433")),
+        (Some(hash.as_str()), Some("-1")), (Some(hash.as_str()), Some("18446744073709551616"))] {
+        assert!(!persistence_helper_pins(digest, size));
+    }
+    let mut original = RuntimeConfig::packaged(PathBuf::new());
+    let mut second = original.clone();
+    let document = Arc::new(()); let replacement = Arc::new(());
+    assert!(!original.installed_persistence_available(&document));
+    original.claim_original_supervisor(); original.bind_original_session_document(&document);
+    second.claim_original_supervisor(); second.bind_original_session_document(&replacement);
+    assert!(!second.installed_persistence_available(&replacement));
+    assert!(!original.installed_persistence_available(&replacement));
+    let eligible = cfg!(all(target_os = "macos", target_arch = "aarch64")) && INSTALLED_MAC_PERSISTENCE_QUALIFIED
+        && !cfg!(feature = "windows-runtime-publisher") && original.installed_session_available(&document)
+        && persistence_helper_pins(option_env!("MRK_MACOS_VAULT_HELPER_SHA256"), option_env!("MRK_MACOS_VAULT_HELPER_BYTES"));
+    assert_eq!(original.installed_persistence_available(&document), eligible);
+    drop(document); original.bind_original_session_document(&replacement);
+    assert!(!original.installed_persistence_available(&replacement));
 }

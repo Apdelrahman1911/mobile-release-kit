@@ -299,7 +299,7 @@ jobs:
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_OWNER_PINS
-      - name: Compile headless Mac libraries and run thirteen exact DATA regressions first
+      - name: Compile headless Mac libraries and run twenty exact DATA regressions first
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
         timeout-minutes: 10
         shell: bash
@@ -335,17 +335,24 @@ jobs:
               "ios_toolchain::tests::fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup",
               "asset_session::tests::macos_input_context_matrix_keeps_platform_kinds_and_ios_signing_separate",
               "asset_session::tests::macos_cached_record_preview_publication_and_old_context_cannot_bypass_kind_gate",
+              "asset_session::vault::tests::explicit_vault_loans_supply_two_signing_inputs_and_preserve_actual_borrowed_backing_on_lock",
+              "asset_session::vault::tests::bound_loan_publication_refuses_changed_lineage_or_unsettled_original_without_taking_payload",
+              "asset_session::vault::tests::loan_currentness_rejects_equal_counter_replacement_new_context_registry_and_reassignment",
+              "asset_session::vault::tests::reassigned_loan_census_is_not_refunded_before_off_lock_retirement_and_restore_preserves_it",
+              "asset_session::vault::tests::schema_three_advertises_storage_modes_without_opening_or_probing_a_vault",
+              "asset_session::vault::tests::encrypted_projection_redacts_locked_read_only_and_mutating_authority",
+              "runtime::persistence_selection_keeps_original_document_and_fixed_helper_pin_bounds",
           )
           native_names = (
               "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
               "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
           )
           libraries = (
-              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 11, "headless"),
+              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 18, "headless"),
               ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",
                ["default"], native_names, 2, "headless-native"),
           )
-          receipt = {"schemaVersion": 1, "scope": "eleven-main-and-two-native-macos-headless-data-regressions",
+          receipt = {"schemaVersion": 1, "scope": "eighteen-main-and-two-native-macos-headless-data-regressions",
                      "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                      "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
                      "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "names": names + native_names, "targets": [],
@@ -2350,6 +2357,7 @@ jobs:
           set -o noclobber
           cd desktop
           npm ci --ignore-scripts --no-audit --no-fund
+          "$MRK_PYTHON" -I -S -B tools/macos_frontend_data_checks.py
           npm run build
           cd src-tauri
           set +e
@@ -2784,6 +2792,9 @@ jobs:
             ${{ steps.work.outputs.root }}/headless-native-tests.stderr
             ${{ steps.work.outputs.root }}/headless-native-tests.status
             ${{ steps.work.outputs.root }}/headless-tests.receipt.json
+            ${{ steps.work.outputs.root }}/frontend-data.receipt.json
+            ${{ steps.work.outputs.root }}/frontend-data-tests.stdout
+            ${{ steps.work.outputs.root }}/frontend-data-tests.stderr
             ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl
             ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt
             ${{ steps.work.outputs.root }}/bounded-diagnostics.json

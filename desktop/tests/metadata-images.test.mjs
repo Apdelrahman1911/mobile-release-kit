@@ -757,8 +757,10 @@ test('guided Metadata UI displays real metadata, not fabricated thumbnails or br
 
 
 function genericImageStatus(revision = 0, operationPatch = null) {
-  return { schemaVersion: 2, statusRevision: revision, mode: 'closed', persistence: null,
-    capability: { available: true, reason: 'none' }, context: null, records: [], assignments: [],
+  return { schemaVersion: 3, statusRevision: revision, mode: 'closed', persistence: null,
+    capability: { available: true, reason: 'none' },
+    modes: { session: { available: true, reason: 'none' }, encrypted: { available: false, reason: 'unqualified' } },
+    context: null, records: [], assignments: [],
     operation: operationPatch === null ? null : { operationId: 73, operation: 'choose-images', phase: 'capturing',
       reason: 'none', source: 'pending', settlement: 'pending', storageOutcome: null,
       selectionToken: null, assessment: null, preview: null, ...operationPatch } };

@@ -1,6 +1,7 @@
 // App-owned coordination only, following OfflinePreflightController's original
 // observer/one-Start lifetime. A view, Promise or saved comparison is not native
 // custody, qualification, cancellation settlement or a release approval.
+import { assetStorageWritable } from './assetSessionProtocol.ts';
 import { isDirty } from './drafts.ts';
 import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import { parseReleaseVersionObservation } from './releaseVersion.ts';
@@ -107,10 +108,10 @@ function signingObservation(project: IOSArchiveProject | null, assets: AssetDisp
   if (!project?.signingPolicy) return unavailable('Save the Apple Team ID and reviewed Apple Distribution certificate SHA-256 fingerprint in Project settings, then refresh saved configuration.');
   if (project.dirtyDraft) return unavailable('Signed export requires the credential context to match the saved configuration. Save or explicitly revert the unsaved draft, then refresh, read the saved version and assign the current inputs again.');
   const status = assets?.status, context = status?.context, operation = status?.operation;
-  if (!assets || assets.mode !== 'native' || !status || status.mode !== 'session' || !status.capability.available ||
+  if (!assets || assets.mode !== 'native' || !status || !assetStorageWritable(status) || !status.capability.available ||
       assets.blocked || assets.observationFailed || assets.originPending || assets.busy || assets.updatingContext || !assets.contextCurrent ||
       operation && (operation.phase !== 'idle' || operation.settlement !== 'known'))
-    return unavailable('In Credentials, open the separately admitted session and finish its original selection, assessment, keep and assignment steps. An active, stale or unverified session cannot supply signing input.');
+    return unavailable('In Credentials, choose available memory-only storage or unlock your encrypted vault, then finish selection, assessment, save and separate assignment. An active, locked, read-only, stale or unverified source cannot supply signing input.');
   if (!context || context.projectId !== project.projectId || context.platform !== 'ios' || context.stage !== 'candidate' || context.purpose !== 'signing' ||
       assets.scope.platform !== 'ios' || assets.scope.stage !== 'candidate' || assets.scope.purpose !== 'signing')
     return unavailable('In Credentials, submit this saved project with iOS · Candidate / internal testing · Build / signing only, then assign its inputs. Other projects or release contexts cannot donate material.');

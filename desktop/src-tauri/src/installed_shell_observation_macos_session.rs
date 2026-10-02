@@ -175,7 +175,7 @@ impl Record {
         self.returns[n] += 1; true
     }
     fn observe_status(&mut self, status: &Value) -> bool {
-        if status["schemaVersion"] != 2 || !status["persistence"].is_null()
+        if status["schemaVersion"] != 3 || !status["persistence"].is_null()
             || status["records"].as_array().is_none_or(|rows| rows.len() > 2)
             || status["assignments"].as_array().is_none_or(|rows| rows.len() > 2)
             || status["operation"]["settlement"].as_str().is_some_and(|s| matches!(s, "unknown" | "late-known")) { return false; }
@@ -439,10 +439,10 @@ pub(super) fn data_checks() -> bool {
             if choose_id(case, i as u8) != Some(id) || file_index(case, id) != Some(i as u8) { return false; }
         }
     }
-    let status = json!({"schemaVersion":2,"statusRevision":1,"persistence":null,"records":[],"assignments":[],"operation":null});
+    let status = json!({"schemaVersion":3,"statusRevision":1,"persistence":null,"records":[],"assignments":[],"operation":null});
     let mut record = Record::new(Case::SigningInputs);
     if !record.observe_status(&status) || record.report(true).is_some() { return false; }
-    for (key, replacement) in [("schemaVersion", json!(1)), ("persistence", json!({})),
+    for (key, replacement) in [("schemaVersion", json!(1)), ("schemaVersion", json!(2)), ("persistence", json!({})),
         ("operation", json!({"settlement":"unknown"})), ("operation", json!({"settlement":"late-known"}))] {
         let mut changed = status.clone(); changed[key] = replacement;
         if record.observe_status(&changed) { return false; }
@@ -528,7 +528,7 @@ pub(super) fn data_checks() -> bool {
         let snapshot = InstalledMacSessionSnapshot { status: status.clone(), originals, originals_settled: true, empty: true };
         if partial.final_originals(&snapshot) || partial.report(true).is_some() { return false; }
     }
-    let lock_status = json!({"schemaVersion":2,"statusRevision":1,"persistence":null,"records":[],"assignments":[],
+    let lock_status = json!({"schemaVersion":3,"statusRevision":1,"persistence":null,"records":[],"assignments":[],
         "operation":{"operationId":17,"operation":"lock","phase":"idle","settlement":"known","reason":"user-cancelled"}});
     let mut lock_record = android.clone(); lock_record.locked = false;
     let locked = InstalledMacSessionSnapshot { status: lock_status.clone(), originals: 17, originals_settled: true, empty: true };

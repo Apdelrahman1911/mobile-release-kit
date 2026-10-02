@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { IOSArchiveController, iosArchiveOwnerReason, iosArchiveHelp, iosArchiveInputHelp,
   iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp } from '../src/iosArchive.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
+import { parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
@@ -81,11 +82,19 @@ function assetState(optional = []) {
   return { mode: 'native', scope: { platform: 'ios', stage: 'candidate', purpose: 'signing' }, contextCurrent: true,
     busy: null, updatingContext: false, observing: false, observationFailed: false, blocked: false, error: null, previewDeadline: null,
     entryGeneration: 1, selectionKind: null, cancelledOperationId: null, originPending: false, intent: null, reviewReady: false,
-    status: { schemaVersion: 1, statusRevision: 7, mode: 'session', capability: { available: true, reason: 'none' },
+    status: { schemaVersion: 3, statusRevision: 7, mode: 'session', persistence: null, capability: { available: true, reason: 'none' },
+      modes: { session: { available: true, reason: 'none' }, encrypted: { available: true, reason: 'none' } },
       context: { revision: 3, projectId: 'p1', platform: 'ios', stage: 'candidate', purpose: 'signing' },
-      operation: { operationId: 9, operation: 'bind', phase: 'idle', reason: 'none', source: 'captured', settlement: 'known', selectionToken: null, assessment: null, preview: null },
-      records: assignments.map((row) => ({ kind: row.kind, recordId: row.recordId, revision: row.recordRevision, availability: 'assigned' })),
+      operation: { operationId: 9, operation: 'bind', phase: 'idle', reason: 'none', source: 'captured', settlement: 'known', storageOutcome: null, selectionToken: null, assessment: null, preview: null },
+      records: assignments.map((row) => ({ kind: row.kind, recordId: row.recordId, revision: row.recordRevision, availability: 'assigned', storage: 'session', label: null, payloadState: 'assessed' })),
       assignments: assignments.map((row) => ({ ...row, availability: 'available' })) } };
+}
+function vaultAssetState(optional = []) {
+  const value = assetState(optional);
+  value.status.mode = 'encrypted';
+  value.status.persistence = { state: 'unlocked', reason: 'none', keyAccess: 'read-write' };
+  for (const record of value.status.records) record.storage = 'encrypted';
+  return value;
 }
 function signedCompleted(op, selected = selection({ symbolsPolicy: 'retain' })) {
   const value = completed(op, selected);
@@ -415,6 +424,37 @@ test('signed controller binds only saved public policy and exact idle assigned s
   h.controller.setVisible(false); assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 0);
   h.reply(sent.call, status(2, signedCompleted(op))); await sent.done;
   assert.equal(h.state.status.operation.result.scope, IOS_SIGNED_ARCHIVE_SCOPE); assert.equal(iosArchiveOwnerReason(h.state), null);
+});
+
+test('eligible encrypted read-write assignments use the same signed owner and private-free request as memory assignments', async (t) => {
+  const optional = ['ios-firebase', 'project-read-token'];
+  const assets = vaultAssetState(optional); assert.deepEqual(parseAssetStatus(assets.status), assets.status);
+  const h = harness(t, { savedSnapshot: signedSnapshot(), assets }); await h.ready;
+  assert.equal(h.controller.setArchiveMode('signed'), true); const op = await reviewed(h);
+  assert.deepEqual(h.calls[0].input.signing, signingPolicy(optional));
+  assert.doesNotMatch(JSON.stringify(h.calls[0].input), /password|privateKey|profileBytes|vaultKey|signingTools/);
+  h.controller.setAcknowledged(OP, OWNER, true); assert.equal(h.controller.startReason(), null);
+  const sent = start(h, op); assert.deepEqual(sent.call.input, { operationId: OP, ownerGeneration: OWNER, consentVersion: IOS_SIGNED_ARCHIVE_CONSENT });
+  h.reply(sent.call, status(2, signedCompleted(op))); await sent.done;
+  assert.equal(h.state.status.operation.result.scope, IOS_SIGNED_ARCHIVE_SCOPE);
+});
+
+test('encrypted Lock, read-only, eligibility loss and stale context retire late signed preparation without rearming Start', async (t) => {
+  for (const mutate of [
+    (a) => { a.status.persistence = { state: 'locked', reason: 'none', keyAccess: 'locked' }; a.status.context = null; a.status.records = []; a.status.assignments = []; },
+    (a) => { a.status.persistence = { state: 'interrupted', reason: 'vault-interrupted', keyAccess: 'read-only' }; },
+    (a) => { a.status.modes.encrypted = { available: false, reason: 'unqualified' }; },
+    (a) => { a.contextCurrent = false; },
+  ]) {
+    const h = harness(t, { savedSnapshot: signedSnapshot(), assets: vaultAssetState() }); await h.ready; h.controller.setArchiveMode('signed');
+    const preparing = h.controller.prepare(), call = h.calls.at(-1), before = h.state.contextGeneration;
+    const changed = clone(h.assets); mutate(changed); h.setAssets(changed);
+    assert.ok(h.state.contextGeneration > before); assert.equal(h.state.consent, null);
+    const op = operation(call.input); h.reply(call, status(1, op)); await preparing;
+    assert.equal(h.state.consent, null); assert.equal(h.calls.at(-1).kind, 'cancel');
+    await h.controller.start(OP, OWNER); assert.equal(h.calls.filter((entry) => entry.kind === 'start').length, 0);
+    h.reply(h.calls.at(-1), status(2, terminal(op, 'cancelled', 'context-changed'))); await flush();
+  }
 });
 
 test('signed preparation refuses absent, stale, foreign, pending and partially available assignment sources', async (t) => {

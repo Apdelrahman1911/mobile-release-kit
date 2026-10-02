@@ -132,13 +132,15 @@ final class NormalAppUITests: XCTestCase {
 
 
     // Finite synthetic files only. No existing project, .git, credential, tool
-    // input or script is copied. Retain the small fixture for job retirement:
+    // input or script is copied from a user. The separate persistence profile
+    // contains inert signature-less envelopes, never usable signing material.
+    // Retain the small fixture for job retirement:
     // XCTest notRunning does not prove all-worker finality for deletion.
     private struct FixtureSpec: Decodable {
         let schemaVersion: Int
         let files: [String: String]
         let stages: [String: [String: String]]
-        let templateDataSHA256: String
+        let templateDataSHA256: String?
     }
     private struct StatFacts: Equatable {
         let device: dev_t
@@ -147,6 +149,7 @@ final class NormalAppUITests: XCTestCase {
         let uid: uid_t
         let gid: gid_t
         let links: nlink_t
+        let flags: UInt32
         let bytes: off_t
         let modifiedSeconds: time_t
         let modifiedNanoseconds: Int
@@ -154,17 +157,19 @@ final class NormalAppUITests: XCTestCase {
         let changedNanoseconds: Int
         init(_ s: stat) {
             device = s.st_dev; inode = s.st_ino; mode = s.st_mode
-            uid = s.st_uid; gid = s.st_gid; links = s.st_nlink; bytes = s.st_size
+            uid = s.st_uid; gid = s.st_gid; links = s.st_nlink; flags = s.st_flags; bytes = s.st_size
             modifiedSeconds = s.st_mtimespec.tv_sec; modifiedNanoseconds = s.st_mtimespec.tv_nsec
             changedSeconds = s.st_ctimespec.tv_sec; changedNanoseconds = s.st_ctimespec.tv_nsec
         }
         func sameDirectory(_ other: StatFacts) -> Bool {
             // Legitimate child creation changes directory timestamps/link count.
             device == other.device && inode == other.inode && mode == other.mode
-                && uid == other.uid && gid == other.gid
+                && uid == other.uid && gid == other.gid && flags == other.flags
         }
     }
     private final class LocalFixture {
+        enum Profile: Equatable { case projectEdits, persistentCredentials }
+        enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
         static let title = "project/release/store/android/fr-FR/title.txt"
@@ -189,6 +194,14 @@ final class NormalAppUITests: XCTestCase {
             }
             return result
         }
+        static let persistenceOriginals: Set<String> = [config, version, "project/.gitignore", "project/README-user.txt",
+            "project/ios/MRKObserved.xcodeproj/project.pbxproj",
+            "project/ios/MRKObserved.xcodeproj/xcshareddata/xcschemes/MRKObserved.xcscheme",
+            "project/ios/MRKObserved.xcodeproj/project.xcworkspace/contents.xcworkspacedata",
+            "project/ios/MRKObserved/main.m", "project/ios/MRKObserved/Info.plist",
+            "sources/synthetic.p12", "sources/synthetic.mobileprovision"]
+        static let applicationName = "dev.mobile-release-kit.desktop"
+        static let storeControls: [String: Int] = ["vault-lock": 0, "initialization-reservation": 48, "vault-header": 104]
         private struct Directory {
             let fd: Int32
             let parent: Int32?
@@ -204,6 +217,14 @@ final class NormalAppUITests: XCTestCase {
         private var current: [String: File] = [:]
         private var acceptedStages: Set<String> = []
         private var closeErrors: [String] = []
+        private var applicationSupport: Directory?
+        private var applicationDirectory: Directory?
+        private var vaultDirectory: Directory?
+        private var storeCurrent: [String: File] = [:]
+        private var p12Record: String?
+        private var profileRecord: String?
+        private var replacedP12 = false
+        private var deletedProfile = false
         private(set) var rootPath = ""
         var projectPath: String { rootPath + "/project" }
         var sourcesPath: String { rootPath + "/sources" }
@@ -259,14 +280,20 @@ final class NormalAppUITests: XCTestCase {
             try Self.need(closeErrors.isEmpty, "an earlier consuming close failed")
             let (parent, name) = Self.parts(path)
             guard let original = directories[parent] else { throw Refusal.condition("fixture: missing fixed parent") }
+            return try readLeaf(original, name: name)
+        }
+        private func readLeaf(_ original: Directory, name: String, privateOnly: Bool = false) throws -> File {
+            try Self.need(closeErrors.isEmpty, "an earlier consuming close failed")
             try checkDirectory(original)
             let fd = openat(original.fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-            try Self.need(fd >= 0, "fixed leaf open failed: " + path)
+            try Self.need(fd >= 0, "fixed leaf open failed")
             defer { if Darwin.close(fd) != 0 { closeErrors.append("fixed-leaf-close") } }
             let before = try Self.facts(fd)
             try Self.need(before.mode & mode_t(S_IFMT) == mode_t(S_IFREG) && before.links == 1
                 && before.uid == getuid() && before.gid == getgid() && before.bytes >= 0 && before.bytes <= 32 * 1024
-                && before.mode & 0o7022 == 0, "leaf shape/mode/limit: " + path)
+                && before.mode & 0o7022 == 0
+                && (!privateOnly || before.mode & 0o7777 == 0o600 && before.flags == 0
+                    && before.device == original.facts.device), "leaf shape/mode/limit")
             var bytes = Data(), buffer = [UInt8](repeating: 0, count: 4096)
             while true {
                 let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!, $0.count) }
@@ -276,7 +303,7 @@ final class NormalAppUITests: XCTestCase {
                 bytes.append(contentsOf: buffer.prefix(count))
             }
             try Self.need(bytes.count == before.bytes && before == Self.facts(fd)
-                && before == Self.named(original.fd, name), "fixed leaf changed during observation: " + path)
+                && before == Self.named(original.fd, name), "fixed leaf changed during observation")
             return File(bytes: bytes, facts: before)
         }
         private func children(_ directory: Directory) throws -> Set<String> {
@@ -331,8 +358,10 @@ final class NormalAppUITests: XCTestCase {
             }
             try Self.need(closeErrors.isEmpty, "a consuming file/roster close failed")
         }
-        func prepare() throws {
-            guard let url = Bundle(for: NormalAppUITests.self).url(forResource: "normal-project-v1", withExtension: "json") else {
+        func prepare(_ profile: Profile = .projectEdits) throws {
+            try Self.need(rootPath.isEmpty && current.isEmpty, "fixture preparation was repeated")
+            let resourceName = profile == .projectEdits ? "normal-project-v1" : "normal-persistence-v1"
+            guard let url = Bundle(for: NormalAppUITests.self).url(forResource: resourceName, withExtension: "json") else {
                 throw Refusal.condition("fixture: bundled fixed DATA absent")
             }
             let resource = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -359,13 +388,15 @@ final class NormalAppUITests: XCTestCase {
             if Darwin.close(resource) != 0 { closeErrors.append("resource-close") }
             try Self.need(closeErrors.isEmpty, "bundled DATA close failed")
             let spec = try JSONDecoder().decode(FixtureSpec.self, from: data)
-            let stagePaths: [String: Set<String>] = [
+            let stagePaths: [String: Set<String>] = profile == .projectEdits ? [
                 "config": [Self.config, "project/.gitignore"], "workflows": Set(Self.callers),
                 "text": [Self.title], "version": [Self.version], "images": Set(Self.imageTargets)
-            ]
-            try Self.need(spec.schemaVersion == 1 && Set(spec.files.keys) == Self.originals
+            ] : [:]
+            let expectedOriginals = profile == .projectEdits ? Self.originals : Self.persistenceOriginals
+            try Self.need(spec.schemaVersion == 1 && Set(spec.files.keys) == expectedOriginals
                 && Set(spec.stages.keys) == Set(stagePaths.keys)
-                && spec.templateDataSHA256.count == 64, "fixed DATA inventory mismatch")
+                && (profile == .projectEdits ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),
+                "fixed DATA inventory mismatch")
             func decode(_ values: [String: String]) throws -> [String: Data] {
                 var decoded: [String: Data] = [:]
                 for (path, encoded) in values {
@@ -416,7 +447,7 @@ final class NormalAppUITests: XCTestCase {
             }
             for path in originals.keys.sorted() {
                 let bytes = originals[path]!, (parent, name) = Self.parts(path), original = directories[parent]!
-                let mode: mode_t = path.hasPrefix("sources/") ? 0o644 : 0o600
+                let mode: mode_t = profile == .projectEdits && path.hasPrefix("sources/") ? 0o644 : 0o600
                 let fd = openat(original.fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
                 try Self.need(fd >= 0, "exclusive file creation failed")
                 do {
@@ -441,6 +472,129 @@ final class NormalAppUITests: XCTestCase {
             }
             try checkRoster()
             print("MRK_NORMAL_PROJECT_FIXTURE=retained-for-disposable-job-retirement;path=\(rootPath);bytes=\(current.values.reduce(0) { $0 + $1.bytes.count })")
+        }
+        // Read-only admission BEFORE app launch. This does not adopt an existing
+        // store, create a substitute app-data location, or inspect a Keychain.
+        func admitDefaultVault() throws {
+            try Self.need(applicationSupport == nil && applicationDirectory == nil && vaultDirectory == nil,
+                          "default-store admission repeated")
+            var parent = try adoptDirectory(open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: nil, name: "/")
+            anchors.append(parent)
+            for name in ["Users", "runner", "Library", "Application Support"] {
+                parent = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
+                                            parent: parent.fd, name: name)
+                anchors.append(parent)
+                try Self.need((parent.facts.uid == 0 || parent.facts.uid == getuid()) && parent.facts.mode & 0o022 == 0,
+                              "default-store ancestor policy refused")
+            }
+            applicationSupport = parent
+            try assertDefaultVaultAbsent()
+        }
+        func assertDefaultVaultAbsent() throws {
+            guard let support = applicationSupport else { throw Refusal.condition("fixture: default-store admission absent") }
+            try checkDirectory(support)
+            var info = stat()
+            let result = fstatat(support.fd, Self.applicationName, &info, AT_SYMLINK_NOFOLLOW)
+            let error = errno
+            try Self.need(result == -1 && error == ENOENT, "existing default app-data is not task-owned")
+            // A bounded namespace observation supplements the exact NoFollow
+            // lookup. It never reads or changes unrelated sibling contents.
+            try Self.need(try children(support).allSatisfy { $0.precomposedStringWithCanonicalMapping.lowercased() != Self.applicationName },
+                          "default app-data namespace collision")
+        }
+        private func privateStoreDirectory(_ parent: Directory, name: String) throws -> Directory {
+            try checkDirectory(parent)
+            let directory = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
+                                               parent: parent.fd, name: name)
+            try Self.need(directory.facts.uid == getuid() && directory.facts.gid == getgid()
+                && directory.facts.mode & 0o7777 == 0o700 && directory.facts.flags == 0
+                && directory.facts.device == parent.facts.device, "new default-store directory policy refused")
+            return directory
+        }
+        private func storeSnapshot() throws -> [String: File] {
+            guard let support = applicationSupport else { throw Refusal.condition("fixture: default-store admission absent") }
+            try checkDirectory(support)
+            if applicationDirectory == nil { applicationDirectory = try privateStoreDirectory(support, name: Self.applicationName) }
+            guard let app = applicationDirectory else { throw Refusal.condition("fixture: default app-data missing") }
+            try Self.need(try children(app) == ["credential-vault-v1"], "unexpected default app-data output")
+            if vaultDirectory == nil { vaultDirectory = try privateStoreDirectory(app, name: "credential-vault-v1") }
+            guard let vault = vaultDirectory else { throw Refusal.condition("fixture: default vault missing") }
+            let names = try children(vault)
+            let controls = Set(Self.storeControls.keys)
+            let records = names.subtracting(controls)
+            try Self.need(names.isSuperset(of: controls) && records.count <= 2 && records.allSatisfy { name in
+                let suffix = name.dropFirst("record-".count)
+                return name.hasPrefix("record-") && suffix.utf8.count == 32
+                    && suffix.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+            }, "unexpected default-store roster or mutation debris")
+            let canaries = ["private-envelope-only-canary", "MRK-inert-password-v1", "MRK-inert-password-v2",
+                            "Synthetic distribution input", "Synthetic distribution replacement", "Synthetic profile input"]
+            var result: [String: File] = [:]
+            var identities: Set<String> = []
+            var total = 0
+            for name in names.sorted() {
+                let file = try readLeaf(vault, name: name, privateOnly: true)
+                try Self.need(identities.insert("\(file.facts.device):\(file.facts.inode)").inserted,
+                              "default-store leaves alias one original")
+                if let length = Self.storeControls[name] { try Self.need(file.bytes.count == length, "default-store control length") }
+                else { try Self.need(file.bytes.count >= 248, "default-store record framing length") }
+                total += file.bytes.count
+                try Self.need(total <= 64 * 1024 && canaries.allSatisfy { file.bytes.range(of: Data($0.utf8)) == nil },
+                              "default-store byte bound or synthetic plaintext canary")
+                result[name] = file
+            }
+            try Self.need(try children(vault) == names, "default-store roster changed during readback")
+            try checkDirectory(app); try checkDirectory(support)
+            return result
+        }
+        func acceptStore(_ change: StoreChange) throws {
+            let observed = try storeSnapshot()
+            let controls = Set(Self.storeControls.keys)
+            let before = Set(storeCurrent.keys), after = Set(observed.keys)
+            var changed: Set<String> = []
+            switch change {
+            case .initialize:
+                try Self.need(storeCurrent.isEmpty && after == controls && p12Record == nil && profileRecord == nil,
+                              "default-store initialization stage")
+            case .saveP12:
+                let added = after.subtracting(before)
+                try Self.need(before == controls && p12Record == nil && added.count == 1 && after.isSuperset(of: before),
+                              "default-store P12 save stage")
+                p12Record = added.first
+            case .saveProfile:
+                let added = after.subtracting(before)
+                try Self.need(p12Record != nil && profileRecord == nil && before.count == 4
+                    && added.count == 1 && after.isSuperset(of: before), "default-store profile save stage")
+                profileRecord = added.first
+            case .replaceP12:
+                guard let name = p12Record, let old = storeCurrent[name], let new = observed[name] else {
+                    throw Refusal.condition("fixture: replacement original missing")
+                }
+                try Self.need(!replacedP12 && profileRecord != nil && before.count == 5 && after == before
+                    && new.facts.inode != old.facts.inode && new.bytes != old.bytes, "default-store replacement stage")
+                changed.insert(name); replacedP12 = true
+            case .deleteProfile:
+                guard let name = profileRecord else { throw Refusal.condition("fixture: removal original missing") }
+                try Self.need(replacedP12 && !deletedProfile && before.count == 5 && after == before.subtracting([name]),
+                              "default-store removal stage")
+                changed.insert(name); deletedProfile = true
+            }
+            for (name, old) in storeCurrent where !changed.contains(name) {
+                guard let current = observed[name] else { throw Refusal.condition("fixture: unrelated store original disappeared") }
+                try Self.need(current.facts == old.facts && current.bytes == old.bytes, "unrelated store original changed")
+            }
+            storeCurrent = observed
+            try assertUnchanged()
+        }
+        func assertStoreUnchanged() throws {
+            try Self.need(!storeCurrent.isEmpty, "default-store baseline absent")
+            let current = try storeSnapshot()
+            try Self.need(Set(current.keys) == Set(storeCurrent.keys), "default-store roster changed")
+            for (name, before) in storeCurrent {
+                guard let after = current[name] else { throw Refusal.condition("fixture: default-store original disappeared") }
+                try Self.need(before.facts == after.facts && before.bytes == after.bytes, "default-store original changed")
+            }
+            try assertUnchanged()
         }
         func text(_ path: String, stage: String? = nil) throws -> String {
             let bytes = stage.flatMap { changes[$0]?[path] } ?? originals[path]
@@ -503,6 +657,7 @@ final class NormalAppUITests: XCTestCase {
                 if Darwin.close(fd) != 0 { closeErrors.append("directory-close") }
             }
             directories.removeAll(); anchors.removeAll()
+            applicationSupport = nil; applicationDirectory = nil; vaultDirectory = nil
             try Self.need(closeErrors.isEmpty, "original close errors: " + closeErrors.joined(separator: ","))
         }
     }
@@ -544,6 +699,10 @@ final class NormalAppUITests: XCTestCase {
         "Original image operation is unverified", "Image copy or cleanup is unconfirmed", "Image recovery needs attention",
         "Images written; completion needs attention", "Original image review ended", "Original image selection refused",
         "Image operation status needs attention"
+    ]
+    private static let privateInputFailures = [
+        "The session action was not confirmed", "Private input is unavailable in this build",
+        "Encrypted storage is unavailable:", "unknown", "late-known"
     ]
     @MainActor private func remaining(_ requested: TimeInterval) throws -> TimeInterval {
         guard let deadline = journeyDeadline else { return requested }
@@ -724,7 +883,7 @@ final class NormalAppUITests: XCTestCase {
             + (text.hasSuffix("\n") ? "" : "\\ No newline at end of file\n")
     }
 
-    @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {
+    @MainActor private func admittedJourneyApplication() throws -> URL {
         let context = ProcessInfo.processInfo.environment
         try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
                     "this scenario is not admitted on a shared or personal desktop")
@@ -745,6 +904,11 @@ final class NormalAppUITests: XCTestCase {
         try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop"
                     && (Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mobile-release-kit-desktop",
                     "the exact ordinary installed application is missing")
+        return url
+    }
+
+    @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {
+        let url = try admittedJourneyApplication()
         // The preceding Installer/readback gate binds the bytes to the normal
         // Cargo binary. A bundle identifier by itself is NOT that proof.
         let app = XCUIApplication(url: url)
@@ -771,6 +935,311 @@ final class NormalAppUITests: XCTestCase {
         return (app, window, renderer)
     }
 
+    private enum PrivateInput: String {
+        case p12 = "Apple Distribution identity", profile = "Apple provisioning profile"
+        var file: String { self == .p12 ? "synthetic.p12" : "synthetic.mobileprovision" }
+        var initialLabel: String { self == .p12 ? "Synthetic distribution input" : "Synthetic profile input" }
+        var envelopeHelp: String { self == .p12
+            ? "P12 envelope only: the password has not been tested, and no certificate, private key, expiry or signing identity has been verified."
+            : "CMS envelope only: this does not establish an Apple issuer, profile validity, team, bundle ID or signing permission." }
+    }
+    @MainActor private func privateValue(_ storage: XCUIElement, _ root: XCUIElement,
+                                        label: String, value: String, timeout: TimeInterval = 5) throws {
+        let group = try waitElement(named(root, label), in: storage, timeout: timeout, failures: Self.privateInputFailures)
+        _ = try waitElement(group.staticTexts.matching(identifier: value), in: storage,
+                            timeout: timeout, failures: Self.privateInputFailures)
+    }
+    @MainActor private func privateStatus(_ storage: XCUIElement, action: String,
+                                         phase: String = "idle", mutation: Bool = false) throws {
+        let original = try waitElement(named(storage, "Original private-input operation"), in: storage,
+                                       timeout: 48, failures: Self.privateInputFailures)
+        try privateValue(storage, original, label: "Private-input operation action", value: action, timeout: 48)
+        try privateValue(storage, original, label: "Private-input operation phase", value: phase, timeout: 48)
+        try privateValue(storage, original, label: "Private-input operation settlement", value: "known", timeout: 48)
+        if mutation {
+            try privateValue(storage, original, label: "Private-input storage effect", value: "known-applied")
+            try privateValue(storage, original, label: "Private-input storage durability", value: "confirmed")
+            try privateValue(storage, original, label: "Private-input storage cleanup", value: "known")
+        }
+    }
+    @MainActor private func privateContext(_ storage: XCUIElement, renderer: XCUIElement,
+                                          explicitlySubmit: Bool = false) throws {
+        if explicitlySubmit {
+            try press(storage, "Submit current context", renderer: renderer, failures: Self.privateInputFailures)
+        }
+        _ = try waitElement(storage.staticTexts.matching(identifier: "Context submitted · not yet policy-validated"),
+                            in: storage, timeout: 48, failures: Self.privateInputFailures)
+    }
+    @MainActor private func privateRecord(_ storage: XCUIElement, input: PrivateInput, label: String,
+                                         revision: Int, assigned: Bool, notChecked: Bool = false) throws -> XCUIElement {
+        let query = storage.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@ AND label ENDSWITH %@",
+            "Private input · " + input.rawValue + " · item ", " · " + label))
+        let row = try waitElement(query, in: storage, failures: Self.privateInputFailures)
+        try privateValue(storage, row, label: "Private-input record revision", value: String(revision))
+        _ = try waitElement(row.staticTexts.matching(identifier: assigned
+            ? "Assigned to current submitted context" : "Not assigned to the current draft"), in: storage,
+            failures: Self.privateInputFailures)
+        if notChecked {
+            _ = try waitElement(row.staticTexts.matching(identifier:
+                "Payload not checked for the current session and draft. Assess this exact revision before assigning."),
+                in: storage, failures: Self.privateInputFailures)
+        }
+        return row
+    }
+    @MainActor private func privateRecordIndex(_ row: XCUIElement, input: PrivateInput, label: String) throws -> Int {
+        for index in 1...2 where row.label == "Private input · \(input.rawValue) · item \(index) · \(label)" { return index }
+        throw Refusal.condition("fixed stored record has an unexpected accessible identity")
+    }
+    @MainActor private func privateRecordCount(_ storage: XCUIElement, count: Int, assigned: Int) throws {
+        try require(storage.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "Private input · ")).count == count,
+                    "stored record count differs")
+        try require(storage.staticTexts.matching(identifier: "Assigned to current submitted context").count == assigned,
+                    "stored assignments appeared without the required explicit Bind")
+    }
+    @MainActor private func privateReview(_ storage: XCUIElement, title: String, target: String) throws -> XCUIElement {
+        let review = try waitElement(named(storage, "Explicit private-input review"), in: storage,
+                                     timeout: 48, failures: Self.privateInputFailures)
+        _ = try waitElement(review.staticTexts.matching(identifier: title), in: storage, failures: Self.privateInputFailures)
+        try privateValue(storage, review, label: "Private-input review target", value: target)
+        return review
+    }
+    @MainActor private func privateAssessment(_ storage: XCUIElement, input: PrivateInput) throws {
+        _ = try waitElement(storage.staticTexts.matching(identifier: "Supplied-input assessment"), in: storage,
+                            failures: Self.privateInputFailures)
+        try require(storage.staticTexts.matching(identifier: "Configured only").count >= 1,
+                    "mechanical supplied-input assessment did not configure this input")
+        for label in [input.envelopeHelp, "Native validation: not run", "Service validation: not run", "Release readiness: unknown"] {
+            _ = try waitElement(storage.staticTexts.matching(identifier: label), in: storage, failures: Self.privateInputFailures)
+        }
+    }
+    @MainActor private func choosePrivate(_ storage: XCUIElement, window: XCUIElement, renderer: XCUIElement,
+                                         fixture: LocalFixture, input: PrivateInput, replacement: String? = nil,
+                                         cancel: Bool = false) throws {
+        try select(storage, label: "What would you like to provide?", value: input.rawValue, renderer: renderer)
+        try select(storage, label: "New or replacement copy?", value: replacement ?? "Save a new encrypted record", renderer: renderer)
+        try press(storage, "Select file…", renderer: renderer, failures: Self.privateInputFailures)
+        let sheet = try nativeSheet(window, title: "Choose a signing or iOS build-input file")
+        if cancel {
+            try click(sheet.buttons.matching(identifier: "Cancel"), "owned signing-input Cancel unavailable")
+            try waitGone(sheet)
+        } else {
+            try goToFolder(sheet, path: fixture.sourcesPath)
+            let file = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: input.file),
+                                      in: sheet, enabled: true)
+            try require(file.isHittable, "owned inert signing-input file is not actionable")
+            file.click()
+            try require(file.isSelected, "native inert-file selection was not observed")
+            try nativeOpen(sheet)
+            try privateStatus(storage, action: "choose-file", phase: "selected")
+        }
+        try fixture.assertUnchanged()
+    }
+    @MainActor private func savePrivate(_ storage: XCUIElement, renderer: XCUIElement, fixture: LocalFixture,
+                                       input: PrivateInput, label: String, reviewTarget: String,
+                                       replacement: Bool = false) throws {
+        if input == .p12 {
+            let password = try waitElement(controls(storage, [.secureTextField], label: "P12 export password", prefix: true),
+                                           in: storage, enabled: true, failures: Self.privateInputFailures)
+            try reveal(password, in: renderer); password.click()
+            // Fictional DATA typed into the ordinary write-only field. Do not
+            // inspect its masked value, use the clipboard or change app state.
+            password.typeText(replacement ? "MRK-inert-password-v2" : "MRK-inert-password-v1")
+        }
+        try replace(field(storage, "Vault label (optional)"), with: label, renderer: renderer)
+        try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
+        try privateStatus(storage, action: "prepare", phase: "preview")
+        try privateAssessment(storage, input: input)
+        let review = try privateReview(storage, title: "Save this encrypted input?", target: reviewTarget)
+        try fixture.assertUnchanged()
+        try press(review, "Save encrypted copy", renderer: renderer, failures: Self.privateInputFailures)
+        try privateStatus(storage, action: "commit", mutation: true)
+        try require(named(storage, "Explicit private-input review").count == 0, "saving retained an assignment review")
+    }
+    @MainActor private func assignPrivate(_ storage: XCUIElement, renderer: XCUIElement, fixture: LocalFixture,
+                                         input: PrivateInput, label: String, revision: Int) throws {
+        let row = try privateRecord(storage, input: input, label: label, revision: revision, assigned: false)
+        let index = try privateRecordIndex(row, input: input, label: label)
+        try press(row, "Assess and assign…", renderer: renderer, failures: Self.privateInputFailures)
+        try privateStatus(storage, action: "prepare", phase: "preview")
+        try privateAssessment(storage, input: input)
+        let review = try privateReview(storage, title: "Assign this record to the submitted context?",
+            target: "\(input.rawValue) · \(label) · item \(index) · revision \(revision)")
+        try fixture.assertStoreUnchanged()
+        try press(review, "Assign to this context", renderer: renderer, failures: Self.privateInputFailures)
+        try privateStatus(storage, action: "bind")
+        _ = try privateRecord(storage, input: input, label: label, revision: revision, assigned: true)
+        try fixture.assertStoreUnchanged()
+    }
+    @MainActor private func lockPrivateVault(_ storage: XCUIElement, renderer: XCUIElement,
+                                            fixture: LocalFixture, preservedMutation: Bool = false) throws {
+        try press(storage, "Lock vault…", renderer: renderer, failures: Self.privateInputFailures)
+        let consent = try waitElement(named(storage, "Confirm private-input lock"), in: storage,
+                                      failures: Self.privateInputFailures)
+        try press(consent, "Lock vault", renderer: renderer, failures: Self.privateInputFailures)
+        _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage,
+                            timeout: 48, failures: Self.privateInputFailures)
+        try privateStatus(storage, action: preservedMutation ? "commit" : "lock", mutation: preservedMutation)
+        try privateRecordCount(storage, count: 0, assigned: 0)
+        try fixture.assertStoreUnchanged()
+    }
+    @MainActor private func reopenPrivateVault(_ storage: XCUIElement, renderer: XCUIElement,
+                                              fixture: LocalFixture) throws {
+        try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+        try privateStatus(storage, action: "open-vault")
+        _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · locked"), in: storage,
+                            failures: Self.privateInputFailures)
+        try privateRecordCount(storage, count: 0, assigned: 0)
+        try press(storage, "Unlock vault", renderer: renderer, failures: Self.privateInputFailures)
+        try privateStatus(storage, action: "unlock")
+        _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · unlocked"), in: storage,
+                            failures: Self.privateInputFailures)
+        try privateContext(storage, renderer: renderer, explicitlySubmit: true)
+        try privateRecordCount(storage, count: 2, assigned: 0)
+        for input in [PrivateInput.p12, .profile] {
+            _ = try privateRecord(storage, input: input, label: input.initialLabel, revision: 1, assigned: false, notChecked: true)
+        }
+        try fixture.assertStoreUnchanged()
+    }
+
+    @MainActor func testSyntheticPersistentCredentials() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("persistence-admission") {
+            _ = try admittedJourneyApplication()
+            try fixture.admitDefaultVault() // Before any application launch.
+            try fixture.prepare(.persistentCredentials)
+        }
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("persistence-launch") {
+            try fixture.assertDefaultVaultAbsent()
+            launched = try launchForJourney()
+        }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
+        var selectedStorage: XCUIElement?
+        try stage("persistence-project-and-initialize") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let project = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected persistence project differs")
+            try press(renderer, "Credentials", renderer: renderer)
+            let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+            selectedStorage = storage
+            try select(storage, label: "Platform", value: "iOS", renderer: renderer)
+            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
+            try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "open-vault")
+            _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · uninitialized"), in: storage,
+                                failures: Self.privateInputFailures)
+            try fixture.assertDefaultVaultAbsent()
+            try privateRecordCount(storage, count: 0, assigned: 0)
+            try press(storage, "Review vault initialization…", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "prepare-initialize", phase: "preview")
+            let review = try privateReview(storage, title: "Create a new encrypted vault?", target: "New encrypted private-input vault")
+            try privateRecordCount(storage, count: 0, assigned: 0)
+            try fixture.assertUnchanged()
+            try press(review, "Create encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "initialize", mutation: true)
+            _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · unlocked"), in: storage,
+                                failures: Self.privateInputFailures)
+            try fixture.acceptStore(.initialize)
+            try privateContext(storage, renderer: renderer, explicitlySubmit: true)
+            try privateRecordCount(storage, count: 0, assigned: 0)
+        }
+        guard let storage = selectedStorage else { throw Refusal.condition("ordinary private-input controls missing") }
+        for input in [PrivateInput.p12, .profile] {
+            try stage(input == .p12 ? "persistence-save-and-bind-p12" : "persistence-save-and-bind-profile") {
+                try choosePrivate(storage, window: window, renderer: renderer, fixture: fixture, input: input)
+                try savePrivate(storage, renderer: renderer, fixture: fixture, input: input, label: input.initialLabel,
+                                reviewTarget: "New \(input.rawValue.lowercased()) encrypted record")
+                try fixture.acceptStore(input == .p12 ? .saveP12 : .saveProfile)
+                _ = try privateRecord(storage, input: input, label: input.initialLabel, revision: 1, assigned: false, notChecked: true)
+                try privateRecordCount(storage, count: input == .p12 ? 1 : 2, assigned: input == .p12 ? 0 : 1)
+                try assignPrivate(storage, renderer: renderer, fixture: fixture, input: input, label: input.initialLabel, revision: 1)
+            }
+        }
+        try stage("persistence-context-invalidation") {
+            try privateRecordCount(storage, count: 2, assigned: 2)
+            try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer)
+            try privateContext(storage, renderer: renderer)
+            try privateRecordCount(storage, count: 2, assigned: 0)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
+            try privateContext(storage, renderer: renderer)
+            try privateRecordCount(storage, count: 2, assigned: 0)
+            try fixture.assertStoreUnchanged()
+            for input in [PrivateInput.p12, .profile] {
+                try assignPrivate(storage, renderer: renderer, fixture: fixture, input: input, label: input.initialLabel, revision: 1)
+            }
+        }
+        try stage("persistence-lock-reopen-rebind") {
+            try lockPrivateVault(storage, renderer: renderer, fixture: fixture)
+            try reopenPrivateVault(storage, renderer: renderer, fixture: fixture)
+            for input in [PrivateInput.p12, .profile] {
+                try assignPrivate(storage, renderer: renderer, fixture: fixture, input: input, label: input.initialLabel, revision: 1)
+            }
+        }
+        try stage("persistence-replacement-cancel") {
+            let row = try privateRecord(storage, input: .p12, label: PrivateInput.p12.initialLabel, revision: 1, assigned: true)
+            let index = try privateRecordIndex(row, input: .p12, label: PrivateInput.p12.initialLabel)
+            try choosePrivate(storage, window: window, renderer: renderer, fixture: fixture, input: .p12,
+                replacement: "Replace item \(index) · \(PrivateInput.p12.initialLabel) · revision 1", cancel: true)
+            // The cancelled original owns a vault lease. Its STOP deliberately
+            // retires the entire session, not just the selected assignment.
+            _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage,
+                                timeout: 48, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "choose-file")
+            try privateRecordCount(storage, count: 0, assigned: 0)
+            try fixture.assertStoreUnchanged()
+            try reopenPrivateVault(storage, renderer: renderer, fixture: fixture)
+        }
+        try stage("persistence-replace-current-record") {
+            let row = try privateRecord(storage, input: .p12, label: PrivateInput.p12.initialLabel, revision: 1, assigned: false)
+            let index = try privateRecordIndex(row, input: .p12, label: PrivateInput.p12.initialLabel)
+            try choosePrivate(storage, window: window, renderer: renderer, fixture: fixture, input: .p12,
+                replacement: "Replace item \(index) · \(PrivateInput.p12.initialLabel) · revision 1")
+            try savePrivate(storage, renderer: renderer, fixture: fixture, input: .p12, label: "Synthetic distribution replacement",
+                reviewTarget: "\(PrivateInput.p12.rawValue) · \(PrivateInput.p12.initialLabel) · item \(index) · revision 1", replacement: true)
+            try fixture.acceptStore(.replaceP12)
+            try privateRecordCount(storage, count: 2, assigned: 0)
+            _ = try privateRecord(storage, input: .p12, label: "Synthetic distribution replacement", revision: 2, assigned: false, notChecked: true)
+            try assignPrivate(storage, renderer: renderer, fixture: fixture, input: .p12, label: "Synthetic distribution replacement", revision: 2)
+        }
+        try stage("persistence-delete-and-quit") {
+            // Cancel/reopen cleared both bindings. Reassess and bind this same
+            // persisted profile so Delete must revoke a live assignment too.
+            try assignPrivate(storage, renderer: renderer, fixture: fixture, input: .profile,
+                              label: PrivateInput.profile.initialLabel, revision: 1)
+            try privateRecordCount(storage, count: 2, assigned: 2)
+            let row = try privateRecord(storage, input: .profile, label: PrivateInput.profile.initialLabel, revision: 1, assigned: true)
+            let index = try privateRecordIndex(row, input: .profile, label: PrivateInput.profile.initialLabel)
+            try press(row, "Review removal…", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "prepare-delete", phase: "preview")
+            let review = try privateReview(storage, title: "Remove this encrypted copy?",
+                target: "\(PrivateInput.profile.rawValue) · \(PrivateInput.profile.initialLabel) · item \(index) · revision 1")
+            try fixture.assertStoreUnchanged()
+            try press(review, "Remove encrypted copy", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "commit", mutation: true)
+            try fixture.acceptStore(.deleteProfile)
+            try privateRecordCount(storage, count: 1, assigned: 1)
+            _ = try privateRecord(storage, input: .p12, label: "Synthetic distribution replacement", revision: 2, assigned: true)
+            try lockPrivateVault(storage, renderer: renderer, fixture: fixture, preservedMutation: true)
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
+            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal Quit did not reach notRunning")
+            normalQuitObserved = true
+            try fixture.assertStoreUnchanged()
+            try fixture.closeOriginals(); ownedFixture = nil
+        }
+        // Original XCTest counts/exit and independent native-owner evidence are
+        // still required. No app-restart, real signing or delivery claim.
+        print("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete;appRestart=not-run;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
+    }
 
     @MainActor func testSyntheticProjectLocalEdits() throws {
         try syntheticProjectJourney(includeImages: false)

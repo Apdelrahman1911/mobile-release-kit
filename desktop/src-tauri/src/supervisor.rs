@@ -794,6 +794,7 @@ impl Supervisor {
     pub(crate) fn github_release_profile_available(&self) -> bool { self.inner.runtime.github_release_profile_available() }
     pub(crate) fn bind_original_session_document(&self, identity: &Arc<()>) { self.inner.runtime.bind_original_session_document(identity); }
     pub(crate) fn installed_session_available(&self, identity: &Arc<()>) -> bool { self.inner.runtime.installed_session_available(identity) }
+    pub(crate) fn installed_persistence_available(&self, identity: &Arc<()>) -> bool { self.inner.runtime.installed_persistence_available(identity) }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
         target_os = "macos", target_arch = "aarch64"))]

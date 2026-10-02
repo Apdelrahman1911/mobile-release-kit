@@ -170,9 +170,13 @@ mod known {
             self.arc::<crate::vault_crypto::VaultKey>()?;
             self.heap::<crate::vault_crypto::VaultKey>(Some(value.retained_bytes()))
         }
+        fn vault_loan(&mut self, value: &vault::BoundLoan) -> Count<()> {
+            self.context(&value.context)?; self.payload(&value.payload)?; self.vault_store(&value.store)?; self.vault_key(&value.key)
+        }
         fn vault_session(&mut self, value: &vault::Session) -> Count<()> {
             self.heap::<vault::Session>(value.data_bytes())?; self.vault_store(value.store())?;
-            if let Some(key) = value.key() { self.vault_key(key)?; } Ok(())
+            if let Some(key) = value.key() { self.vault_key(key)?; }
+            for loan in value.bound.iter().flatten() { self.vault_loan(loan)?; } Ok(())
         }
         fn gui(&mut self, value: &Arc<GuiCall>, owner: &Arc<OriginalWork>) -> Count<()> {
             if value.owner.as_ptr() != Arc::as_ptr(owner) { return Err(Reason::Capacity); }
@@ -285,6 +289,7 @@ mod known {
             if let Some(batch) = &value.image_batch { self.heap::<asset_source::CapturedPublicImageBatch>(batch.retained_bytes())?; }
             if let Some(label) = &value.vault.label { self.add(label.capacity())?; }
             if let Some(payload) = &value.vault.loaded { self.payload(payload)?; }
+            if let Some(loan) = &value.vault.previous_bound { self.vault_loan(loan)?; }
             if let Some(store) = &value.vault.lease { self.vault_store(store)?; }
             // installation_result and the remainder of SlotData are inline DATA.
             self.owner(&value.owner)

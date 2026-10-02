@@ -41,6 +41,6 @@ export function ReleaseInputGuidance({ state, controller, onGuide, onSettings, o
         }}>{sessionPreparationKind(row.guideId) ? 'Open preparation guide' : 'Open reference guide'}</button>}
       </article>)}</div>
     </div>)}
-    <p className="release-input-scope">Opening guidance never changes session context or selects, imports, validates, registers, stores or assigns private inputs. Supported guides offer a separate explicit continuation to the existing session controls. Those controls retain their own availability and original status; persistent vault storage and unsupported file pickers remain unavailable.</p>
+    <p className="release-input-scope">Opening guidance never changes session context or selects, imports, validates, registers, stores or assigns private inputs. Supported guides offer a separate explicit continuation to the existing session controls. Those controls retain their own availability and original status; encrypted storage has its own native availability, and unsupported file pickers remain unavailable.</p>
   </section>;
 }

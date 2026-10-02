@@ -60,7 +60,7 @@ export function assetLabelFits(value: unknown): value is string | null {
 // Presentation gate only. The native original owner independently authorizes
 // every operation; an unlocked-looking DTO is not a key or mutation lease.
 export function assetStorageWritable(status: AssetStatus | null | undefined): boolean {
-  return status?.mode === 'session' || status?.mode === 'encrypted' && status.persistence?.state === 'unlocked' && status.persistence.keyAccess === 'read-write';
+  return !!status?.capability.available && (status.mode === 'session' && status.modes.session.available || status.mode === 'encrypted' && status.modes.encrypted.available && status.persistence?.state === 'unlocked' && status.persistence.keyAccess === 'read-write');
 }
 // Count bytes while walking, before cloning/JSON.stringify. Strings remain
 // immutable caller values; no secret copy is retained by this validator.
@@ -129,10 +129,18 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
   try {
     const mode = object(value) ? Object.getOwnPropertyDescriptor(value, 'mode') : undefined;
     const encrypted = mode && 'value' in mode && mode.value === 'encrypted';
-    if (!assetJsonFits(value, encrypted ? 131072 : 32768) || !keys(value, ['schemaVersion', 'statusRevision', 'mode', 'persistence', 'capability', 'context', 'operation', 'records', 'assignments']) ||
-        value.schemaVersion !== 2 || !assetCounter(value.statusRevision) || !one(value.mode, ['closed', 'session', 'encrypted']) ||
+    if (!assetJsonFits(value, encrypted ? 131072 : 32768) || !keys(value, ['schemaVersion', 'statusRevision', 'mode', 'persistence', 'capability', 'modes', 'context', 'operation', 'records', 'assignments']) ||
+        value.schemaVersion !== 3 || !assetCounter(value.statusRevision) || !one(value.mode, ['closed', 'session', 'encrypted']) ||
         !keys(value.capability, ['available', 'reason']) || typeof value.capability.available !== 'boolean' || !one(value.capability.reason, ASSET_REASONS) ||
-        (value.capability.available && value.capability.reason !== 'none')) return null;
+        (value.capability.available && value.capability.reason !== 'none') ||
+        !keys(value.modes, ['session', 'encrypted'])) return null;
+    for (const mode of ['session', 'encrypted']) {
+      const capability = value.modes[mode];
+      if (!keys(capability, ['available', 'reason']) || typeof capability.available !== 'boolean' || !one(capability.reason, ASSET_REASONS) ||
+          capability.available !== (capability.reason === 'none') || capability.available && !value.capability.available) return null;
+    }
+    if ((value.modes.session as ObjectValue).available !== value.capability.available ||
+        (value.modes.session as ObjectValue).reason !== value.capability.reason) return null;
     if (encrypted ? !keys(value.persistence, ['state', 'reason', 'keyAccess']) ||
         !one(value.persistence.state, ['uninitialized', 'locked', 'unlocked', 'initializing', 'mutating', 'interrupted', 'unknown']) ||
         !one(value.persistence.reason, ASSET_REASONS) || !one(value.persistence.keyAccess, ['locked', 'read-only', 'read-write']) ||
@@ -280,7 +288,7 @@ export function assetError(error: unknown): ApiError {
 export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   none: 'The last observed step has no reported refusal. This is not release or Store verification.',
   closed: 'Choose memory-only storage or an available encrypted vault before providing private inputs. No mode is selected automatically.',
-  unqualified: 'Native session import has not completed its required qualification. You can read the guides, but this build cannot collect private inputs.',
+  unqualified: 'The requested native capability has not completed its required qualification. This action is unavailable; check the separately listed storage modes before providing private inputs.',
   'unsupported-platform': 'Session import needs its separately admitted native profile: Linux x86_64 or Apple-silicon macOS. Apple P12/profile collection is macOS-only. Windows and browser previews cannot collect these inputs; format support does not enable a native profile.',
   'unsupported-filesystem': 'The native profile requires its admitted local filesystem: ext-family on Linux or APFS on macOS. Network, overlay and FUSE sources are refused. Your original file was not changed.',
   'unsupported-format': 'Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, unencrypted P8 PKCS#8 envelopes and, on admitted macOS, P12 and DER CMS profile envelopes. P8 assessment checks envelope/EC-P256 identifiers only, not mathematical key validity or account access. Passwords and Apple authenticity are not tested. Binary plist is not enabled.',
@@ -302,7 +310,7 @@ export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   'cleanup-unknown': 'Original cleanup could not be confirmed. Do not retry, replace or assume private buffers are gone. Keep the application open while its original owners report any late settlement.',
   'vault-uninitialized': 'No initialized encrypted vault was found. Review Initialize to create this app’s private store and one protected wrapping key; nothing is created in a project.',
   'vault-key-missing': 'The exact wrapping key is missing from the admitted persistent OS keyring. Existing encrypted files cannot be unlocked. Do not replace the key or delete files; preserve them for recovery.',
-  'vault-keyring-locked': 'The protected OS keyring is locked. Use Unlock explicitly; the operating system may ask for approval. Status checks never open a prompt.',
+  'vault-keyring-locked': 'The protected OS keyring is locked. On macOS, open Keychain Access and unlock your existing login keychain yourself, then choose Unlock vault again after original cleanup settles. The app only retrieves its exact key from an already-unlocked login keychain; it does not unlock or replace the keychain, replace a key or use plaintext fallback. Status does not access the keyring.',
   'vault-keyring-denied': 'The OS keyring request was declined or could not complete. No unlocked key or credential use is confirmed. Check original cleanup before another explicit action.',
   'vault-keyring-unavailable': 'The required persistent OS keyring is unavailable. No session-keyring, plaintext or password fallback is used.',
   'vault-provider-unsupported': 'This desktop has not admitted the required persistent keyring profile. Reading this guide or passing a format check cannot enable encrypted storage.',

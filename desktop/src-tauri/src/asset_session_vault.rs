@@ -6,6 +6,9 @@ use crate::{vault_crypto as crypto, vault_format as format, vault_store as store
 
 // Compiler/codec tests and a same-UID service are not native qualification.
 const DURABLE_QUALIFIED: bool = false;
+pub(super) fn qualified(document: &DocumentBinding) -> bool {
+    DURABLE_QUALIFIED || document.inner.bridge.installed_persistence_available(&document.inner.session_identity)
+}
 
 // Explicit one-use qualification selection exists only in the installed Mac
 // observer. Normal callers always select Ordinary; no UI/global gate is opened.
@@ -51,15 +54,43 @@ impl Descriptor {
         StoredRef { identity, record: self.authenticated.record, revision: self.authenticated.revision, original: self.original }
     }
 }
+// Fixed inline cells: no growing decrypted cache. These are retained only by
+// explicit final Bind, never Save or Unlock. Arc duplicates share the original
+// charged backing; every census and retirement visitor below follows them.
+const BOUND_LOAN_LIMIT: usize = 8;
+pub(super) struct BoundLoan {
+    pub(super) context: Arc<NativeContext>, pub(super) payload: Arc<Payload>, reference: StoredRef,
+    pub(super) store: Arc<Mutex<store::StoreBook>>, pub(super) key: Arc<crypto::VaultKey>,
+}
+impl BoundLoan {
+    fn current(&self, state: &DocumentState, session: &Session) -> bool {
+        !state.session && !state.stopping && !state.unknown && !state.exhausted && !state.lock_pending
+            && !state.retiring && !state.quit_pending && state.lifetime.original_bound()
+            && session.writable() && Arc::ptr_eq(&self.store, &session.store)
+            && session.key.as_ref().is_some_and(|key| Arc::ptr_eq(key, &self.key))
+            && session.identity == Some(self.reference.identity) && self.key.identity() == self.reference.identity
+            && self.context.registry_generation == session.registry_generation
+            && state.context.as_ref().is_some_and(|context| Arc::ptr_eq(context, &self.context))
+            && self.payload.usable_source()
+            && session.rows.iter().any(|row| !row.mutation_pending && row.authenticated.record == self.reference.record
+                && row.authenticated.revision == self.reference.revision && row.original == self.reference.original
+                && row.authenticated.descriptor.kind == self.payload.kind)
+            && state.assignments.iter().any(|assignment| assignment.kind == self.payload.kind
+                && assignment.context_revision == self.context.revision && assignment.availability == AssignmentAvailability::Available
+                && self.reference.record.token() == assignment.record_id.0 && self.reference.revision.counter == assignment.record_revision)
+    }
+}
 pub(super) struct Session {
     store: Arc<Mutex<store::StoreBook>>, root: Option<store::RootWitness>, header: Option<[u8; format::HEADER_BYTES]>,
     identity: Option<format::Identity>, key: Option<Arc<crypto::VaultKey>>, rows: Vec<Descriptor>, inventory: Vec<format::Id>,
     state: State, reason: Reason, revoked: bool, read_only: bool, registry_generation: u32, release_end: Option<Instant>,
+    pub(super) bound: [Option<BoundLoan>; BOUND_LOAN_LIMIT],
 }
 impl Session {
     fn new(store: Arc<Mutex<store::StoreBook>>, generation: u32) -> Self {
         Self { store, root: None, header: None, identity: None, key: None, rows: Vec::new(), inventory: Vec::new(),
-            state: State::Unknown, reason: Reason::None, revoked: false, read_only: false, registry_generation: generation, release_end: None }
+            state: State::Unknown, reason: Reason::None, revoked: false, read_only: false, registry_generation: generation, release_end: None,
+            bound: std::array::from_fn(|_| None) }
     }
     fn writable(&self) -> bool { !self.revoked && !self.read_only && self.state == State::Unlocked && self.key.is_some() }
     fn row(&self, key: &RecordKey) -> Option<&Descriptor> { self.rows.iter().find(|row| row.matches(key)) }
@@ -92,10 +123,12 @@ pub(super) struct Work {
 pub(super) struct Retired {
     pub(super) session: Option<Session>, pub(super) keys: [Option<Arc<crypto::VaultKey>>; 2],
     pub(super) loaded: Option<Arc<Payload>>, label: Option<String>, rows: Vec<Descriptor>,
+    pub(super) bound: [Option<BoundLoan>; BOUND_LOAN_LIMIT], pub(super) previous_bound: Option<BoundLoan>,
 }
 impl Retired {
     pub(super) fn empty(&self) -> bool {
         self.session.is_none() && self.keys.iter().all(Option::is_none) && self.loaded.is_none() && self.label.is_none() && self.rows.capacity() == 0
+            && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none()
     }
     pub(super) fn data_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>().checked_add(self.label.as_ref().map_or(0, String::capacity))?.checked_add(rows_bytes(&self.rows)?)
@@ -114,6 +147,7 @@ impl Work {
 #[derive(Default)]
 pub(super) struct SlotData {
     pub(super) label: Option<String>, pub(super) loaded: Option<Arc<Payload>>, reference: Option<StoredRef>,
+    pub(super) previous_bound: Option<BoundLoan>,
     initialize: Option<format::Identity>, generation: Option<u32>, pub(super) lease: Option<Arc<Mutex<store::StoreBook>>>,
     outcome: Option<store::StorageOutcome>,
 }
@@ -156,7 +190,7 @@ pub(super) fn summaries(state: &DocumentState) -> Vec<RecordStatus> {
     vault.rows.iter().map(|row| {
         let key = row.key();
         let assigned = vault.writable() && state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
-            && assignment.availability == AssignmentAvailability::Available);
+            && assignment_available(state, assignment));
         let assessed = vault.writable() && record_assessed(state, &key);
         RecordStatus { record_id: key.id, revision: key.revision, kind: row.authenticated.descriptor.kind,
             availability: if row.mutation_pending { "mutation-pending" } else if assigned { "assigned" } else { "unassigned" },
@@ -348,6 +382,69 @@ pub(super) fn usable(state: &DocumentState, slot: &Slot, key: &RecordKey, kind: 
         && slot.vault.reference.is_some_and(|reference| reference.matches(key))
         && slot.vault.loaded.as_ref().is_some_and(|payload| payload.kind == kind && payload.usable_source())
 }
+pub(super) fn assignment_current(state: &DocumentState, assignment: &Assignment) -> bool {
+    state.vault.as_ref().is_some_and(|session| session.bound.iter().flatten().any(|loan|
+        loan.payload.kind == assignment.kind && loan.reference.record.token() == assignment.record_id.0
+            && loan.reference.revision.counter == assignment.record_revision && loan.context.revision == assignment.context_revision
+            && loan.current(state, session)))
+}
+pub(super) fn assigned_payload<'a>(state: &'a DocumentState, key: &RecordKey, kind: Kind,
+    context: &Arc<NativeContext>) -> Option<&'a Arc<Payload>> {
+    let session = state.vault.as_ref()?;
+    session.bound.iter().flatten().find(|loan| loan.reference.matches(key) && loan.payload.kind == kind
+        && Arc::ptr_eq(&loan.context, context) && loan.current(state, session)).map(|loan| &loan.payload)
+}
+// The caller reserves the assignment cell first, retains the document lock and
+// publishes the assignment immediately after this succeeds. No fallible action,
+// allocation or native IO occurs between the two publications.
+pub(super) fn bind_payload(state: &mut DocumentState, slot: &mut Slot, assignment: &Assignment) -> Result<(), Reason> {
+    let session = state.vault.as_ref().ok_or(Reason::Closed)?;
+    let context = slot.context.as_ref().ok_or(Reason::ContextStale)?;
+    let reference = slot.vault.reference.ok_or(Reason::SourceChanged)?;
+    let payload = slot.vault.loaded.as_ref().ok_or(Reason::SourceRefused)?;
+    let key = session.key.as_ref().ok_or(Reason::VaultKeyMissing)?;
+    if state.session || !session.writable() || state.stopping || state.unknown || state.exhausted || state.lock_pending
+        || state.retiring || state.quit_pending || !state.lifetime.original_bound() || slot.operation != Operation::Bind
+        || slot.cleanup_end.is_some() || slot.reason != Reason::None || slot.error.is_some() || slot.owner.interrupted()
+        || !slot.owner.resources_settled() || slot.vault.previous_bound.is_some()
+        || !slot.owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+        || !slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+        || !owns(slot, session) || slot.vault.generation != Some(session.registry_generation)
+        || !state.context.as_ref().is_some_and(|current| Arc::ptr_eq(current, context))
+        || context.registry_generation != session.registry_generation || context.revision != assignment.context_revision
+        || assignment.availability != AssignmentAvailability::Available || payload.kind != assignment.kind || !payload.usable_source()
+        || reference.record.token() != assignment.record_id.0 || reference.revision.counter != assignment.record_revision
+        || session.identity != Some(reference.identity) || key.identity() != reference.identity
+        || !session.rows.iter().any(|row| !row.mutation_pending && row.authenticated.record == reference.record
+            && row.authenticated.revision == reference.revision && row.original == reference.original
+            && row.authenticated.descriptor.kind == assignment.kind)
+        || !slot.owner.vault.try_lock().is_ok_and(|work| work.first.is_none() && !work.release
+            && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store))
+            && work.key.as_ref().is_some_and(|original| Arc::ptr_eq(original, key))) {
+        return Err(Reason::SourceChanged);
+    }
+    if let Some(material) = &payload.material {
+        let MaterialOrigin::Stored(original) = &material.origin else { return Err(Reason::SourceChanged); };
+        if original.reference.identity != reference.identity || original.reference.record != reference.record
+            || original.reference.revision != reference.revision || original.reference.original != reference.original {
+            return Err(Reason::SourceChanged);
+        }
+    }
+    let index = session.bound.iter().position(|loan| loan.as_ref().is_some_and(|loan| loan.payload.kind == assignment.kind))
+        .or_else(|| session.bound.iter().position(Option::is_none)).ok_or(Reason::Capacity)?;
+    // Temporary loaded bytes are not permission to grow permanent resident
+    // holdings. Include the caller-local assignment token; inline loan cells are
+    // already precharged in Session/Slot/Retired, and shared Arcs deduplicate.
+    let live = lookup_memory::pending_slot_bytes(state, slot).map_err(|_| Reason::Capacity)?;
+    if live.checked_add(assignment.record_id.0.capacity()).is_none_or(|bytes| bytes > store::RESIDENT_BYTES) {
+        return Err(Reason::Capacity);
+    }
+    let loan = BoundLoan { context: context.clone(), reference, payload: slot.vault.loaded.take().expect("checked loaded original"),
+        store: session.store.clone(), key: key.clone() };
+    let session = state.vault.as_mut().expect("checked same document vault");
+    slot.vault.previous_bound = session.bound[index].replace(loan);
+    Ok(())
+}
 pub(super) fn revoke(state: &mut DocumentState, key: &RecordKey) {
     if let Some(row) = state.vault.as_mut().and_then(|vault| vault.rows.iter_mut().find(|row| row.matches(key))) { row.mutation_pending = true; }
 }
@@ -439,7 +536,13 @@ pub(super) fn retirement_ready(state: &DocumentState, slot: &Slot) -> bool {
 }
 pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Retired {
     let closing = release_pending(state);
-    let mut retired = Retired { loaded: slot.vault.loaded.take(), label: slot.vault.label.take(), ..Retired::default() };
+    let mut retired = Retired { loaded: slot.vault.loaded.take(), label: slot.vault.label.take(),
+        previous_bound: slot.vault.previous_bound.take(), ..Retired::default() };
+    let stale: [bool; BOUND_LOAN_LIMIT] = std::array::from_fn(|index| state.vault.as_ref().is_some_and(|session|
+        session.bound[index].as_ref().is_some_and(|loan| closing || !loan.current(state, session))));
+    if let Some(session) = &mut state.vault {
+        for (index, stale) in stale.into_iter().enumerate() { if stale { retired.bound[index] = session.bound[index].take(); } }
+    }
     slot.vault.reference = None;
     if let Ok(mut work) = slot.owner.vault.try_lock() { retired.keys[0] = work.key.take(); }
     if closing {
@@ -453,8 +556,10 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
 }
 pub(super) fn restore_retirement(state: &mut DocumentState, slot: &mut Slot, mut retired: Retired) {
     slot.vault.loaded = retired.loaded.take(); slot.vault.label = retired.label.take();
+    slot.vault.previous_bound = retired.previous_bound.take();
     if let Some(session) = retired.session.take() { state.vault = Some(session); }
     if let Some(session) = &mut state.vault {
+        for (index, loan) in retired.bound.iter_mut().enumerate() { if loan.is_some() { session.bound[index] = loan.take(); } }
         if !retired.rows.is_empty() { session.rows = std::mem::take(&mut retired.rows); }
         if retired.keys[1].is_some() { session.key = retired.keys[1].take(); }
     }
@@ -895,6 +1000,169 @@ mod tests {
         (state, owner)
     }
 
+    fn loan_payload(kind: Kind, reference: StoredRef) -> Arc<Payload> {
+        // Inert envelope/role DATA, never a usable certificate/profile/provider.
+        let file = match kind {
+            Kind::AppleP12 => Some(vec![0x30,0x18,0x02,0x01,0x03,0x30,0x13,0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x07,0x01,
+                0xa0,0x06,0x04,0x04,b'D',b'A',b'T',b'A']),
+            Kind::AppleProfile => Some(vec![0x30,0x2b,0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x07,0x02,0xa0,0x1e,
+                0x30,0x1c,0x02,0x01,0x01,0x31,0x00,0x30,0x13,0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x07,0x01,
+                0xa0,0x06,0x04,0x04,b'D',b'A',b'T',b'A',0x31,0x00]),
+            Kind::GoogleWif | Kind::ProjectReadToken => None,
+            _ => panic!("unsupported synthetic loan kind"),
+        };
+        let fields = match kind {
+            Kind::AppleP12 => json!({"password":"synthetic-password"}),
+            Kind::GoogleWif => json!({"provider":"p".repeat(4096),"serviceAccount":null}),
+            Kind::ProjectReadToken => json!({"token":"synthetic-dependency-token"}),
+            _ => json!({}),
+        };
+        let material = file.map(|bytes| {
+            let observation = credential_format::inspect(kind.file().unwrap(), &bytes, &mut || false).ok().unwrap();
+            assert!(observation.is_observed());
+            Arc::new(Material { origin: MaterialOrigin::Stored(StoredMaterial { bytes: crypto::StoredBytes::lifecycle_data(bytes), reference }), observation })
+        });
+        Arc::new(Payload { kind, material, fields: Some(commands::own_fields(kind, &fields).ok().unwrap()) })
+    }
+    fn loan_slot(state: &mut DocumentState, kind: Kind, record: u8) -> (Slot, Assignment) {
+        let session = state.vault.as_mut().unwrap();
+        let mut row = descriptor_data(record, 1);
+        let presence = match kind { Kind::AppleP12 | Kind::ProjectReadToken => vec![true], Kind::GoogleWif => vec![true, false], _ => vec![] };
+        row.authenticated.descriptor = format::Descriptor::new(kind, None, presence, kind.file().is_some()).unwrap();
+        let reference = row.reference(session.identity.unwrap()); let key = row.key();
+        session.rows.push(row);
+        let context = state.context.as_ref().unwrap().clone();
+        let owner = OriginalWork::new(u32::from(record) + 10, false, Weak::new());
+        attach(&owner, session, true, false).ok().unwrap();
+        // Exact synthetic receipt DATA for the narrow publisher predicate, NOT
+        // executed joins/native Check or core policy acceptance.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        owner.child.lock().unwrap().receipt = JoinReceipt::Returned;
+        owner.ended.store(true, Ordering::SeqCst);
+        let mut slot = Slot::new(owner, Operation::Bind, Some(context.clone()), Some(key.clone()), None);
+        slot.kind = Some(kind); slot.vault.lease = Some(session.store.clone());
+        slot.vault.generation = Some(session.registry_generation); slot.vault.reference = Some(reference);
+        slot.vault.loaded = Some(loan_payload(kind, reference));
+        let assignment = Assignment { kind, record_id: key.id, record_revision: key.revision,
+            context_revision: context.revision, availability: AssignmentAvailability::Available };
+        (slot, assignment)
+    }
+    fn publish_loan_data(state: &mut DocumentState, kind: Kind, record: u8) -> RecordKey {
+        drop(state.slot.take()); // Prior DATA-only owner; no task/native originals.
+        let (mut slot, assignment) = loan_slot(state, kind, record);
+        let key = RecordKey { id: assignment.record_id.clone(), revision: assignment.record_revision };
+        state.assignments.reserve_exact(1);
+        bind_payload(state, &mut slot, &assignment).ok().unwrap();
+        assert!(slot.vault.loaded.is_none());
+        if let Some(old) = state.assignments.iter_mut().find(|old| old.kind == kind) { *old = assignment; }
+        else { state.assignments.push(assignment); }
+        slot.phase = Phase::Idle; slot.settlement = Settlement::Known; state.slot = Some(slot); key
+    }
+    fn loan_state() -> DocumentState {
+        let (mut state, _) = model(Operation::Bind, true);
+        state.context = Some(Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+            project: context_data().project.clone(), registry_generation: 7, draft: b"{}".to_vec(),
+            platform: Platform::Ios, stage: Stage::Candidate, purpose: Purpose::Signing }));
+        state
+    }
+    #[test]
+    fn explicit_vault_loans_supply_two_signing_inputs_and_preserve_actual_borrowed_backing_on_lock() {
+        let mut state = loan_state();
+        let p12 = publish_loan_data(&mut state, Kind::AppleP12, 3);
+        let profile = publish_loan_data(&mut state, Kind::AppleProfile, 4);
+        assert_eq!(state.vault.as_ref().unwrap().bound.iter().flatten().count(), 2);
+        let native = state.context.as_ref().unwrap().clone();
+        assert!(assigned_payload(&state, &p12, Kind::AppleP12, &native).is_some());
+        assert!(assigned_payload(&state, &profile, Kind::AppleProfile, &native).is_some());
+        let mut context = crate::ios_archive_protocol::tests::context();
+        context.project_id = native.project_id.clone(); context.operation = crate::ios_archive_protocol::Operation::IOSSignedExport;
+        context.signing = Some(crate::ios_archive_protocol::SigningPolicy { team_id: "AAAAAAAAAA".into(),
+            distribution_certificate_sha256: "a".repeat(64), assignments: state.assignments.iter().map(|a|
+                crate::ios_archive_protocol::SigningAssignment { kind: a.kind.name().into(), record_id: a.record_id.0.clone(),
+                    record_revision: a.record_revision, context_revision: a.context_revision }).collect() });
+        let borrowed = super::super::ios_signing::borrow_material(&state, &context, 7, &native.project).unwrap();
+        assert!(borrowed.current(&state, 7, &native.project));
+        assert_eq!(borrowed.parts().unwrap().iter().map(|part| part.0).collect::<Vec<_>>(),
+            ["apple-p12", "p12-password", "apple-profile"]);
+        let observed = Arc::downgrade(assigned_payload(&state, &p12, Kind::AppleP12, &native).unwrap());
+        invalidate_all(&mut state); request_release(&mut state, Instant::now());
+        assert!(!borrowed.current(&state, 7, &native.project));
+        assert!(super::super::ios_signing::borrow_material(&state, &context, 7, &native.project).is_err());
+        let mut slot = state.slot.take().unwrap(); let retired = take_retirement(&mut state, &mut slot);
+        assert!(retired.bound.iter().flatten().count() == 2 && state.vault.is_none());
+        drop(retired); drop(slot); drop(state);
+        assert!(observed.upgrade().is_some()); // Existing signer, not a vault-row refund.
+        assert_eq!(borrowed.parts().unwrap()[1].1, b"synthetic-password");
+        drop(borrowed); assert!(observed.upgrade().is_none());
+    }
+    #[test]
+    fn bound_loan_publication_refuses_changed_lineage_or_unsettled_original_without_taking_payload() {
+        for changed in 0..8 {
+            let mut state = loan_state(); drop(state.slot.take());
+            let (mut slot, assignment) = loan_slot(&mut state, Kind::AppleP12, 3);
+            match changed {
+                0 => state.vault.as_mut().unwrap().rows[0].authenticated.revision.random = id(202),
+                1 => slot.vault.lease = Some(Arc::new(Mutex::new(store::StoreBook::new()))),
+                2 => state.vault.as_mut().unwrap().key = Some(Arc::new(crypto::lifecycle_data_key(identity()))),
+                3 => slot.owner.coordinator.lock().unwrap().receipt = JoinReceipt::Failed,
+                4 => slot.owner.child.lock().unwrap().receipt = JoinReceipt::Pending,
+                5 => state.vault.as_mut().unwrap().read_only = true,
+                6 => state.vault.as_mut().unwrap().registry_generation += 1,
+                _ => state.unknown = true,
+            }
+            assert!(bind_payload(&mut state, &mut slot, &assignment).is_err(), "changed={changed}");
+            assert!(slot.vault.loaded.is_some() && state.assignments.is_empty());
+            assert!(state.vault.as_ref().unwrap().bound.iter().all(Option::is_none));
+        }
+    }
+    #[test]
+    fn loan_currentness_rejects_equal_counter_replacement_new_context_registry_and_reassignment() {
+        for changed in 0..6 {
+            let mut state = loan_state(); let key = publish_loan_data(&mut state, Kind::AppleP12, 3);
+            let native = state.context.as_ref().unwrap().clone();
+            match changed {
+                0 => state.vault.as_mut().unwrap().rows[0].authenticated.revision.random = id(202),
+                1 => state.context = Some(context_data()),
+                2 => state.vault.as_mut().unwrap().registry_generation += 1,
+                3 => revoke_record(&mut state, &key),
+                4 => state.assignments[0].availability = AssignmentAvailability::Unavailable,
+                _ => state.vault.as_mut().unwrap().revoked = true,
+            }
+            assert!(assigned_payload(&state, &key, Kind::AppleP12, &native).is_none(), "changed={changed}");
+            assert!(!assignment_available(&state, &state.assignments[0]));
+        }
+    }
+    #[test]
+    fn reassigned_loan_census_is_not_refunded_before_off_lock_retirement_and_restore_preserves_it() {
+        let mut state = loan_state(); state.context = Some(context_data());
+        publish_loan_data(&mut state, Kind::GoogleWif, 3);
+        let original = Arc::downgrade(&state.vault.as_ref().unwrap().bound[0].as_ref().unwrap().payload);
+        publish_loan_data(&mut state, Kind::GoogleWif, 4);
+        assert_eq!(state.vault.as_ref().unwrap().bound.iter().flatten().count(), 1);
+        let owner = state.slot.as_ref().unwrap().owner.clone(); let before = live(&state, &owner);
+        let mut slot = state.slot.take().unwrap();
+        let retired = take_retirement(&mut state, &mut slot);
+        assert!(retired.previous_bound.is_some());
+        restore_retirement(&mut state, &mut slot, retired); state.slot = Some(slot);
+        assert_eq!(live(&state, &owner), before);
+        let mut slot = state.slot.take().unwrap(); let retired = take_retirement(&mut state, &mut slot);
+        owner.retain_retirement(Retirement { vault: retired, ..Retirement::default() }).ok().unwrap(); state.slot = Some(slot);
+        assert_eq!(live(&state, &owner), before); assert!(original.upgrade().is_some());
+        assert!(owner.release_retirement()); assert!(original.upgrade().is_none());
+        assert!(live(&state, &owner) < before);
+    }
+    #[test]
+    fn schema_three_advertises_storage_modes_without_opening_or_probing_a_vault() {
+        let state = loan_state();
+        for (native, durable) in [(false, false), (true, false), (true, true)] {
+            let value = serde_json::to_value(DocumentBinding::status_data_modes(&state, native, durable)).unwrap();
+            assert_eq!(value["schemaVersion"], 3);
+            assert_eq!(value["modes"]["session"]["available"], native);
+            assert_eq!(value["modes"]["encrypted"]["available"], native && durable);
+            assert!(state.vault.as_ref().unwrap().bound.iter().all(Option::is_none));
+        }
+    }
+
     #[test]
     fn completed_unlock_context_and_commit_retirement_preserve_the_healthy_lease_not_old_authority() {
         for operation in [Operation::Unlock, Operation::Initialize, Operation::Commit] {
@@ -1191,12 +1459,9 @@ mod tests {
 
     #[test]
     fn encrypted_projection_redacts_locked_read_only_and_mutating_authority() {
-        let (mut state, _) = model(Operation::Prepare, true);
-        state.context = Some(context_data());
-        let row = descriptor_data(3, 1); let key = row.key();
-        state.vault.as_mut().unwrap().rows = vec![row, descriptor_data(4, 1)];
-        state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: key.id, record_revision: key.revision,
-            context_revision: 1, availability: AssignmentAvailability::Available });
+        let mut state = loan_state(); state.context = Some(context_data());
+        let _key = publish_loan_data(&mut state, Kind::GoogleWif, 3);
+        state.vault.as_mut().unwrap().rows.push(descriptor_data(4, 1));
         let unlocked = serde_json::to_value(DocumentBinding::status_data(&state, false)).unwrap();
         assert_eq!(unlocked["records"][0]["availability"], "assigned");
         assert_eq!(unlocked["records"][0]["payloadState"], "assessed");
@@ -1291,7 +1556,7 @@ mod tests {
             subject: PreviewSubject::new(Kind::GoogleWif, SubjectChange::Assign, Some(&record)) });
         slot.vault.outcome = Some(store::StorageOutcome { effect: store::Effect::KnownApplied, durability: store::Durability::Unknown, cleanup: store::Cleanup::Pending });
         let value = serde_json::to_value(DocumentBinding::status_data(&state, false)).unwrap();
-        assert_eq!(value["schemaVersion"], 2); assert_eq!(value["mode"], "closed");
+        assert_eq!(value["schemaVersion"], 3); assert_eq!(value["mode"], "closed");
         for key in ["context", "persistence"] { assert_eq!(value[key], Value::Null); }
         for key in ["records", "assignments"] { assert_eq!(value[key], json!([])); }
         for key in ["selectionToken", "assessment", "preview"] { assert_eq!(value["operation"][key], Value::Null); }
@@ -1392,10 +1657,10 @@ pub(super) fn start_cleanup(document: &DocumentBinding, state: &mut DocumentStat
     }
     let slot = state.slot.as_mut().ok_or_else(AssetError::invalid)?;
     if !controls_released(&slot.owner) || slot.candidate.is_some() || slot.staged.is_some() || slot.retired_payload.is_some()
-        || slot.vault.loaded.is_some() || slot.context.is_some() { return Ok(None); }
+        || slot.vault.loaded.is_some() || slot.vault.previous_bound.is_some() || slot.context.is_some() { return Ok(None); }
     let mut work = slot.owner.vault.try_lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
     if work.release_claimed { return Ok(None); }
-    if work.key.is_some() || state.vault.as_ref().is_some_and(|session| session.key.is_some() || !session.rows.is_empty()) {
+    if work.key.is_some() || state.vault.as_ref().is_some_and(|session| session.key.is_some() || !session.rows.is_empty() || session.bound.iter().any(Option::is_some)) {
         return Ok(None);
     }
     let mut coordinator = slot.owner.coordinator.try_lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
@@ -1513,7 +1778,7 @@ impl DocumentBinding {
         _action: QualifiedAction, _path: Option<&std::path::Path>) -> Result<(), AssetError> {
         self.gate(state, false)?;
         let qualified = match selection {
-            Qualification::Ordinary => DURABLE_QUALIFIED,
+            Qualification::Ordinary => self.persistence_qualified(),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
             Qualification::Installed(selection) => {
                 use crate::shell::installed_observation::vault::Action;

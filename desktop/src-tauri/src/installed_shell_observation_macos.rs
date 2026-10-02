@@ -74,6 +74,19 @@ const FAILURE_REASONS: &[&str] = &[
     "vault-request-contract", "vault-result-contract", "vault-original-contract", "vault-finality-contract",
     "installation-request-contract", "installation-status-contract", "installation-first-read-contract",
     "installation-original-contract", "installation-finality-contract",
+    "bootstrap-attach-thread", "bootstrap-attach-duplicate", "bootstrap-window-result",
+    "bootstrap-navigation-untrusted", "bootstrap-navigation-unattached", "bootstrap-navigation-order",
+    "bootstrap-load-untrusted", "bootstrap-load-unattached", "bootstrap-load-reload-order",
+    "bootstrap-load-start-order", "bootstrap-load-finish-before-start", "bootstrap-load-finish-duplicate",
+    "bootstrap-info-methods-shape", "bootstrap-info-actions-shape", "bootstrap-info-runtime-state",
+    "bootstrap-info-runtime-mode", "bootstrap-info-runtime-reason", "bootstrap-info-app-name",
+    "bootstrap-info-app-version", "bootstrap-info-project-selection", "bootstrap-info-project-reason",
+    "bootstrap-info-project-fields", "bootstrap-info-method-count", "bootstrap-info-action-count",
+    "bootstrap-info-available-count", "bootstrap-info-required-method", "bootstrap-info-method-availability",
+    "bootstrap-info-action-availability", "bootstrap-info-duplicate", "bootstrap-info-reload",
+    "bootstrap-catalog-info-order", "bootstrap-catalog-duplicate", "bootstrap-catalog-result",
+    "bootstrap-catalog-fields", "bootstrap-catalog-field-count", "bootstrap-catalog-version-help",
+    "bootstrap-catalog-reload", "bootstrap-close-request", "bootstrap-tick-main-thread",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
 fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) -> bool {
@@ -85,6 +98,49 @@ fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) ->
 }
 fn first_failure_reason(first: &AtomicU8) -> Option<&'static str> {
     FAILURE_REASONS.get(usize::from(first.load(Ordering::SeqCst).checked_sub(1)?)).copied()
+}
+fn bootstrap_failure_reason(reason: &str) -> bool {
+    reason.starts_with("bootstrap-") && FAILURE_REASONS.contains(&reason)
+}
+fn latch_bootstrap(first: &AtomicU8, failed: &AtomicBool, detail: &mut Option<BootstrapSample>, reason: &'static str, sample: BootstrapSample) {
+    // The existing Record guard spans the one first-winner decision and its
+    // DATA publication. Later errors/cleanup cannot attach or replace facts.
+    if latch_failure(first, failed, reason) && bootstrap_failure_reason(reason) { *detail = Some(sample); }
+}
+
+// Original appInfo predicates, in their original short-circuit order. Only
+// closed site labels leave here, never values from the supplied capability DATA.
+fn bootstrap_app_info_failure(info: &AppInfo, methods: &[Value], actions: &[Value], expected_methods: usize,
+    project_fields: bool) -> Option<&'static str> {
+    if info.runtime.state != "available" { return Some("bootstrap-info-runtime-state"); }
+    if info.runtime.mode != "bundled" { return Some("bootstrap-info-runtime-mode"); }
+    if info.runtime.reason.is_some() { return Some("bootstrap-info-runtime-reason"); }
+    if info.app_name != "Mobile Release Kit" { return Some("bootstrap-info-app-name"); }
+    if info.app_version != env!("CARGO_PKG_VERSION") { return Some("bootstrap-info-app-version"); }
+    if !info.project_selection.available { return Some("bootstrap-info-project-selection"); }
+    if info.project_selection.reason.is_some() { return Some("bootstrap-info-project-reason"); }
+    if info.project_path_selection.available != project_fields { return Some("bootstrap-info-project-fields"); }
+    if !(METHODS.len()..=64).contains(&methods.len()) { return Some("bootstrap-info-method-count"); }
+    if !(1..=64).contains(&actions.len()) { return Some("bootstrap-info-action-count"); }
+    let available = |m: &&Value| m["available"].as_bool() == Some(true);
+    if methods.iter().filter(available).count() != expected_methods { return Some("bootstrap-info-available-count"); }
+    if !METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m["method"].as_str() == Some(*name)).count() == 1) {
+        return Some("bootstrap-info-required-method");
+    }
+    if !methods.iter().all(|m| m["available"].is_boolean()) { return Some("bootstrap-info-method-availability"); }
+    if !actions.iter().all(|a| a["available"].as_bool() == Some(false)) { return Some("bootstrap-info-action-availability"); }
+    None
+}
+fn bootstrap_catalog_failure(result: &Result<Value, BridgeError>) -> Option<&'static str> {
+    let Ok(value) = result else { return Some("bootstrap-catalog-result"); };
+    let Some(fields) = value["fields"].as_array() else { return Some("bootstrap-catalog-fields"); };
+    if fields.len() > 64 { return Some("bootstrap-catalog-field-count"); }
+    if fields.iter().filter(|f| f["path"].as_str() == Some("version.source")
+        && ["label", "requiredness", "what", "why", "where", "format", "requiredWhen", "failure"].iter().all(|k|
+            f[*k].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 16384))).count() != 1 {
+        return Some("bootstrap-catalog-version-help");
+    }
+    None
 }
 
 /// A read-only readiness predicate, never an action/close/finality permit.
@@ -856,6 +912,7 @@ impl Session {
 struct OpenHistory { sample: OpenInputSample, identity: IdentitySample, completion: CompletionSample, progress: Arc<OpenRelease> }
 struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
+    bootstrap_failure: Option<BootstrapSample>,
     last_project_chooser: Option<ProjectChooserSample>,
     original_window: Option<OriginalWindowSample>,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -882,6 +939,27 @@ struct Record {
     panel_history: Vec<OpenHistory>, file_attached: [bool; 7], file_actions: [bool; 7],
     field_attached: [bool; project_fields::COUNT], field_actions: [bool; project_fields::COUNT],
     fixture: Fixture,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BootstrapSample {
+    step: Step, attached: bool, initial_navigation: bool, started: bool, loaded: bool,
+    info: bool, catalog: bool, capability: bool, methods: usize,
+    reload_requested: bool, reload_navigation: bool, loss_seen: bool, original_window_admitted: Option<bool>,
+}
+impl BootstrapSample {
+    fn from_record(r: &Record) -> Self {
+        Self { step: r.step, attached: r.attached, initial_navigation: r.initial_navigation,
+            started: r.started, loaded: r.loaded, info: r.info, catalog: r.catalog, capability: r.capability,
+            methods: r.methods, reload_requested: r.reload_requested, reload_navigation: r.reload_navigation,
+            loss_seen: r.loss_seen, original_window_admitted: r.original_window.map(|s| s.admitted) }
+    }
+    fn value(self) -> Value {
+        json!({"source":"first-failure-record", "step":format!("{:?}", self.step), "attached":self.attached,
+            "initialNavigation":self.initial_navigation, "started":self.started, "loaded":self.loaded,
+            "info":self.info, "catalog":self.catalog, "capability":self.capability, "methods":self.methods,
+            "reloadRequested":self.reload_requested, "reloadNavigation":self.reload_navigation,
+            "lossSeen":self.loss_seen, "originalWindowAdmitted":self.original_window_admitted})
+    }
 }
 impl Record {
     fn action_returned(&self, step: Step) -> Result<bool, &'static str> {
@@ -915,6 +993,7 @@ impl Record {
 #[derive(Clone, Copy)]
 struct FailureSnapshot {
     source: &'static str, step: Step, pending: Option<Pending>, native_dispatch: Option<NativeDispatch>,
+    bootstrap: Option<BootstrapSample>,
     dom: Option<(u16, Option<ProjectChooserSample>)>,
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -925,6 +1004,7 @@ struct FailureSnapshot {
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
+            bootstrap: r.bootstrap_failure,
             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
             project_selection: r.project_selection, completion_selection: r.completion_selection,
@@ -940,6 +1020,7 @@ impl FailureSnapshot {
         // pending/panel absence observations. The schema labels this explicitly.
         self.source = "prearm-open-progress";
         self.dom = None; // No fresh DOM/counter observation at this cached expiry.
+        self.bootstrap = None; // A pre-arm cache is not the first failure's Record sample.
         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.completion_selection = None;
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
@@ -950,6 +1031,7 @@ impl FailureSnapshot {
         if step.len() > 32 || !step.is_ascii() || !FAILURE_REASONS.contains(&reason) { return None; }
         if self.project_selection.is_some() && (self.source != "record" || !project_selection_failure_reason(reason)
             || !matches!(self.step, Step::OpenProject | Step::ProjectSettled)) { return None; }
+        if self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason)) { return None; }
         let context = edit::bounded(&failure_context(&self), 8192).ok()?;
         if !context.is_ascii() { return None; }
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
@@ -987,6 +1069,9 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     if let Some((evaluations, chooser)) = r.dom {
         value["dom"] = json!({"evaluations":evaluations, "lastProjectChooser":chooser.map(ProjectChooserSample::value)});
     }
+    // Only this nested sample belongs to the first failure. The rest of this
+    // context still describes the later report snapshot, not that earlier time.
+    if let Some(sample) = r.bootstrap { value["bootstrap"] = sample.value(); }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some((i,data,name)) = r.field_preparation {
@@ -1077,6 +1162,7 @@ impl Observation {
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
+                bootstrap_failure: None,
                 last_project_chooser: None, original_window: None,
                 native_dispatch: None, last_panel: None, native_action: None,
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
@@ -1110,6 +1196,10 @@ impl Observation {
     }
     fn fail(&self) { self.fail_with("observer-invariant"); }
     fn fail_with(&self, reason: &'static str) { latch_failure(&self.failure_reason, &self.failed, reason); }
+    fn fail_bootstrap(&self, r: &mut Record, reason: &'static str) {
+        let sample = BootstrapSample::from_record(r);
+        latch_bootstrap(&self.failure_reason, &self.failed, &mut r.bootstrap_failure, reason, sample);
+    }
     fn record(&self) -> Option<MutexGuard<'_, Record>> {
         match self.record.lock() { Ok(r) => Some(r), Err(_) => { self.fail_with("observer-record-unavailable"); None } }
     }
@@ -1203,9 +1293,11 @@ impl Observation {
     }
     pub(super) fn attach(&self, _: &Supervisor) -> Result<(), BridgeError> {
         let Some(mut r) = self.record() else { return Err(BridgeError::cleanup_unknown()); };
-        if std::thread::current().id() != self.main || r.attached || !self.timely() {
-            self.fail(); return Err(BridgeError::invalid());
+        if std::thread::current().id() != self.main {
+            self.fail_bootstrap(&mut r, "bootstrap-attach-thread"); return Err(BridgeError::invalid());
         }
+        if r.attached { self.fail_bootstrap(&mut r, "bootstrap-attach-duplicate"); return Err(BridgeError::invalid()); }
+        if !self.timely() { self.fail(); return Err(BridgeError::invalid()); }
         r.attached = true; Ok(())
     }
     pub(super) fn observe_original_window(&self, window: &tauri::Window) {
@@ -1228,7 +1320,7 @@ impl Observation {
             Err(_) => OriginalWindowSample { native_returned: false, result: "accessor-error", state: None, admitted: false },
         };
         let Some(mut r) = self.record() else { return; };
-        if returned.result != "ok" { self.fail(); }
+        if returned.result != "ok" { self.fail_bootstrap(&mut r, "bootstrap-window-result"); }
         // Actual calls returned. Recheck the SAME endpoint/absorbing failure;
         // nil/inactive/different-main are nonterminal unsatisfied snapshots.
         let needed = original_window_needed(r.attached, r.step, r.pending, r.original_window);
@@ -1238,50 +1330,55 @@ impl Observation {
     }
     pub(super) fn navigation(&self, trusted: bool, allowed: bool) {
         let Some(mut r) = self.record() else { return; };
-        if !trusted || !r.attached { self.fail(); return; }
+        if !trusted { self.fail_bootstrap(&mut r, "bootstrap-navigation-untrusted"); return; }
+        if !r.attached { self.fail_bootstrap(&mut r, "bootstrap-navigation-unattached"); return; }
         if !r.initial_navigation && !r.loaded && allowed { r.initial_navigation = true; return; }
         if self.case.loses_document() && r.reload_requested && !r.reload_navigation && r.loaded && !allowed {
             r.reload_navigation = true; return;
         }
-        self.fail();
+        self.fail_bootstrap(&mut r, "bootstrap-navigation-order");
     }
     pub(super) fn page_load(&self, trusted: bool, finished: bool) {
         let Some(mut r) = self.record() else { return; };
-        if !trusted || !r.attached { self.fail(); return; }
+        if !trusted { self.fail_bootstrap(&mut r, "bootstrap-load-untrusted"); return; }
+        if !r.attached { self.fail_bootstrap(&mut r, "bootstrap-load-unattached"); return; }
         if r.reload_requested {
             // A real second Started can invalidate even if native navigation
             // ordering varies. Finished cannot bind or restore the original.
             if !finished && !r.loss_seen && r.loaded { r.loss_seen = true; return; }
-            self.fail(); return;
+            self.fail_bootstrap(&mut r, "bootstrap-load-reload-order"); return;
         }
-        if if finished { !r.started || r.loaded } else { r.started } { self.fail(); return; }
+        if finished {
+            if !r.started { self.fail_bootstrap(&mut r, "bootstrap-load-finish-before-start"); return; }
+            if r.loaded { self.fail_bootstrap(&mut r, "bootstrap-load-finish-duplicate"); return; }
+        } else if r.started { self.fail_bootstrap(&mut r, "bootstrap-load-start-order"); return; }
         if finished { r.loaded = true; } else { r.started = true; }
     }
     pub(super) fn app_info(&self, info: &AppInfo) {
-        let Some(methods) = info.capabilities.as_ref().and_then(|v| v["methods"].as_array()) else { self.fail(); return; };
-        let Some(actions) = info.capabilities.as_ref().and_then(|v| v["actions"].as_array()) else { self.fail(); return; };
-        let available = |m: &&Value| m["available"].as_bool() == Some(true);
-        let valid = info.runtime.state == "available" && info.runtime.mode == "bundled" && info.runtime.reason.is_none()
-            && info.app_name == "Mobile Release Kit" && info.app_version == env!("CARGO_PKG_VERSION")
-            && info.project_selection.available && info.project_selection.reason.is_none()
-            && info.project_path_selection.available == (self.case == Case::ProjectFields
-                || crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED)
-            && (METHODS.len()..=64).contains(&methods.len()) && (1..=64).contains(&actions.len())
-            && methods.iter().filter(available).count() == self.case.methods()
-            && METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m["method"].as_str() == Some(*name)).count() == 1)
-            && methods.iter().all(|m| m["available"].is_boolean())
-            && actions.iter().all(|a| a["available"].as_bool() == Some(false));
+        // These two shape failures originally occur without a Record guard.
+        // Preserve that route; the closed reason has no first-failure flags.
+        let Some(methods) = info.capabilities.as_ref().and_then(|v| v["methods"].as_array()) else {
+            self.fail_with("bootstrap-info-methods-shape"); return;
+        };
+        let Some(actions) = info.capabilities.as_ref().and_then(|v| v["actions"].as_array()) else {
+            self.fail_with("bootstrap-info-actions-shape"); return;
+        };
+        let failure = bootstrap_app_info_failure(info, methods, actions, self.case.methods(), self.case == Case::ProjectFields
+            || crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED);
         let Some(mut r) = self.record() else { return; };
-        if !valid || r.info || r.reload_requested { self.fail(); return; }
+        if let Some(reason) = failure { self.fail_bootstrap(&mut r, reason); return; }
+        if r.info { self.fail_bootstrap(&mut r, "bootstrap-info-duplicate"); return; }
+        if r.reload_requested { self.fail_bootstrap(&mut r, "bootstrap-info-reload"); return; }
         r.info = true; r.methods = methods.len();
     }
     pub(super) fn catalog(&self, result: &Result<Value, BridgeError>) {
-        let valid = result.as_ref().ok().and_then(|v| v["fields"].as_array()).is_some_and(|fields|
-            fields.len() <= 64 && fields.iter().filter(|f| f["path"].as_str() == Some("version.source")
-                && ["label", "requiredness", "what", "why", "where", "format", "requiredWhen", "failure"].iter().all(|k|
-                    f[*k].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 16384))).count() == 1);
+        let failure = bootstrap_catalog_failure(result);
         let Some(mut r) = self.record() else { return; };
-        if !r.info || r.catalog || !valid || r.reload_requested { self.fail(); return; } r.catalog = true;
+        if !r.info { self.fail_bootstrap(&mut r, "bootstrap-catalog-info-order"); return; }
+        if r.catalog { self.fail_bootstrap(&mut r, "bootstrap-catalog-duplicate"); return; }
+        if let Some(reason) = failure { self.fail_bootstrap(&mut r, reason); return; }
+        if r.reload_requested { self.fail_bootstrap(&mut r, "bootstrap-catalog-reload"); return; }
+        r.catalog = true;
     }
     pub(super) fn project_result(&self, result: &Result<Option<Project>, crate::asset_commands::AssetError>, selection: Option<&InstalledMacProjectSelectionData>) {
         let Some(mut r) = self.record() else { return; };
@@ -1538,7 +1635,7 @@ impl Observation {
         }
         if let Ok(status) = result { self.edit_status(status,edits); }
     }
-    pub(super) fn close_request(&self) { self.fail(); } // Native Quit/loss, never synthetic Close IPC, owns EOF.
+    pub(super) fn close_request(&self) { self.fail_with("bootstrap-close-request"); } // Native Quit/loss, never synthetic Close IPC, owns EOF.
     pub(super) fn edit_status(&self, status: &ConfigEditStatus, edits: &EditOwner) {
         let Some(mut r) = self.record() else { return; };
         if status.schema_version != 1 || !edit::token(&status.window_generation) { self.fail_with("edit-status-schema"); return; }
@@ -1598,7 +1695,7 @@ impl Observation {
         r.status_revision = Some(status.status_revision);
     }
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
-        if std::thread::current().id() == self.main { self.fail(); return; }
+        if std::thread::current().id() == self.main { self.fail_with("bootstrap-tick-main-thread"); return; }
         // Drain the one prepared original even after failure/deadline: known
         // non-entry may retire its barrier, never dispatch a late Press.
         if self.accessibility_step(app) {
@@ -3491,6 +3588,91 @@ fn native_recheck_data_check() -> bool {
     if receiver.try_recv() != Ok(None) || receiver.try_recv().is_ok() || sink.claim.load(Ordering::SeqCst) != 2 { return false; }
     true
 }
+fn bootstrap_diagnostic_data_checks() -> bool {
+    // Inert DATA only: no Record/native fixture, thread, endpoint or receipt.
+    let sample = BootstrapSample { step: Step::Bootstrap, attached: true, initial_navigation: true,
+        started: true, loaded: true, info: false, catalog: false, capability: true, methods: 0,
+        reload_requested: false, reload_navigation: false, loss_seen: false, original_window_admitted: Some(true) };
+    let later = BootstrapSample { step: Step::Environment, info: true, methods: METHODS.len(), ..sample };
+    for reason in FAILURE_REASONS {
+        let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+        latch_bootstrap(&first, &failed, &mut detail, *reason, sample);
+        let expected = bootstrap_failure_reason(reason).then_some(sample);
+        if detail != expected || !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*reason) { return false; }
+        latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
+        latch_failure(&first, &failed, "observer-deadline");
+        if detail != expected || first_failure_reason(&first) != Some(*reason) { return false; }
+    }
+    let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+    latch_bootstrap(&first, &failed, &mut detail, "bootstrap-unrecognized", sample);
+    if detail.is_some() || first_failure_reason(&first) != Some("observer-invariant") || !failed.load(Ordering::SeqCst) { return false; }
+    // No Record at the first failure means no later callback can manufacture
+    // the missing first-time flags, even if that callback holds Record now.
+    let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+    latch_failure(&first, &failed, "bootstrap-info-methods-shape");
+    latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
+    if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
+    let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None,
+        bootstrap: Some(sample), dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
+        accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
+    if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()
+        || (FailureSnapshot { source: "prearm-open-progress", ..snapshot }).frame("bootstrap-info-available-count").is_some() { return false; }
+    let expired = snapshot.at_expiry(OpenProgress { state: "unknown", requested: false, dispatched: false, entered: false,
+        returned: false, joined: false, retired: false, expired: true });
+    if expired.bootstrap.is_some() || expired.dom.is_some() || failure_context(&expired).get("bootstrap").is_some() { return false; }
+    let info = || AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"),
+        runtime: crate::runtime::RuntimeStatus { state: "available", reason: None, mode: "bundled" }, capabilities: None,
+        project_selection: crate::bridge::ProjectSelectionAvailability { available: true, reason: None },
+        project_path_selection: crate::bridge::ProjectPathSelectionAvailability { available: false, reason: None }, installation: None };
+    let methods: Vec<Value> = METHODS.iter().map(|name| json!({"method":name,"available":true})).collect();
+    let actions = [json!({"available":false})];
+    let classify = |value: &AppInfo, methods: &[Value], actions: &[Value]| bootstrap_app_info_failure(value, methods, actions, METHODS.len(), false);
+    if classify(&info(), &methods, &actions).is_some() { return false; }
+    for change in 0..8 {
+        let mut value = info();
+        let reason = match change {
+            0 => { value.runtime.state = "unavailable"; value.runtime.mode = "other"; "bootstrap-info-runtime-state" },
+            1 => { value.runtime.mode = "other"; value.runtime.reason = Some("inert".into()); "bootstrap-info-runtime-mode" },
+            2 => { value.runtime.reason = Some("inert".into()); "bootstrap-info-runtime-reason" },
+            3 => { value.app_name = "inert"; "bootstrap-info-app-name" },
+            4 => { value.app_version = "inert"; "bootstrap-info-app-version" },
+            5 => { value.project_selection.available = false; value.project_selection.reason = Some("inert"); "bootstrap-info-project-selection" },
+            6 => { value.project_selection.reason = Some("inert"); "bootstrap-info-project-reason" },
+            _ => { value.project_path_selection.available = true; "bootstrap-info-project-fields" },
+        };
+        if classify(&value, &methods, &actions) != Some(reason) { return false; }
+    }
+    for count in [0, METHODS.len() - 1, 65] {
+        if classify(&info(), &vec![methods[0].clone(); count], &[]) != Some("bootstrap-info-method-count") { return false; }
+    }
+    for count in [0, 65] {
+        if classify(&info(), &methods, &vec![actions[0].clone(); count]) != Some("bootstrap-info-action-count") { return false; }
+    }
+    let mut unavailable = methods.clone(); unavailable[0]["available"] = Value::Bool(false);
+    let mut duplicate = methods.clone(); duplicate[0] = duplicate[1].clone();
+    let mut malformed = methods.clone(); malformed.push(json!({"method":"inert","available":null}));
+    for (values, reason) in [(&unavailable, "bootstrap-info-available-count"), (&duplicate, "bootstrap-info-required-method"),
+        (&malformed, "bootstrap-info-method-availability")] {
+        if classify(&info(), values, &actions) != Some(reason) { return false; }
+    }
+    for available in [Value::Bool(true), Value::Null] {
+        if classify(&info(), &methods, &[json!({"available":available})]) != Some("bootstrap-info-action-availability") { return false; }
+    }
+    let mut extended = methods.clone(); extended.resize(64, json!({"method":"inert","available":false}));
+    if classify(&info(), &extended, &actions).is_some() { return false; }
+    let field = json!({"path":"version.source","label":"inert","requiredness":"inert","what":"inert",
+        "why":"inert","where":"inert","format":"inert","requiredWhen":"inert","failure":"inert"});
+    if bootstrap_catalog_failure(&Ok(json!({"fields":[field.clone()]}))).is_some()
+        || bootstrap_catalog_failure(&Err(BridgeError::invalid())) != Some("bootstrap-catalog-result")
+        || bootstrap_catalog_failure(&Ok(Value::Null)) != Some("bootstrap-catalog-fields")
+        || bootstrap_catalog_failure(&Ok(json!({"fields":vec![field.clone(); 65]}))) != Some("bootstrap-catalog-field-count")
+        || bootstrap_catalog_failure(&Ok(json!({"fields":[field.clone(), field.clone()]}))) != Some("bootstrap-catalog-version-help") { return false; }
+    for invalid in [Value::Null, Value::String(String::new()), Value::String("x".repeat(16385))] {
+        let mut changed = field.clone(); changed["where"] = invalid;
+        if bootstrap_catalog_failure(&Ok(json!({"fields":[changed]}))) != Some("bootstrap-catalog-version-help") { return false; }
+    }
+    true
+}
 fn original_window_witness_data_check() -> bool {
     // Inert returned DATA/policy only; no Window, callback, native query or
     // fabricated sample from this check is published as runtime evidence.
@@ -3828,6 +4010,7 @@ fn observer_data_checks() -> bool {
 
     if !project_selection_data_checks() { return false; }
     if !project_snapshot_failure_data_checks() { return false; }
+    if !bootstrap_diagnostic_data_checks() { return false; }
     // Every closed reason survives later generic cleanup/deadline failures.
     for reason in FAILURE_REASONS {
         if !reason.is_ascii() || reason.len() > 48 { return false; }

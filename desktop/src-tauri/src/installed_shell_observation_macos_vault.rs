@@ -241,7 +241,10 @@ impl Record {
         if !self.final_originals || !self.opened || !self.preview_consumed || !self.locked
             || !control.completed() || self.initialization.is_none() || self.storage.is_none()
             || control.case == Case::RoundTrip && !self.not_executed && !(self.initialized && self.reopened && self.unlocked && self.relocked && self.lookup.is_some()) { return None; }
-        Some(json!({"mechanism":"original-document-shipping-helper-v1","normalPersistenceEnabled":false,
+        // This is the compiled selector, not proof that this selected helper
+        // journey exercised the ordinary application/UI route.
+        Some(json!({"mechanism":"original-document-shipping-helper-v1",
+            "normalPersistenceEnabled":crate::runtime::INSTALLED_MAC_PERSISTENCE_QUALIFIED,
             "execution":if self.not_executed {"not-executed-provider-prerequisite"} else {"executed"},
             "testResult":if self.not_executed {"not-executed"} else if control.case == Case::RoundTrip {"positive"} else {"expected-stop"},
             "checkpoint":match control.case {Case::RoundTrip=>"none",Case::StopBeforeGo=>"before-helper-go",Case::StopAfterAdd=>"successful-add-terminal-before-application-candidate"},

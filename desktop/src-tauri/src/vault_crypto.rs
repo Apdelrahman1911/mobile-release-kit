@@ -272,6 +272,12 @@ impl SealedRecord {
 pub(crate) struct AuthenticatedDescriptor { pub(crate) record: Id, pub(crate) revision: Revision, pub(crate) descriptor: Descriptor }
 pub(crate) struct StoredBytes { bytes: Zeroizing<Vec<u8>>, file: Range<usize> }
 impl StoredBytes {
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn lifecycle_data(bytes: Vec<u8>) -> Self {
+        // Synthetic custody/accounting input only, not authentication or native
+        // provider evidence. Production plaintext still comes only from open_record.
+        let end = bytes.len(); Self { bytes: Zeroizing::new(bytes), file: 0..end }
+    }
     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes[self.file.clone()] }
     pub(crate) fn retained_bytes(&self) -> Result<usize> { self.bytes.capacity().checked_add(std::mem::size_of::<Self>()).ok_or(Error::Bounds) }
 }

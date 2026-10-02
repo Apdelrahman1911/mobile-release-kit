@@ -131,8 +131,22 @@ FAILURE_REASONS = frozenset((
     "project-fields-fixture-contract project-fields-dom-contract "
     "vault-request-contract vault-result-contract vault-original-contract vault-finality-contract "
     "installation-request-contract installation-status-contract installation-first-read-contract "
-    "installation-original-contract installation-finality-contract"
+    "installation-original-contract installation-finality-contract "
+    "bootstrap-attach-thread bootstrap-attach-duplicate bootstrap-window-result "
+    "bootstrap-navigation-untrusted bootstrap-navigation-unattached bootstrap-navigation-order "
+    "bootstrap-load-untrusted bootstrap-load-unattached bootstrap-load-reload-order "
+    "bootstrap-load-start-order bootstrap-load-finish-before-start bootstrap-load-finish-duplicate "
+    "bootstrap-info-methods-shape bootstrap-info-actions-shape bootstrap-info-runtime-state "
+    "bootstrap-info-runtime-mode bootstrap-info-runtime-reason bootstrap-info-app-name "
+    "bootstrap-info-app-version bootstrap-info-project-selection bootstrap-info-project-reason "
+    "bootstrap-info-project-fields bootstrap-info-method-count bootstrap-info-action-count "
+    "bootstrap-info-available-count bootstrap-info-required-method bootstrap-info-method-availability "
+    "bootstrap-info-action-availability bootstrap-info-duplicate bootstrap-info-reload "
+    "bootstrap-catalog-info-order bootstrap-catalog-duplicate bootstrap-catalog-result "
+    "bootstrap-catalog-fields bootstrap-catalog-field-count bootstrap-catalog-version-help "
+    "bootstrap-catalog-reload bootstrap-close-request bootstrap-tick-main-thread"
 ).split())
+BOOTSTRAP_FAILURE_REASONS = frozenset(reason for reason in FAILURE_REASONS if reason.startswith("bootstrap-"))
 PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
 PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
                                      "captured-object-metadata-changed", "different-object", "unavailable"))
@@ -1054,7 +1068,9 @@ def _expected_vault_helper(case, *, negative=False):
          and not (negative and case == VAULT_HELPER_CASES[1]), "vault-helper-case")
     roundtrip = case == VAULT_HELPER_CASES[0] and not negative
     kind = "before-go" if case == VAULT_HELPER_CASES[1] else "after-add" if case == VAULT_HELPER_CASES[2] else "initialize"
-    return {"mechanism": "original-document-shipping-helper-v1", "normalPersistenceEnabled": False,
+    # Exact enabled candidate source. The mechanism is still the selected
+    # helper journey, not ordinary persistent-credential UI acceptance.
+    return {"mechanism": "original-document-shipping-helper-v1", "normalPersistenceEnabled": True,
         "execution": "not-executed-provider-prerequisite" if negative else "executed",
         "testResult": "not-executed" if negative else "positive" if roundtrip else "expected-stop",
         "checkpoint": ("none", "before-helper-go", "successful-add-terminal-before-application-candidate")[VAULT_HELPER_CASES.index(case)],
@@ -2437,6 +2453,27 @@ def _dom_failure_context(value, source):
     return value
 
 
+def _bootstrap_failure_context(value, source, step, reason):
+    # Only these nested facts were retained by the first CAS winner while
+    # holding the original Record guard. No other context becomes first-time
+    # DATA, and unavailable facts are never filled from later Record snapshots.
+    flags = {"attached", "initialNavigation", "started", "loaded", "info", "catalog", "capability",
+             "reloadRequested", "reloadNavigation", "lossSeen"}
+    need(source == "record" and step in FAILURE_STEPS and reason in BOOTSTRAP_FAILURE_REASONS
+         and type(value) is dict and set(value) == flags | {"source", "step", "methods", "originalWindowAdmitted"}
+         and value["source"] == "first-failure-record"
+         and type(value["step"]) is str and value["step"] in FAILURE_STEPS
+         and all(type(value[key]) is bool for key in flags), "failure-context")
+    count, admitted = value["methods"], value["originalWindowAdmitted"]
+    need(type(count) is int and 0 <= count <= 64 and (admitted is None or type(admitted) is bool)
+         and (10 <= count if value["info"] else count == 0)
+         and (not value["loaded"] or value["started"])
+         and (not value["catalog"] or value["info"])
+         and (not value["reloadNavigation"] or value["reloadRequested"] and value["loaded"])
+         and (not value["lossSeen"] or value["reloadRequested"] and value["loaded"]), "failure-context")
+    return value
+
+
 def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -2444,7 +2481,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -2452,6 +2489,9 @@ def failure_context(stdout, stderr, case=None):
             need(type(value["snapshotSource"]) is str and value["snapshotSource"] in ("record", "prearm-open-progress"), "failure-context")
         if "dom" in value:
             value["dom"] = _dom_failure_context(value["dom"], value.get("snapshotSource"))
+        if "bootstrap" in value:
+            value["bootstrap"] = _bootstrap_failure_context(value["bootstrap"], value.get("snapshotSource"),
+                                                            failure_step(stdout, stderr), failure_reason(stdout, stderr))
         if "originalWindow" in value:
             value["originalWindow"] = _original_window_context(value["originalWindow"])
         if "projectSelection" in value:
@@ -3525,7 +3565,7 @@ def main():
                     "instrumentedEngineeringApp": True, "shippingBinaryQualified": False, "distributionQualified": False}
         if scope == VAULT_HELPER_SCOPE:
             complete.update(notExecutedCases=list(not_executed), focusedCasesPassed=not not_executed,
-                            normalPersistenceEnabled=False, privateFixturesRetained=True,
+                            normalPersistenceEnabled=True, privateFixturesRetained=True,
                             syntheticKeychainRowRetirement="disposable-hosted-account-only")
         emit_record(complete, sys.stdout)
     except BaseException:
