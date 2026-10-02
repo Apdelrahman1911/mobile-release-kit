@@ -2907,7 +2907,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
-            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; }
+            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

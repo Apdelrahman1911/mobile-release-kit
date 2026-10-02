@@ -29,8 +29,9 @@ mod android_tool_sources;
 mod android_toolchain_macos_policy;
 mod saved_command_owner;
 pub mod runtime;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+// Pure fixed-layout DATA is also used by portable contract tests.
 pub mod macos_install_paths;
+pub mod macos_install_record;
 // Protected original books. The retained Android launch path is wired but
 // qualification-disabled; legacy inspection-only DATA remains separate.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

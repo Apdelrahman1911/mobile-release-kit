@@ -38,6 +38,11 @@ APP_NAME = "Mobile Release Kit.app"
 APP_BINARY = "Contents/MacOS/mobile-release-kit-desktop"
 VAULT_HELPER = "Contents/Helpers/mrk-vault-keychain"
 PACKAGE_ID = "dev.mobile-release-kit.desktop.installed"
+PACKAGE_VERSION = "0.1.0"
+BUNDLE_ID = "dev.mobile-release-kit.desktop"
+INSTALLATION_INVENTORY_NAME = "install-inventory.json"
+INSTALLATION_RECORD_NAME = "installation-v1.json"
+INSTALLATION_RECORD_LIMIT = 8192
 FIXTURE_PREFIX = "MobileReleaseKit-InstallerFixture-"
 FIXTURE_MARKER = b"MRK_MACOS_INSTALLER_FIXTURE_OCCUPANT\n"
 # Exact order/expected original outcomes of the separate compile-time package.
@@ -50,6 +55,7 @@ FIXTURE_CASES = {
     "first-publication-second-refusal": ("exclusive-publication-refused-or-unknown", "confirmed", "occupied-refused", "partial-installation-retained", True, 20),
     "prepublication-persistence-report": ("fixture-reported-persistence-failure", "not-attempted", "not-attempted", "refused-staging-retained", False, 1),
     "postruntime-persistence-report": ("fixture-reported-persistence-failure", "confirmed", "not-attempted", "partial-installation-retained", True, 20),
+    "metadata-descriptor-collision": ("open-refused", "confirmed", "not-attempted", "partial-installation-retained", True, 20),
 }
 PROTOCOL = "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
 # Current product protocol is separately source-bound; never rewrite the
@@ -255,12 +261,15 @@ def no_xattrs(fd):
         raise Refused("unsupported-data-host")
 
 
-def read_at(fd, name, limit):
+def read_at(fd, name, limit, *, zero_flags=False):
     before = os.stat(name, dir_fd=fd, follow_symlinks=False)
-    need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit, "ordinary-file-bound")
+    need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit
+         and (not zero_flags or getattr(before, "st_flags", None) == 0), "ordinary-file-bound")
     original = os.open(name, READ_FLAGS, dir_fd=fd)
     try:
-        need(signature(os.fstat(original)) == signature(before), "file-open-changed")
+        opened = os.fstat(original)
+        need(signature(opened) == signature(before)
+             and (not zero_flags or getattr(opened, "st_flags", None) == 0), "file-open-changed")
         no_xattrs(original)
         data = bytearray()
         while len(data) <= limit:
@@ -268,8 +277,10 @@ def read_at(fd, name, limit):
             if not block:
                 break
             data.extend(block)
-        need(len(data) == before.st_size and signature(os.fstat(original)) == signature(before)
-             and signature(os.stat(name, dir_fd=fd, follow_symlinks=False)) == signature(before), "file-read-changed")
+        final = os.fstat(original)
+        named = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        need(len(data) == before.st_size and signature(final) == signature(named) == signature(before)
+             and (not zero_flags or getattr(final, "st_flags", None) == getattr(named, "st_flags", None) == 0), "file-read-changed")
         return bytes(data), before
     finally:
         close_once(original)
@@ -833,6 +844,16 @@ def preview_command(args):
          "preview-installation-readback")
     bound_original_result(observed.get("originalInstallerResult"), (None, "confirmed", "confirmed", "installed", True, 0),
                           args.expected_source, observed.get("inventorySha256"), observed.get("runtimeManifestSha256"))
+    metadata = observed.get("installationMetadata")
+    result = observed["originalInstallerResult"]
+    need(type(metadata) is dict and set(metadata) == {"state", "instance", "inventoryBytes", "descriptorBytes", "originalFinality"}
+         and metadata["state"] == "recorded-current-data-correspondence"
+         and metadata["originalFinality"] == "separate-Installer-status"
+         and metadata["instance"] == result["staging"][9:]
+         and type(metadata["inventoryBytes"]) is int and 0 < metadata["inventoryBytes"] <= 1024 * 1024
+         and type(metadata["descriptorBytes"]) is int and 0 < metadata["descriptorBytes"] <= INSTALLATION_RECORD_LIMIT
+         and metadata["inventoryBytes"] + metadata["descriptorBytes"] == result["installationMetadata"]["writtenBytes"],
+         "preview-installation-metadata-readback")
     expected = observation_inventory(argparse.Namespace(input=work / "input",
         expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"]))
     need(observed.get("nonrootReadbackFileCount") == len(expected), "preview-readback-roster")
@@ -873,7 +894,9 @@ def app_command(args):
               if cargo_messages is not None else None)
     info = read(DESKTOP / "macos-installed-inputs/Info.plist", 16384)
     parsed = plistlib.loads(info)
-    need(parsed["CFBundleExecutable"] == "mobile-release-kit-desktop" and parsed["LSMinimumSystemVersion"] == "26.0", "app-info-binding")
+    need(parsed["CFBundleExecutable"] == "mobile-release-kit-desktop" and parsed["LSMinimumSystemVersion"] == "26.0"
+         and parsed["CFBundleIdentifier"] == BUNDLE_ID
+         and parsed["CFBundleShortVersionString"] == parsed["CFBundleVersion"] == PACKAGE_VERSION, "app-info-binding")
     files = {APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555), "Contents/Info.plist": (info, 0o644),
              "Contents/PkgInfo": (b"APPL????", 0o644),
              "Contents/Resources/icon.png": (read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024), 0o644)}
@@ -1047,7 +1070,7 @@ def package_info(body, *, fixture=False):
     identifier = PACKAGE_ID + ("-fixture" if fixture else "")
     info = ET.fromstring(body)
     need(info.tag == "pkg-info" and info.get("identifier") == identifier
-         and info.get("version") == "0.1.0" and info.get("install-location") == "/" and info.get("auth") == "root", "scripts-package-identity")
+         and info.get("version") == PACKAGE_VERSION and info.get("install-location") == "/" and info.get("auth") == "root", "scripts-package-identity")
     payload = info.find("payload")
     need(payload is None or payload.get("numberOfFiles") == "0", "installer-must-have-no-payload")
     hooks = info.find("scripts")
@@ -1113,12 +1136,17 @@ def audit_command(args):
 
 
 def observation_inventory(args):
-    body = read(Path(args.input) / "install-inventory.json", 1024 * 1024)
-    need(sha(args.expected_inventory) and sha(args.expected_manifest) and digest(body) == args.expected_inventory, "observation-inventory-anchor")
+    body = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+    return observation_inventory_bytes(body, args.expected_inventory, args.expected_manifest)
+
+
+def observation_inventory_bytes(body, expected_inventory, expected_manifest):
+    need(type(body) is bytes and 0 < len(body) <= 1024 * 1024, "observation-inventory-bytes")
+    need(sha(expected_inventory) and sha(expected_manifest) and digest(body) == expected_inventory, "observation-inventory-anchor")
     inventory = decode(body)
     need(type(inventory) is dict and set(inventory) == {"schemaVersion", "release", "runtimeManifestSha256", "files"}
          and type(inventory["schemaVersion"]) is int and inventory["schemaVersion"] == 1
-         and inventory["release"] == RELEASE and inventory["runtimeManifestSha256"] == args.expected_manifest
+         and inventory["release"] == RELEASE and inventory["runtimeManifestSha256"] == expected_manifest
          and type(inventory["files"]) is list and 0 < len(inventory["files"]) <= MAX_FILES, "observation-inventory-shape")
     rows = {}
     for row in inventory["files"]:
@@ -1130,7 +1158,7 @@ def observation_inventory(args):
         rows[row["path"]] = row
     need(list(rows) == sorted(rows) and sum(row["size"] for row in rows.values()) <= MAX_BYTES
          and {"app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
-         and rows["runtime/manifest.json"]["sha256"] == args.expected_manifest, "observation-inventory-required")
+         and rows["runtime/manifest.json"]["sha256"] == expected_manifest, "observation-inventory-required")
     directories(rows)
     return rows
 
@@ -1489,12 +1517,13 @@ def bound_original_result(result, expected, source, inventory, manifest):
     reason, runtime, app, state, verified, _exit = expected
     need(type(result) is dict and set(result) == {"schemaVersion", "state", "reason", "release", "runtimePublication", "appPublication",
          "staging", "payloadVerified", "payloadWritersSettled", "originalsSettled", "deadlineMetAfterFinalCloses", "createdAncestors",
-         "cleanup", "sourceCommit", "inventorySha256", "runtimeManifestSha256"}, "original-result-closed-shape")
+         "cleanup", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "installationMetadata"}, "original-result-closed-shape")
     need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["release"] == RELEASE
          and result["sourceCommit"] == source and result["inventorySha256"] == inventory and result["runtimeManifestSha256"] == manifest
          and result["state"] == state and result["reason"] == reason and result["runtimePublication"] == runtime and result["appPublication"] == app
          and result["payloadVerified"] is verified and result["payloadWritersSettled"] is True and result["originalsSettled"] is True
          and result["deadlineMetAfterFinalCloses"] is True and result["cleanup"] == "original-closes-only-no-deletion", "original-installer-not-settled-bound-timely")
+    installation_metadata_result(result["installationMetadata"], expected)
     stage = result["staging"]
     need(stage is None or type(stage) is str and re.fullmatch(r"\.install-[0-9a-f]{32}", stage), "original-staging-name")
     need(type(result["createdAncestors"]) is list and len(result["createdAncestors"]) <= 4, "original-created-ancestors")
@@ -1513,6 +1542,156 @@ def byte_correspondence(actual, expected):
         need(len(body) == row["size"] and digest(body) == row["sha256"] and mode == (0o555 if row["executable"] else 0o444), "installed-byte-mode-correspondence")
 
 
+def installation_directory_data(info):
+    """Stable DATA only; caller separately retains/checks full named originals."""
+    need(stat.S_ISDIR(info.st_mode) and info.st_mode == stat.S_IFDIR | 0o755
+         and info.st_uid == info.st_gid == 0 and getattr(info, "st_flags", None) == 0
+         and type(info.st_dev) is int and 0 < info.st_dev <= (1 << 63) - 1
+         and type(info.st_ino) is int and 0 < info.st_ino <= (1 << 64) - 1, "installation-directory-policy")
+    return {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
+            "uid": info.st_uid, "gid": info.st_gid, "flags": info.st_flags}
+
+
+def installation_record_data(body, inventory_body, source, manifest, root, release, instance, *, fixture=False):
+    """Closed DATA comparison, never permission or native/old finality evidence."""
+    need(type(body) is bytes and 0 < len(body) <= INSTALLATION_RECORD_LIMIT
+         and type(inventory_body) is bytes and 0 < len(inventory_body) <= 1024 * 1024
+         and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
+         and sha(manifest) and type(fixture) is bool
+         and type(instance) is str and re.fullmatch(r"[0-9a-f]{32}", instance) and instance != "0" * 32,
+         "installation-record-input")
+    for identity in (root, release):
+        need(type(identity) is dict and set(identity) == {"device", "inode", "mode", "uid", "gid", "flags"}
+             and all(type(value) is int for value in identity.values())
+             and 0 < identity["device"] <= (1 << 63) - 1 and 0 < identity["inode"] <= (1 << 64) - 1
+             and identity["mode"] == stat.S_IFDIR | 0o755 and identity["uid"] == identity["gid"] == identity["flags"] == 0,
+             "installation-record-expected-directory")
+    try:
+        record = decode(body.decode("utf-8"))
+    except UnicodeError as error:
+        raise Refused("installation-record-encoding") from error
+    need(type(record) is dict and set(record) == {"schemaVersion", "basis", "phase", "kind", "instance",
+         "packageIdentifier", "packageVersion", "bundleIdentifier", "release", "sourceCommit", "protocolSha256",
+         "runtimeManifestSha256", "inventory", "policy", "installRoot", "releaseDirectory"}
+         and type(record["schemaVersion"]) is int and record["schemaVersion"] == 1
+         and record["basis"] == "protected-recorded-installation-inventory" and record["phase"] == "inventory-recorded"
+         and record["kind"] == ("fixture" if fixture else "ordinary") and record["instance"] == instance
+         and record["packageIdentifier"] == PACKAGE_ID + ("-fixture" if fixture else "") and record["packageVersion"] == PACKAGE_VERSION
+         and record["bundleIdentifier"] == BUNDLE_ID and record["release"] == RELEASE and record["sourceCommit"] == source
+         and record["protocolSha256"] == CURRENT_PROTOCOL and record["runtimeManifestSha256"] == manifest
+         and record["policy"] == "fixed-root-wheel-readonly-v1", "installation-record-binding")
+    for key, expected in (("installRoot", root), ("releaseDirectory", release)):
+        need(type(record[key]) is dict and set(record[key]) == set(expected)
+             and all(type(value) is int for value in record[key].values()) and record[key] == expected,
+             "installation-record-directory")
+    inventory = record["inventory"]
+    need(type(inventory) is dict and set(inventory) == {"name", "bytes", "sha256"}
+         and inventory["name"] == INSTALLATION_INVENTORY_NAME and type(inventory["bytes"]) is int
+         and inventory["bytes"] == len(inventory_body) and inventory["sha256"] == digest(inventory_body),
+         "installation-record-inventory")
+    rows = observation_inventory_bytes(inventory_body, inventory["sha256"], manifest)
+    need(sum(row["size"] for row in rows.values()) + len(inventory_body) + INSTALLATION_RECORD_LIMIT <= MAX_BYTES,
+         "installation-record-total-bound")
+    return record
+
+
+def installation_metadata_result(value, expected):
+    reason, runtime, app, state, _verified, _exit = expected
+    need(type(value) is dict and set(value) == {"state", "attemptedFiles", "openedFiles", "plannedBytes", "writtenBytes", "writersSettled"}
+         and value["state"] in ("not-attempted", "incomplete", "recorded") and value["writersSettled"] is True
+         and all(type(value[key]) is int for key in ("attemptedFiles", "openedFiles", "plannedBytes", "writtenBytes"))
+         and 0 <= value["openedFiles"] <= value["attemptedFiles"] <= 2
+         and 0 <= value["writtenBytes"] <= value["plannedBytes"] <= 1024 * 1024 + INSTALLATION_RECORD_LIMIT,
+         "installation-metadata-result")
+    expected_state = ("recorded" if state == "installed" or (runtime == "confirmed" and app == "occupied-refused") else
+                      "incomplete" if reason == "open-refused" and runtime == "confirmed" else "not-attempted")
+    need(value["state"] == expected_state, "installation-metadata-phase")
+    if expected_state == "not-attempted":
+        need(all(value[key] == 0 for key in ("attemptedFiles", "openedFiles", "plannedBytes", "writtenBytes")), "installation-metadata-unentered")
+    elif expected_state == "recorded":
+        need(value["attemptedFiles"] == value["openedFiles"] == 2 and 0 < value["writtenBytes"] == value["plannedBytes"],
+             "installation-metadata-not-recorded")
+    else:
+        need(value["attemptedFiles"] == 2 and value["openedFiles"] == 1 and 0 < value["writtenBytes"] < value["plannedBytes"],
+             "installation-metadata-partial-accounting")
+
+
+@contextlib.contextmanager
+def installation_metadata_directory(root, names):
+    """Fixed caller-selected ordinary/fixture installation, read-only originals."""
+    originals = []
+    with parent(root) as (outer, name):
+        try:
+            for entry in (name, "versions", RELEASE):
+                before = os.stat(entry, dir_fd=outer, follow_symlinks=False)
+                data = installation_directory_data(before)
+                opened = os.open(entry, READ_FLAGS | os.O_DIRECTORY, dir_fd=outer)
+                originals.append((opened, outer, entry, signature(before), data))
+                need(signature(os.fstat(opened)) == signature(before)
+                     and installation_directory_data(os.fstat(opened)) == data, "installation-directory-changed")
+                no_xattrs(opened)
+                outer = opened
+            need(set(os.listdir(outer)) == names, "installation-release-roster")
+            yield originals[0][4], originals[-1][4], outer
+            need(set(os.listdir(outer)) == names, "installation-release-roster")
+            for opened, outer, entry, before, data in originals:
+                current = os.fstat(opened)
+                named = os.stat(entry, dir_fd=outer, follow_symlinks=False)
+                need(signature(current) == signature(named) == before
+                     and installation_directory_data(current) == installation_directory_data(named) == data,
+                     "installation-directory-changed")
+        finally:
+            active = sys.exc_info()[0] is not None
+            unknown = False
+            for opened, _outer, _entry, _before, _data in reversed(originals):
+                try:
+                    close_once(opened)
+                except Refused:
+                    unknown = True
+            if unknown and not active:
+                raise Refused("installation-metadata-close-unknown")
+
+
+def installation_metadata_leaf(fd, name, limit):
+    body, info = read_at(fd, name, limit, zero_flags=True)
+    need(info.st_uid == info.st_gid == 0 and info.st_mode == stat.S_IFREG | 0o444 and info.st_nlink == 1
+         and getattr(info, "st_flags", None) == 0, "installation-metadata-file-policy")
+    # read_at consumed its original, without retry, before returning these DATA.
+    return body, info
+
+
+def installation_metadata_readback(args, root, original, *, fixture=False, occupant=None):
+    source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+    need(digest(source_inventory) == args.expected_inventory, "installation-inventory-source")
+    metadata = original["installationMetadata"]
+    need(metadata["state"] == ("incomplete" if occupant is not None else "recorded"), "installation-readback-phase")
+    names = {"runtime", INSTALLATION_INVENTORY_NAME, INSTALLATION_RECORD_NAME}
+    with installation_metadata_directory(root, names) as (root_data, release_data, fd):
+        inventory, _info = installation_metadata_leaf(fd, INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+        need(inventory == source_inventory, "installation-inventory-exact-bytes")
+        descriptor, info = installation_metadata_leaf(fd, INSTALLATION_RECORD_NAME, INSTALLATION_RECORD_LIMIT)
+        if occupant is None:
+            stage = original["staging"]
+            need(type(stage) is str and re.fullmatch(r"\.install-[0-9a-f]{32}", stage), "installation-record-instance")
+            record = installation_record_data(descriptor, inventory, args.expected_source, args.expected_manifest,
+                                              root_data, release_data, stage[9:], fixture=fixture)
+            need(metadata["writtenBytes"] == metadata["plannedBytes"] == len(inventory) + len(descriptor),
+                 "installation-metadata-exact-accounting")
+            result = {"state": "recorded-current-data-correspondence", "instance": record["instance"],
+                      "inventoryBytes": len(inventory), "descriptorBytes": len(descriptor), "originalFinality": "separate-Installer-status"}
+        else:
+            identity = {"device": info.st_dev, "inode": info.st_ino, "mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid,
+                        "links": info.st_nlink, "size": info.st_size, "mtimeSeconds": info.st_mtime_ns // 1000000000,
+                        "mtimeNanoseconds": info.st_mtime_ns % 1000000000, "ctimeSeconds": info.st_ctime_ns // 1000000000,
+                        "ctimeNanoseconds": info.st_ctime_ns % 1000000000}
+            need(descriptor == FIXTURE_MARKER and identity == occupant["before"] == occupant["after"]
+                 and metadata["writtenBytes"] == len(inventory) and metadata["openedFiles"] == 1,
+                 "installation-metadata-occupant-not-preserved")
+            result = {"state": "partial-inventory-and-occupant-preserved", "inventoryBytes": len(inventory),
+                      "descriptorBytes": len(descriptor), "originalFinality": "separate-Installer-status"}
+    return result  # All original leaf/parent closes returned above.
+
+
 def observation_command(args):
     expected = observation_inventory(args)
     result, exported = installer_result_readback(args)
@@ -1524,10 +1703,11 @@ def observation_command(args):
     actual = {"app/" + name: value for name, value in app.items()}
     actual.update({"runtime/" + name: value for name, value in runtime.items()})
     byte_correspondence(actual, expected)
+    metadata = installation_metadata_readback(args, INSTALL_ROOT, result)
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "release": RELEASE, "installerDeadlineMetAfterFinalCloses": True,
             "installerReportedOriginalsSettled": True, "nonrootReadbackFileCount": len(actual),
-            "originalInstallerResult": result, "installerResultExport": exported,
+            "originalInstallerResult": result, "installerResultExport": exported, "installationMetadata": metadata,
             "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
             "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
 
@@ -1537,6 +1717,8 @@ def visible_occupant(case):
         return APP_NAME + "/occupied.txt"
     if case in ("occupied-release", "runtime-publication-collision"):
         return "versions/" + RELEASE + "/runtime/occupied.txt"
+    if case == "metadata-descriptor-collision":
+        return "versions/" + RELEASE + "/" + INSTALLATION_RECORD_NAME
     return None
 
 
@@ -1556,19 +1738,19 @@ def bound_fixture_result(result, source, inventory, manifest):
          and all(result[key] is False for key in ("genuineConcurrentRaceObserved", "nativeCloseFailureInjected", "applicationLaunched", "guiSaveQualified"))
          and result["qualification"] == "native-installer-collisions-and-injected-policy-only", "fixture-not-complete-or-bound")
     # Never accept a report-supplied arbitrary pathname: fixed protected ancestry,
-    # this explicit source prefix, one nonce component, then seven fixed names.
+    # this explicit source prefix, one nonce component, then eight fixed names.
     need(type(result["fixtureBase"]) is str and re.fullmatch(re.escape(FIXTURE_PREFIX + source[:12] + "-") + r"[0-9a-f]{32}", result["fixtureBase"]), "fixture-base-binding")
-    need(type(result["cases"]) is list and len(result["cases"]) == len(FIXTURE_CASES), "fixture-exact-seven-cases")
+    need(type(result["cases"]) is list and len(result["cases"]) == len(FIXTURE_CASES), "fixture-exact-eight-cases")
     for row, (name, expected) in zip(result["cases"], FIXTURE_CASES.items()):
         need(type(row) is dict and set(row) == {"case", "passed", "proofError", "originalResult", "originalExit", "occupant",
              "absenceObservedBeforeCollision", "stagingOpenErrno", "persistence"} and row["case"] == name
              and row["passed"] is True and row["proofError"] is None and type(row["originalExit"]) is int and row["originalExit"] == expected[-1], "fixture-case-shape-or-outcome")
         bound_original_result(row["originalResult"], expected, source, inventory, manifest)
         need((row["originalResult"]["staging"] is None) == (name in ("occupied-app", "occupied-release")), "fixture-staging-phase")
-        collision = name in ("runtime-publication-collision", "staging-file-collision", "first-publication-second-refusal")
+        collision = name in ("runtime-publication-collision", "staging-file-collision", "first-publication-second-refusal", "metadata-descriptor-collision")
         need(row["absenceObservedBeforeCollision"] is collision, "fixture-absence-observation")
         error = row["stagingOpenErrno"]
-        need((type(error) is int and error == 17) if name == "staging-file-collision" else error is None, "fixture-actual-o-excl-eexist")  # Darwin EEXIST.
+        need((type(error) is int and error == 17) if name in ("staging-file-collision", "metadata-descriptor-collision") else error is None, "fixture-actual-o-excl-eexist")  # Darwin EEXIST.
         point = {"prepublication-persistence-report": "payload-file-before-any-publication",
                  "postruntime-persistence-report": "stage-directory-after-runtime-rename"}.get(name)
         persistence = row["persistence"]
@@ -1635,10 +1817,11 @@ def fixture_observation_command(args):
             stage = row["originalResult"]["staging"]
             app_occupant = name in ("occupied-app", "first-publication-second-refusal")
             has_versions = name != "occupied-app"
-            has_release = name in ("occupied-release", "runtime-publication-collision", "first-publication-second-refusal", "postruntime-persistence-report")
+            has_release = name in ("occupied-release", "runtime-publication-collision", "first-publication-second-refusal", "postruntime-persistence-report", "metadata-descriptor-collision")
             runtime_published = row["originalResult"]["runtimePublication"] == "confirmed"
             names = ({stage} if stage is not None else set()) | ({APP_NAME} if app_occupant else set()) | ({"versions"} if has_versions else set())
             runtime_files = 0
+            metadata_observation = None
             with fixture_directory(root, names) as fd:
                 if stage is not None:
                     # Metadata only. Never open/chmod the root-owned0700 staging.
@@ -1649,7 +1832,9 @@ def fixture_observation_command(args):
                 if has_versions:
                     with fixture_directory(root / "versions", {RELEASE} if has_release else set()):
                         if has_release:
-                            with fixture_directory(root / "versions" / RELEASE, {"runtime"}):
+                            metadata_reached = row["originalResult"]["installationMetadata"]["state"] != "not-attempted"
+                            members = {"runtime"} | ({INSTALLATION_INVENTORY_NAME, INSTALLATION_RECORD_NAME} if metadata_reached else set())
+                            with fixture_directory(root / "versions" / RELEASE, members):
                                 runtime_path = root / "versions" / RELEASE / "runtime"
                                 if runtime_published:
                                     files = tree(runtime_path, installed=True)
@@ -1657,8 +1842,11 @@ def fixture_observation_command(args):
                                     runtime_files = len(files)
                                 else:
                                     observe_occupant(runtime_path / "occupied.txt", row["occupant"])
+                                if metadata_reached:
+                                    metadata_observation = installation_metadata_readback(args, root, row["originalResult"], fixture=True,
+                                        occupant=row["occupant"] if name == "metadata-descriptor-collision" else None)
             observations.append({"case": name, "accessibleOccupantChecked": visible_occupant(name) is not None,
-                                 "runtimeReadbackFileCount": runtime_files, "protectedStagingOpened": False})
+                                 "runtimeReadbackFileCount": runtime_files, "protectedStagingOpened": False, "installationMetadata": metadata_observation})
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "originalFixtureResult": result, "installerResultExport": exported, "nonrootReadback": observations,
             "applicationLaunched": False, "guiSaveQualified": False, "genuineConcurrentRaceObserved": False,

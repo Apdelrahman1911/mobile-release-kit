@@ -1,4 +1,4 @@
-"""Fixed Linux Desktop preflight entry; not a CLI or runtime-selected method."""
+"""Fixed Linux/macOS Desktop preflight entry; no CLI or runtime-selected method."""
 import os
 import sys
 import time
@@ -8,7 +8,7 @@ def main() -> int:
     started = time.monotonic()
     if (len(sys.argv) != 2 or not sys.flags.isolated or not sys.flags.no_site
             or not sys.dont_write_bytecode or sys.version_info < (3, 11)
-            or sys.platform != "linux" or not os.path.isabs(sys.argv[1])
+            or sys.platform not in {"linux", "darwin"} or not os.path.isabs(sys.argv[1])
             or not os.path.isabs(__file__)):
         return 78
     runtime_dir = os.path.dirname(__file__)

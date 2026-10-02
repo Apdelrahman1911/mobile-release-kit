@@ -3,6 +3,7 @@
 These tests do not import the core, stage/extract M, launch Python/app children,
 write an installation, construct a panel, or fabricate an operation permit.
 """
+import ast
 import contextlib
 import importlib.util
 import io
@@ -63,10 +64,16 @@ def package_data(*, uid=0, gid=0, root=".", file_owner=None):
 
 def original_result(expected, *, stage=".install-" + "d" * 32):
     reason, runtime, app, state, verified, _exit = expected
+    recorded = state == "installed" or (runtime == "confirmed" and app == "occupied-refused")
+    partial = reason == "open-refused" and runtime == "confirmed"
+    metadata = {"state": "recorded" if recorded else "incomplete" if partial else "not-attempted",
+                "attemptedFiles": 2 if recorded or partial else 0, "openedFiles": 2 if recorded else 1 if partial else 0,
+                "plannedBytes": 10 if recorded or partial else 0, "writtenBytes": 10 if recorded else 6 if partial else 0,
+                "writersSettled": True}
     return {"schemaVersion": 1, "state": state, "reason": reason, "release": TOOL.RELEASE,
             "runtimePublication": runtime, "appPublication": app, "staging": stage, "payloadVerified": verified,
             "payloadWritersSettled": True, "originalsSettled": True, "deadlineMetAfterFinalCloses": True, "createdAncestors": [],
-            "cleanup": "original-closes-only-no-deletion", "sourceCommit": "a" * 40, "inventorySha256": "b" * 64, "runtimeManifestSha256": "c" * 64}
+            "cleanup": "original-closes-only-no-deletion", "sourceCommit": "a" * 40, "inventorySha256": "b" * 64, "runtimeManifestSha256": "c" * 64, "installationMetadata": metadata}
 
 
 def reported_fixture_data():
@@ -83,8 +90,8 @@ def reported_fixture_data():
         persistence = {"point": point, "actualNativeSucceeded": True, "actualNativeErrno": None, "injectedReportedFailure": True}
         rows.append({"case": name, "passed": True, "proofError": None, "originalResult": original_result(expected, stage=stage), "originalExit": expected[-1],
                      "occupant": witness if point is None else None, "persistence": persistence if point is not None else None,
-                     "absenceObservedBeforeCollision": name in ("runtime-publication-collision", "staging-file-collision", "first-publication-second-refusal"),
-                     "stagingOpenErrno": 17 if name == "staging-file-collision" else None})
+                     "absenceObservedBeforeCollision": name in ("runtime-publication-collision", "staging-file-collision", "first-publication-second-refusal", "metadata-descriptor-collision"),
+                     "stagingOpenErrno": 17 if name in ("staging-file-collision", "metadata-descriptor-collision") else None})
     return {"schemaVersion": 1, "sourceCommit": "a" * 40, "inventorySha256": "b" * 64, "runtimeManifestSha256": "c" * 64,
             "fixtureBase": TOOL.FIXTURE_PREFIX + "a" * 12 + "-" + "e" * 32, "setupError": None, "setupOriginalsSettled": True,
             "setupDeadlineMet": True, "inertCloseDeadlinePolicyTable": True, "fixedCasesComplete": True, "passed": True, "cases": rows,
@@ -903,9 +910,9 @@ class MacInstalledData(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(TOOL.Refused):
                 TOOL.bound_original_result({**result, key: value}, expected, "a" * 40, "b" * 64, "c" * 64)
 
-    def test_fixture_result_exact_seven_cases_never_promotes_actual_uncertainty(self):
+    def test_fixture_result_exact_eight_cases_never_promotes_actual_uncertainty(self):
         self.assertEqual(tuple(TOOL.FIXTURE_CASES), ("occupied-app", "occupied-release", "runtime-publication-collision", "staging-file-collision",
-                         "first-publication-second-refusal", "prepublication-persistence-report", "postruntime-persistence-report"))
+                         "first-publication-second-refusal", "prepublication-persistence-report", "postruntime-persistence-report", "metadata-descriptor-collision"))
         marker = b"MRK_MACOS_INSTALL_FIXTURE_RESULT="
         good = reported_fixture_data()
         log = marker + TOOL.canonical(good) + b"\n"
@@ -917,6 +924,8 @@ class MacInstalledData(unittest.TestCase):
                      (("nativeCloseFailureInjected",), True), (("genuineConcurrentRaceObserved",), True),
                      (("cases", 2, "originalResult", "runtimePublication"), "unknown"), (("cases", 3, "stagingOpenErrno"), 5),
                      (("cases", 5, "persistence", "actualNativeSucceeded"), False), (("cases", 6, "persistence", "actualNativeErrno"), 5),
+                     (("cases", 7, "stagingOpenErrno"), 5), (("cases", 7, "originalResult", "installationMetadata", "openedFiles"), 2),
+                     (("cases", 7, "occupant", "visibleRelativePath"), "versions/" + TOOL.RELEASE + "/unrelated"),
                      (("cases", 6, "persistence", "injectedReportedFailure"), False), (("cases", 4, "originalResult", "originalsSettled"), False),
                      (("cases", 4, "originalResult", "deadlineMetAfterFinalCloses"), False), (("cases", 0, "occupant", "after", "inode"), 43),
                      (("cases", 0, "occupant", "visibleRelativePath"), "../../arbitrary"), (("cases", 0, "occupant", "after", "links"), True), (("extra",), True)]
@@ -933,6 +942,139 @@ class MacInstalledData(unittest.TestCase):
         for changed in (log + log, b"MRK_MACOS_INSTALL_RESULT={}\n" + log):
             with self.assertRaises(TOOL.Refused):
                 TOOL.fixture_record(changed, "a" * 40, "b" * 64, "c" * 64)
+
+
+def installation_record_fixture():
+    # Closed DATA only, not a root-owned installation or original receipt.
+    names = ["app/" + TOOL.VAULT_HELPER, "app/Contents/Info.plist",
+             "app/" + TOOL.APP_BINARY, "runtime/manifest.json", "runtime/python/bin/python3"]
+    rows = [{"path": name, "size": 1, "sha256": ("c" if name == "runtime/manifest.json" else "b") * 64,
+             "executable": name in ("app/" + TOOL.VAULT_HELPER, "app/" + TOOL.APP_BINARY, "runtime/python/bin/python3")}
+            for name in sorted(names)]
+    inventory = TOOL.canonical({"schemaVersion": 1, "release": TOOL.RELEASE,
+                                "runtimeManifestSha256": "c" * 64, "files": rows})
+    identity = {"device": 1, "inode": 9007199254740993, "mode": stat.S_IFDIR | 0o755, "uid": 0, "gid": 0, "flags": 0}
+    release = {**identity, "inode": identity["inode"] + 1}
+    record = {"schemaVersion": 1, "basis": "protected-recorded-installation-inventory", "phase": "inventory-recorded",
+              "kind": "ordinary", "instance": "d" * 32, "packageIdentifier": TOOL.PACKAGE_ID,
+              "packageVersion": TOOL.PACKAGE_VERSION, "bundleIdentifier": TOOL.BUNDLE_ID, "release": TOOL.RELEASE,
+              "sourceCommit": "a" * 40, "protocolSha256": TOOL.CURRENT_PROTOCOL, "runtimeManifestSha256": "c" * 64,
+              "inventory": {"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": TOOL.digest(inventory)},
+              "policy": "fixed-root-wheel-readonly-v1", "installRoot": identity, "releaseDirectory": release}
+    return record, inventory, identity, release
+
+
+@unittest.skipUnless(TOOL is not None, "POSIX inert DATA definitions only")
+class MacInstallationMetadataData(unittest.TestCase):
+    def test_closed_record_matches_exact_inventory_tuple_and_full_integer_directory_identity(self):
+        record, inventory, root, release = installation_record_fixture()
+        def parse(body, payload=inventory):
+            return TOOL.installation_record_data(body, payload, "a" * 40, "c" * 64, root, release, "d" * 32)
+        self.assertEqual(parse(TOOL.canonical(record)), record)
+        for path, value in [(("schemaVersion",), True), (("phase",), "installed"), (("kind",), "fixture"),
+                            (("sourceCommit",), "e" * 40), (("protocolSha256",), "e" * 64),
+                            (("instance",), "0" * 32), (("installRoot", "inode"), 9007199254740992),
+                            (("releaseDirectory", "flags"), 1), (("installRoot", "mtime"), 1),
+                            (("installRoot", "uid"), False), (("inventory", "bytes"), True), (("extra",), True)]:
+            changed = TOOL.decode(TOOL.canonical(record))
+            cursor = changed
+            for key in path[:-1]:
+                cursor = cursor[key]
+            cursor[path[-1]] = value
+            with self.subTest(path=path), self.assertRaises(TOOL.Refused):
+                parse(TOOL.canonical(changed))
+        for body in (b'{"schemaVersion":1,' + TOOL.canonical(record)[1:], b" " * (TOOL.INSTALLATION_RECORD_LIMIT + 1)):
+            with self.assertRaises(TOOL.Refused):
+                parse(body)
+        with self.assertRaises(TOOL.Refused):
+            parse(TOOL.canonical(record), inventory + b" ")
+        # Even a self-consistent descriptor digest cannot bless an invalid roster.
+        malformed = TOOL.decode(inventory)
+        malformed["files"][0]["path"] = "runtime/../unrelated"
+        malformed = TOOL.canonical(malformed)
+        changed = {**record, "inventory": {**record["inventory"], "bytes": len(malformed), "sha256": TOOL.digest(malformed)}}
+        with self.assertRaises(TOOL.Refused):
+            parse(TOOL.canonical(changed), malformed)
+
+    def test_metadata_return_accounting_is_required_and_partial_is_not_success(self):
+        expected = (None, "confirmed", "confirmed", "installed", True, 0)
+        result = original_result(expected)
+        TOOL.bound_original_result(result, expected, "a" * 40, "b" * 64, "c" * 64)
+        for field, value in (("writersSettled", False), ("openedFiles", 1), ("attemptedFiles", True),
+                             ("writtenBytes", 9), ("state", "incomplete"), ("extra", 0)):
+            changed = {**result, "installationMetadata": {**result["installationMetadata"], field: value}}
+            with self.subTest(field=field), self.assertRaises(TOOL.Refused):
+                TOOL.bound_original_result(changed, expected, "a" * 40, "b" * 64, "c" * 64)
+        missing = dict(result)
+        del missing["installationMetadata"]
+        with self.assertRaises(TOOL.Refused):
+            TOOL.bound_original_result(missing, expected, "a" * 40, "b" * 64, "c" * 64)
+        partial = TOOL.FIXTURE_CASES["metadata-descriptor-collision"]
+        value = original_result(partial)
+        TOOL.bound_original_result(value, partial, "a" * 40, "b" * 64, "c" * 64)
+        self.assertEqual(value["installationMetadata"]["openedFiles"], 1)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.installation_metadata_result(result["installationMetadata"], partial)
+
+    def test_metadata_leaf_requires_flags_through_original_read_and_positive_close(self):
+        # Every numerical FD here is an inert token; all consumers are replaced.
+        good = log_info(3, st_mode=stat.S_IFREG | 0o444, st_gid=0, st_flags=0)
+        changed = log_info(3, st_mode=stat.S_IFREG | 0o444, st_gid=0, st_flags=1)
+        for cause in ("none", "flags", "close"):
+            with (mock.patch.object(TOOL.os, "stat", side_effect=[good, good]),
+                  mock.patch.object(TOOL.os, "open", return_value=91),
+                  mock.patch.object(TOOL.os, "fstat", side_effect=[good, changed if cause == "flags" else good]),
+                  mock.patch.object(TOOL.os, "read", side_effect=[b"abc", b""]),
+                  mock.patch.object(TOOL, "no_xattrs"),
+                  mock.patch.object(TOOL, "close_once", side_effect=TOOL.Refused("synthetic-close-unknown") if cause == "close" else None) as close):
+                if cause == "none":
+                    self.assertEqual(TOOL.installation_metadata_leaf(90, TOOL.INSTALLATION_RECORD_NAME, 10)[0], b"abc")
+                else:
+                    with self.subTest(cause=cause), self.assertRaises(TOOL.Refused):
+                        TOOL.installation_metadata_leaf(90, TOOL.INSTALLATION_RECORD_NAME, 10)
+                close.assert_called_once_with(91)
+
+    def test_metadata_parent_cleanup_consumes_all_originals_and_gates_result(self):
+        names = {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}
+        entries = ("MobileReleaseKit", "versions", TOOL.RELEASE)
+        info = {entry: log_info(st_ino=index + 101, st_mode=stat.S_IFDIR | 0o755, st_gid=0, st_nlink=3, st_flags=0)
+                for index, entry in enumerate(entries)}
+        @contextlib.contextmanager
+        def parent(_path):
+            yield 100, entries[0]
+        for cause in ("none", "close", "drift"):
+            stats = [info[name] for name in entries] * 2
+            if cause == "drift":
+                stats[-1] = SimpleNamespace(**{**vars(stats[-1]), "st_ino": 999})
+            with (mock.patch.object(TOOL, "parent", side_effect=parent),
+                  mock.patch.object(TOOL.os, "stat", side_effect=stats),
+                  mock.patch.object(TOOL.os, "open", side_effect=[101, 102, 103]),
+                  mock.patch.object(TOOL.os, "fstat", side_effect=lambda fd: info[entries[fd - 101]]),
+                  mock.patch.object(TOOL.os, "listdir", return_value=list(names)),
+                  mock.patch.object(TOOL, "no_xattrs"),
+                  mock.patch.object(TOOL, "close_once", side_effect=[TOOL.Refused("synthetic-close-unknown"), None, None] if cause == "close" else None) as close):
+                def observe():
+                    with TOOL.installation_metadata_directory(TOOL.INSTALL_ROOT, names) as (_root, _release, fd):
+                        self.assertEqual(fd, 103)
+                    return "after-real-context-closes"
+                if cause == "none":
+                    self.assertEqual(observe(), "after-real-context-closes")
+                else:
+                    with self.subTest(cause=cause), self.assertRaises(TOOL.Refused):
+                        observe()
+                self.assertEqual(close.call_args_list, [mock.call(103), mock.call(102), mock.call(101)])
+
+    def test_record_identifiers_match_existing_package_and_bundle_source(self):
+        source = Path(__file__).absolute().parents[2]
+        info = TOOL.plistlib.loads((source / "desktop/macos-installed-inputs/Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleIdentifier"], TOOL.BUNDLE_ID)
+        self.assertEqual(info["CFBundleVersion"], TOOL.PACKAGE_VERSION)
+        self.assertEqual(info["CFBundleShortVersionString"], TOOL.PACKAGE_VERSION)
+        paths = (source / "desktop/src-tauri/src/macos_install_paths.rs").read_text(encoding="utf-8")
+        for key, value in (("PACKAGE_ID", TOOL.PACKAGE_ID), ("FIXTURE_PACKAGE_ID", TOOL.PACKAGE_ID + "-fixture"),
+                           ("PACKAGE_VERSION", TOOL.PACKAGE_VERSION), ("BUNDLE_ID", TOOL.BUNDLE_ID)):
+            self.assertIn(f'pub const {key}: &str = "{value}";', paths)
+
 
 
 @contextlib.contextmanager
@@ -1299,6 +1441,60 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', inputs)
         self.assertIn('--output "$MRK_MACOS_WORK/input"', inputs)
 
+    def test_native_action_roster_and_independent_publisher_bindings(self):
+        root = Path(__file__).absolute().parents[2]
+        publisher = "b4cb582837a244f67e4c926f2ce2bb42ad8cfe37"
+        fields = (("githubPreflightToolingSha", "MRK_GITHUB_PREFLIGHT_TOOLING_SHA"),
+                  ("githubReleaseToolingSha", "MRK_GITHUB_RELEASE_TOOLING_SHA"))
+        for filename in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
+            workflow = (root / ".github/workflows" / filename).read_text()
+            admission = workflow_step(workflow, "Admit only this exact disposable-hosted source route")
+            for field, variable in fields:
+                self.assertEqual(TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{40})$", workflow, TOOL.re.M), [publisher])
+                self.assertIn('"$' + variable + '" =~ ^[0-9a-f]{40}$', admission)
+                self.assertIn('"$' + variable + '" == ' + publisher, admission)
+                self.assertIn('"' + field + '": os.environ["' + variable + '"]', workflow)
+            # Digests must be generated from the actual templates, not provided
+            # by CI alongside a different source/application commit.
+            for generated in ("MRK_GITHUB_PREFLIGHT_CALLER_SHA256", "MRK_GITHUB_RELEASE_CANDIDATE_SHA256",
+                              "MRK_GITHUB_RELEASE_EXTERNAL_SHA256", "MRK_GITHUB_RELEASE_PRODUCTION_SHA256"):
+                self.assertNotIn(generated + ":", workflow)
+        build = (root / "desktop/src-tauri/build.rs").read_text()
+        for _, selector in fields:
+            self.assertIn('const SELECTOR: &str = "' + selector + '";', build)
+        self.assertEqual(build.count("Sha256::digest(caller.as_bytes())"), 2)
+        for template in ("mobile-preflight.yml", "mobile-candidate.yml", "mobile-external-testing.yml", "mobile-production-submit.yml"):
+            self.assertIn('include_str!("../../templates/workflows/' + template + '")', build)
+
+        workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        data = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
+        names = ast.literal_eval(TOOL.re.search(r"          names = (\[\n.*?\n          \])\n", data, TOOL.re.S).group(1))
+        digest = lambda selected: TOOL.digest(TOOL.json.dumps(selected, separators=(",", ":")).encode())
+        self.assertEqual(len(names), 79)
+        self.assertEqual(len(set(names)), 79)
+        self.assertEqual(digest(names[:57]), "4a5c62f00838d17f54e0970c209fc44a2b5708314e39437dbb156a25ac42ffa6")
+        self.assertEqual(digest(names[57:]), "f14c3263aadbdaeb0e7d21c821784902289552eb431ce3448726c6631064bfd5")
+        self.assertEqual(digest(names), "81ca0c9325763f3aaf2a181e521d7b6adde06b7c0321eecacfc2b93a78c3c051")
+        self.assertEqual(data.count(digest(names)), 2)
+        sources = ast.literal_eval(TOOL.re.search(r"          source_names = (\(\n.*?\n          \))\n", data, TOOL.re.S).group(1))
+        self.assertEqual(len(sources), len(set(sources)))
+        for name in names[57:]:
+            module, cls, method = name.split(".")
+            path = "tests/desktop/" + module + ".py"
+            self.assertIn(path, sources)
+            definitions = ast.parse((root / path).read_text())
+            owner = next(node for node in definitions.body if isinstance(node, ast.ClassDef) and node.name == cls)
+            self.assertIn(method, [node.name for node in owner.body if isinstance(node, ast.FunctionDef)])
+        for fragment in ('len(names) != 79 or len(set(names)) != 79', 'suite.countTestCases() != 79',
+                         'facts["testsRun"] == 79', 'counts.get("testsRun") != 79', '"pythonExpectedCount": 79',
+                         '"workflowFilesystemCount": 2', '"imageFilesystemCount": 18', '"evidenceReaderCount": 37',
+                         '"githubActionCount": 22', '"test_github_preflight_frames", "test_github_preflight", "test_github_release"'):
+            self.assertIn(fragment, data)
+        for path in ("desktop/github_preflight_bootstrap.py", "desktop/github_release_bootstrap.py",
+                     "src/mobile_release/github_preflight.py", "src/mobile_release/github_release.py",
+                     "src/mobile_release/_github_action_family.py", "src/mobile_release/_desktop_github_preflight_engine.py"):
+            self.assertIn(path, sources)
+
     def test_ordinary_current_route_preserves_separate_installer_and_aqua_obligations(self):
         root = Path(__file__).absolute().parents[2]
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
@@ -1324,7 +1520,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertFalse(forbidden in workflow, forbidden)
         self.assertIn("refs/heads/verify/desktop-macos-installed", workflow)
         self.assertIn("$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF", workflow)
-        self.assertIn('"fixedFixtureCases": 7', workflow)
+        self.assertIn('"fixedFixtureCases": 8', workflow)
         self.assertIn('"aclPrimitiveCases": 6', workflow)
         self.assertIn('"selectedRegressionGroups": [2, 1, 2]', workflow)
         self.assertIn('"actualAquaSaveGate": "pending"', workflow)
@@ -1384,7 +1580,9 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertFalse(result["profileTest"])
         self.assertFalse(result["instrumented"])
         self.assertEqual(result["qualification"], "ordinary-bin-data-not-launched")
-        info = TOOL.plistlib.dumps({"CFBundleExecutable": binary.name, "LSMinimumSystemVersion": "26.0"})
+        info = TOOL.plistlib.dumps({"CFBundleExecutable": binary.name, "LSMinimumSystemVersion": "26.0",
+                                   "CFBundleIdentifier": TOOL.BUNDLE_ID, "CFBundleShortVersionString": TOOL.PACKAGE_VERSION,
+                                   "CFBundleVersion": TOOL.PACKAGE_VERSION})
         values = {binary: body, Path("/synthetic-mrk-preview/helper"): body,
                   Path("/synthetic-mrk-preview/cargo.jsonl"): messages,
                   TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
@@ -1564,7 +1762,9 @@ class MacNormalPreviewData(unittest.TestCase):
         observed = {"sourceCommit": "a" * 40, "installerDeadlineMetAfterFinalCloses": True,
             "installerReportedOriginalsSettled": True, "applicationLaunched": False, "guiSaveQualified": False,
             "runtimeManifestSha256": "c" * 64, "inventorySha256": "d" * 64, "nonrootReadbackFileCount": 1,
-            "originalInstallerResult": {"syntheticDelegation": True}}
+             "originalInstallerResult": original_result((None, "confirmed", "confirmed", "installed", True, 0)),
+            "installationMetadata": {"state": "recorded-current-data-correspondence", "instance": "d" * 32,
+                "inventoryBytes": 6, "descriptorBytes": 4, "originalFinality": "separate-Installer-status"}}
         package = b"synthetic-package-DATA-not-native-Installer-evidence"
         values = {work / "normal-build.jsonl": messages, binary: body,
             work / "normal-build.status": b"0\n", work / "installer-output.status": b"0\n",
@@ -1608,6 +1808,8 @@ class MacNormalPreviewData(unittest.TestCase):
             ("source-binding.json", "instrumented", True), ("source-inventory.json", "tree", "f" * 40),
             ("app-result.json", "appBinarySha256BeforeSigning", "f" * 64),
             ("installation-observation.json", "installerDeadlineMetAfterFinalCloses", False),
+            ("installation-observation.json", "installationMetadata", None),
+            ("installation-observation.json", "installationMetadata", {"state": "incomplete"}),
             ("installation-observation.json", "installerReportedOriginalsSettled", False),
             ("installation-observation.json", "runtimeManifestSha256", "f" * 64),
             ("installation-observation.json", "nonrootReadbackFileCount", 2),
@@ -1637,19 +1839,29 @@ class MacNormalPreviewData(unittest.TestCase):
                     if "if: github.ref == 'refs/heads/verify/desktop-macos-installed'" in block}
         self.assertEqual(selected, {
             "Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive",
-            "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)",
-            "Build the separate fixed seven-case Installer package from the same completed input",
-            "Standard Installer runs the one fixed fixture, never root libtest or a scenario selector",
-            "Nonroot fixture readback leaves protected0700 staging closed and unchanged"})
+            "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)"})
         self.assertIn("      - verify/desktop-macos-preview\n", workflow)
         self.assertIn("--message-format=json", workflow)
         self.assertIn('--normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', workflow)
         self.assertIn('--normal-cargo-target-dir "$CARGO_TARGET_DIR"', workflow)
         for name in ("Fail fast on native Scripts ownership and package format (never Installer)",
+                     "Build the separate fixed eight-case Installer package from the same completed input",
+                     "Standard Installer runs the one fixed fixture, never root libtest or a scenario selector",
+                     "Nonroot fixture readback leaves protected0700 staging closed and unchanged",
                      "Build the fixed one-shot root Installer and scripts-only package",
                      "Nonroot byte/mode readback, not a headless GUI substitute"):
             block = workflow.split("      - name: " + name + "\n", 1)[1].split("      - name: ", 1)[0]
             self.assertNotIn("if:", block)
+        fixture_steps = (
+            "Bind this completed signed app and current-source runtime into fresh Installer DATA",
+            "Build the separate fixed eight-case Installer package from the same completed input",
+            "Standard Installer runs the one fixed fixture, never root libtest or a scenario selector",
+            "Nonroot fixture readback leaves protected0700 staging closed and unchanged",
+            "Build the fixed one-shot root Installer and scripts-only package")
+        positions = [workflow.index("      - name: " + name + "\n") for name in fixture_steps]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(workflow.count('"fixedFixtureCases": 8'), 2)
+        self.assertNotIn('"fixedFixtureCases": 0', workflow)
         self.assertLess(workflow.index("observe-installation"), workflow.index("stage_macos_installed.py preview"))
         publish = workflow.split("      - name: Upload only the normal user preview package and guide\n", 1)[1].split("      - name: ", 1)[0]
         self.assertIn("steps.preview.outcome == 'success'", publish)
@@ -1678,6 +1890,7 @@ class MacNormalPreviewData(unittest.TestCase):
                          "normal-ui/result.json", "A missing, failed or skipped check is not a pass",
                          "does not prove POSIX exit status or every worker's finality",
                          "Gatekeeper", "Do not disable", "NOT READY / undelivered",
+                         "fixed eight-case Installer fixture before ordinary install",
                          "project-relative field-picker journeys", "No Store mutation",
                          "project-field Aqua observer failure is preserved and unresolved"):
             self.assertIn(required, guide)

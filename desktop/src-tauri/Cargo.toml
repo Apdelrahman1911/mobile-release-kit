@@ -53,7 +53,7 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
-# Separate fixed seven-case package only; absent from ordinary Installer/app.
+# Separate fixed eight-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
 # Explicit engineering observer controls; absent from every shipping profile.
 macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]

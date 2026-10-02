@@ -35,6 +35,8 @@ FILE_NATIVE_PANELS = {case: {f"Session(Native({index}))": identifier for index, 
 IOS_CURRENT_CASES = IOS_CASES + ("ios-signing-inputs", *IOS_SIGNED_CASES, "ios-recovery-empty")
 IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty",)
 PROJECT_FIELDS_CASE = "project-fields"
+VAULT_HELPER_SCOPE = "vault-helper-shipping"
+VAULT_HELPER_CASES = ("vault-helper-roundtrip", "vault-helper-stop-before-go", "vault-helper-stop-after-add")
 PROJECT_FIELD_CHOICES = (
     ("version.source", "version-source", "inputs/VERSION", None),
     ("ios.project", "ios-project", "ios/Example.xcodeproj", None),
@@ -49,7 +51,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE)
+ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -83,6 +85,9 @@ FAILURE_STEPS |= frozenset(f"Session({name})" for name in (
 FAILURE_STEPS |= frozenset(f"ProjectFields({name}({i}))" for name in (
     "Navigate Section Browse Native Chosen Read").split() for i in range(10)) | frozenset(
     f"ProjectFields({name})" for name in ("PreviewPage Preview Previewed Done").split())
+FAILURE_STEPS |= frozenset(f"Vault({name})" for name in (
+    "Open Opened Prepare Prepared Initialize Initialized Lock Locked Reopen Reopened Unlock Unlocked Relock Relocked"
+).split())
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
@@ -119,7 +124,8 @@ FAILURE_REASONS = frozenset((
     "ios-finality-contract ios-fixture-contract ios-dom-contract "
     "session-request-contract session-result-contract session-original-contract session-dom-contract "
     "project-fields-request-contract project-fields-result-contract project-fields-original-contract "
-    "project-fields-fixture-contract project-fields-dom-contract"
+    "project-fields-fixture-contract project-fields-dom-contract "
+    "vault-request-contract vault-result-contract vault-original-contract vault-finality-contract"
 ).split())
 PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
 PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
@@ -579,10 +585,10 @@ class Binding:
         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
         return self
 
-    def root(self, *, project_fields=False):
+    def root(self, *, project_fields=False, vault_helper=False):
         self.checked()
-        need(type(project_fields) is bool, "scope-not-supported")
-        suffix = "-project-fields" if project_fields else ""
+        need(type(project_fields) is bool and type(vault_helper) is bool and not (project_fields and vault_helper), "scope-not-supported")
+        suffix = "-project-fields" if project_fields else "-vault-helper" if vault_helper else ""
         return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}{suffix}"
 
     def public(self):
@@ -613,7 +619,9 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE), "scope-not-supported")
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE), "scope-not-supported")
+    if scope == VAULT_HELPER_SCOPE:
+        return VAULT_HELPER_CASES
     if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE):
         return (scope,)
     if scope == "ios-current-synthetic":
@@ -626,13 +634,14 @@ def argument_scope(argv):
     need(type(argv) is list and (argv == [] or argv == ["--scope", "ios-unsigned-archive"]
                                or argv == ["--scope", "ios-current-synthetic"]
                                or argv == ["--scope", PROJECT_FIELDS_CASE]
-                               or argv == ["--scope", ANDROID_INPUT_CASE]), "arguments-not-supported")
+                               or argv == ["--scope", ANDROID_INPUT_CASE]
+                               or argv == ["--scope", VAULT_HELPER_SCOPE]), "arguments-not-supported")
     return argv[1] if argv else None
 
 
 def case_timeout(case):
     need(type(case) is str and case in ALL_CASES, "case-binding")
-    return 325 if case in IOS_OPERATION_CASES else 60
+    return 325 if case in IOS_OPERATION_CASES else 135 if case in VAULT_HELPER_CASES else 60
 
 
 def ios_config(case):
@@ -999,10 +1008,111 @@ def _expected_project_fields():
             for identifier in (1, 2, 3, 4, 5, 8, 9, 10, 11)]}
 
 
+def _expected_vault_original(kind, *, negative=False):
+    """Literal parser-test DATA only; never native evidence or an omitted receipt default."""
+    before = kind == "before-go"
+    added = kind in ("initialize", "after-add") and not negative
+    lookup = kind == "lookup"
+    consumed = kind in ("initialize", "lookup") and not negative
+    failed = before or kind == "after-add" or negative
+    return {"go": not before, "requestSent": not before, "writeAttempted": not before,
+        "stopAttempted": False, "stopSent": False, "notice": negative, "terminal": not before,
+        "successfulAddTerminal": added, "terminalSuccess": not (before or negative),
+        "outputFailed": False, "stderrSeen": False,
+        "authSettled": None if before else True, "filesystemSettled": None if before else True,
+        "nativeInputClosed": None if before else True,
+        "addOutcome": None if before or lookup else "locked" if negative else "added",
+        "addSettled": None if before or lookup else True,
+        "lookupSettled": None if before or negative else True, "addEffect": int(added),
+        "addItemCallsAbsent": None if before or lookup else negative,
+        "addPrerequisiteRefused": None if before or lookup else negative,
+        "nativeCandidateConsumed": None if before or negative else True,
+        "tryWaitEntered": True, "tryWaitReturned": True, "waitEntered": False,
+        "exitObserved": True, "exitSuccess": not (before or negative),
+        "waitFailed": False, "killAttempted": False, "killFailed": False,
+        "stdoutEof": True, "stderrEof": True, "pipeClosed": [True, True, True], "helperSlotsSettled": True,
+        "driverReturned": True, "driverBeforeCleanup": True, "blockingChildJoined": True,
+        "resourcesSettled": True, "allocationsReleased": True,
+        "firstFailure": "locked" if negative else "interrupted" if failed else None,
+        "cleanupContracted": failed, "cleanupUnknown": False,
+        "applicationCandidateConstructed": consumed, "applicationCandidateTaken": consumed,
+        "applicationCallbackReturned": consumed}
+
+
+def _expected_vault_helper(case, *, negative=False):
+    """Finite DATA fixture. parse_result requires and checks the actual native member first."""
+    need(case in VAULT_HELPER_CASES and type(negative) is bool
+         and not (negative and case == VAULT_HELPER_CASES[1]), "vault-helper-case")
+    roundtrip = case == VAULT_HELPER_CASES[0] and not negative
+    kind = "before-go" if case == VAULT_HELPER_CASES[1] else "after-add" if case == VAULT_HELPER_CASES[2] else "initialize"
+    return {"mechanism": "original-document-shipping-helper-v1", "normalPersistenceEnabled": False,
+        "execution": "not-executed-provider-prerequisite" if negative else "executed",
+        "testResult": "not-executed" if negative else "positive" if roundtrip else "expected-stop",
+        "checkpoint": ("none", "before-helper-go", "successful-add-terminal-before-application-candidate")[VAULT_HELPER_CASES.index(case)],
+        "checkpointObserved": not negative and not roundtrip,
+        "nativeLookupMayAlreadyHaveConsumed": case == VAULT_HELPER_CASES[2],
+        "openedEmpty": True, "previewConsumedOnce": True, "initialized": roundtrip, "locked": True,
+        "reopened": roundtrip, "unlocked": roundtrip, "relocked": roundtrip,
+        "initializeHelper": _expected_vault_original(kind, negative=negative),
+        "lookupHelper": _expected_vault_original("lookup") if roundtrip else None,
+        "storage": {"reservation": [True, True], "header": [roundtrip, roundtrip], "durability": [True, roundtrip]},
+        "originalCount": 7 if roundtrip else 5, "allOriginalsSettled": True, "finalDocumentEmpty": True,
+        "syntheticKeychainRowRetirement": "disposable-hosted-account-only", "physicalMacEvidence": False}
+
+
+def _vault_helper_original(value, kind, *, negative=False):
+    label = "vault-helper-original"
+    need(type(value) is dict, label)
+    expected = _expected_vault_original(kind, negative=negative)
+    # Original same-slot STOP is mandatory for the two checkpoint cases. A
+    # transport STOP is neither invented nor needed once the decoded terminal
+    # has positively retired the helper's input; preserve actual observations.
+    for field in ("stopAttempted", "stopSent"):
+        need(type(value.get(field)) is bool, label)
+    need(value["stopSent"] == value["stopAttempted"] and
+         (not value["stopAttempted"] or kind == "after-add" or negative), label)
+    expected.update(stopAttempted=value["stopAttempted"], stopSent=value["stopSent"])
+    if negative:
+        need(type(value.get("notice")) is bool, label)
+        need(type(value.get("addOutcome")) is str and value["addOutcome"] in (
+            "missing", "locked", "interaction-required", "authentication-failed", "unavailable", "unsupported", "native-failure"), label)
+        need(type(value.get("firstFailure")) is str and value["firstFailure"] in (
+            "missing-key", "locked", "denied", "unsupported-provider", "unavailable"), label)
+        expected.update(notice=value["notice"], addOutcome=value["addOutcome"], firstFailure=value["firstFailure"])
+    _exact(value, expected)
+    return value
+
+
+def _vault_helper_report(value, case):
+    label = "vault-helper-report"
+    need(case in VAULT_HELPER_CASES and type(value) is dict, label)
+    execution = value.get("execution")
+    need(type(execution) is str and execution in ("executed", "not-executed-provider-prerequisite"), label)
+    negative = execution != "executed"
+    expected = _expected_vault_helper(case, negative=negative)
+    kind = "before-go" if case == VAULT_HELPER_CASES[1] else "after-add" if case == VAULT_HELPER_CASES[2] else "initialize"
+    expected["initializeHelper"] = _vault_helper_original(value.get("initializeHelper"), kind, negative=negative)
+    if case == VAULT_HELPER_CASES[0] and not negative:
+        expected["lookupHelper"] = _vault_helper_original(value.get("lookupHelper"), "lookup")
+    _exact(value, expected)
+    return value
+
+
+def vault_fixture_path(binding, home, case):
+    """Closed path DATA. The native owner alone supplies getpwuid's real home."""
+    binding.checked()
+    need(type(home) is str and 1 < len(home.encode("utf-8")) <= 2048
+         and home.startswith("/") and "\x00" not in home and "\\" not in home
+         and all(part and part not in (".", "..") for part in home.split("/")[1:])
+         and len(home.split("/")) <= 64 and case in VAULT_HELPER_CASES, "vault-native-home")
+    return (Path(home) / "Library" / "Application Support" /
+            f"mrk-macos-aqua-vault-{binding.source}-{binding.run}-{binding.attempt}" / case / "dev.mobile-release-kit.desktop")
+
+
 def expected_result(binding, case):
     binding.checked()
     need(case in ALL_CASES, "case-binding")
-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE):
+    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) or case in VAULT_HELPER_CASES:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
         if case in IOS_OPERATION_CASES:
@@ -1011,6 +1121,8 @@ def expected_result(binding, case):
             value["signingInputs"] = _expected_signing_inputs(case)
         if case == PROJECT_FIELDS_CASE:
             value["projectFields"] = _expected_project_fields()
+        if case in VAULT_HELPER_CASES:
+            value["vaultHelper"] = _expected_vault_helper(case)
         value["native"]["projectOpenBinding"]["case"] = case
         value["native"]["projectCompletionSelection"]["case"] = case
         if case == PROJECT_FIELDS_CASE:
@@ -1226,6 +1338,9 @@ def parse_result(stdout, stderr, binding, case):
     expected = expected_result(binding, case)
     if case == PROJECT_FIELDS_CASE:
         _project_field_selection_histories(value, expected)
+    if case in VAULT_HELPER_CASES:
+        need(type(value) is dict and "vaultHelper" in value, "vault-helper-report")
+        expected["vaultHelper"] = _vault_helper_report(value["vaultHelper"], case)
     if case in IOS_OPERATION_CASES:
         need(type(value) is dict and "iosArchive" in value, "ios-report")
         expected["iosArchive"] = _ios_report(value["iosArchive"], case)
@@ -1350,6 +1465,8 @@ def _native_action_context(value, native, panel, *, case=None):
         spec = NATIVE_ACTION_STEPS.get(value["step"])
         if value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
             spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
+        elif value["step"] == "Quit" and case in VAULT_HELPER_CASES:
+            spec = ("quit-confirm", "quit", (5, 7) if case == VAULT_HELPER_CASES[0] else (5,), 16)
         elif value["step"] == "Session(Native(6))" and case in ("ios-signing-inputs", ANDROID_INPUT_CASE):
             spec = ("file-cancel", "file", (INPUT_IDS[case][6],), 32)
         elif value["step"] == "ProjectFields(Native(4))" and case == PROJECT_FIELDS_CASE:
@@ -2592,7 +2709,7 @@ class Fixtures:
     def __init__(self, binding, uid, gid, scope=None):
         self.binding, self.uid, self.gid = binding, uid, gid
         self.cases = selected_cases(scope)
-        self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE))
+        self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE))
         self.fds = set()
         self.close_errors = 0
         self.first_close_error = None
@@ -2603,6 +2720,9 @@ class Fixtures:
         self.case = None
         self.stage = "prepare"
         self.projects, self.states, self.originals, self.input_originals, self.field_outside_originals = {}, {}, {}, {}, {}
+        self.vault_ancestors, self.vault_parents = [], {}
+        self.vault_namespace = self.vault_support = None
+        self.vault_paths, self.vault_completed = {}, set()
 
     def _open(self, name, parent=None, *, directory=False, create=False):
         flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -2726,6 +2846,8 @@ class Fixtures:
                 self.field_outside_originals[case] = self._capture_field_outside(case)
             self.originals[case] = self._capture(case, False)
         self._namespace()
+        if self.cases == VAULT_HELPER_CASES:
+            self._prepare_vault_parents()
 
     def _namespace(self):
         need(signature(os.stat("/private/tmp", follow_symlinks=False))[:6] == signature(os.fstat(self.parent))[:6], "temporary-parent-replaced")
@@ -2864,6 +2986,10 @@ class Fixtures:
         self._roster(state, ("home", "tmp", "inputs") if case in SESSION_CASES
                      else ("home", "tmp", "outside") if case == PROJECT_FIELDS_CASE else ("home", "tmp"), "fresh-state-roster")
         self._inputs_unchanged(case)
+        if case in VAULT_HELPER_CASES:
+            self._vault_namespace_current()
+            need(case not in self.vault_completed, "vault-case-reused")
+            self._roster(self.vault_parents[case], (), "vault-application-collision")
         for name in ("home", "tmp"):
             with self._temporary(self._open(name, state, directory=True)) as fd:
                 self._named(state, name, fd, 0o700)
@@ -2876,6 +3002,102 @@ class Fixtures:
         self._inputs_unchanged(case)
         return validate_snapshot(self.originals[case], self._capture(case, True, ios_output_created=ios_output_created),
                                  case, True, self.uid, self.gid, ios_output_created=ios_output_created)
+
+    def _prepare_vault_parents(self):
+        import pwd
+        # Provider selection is always the ordinary native account. HOME and
+        # TMPDIR still isolate unrelated app state but cannot redirect Keychain.
+        account = pwd.getpwuid(self.uid)
+        need(account.pw_uid == self.uid and self.uid > 0, "vault-native-user")
+        self.vault_paths = {case: vault_fixture_path(self.binding, account.pw_dir, case) for case in self.cases}
+        support = self.vault_paths[self.cases[0]].parents[2]
+        root = self._open("/", directory=True)
+        current = root
+        for parent, name in [(None, "/"), *[(None, part) for part in support.parts[1:]]]:
+            if name != "/":
+                parent = current
+                current = self._open(name, parent, directory=True)
+            held = signature(os.fstat(current))
+            named = signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
+            need(held == named and stat.S_ISDIR(held[2]) and held[2] & 0o7022 == 0
+                 and held[3] in (0, self.uid), "vault-ancestor-custody")
+            # Parent sizes/timestamps/link counts can change when OUR fresh
+            # child is created. Object identity, owner and mode may never drift.
+            self.vault_ancestors.append((parent, name, current, held[:5]))
+        self.vault_support = current
+        namespace = self.vault_paths[self.cases[0]].parents[1].name
+        self.vault_namespace = self._mkdir(current, namespace)
+        for case in self.cases:
+            self.vault_parents[case] = self._mkdir(self.vault_namespace, case)
+            self._roster(self.vault_parents[case], (), "vault-case-collision")
+        # The core, not the fixture owner, creates the application/vault leaves.
+        self._vault_namespace_current()
+
+    def _vault_namespace_current(self):
+        need(self.cases == VAULT_HELPER_CASES and self.vault_namespace is not None
+             and self.vault_support is not None and self.vault_ancestors, "vault-fixture-custody")
+        for parent, name, fd, original in self.vault_ancestors:
+            need(signature(os.fstat(fd))[:5] == original
+                 and signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5] == original,
+                 "vault-ancestor-changed")
+        name = self.vault_paths[self.cases[0]].parents[1].name
+        self._named(self.vault_support, name, self.vault_namespace, 0o700)
+        self._roster(self.vault_namespace, self.cases, "vault-namespace-roster")
+        for case in self.cases:
+            self._named(self.vault_namespace, case, self.vault_parents[case], 0o700)
+            self._roster(self.vault_parents[case], ("dev.mobile-release-kit.desktop",)
+                         if case in self.vault_completed else (), "vault-case-roster")
+
+    def readback_vault(self, case, report):
+        need(case in VAULT_HELPER_CASES and case in self.cases and case not in self.vault_completed
+             and not self.inflight and self.last_returned, "vault-readback-order")
+        _vault_helper_report(report, case)  # Actual inner original finality, not outer exit alone.
+        source = self.readback(case)
+        # A fresh no-follow walk below the retained fixture parent; no path or
+        # identity from the child report is opened, and no Keychain is queried.
+        parent = self.vault_parents[case]
+        self._named(self.vault_namespace, case, parent, 0o700)
+        self._roster(parent, ("dev.mobile-release-kit.desktop",), "vault-case-roster")
+        expected = {"vault-lock": 0, "initialization-reservation": 48}
+        if report["initialized"]:
+            expected["vault-header"] = 104
+        with self._temporary(self._open("dev.mobile-release-kit.desktop", parent, directory=True)) as app:
+            self._named(parent, "dev.mobile-release-kit.desktop", app, 0o700)
+            self._roster(app, ("credential-vault-v1",), "vault-application-roster")
+            with self._temporary(self._open("credential-vault-v1", app, directory=True)) as vault:
+                self._named(app, "credential-vault-v1", vault, 0o700)
+                before = signature(os.fstat(vault))
+                self._roster(vault, expected, "vault-control-roster")
+                with ExitStack() as files:
+                    originals = []
+                    for name, length in expected.items():
+                        fd = files.enter_context(self._temporary(self._open(name, vault)))
+                        original = signature(os.fstat(fd))
+                        need(original[0] == before[0] and original[2] == stat.S_IFREG | 0o600
+                             and original[3:6] == (self.uid, self.gid, 1) and original[6] == length
+                             and original == signature(os.stat(name, dir_fd=vault, follow_symlinks=False)),
+                             "vault-control-custody")
+                        need(all(original[:2] != saved[:2] for _, _, saved in originals), "vault-control-alias")
+                        originals.append((name, fd, original))
+                    for name, fd, original in originals:
+                        need(signature(os.fstat(fd)) == original
+                             and signature(os.stat(name, dir_fd=vault, follow_symlinks=False)) == original,
+                             "vault-control-changed")
+                    need(signature(os.fstat(vault)) == before, "vault-control-roster-changed")
+                    self._roster(vault, expected, "vault-control-roster")
+                self._named(app, "credential-vault-v1", vault, 0o700)
+            self._roster(app, ("credential-vault-v1",), "vault-application-roster")
+            self._named(parent, "dev.mobile-release-kit.desktop", app, 0o700)
+        self.vault_completed.add(case)
+        self._vault_namespace_current()
+        # No key/identity/ciphertext bytes or provider database metadata exported.
+        # Core parsing/authentication is proven by its real Initialize/Unlock,
+        # not reconstructed by this independent output-accounting observation.
+        return {**source, "vaultOutput": {"applicationDirectoryObserved": True, "vaultDirectoryObserved": True,
+            "reservationPresent": True, "headerPresent": report["initialized"],
+            "controlFileCount": len(expected), "retainedPrivateBytes": sum(expected.values()),
+            "privateContentsExported": False, "keychainInspectedByOwner": False,
+            "retainedForDisposableAccountRetirement": True}}
 
     def readback_ios(self, case, report):
         need(case in IOS_OPERATION_CASES and case in self.cases and not self.inflight and self.last_returned, "ios-readback-order")
@@ -3040,9 +3262,10 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     """The sole invocation seam. Inert tests supply a non-executing callable."""
     cases = selected_cases(scope)
     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
+    not_executed = []
     for case in cases:
         fixtures.before_call(case)
-        state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE)) / "state" / case
+        state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE)) / "state" / case
         argv = [EXECUTABLE, case]
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
@@ -3076,9 +3299,15 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         fixtures.inner_diagnostic_source = "completed-output"
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
-        readback = fixtures.readback_ios(case, report["iosArchive"]) if case in IOS_OPERATION_CASES else fixtures.readback(case)
+        if case in VAULT_HELPER_CASES:
+            readback = fixtures.readback_vault(case, report["vaultHelper"])
+            if report["vaultHelper"]["testResult"] == "not-executed":
+                not_executed.append(case)
+        else:
+            readback = fixtures.readback_ios(case, report["iosArchive"]) if case in IOS_OPERATION_CASES else fixtures.readback(case)
         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
               "originalCallReturned": True, "observer": report, "independentReadback": readback})
+    return tuple(not_executed)
 
 
 def admit(environment, root):
@@ -3176,6 +3405,7 @@ def main():
     fixtures = owner = binding = None
     scope = None
     original_error = None
+    not_executed = ()
     try:
         scope = argument_scope(sys.argv[1:])
         root = Path(__file__).absolute().parents[2]
@@ -3184,7 +3414,7 @@ def main():
         os.umask(0o077)
         fixtures = Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
-        run_cases(binding, fixtures, owner.run_owned, uid, username, lambda value: emit_record(value, sys.stdout), scope)
+        not_executed = run_cases(binding, fixtures, owner.run_owned, uid, username, lambda value: emit_record(value, sys.stdout), scope)
     except BaseException as error:
         original_error = error
     if fixtures is not None and not fixtures.inflight:
@@ -3203,12 +3433,19 @@ def main():
             pass  # Output loss remains failure; there is no diagnostic retry.
         return 130 if isinstance(original_error, KeyboardInterrupt) else 1
     try:
-        emit_record({"schemaVersion": 1, "type": "macos-aqua-complete", **binding.public(), "cases": list(selected_cases(scope)),
-                     "allOriginalCallsReturned": True, "independentReadbacks": True, "fixtureHandlesClosed": True,
-                     "instrumentedEngineeringApp": True, "shippingBinaryQualified": False, "distributionQualified": False}, sys.stdout)
+        complete = {"schemaVersion": 1, "type": "macos-aqua-complete", **binding.public(), "cases": list(selected_cases(scope)),
+                    "allOriginalCallsReturned": True, "independentReadbacks": True, "fixtureHandlesClosed": True,
+                    "instrumentedEngineeringApp": True, "shippingBinaryQualified": False, "distributionQualified": False}
+        if scope == VAULT_HELPER_SCOPE:
+            complete.update(notExecutedCases=list(not_executed), focusedCasesPassed=not not_executed,
+                            normalPersistenceEnabled=False, privateFixturesRetained=True,
+                            syntheticKeychainRowRetirement="disposable-hosted-account-only")
+        emit_record(complete, sys.stdout)
     except BaseException:
         return 1
-    return 0
+    # A missing/locked/refused login Keychain is useful negative evidence,
+    # never a successful positive prerequisite or a green qualification run.
+    return 2 if not_executed else 0
 
 
 if __name__ == "__main__":

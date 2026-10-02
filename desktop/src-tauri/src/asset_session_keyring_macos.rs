@@ -90,7 +90,13 @@ pub(super) fn execute(document:&DocumentBinding,owner:&Arc<OriginalWork>)->Resul
     match document.mac_keyring_claim(owner,false){
         Ok(())=>{
             let spawned={let mut book=owner.keyring.lock().map_err(|_|Problem::CleanupUnknown)?;book.spawn_original()};
-            if spawned.is_ok(){if let Err(problem)=document.mac_keyring_claim(owner,true){
+            if spawned.is_ok(){
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+                if let Err(problem) = document.installed_macos_vault_checkpoint(owner,
+                    crate::shell::installed_observation::vault::Checkpoint::BeforeGo) {
+                    owner.keyring.lock().map_err(|_|Problem::CleanupUnknown)?.fail(problem);
+                }
+                if let Err(problem)=document.mac_keyring_claim(owner,true){
                 owner.keyring.lock().map_err(|_|Problem::CleanupUnknown)?.fail(problem);
             }}
         },
@@ -106,6 +112,13 @@ pub(super) fn execute(document:&DocumentBinding,owner:&Arc<OriginalWork>)->Resul
             let mut book=owner.keyring.lock().map_err(|_|Problem::CleanupUnknown)?;
             let done=book.pump();(done,book.turn_delay())
         };
+        // Test-only observation runs after releasing provider custody and BEFORE
+        // the done branch: a terminal+EOF in this same pump must not skip STOP.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        if let Err(problem) = document.installed_macos_vault_checkpoint(owner,
+            crate::shell::installed_observation::vault::Checkpoint::SuccessfulAddTerminal) {
+            owner.keyring.lock().map_err(|_|Problem::CleanupUnknown)?.fail(problem);
+        }
         if done{break;}
         std::thread::sleep(delay); // At most5ms; no new deadline/thread/worker.
     }

@@ -101,10 +101,13 @@ files, private project contents or raw local logs with a report.
 
 The hosted preview keeps the ordinary native package-format audit, exact normal
 Cargo target gate, ad-hoc signature verification, one-shot Installer and
-independent nonroot byte/mode readback. It does **not** repeat the separate old
-ACL probe, five headless regressions or seven Installer-fixture cases. Their
-unchanged engineering route remains available; their historical status is not
-upgraded by this preview.
+independent nonroot byte/mode readback. The same completed app/runtime input is
+also used for the fixed eight-case Installer fixture before ordinary install.
+Its isolated fixture roots are not user installations; only actual successful
+fixture execution/readback establishes those outcomes. It does **not** repeat
+the separate old ACL probe or five headless regressions. Their unchanged
+engineering route remains available; their historical status is not upgraded
+by this preview.
 
 The separate project-field Aqua observer failure is preserved and unresolved.
 It does not prove an ordinary human picker failed, and the preview does not

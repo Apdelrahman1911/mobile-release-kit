@@ -727,10 +727,10 @@ pub(crate) fn probe_project_path(book: &mut SourceBook, root: &RegisteredRoot, p
 pub(crate) fn assert_installed_macos_images_source_contract() {
     // Existing harness=false entry calls these actual inert definitions. No
     // native file, descriptor, ACL temporary or successful capture is invented.
-    tests::public_images_keep_private_leaf_policy_and_full_roster_bounds();
-    tests::image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown();
-    tests::only_local_ownership_aware_apfs_is_admitted();
-    tests::root_aliases_are_exact_and_physical_protection_is_not_path_text();
+    tests::public_images_keep_private_leaf_policy_and_full_roster_bounds_data_check();
+    tests::image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown_data_check();
+    tests::only_local_ownership_aware_apfs_is_admitted_data_check();
+    tests::root_aliases_are_exact_and_physical_protection_is_not_path_text_data_check();
 }
 
 #[cfg(test)]
@@ -798,7 +798,9 @@ mod tests {
         assert!(parts(Path::new(&format!("/{}", vec!["a"; COMPONENT_LIMIT].join("/")))).is_err());
     }
     #[test]
-    pub(super) fn only_local_ownership_aware_apfs_is_admitted() {
+    pub(super) fn only_local_ownership_aware_apfs_is_admitted() { only_local_ownership_aware_apfs_is_admitted_data_check(); }
+
+    pub(super) fn only_local_ownership_aware_apfs_is_admitted_data_check() {
         assert!(admitted_filesystem("apfs", MntFlags::MNT_LOCAL));
         assert!(admitted_filesystem("apfs", MntFlags::MNT_LOCAL | MntFlags::MNT_RDONLY));
         for name in ["hfs", "nfs", "smbfs", "webdav", "autofs", "APFS", ""] { assert!(!admitted_filesystem(name, MntFlags::MNT_LOCAL)); }
@@ -836,7 +838,9 @@ mod tests {
         }
     }
     #[test]
-    pub(super) fn root_aliases_are_exact_and_physical_protection_is_not_path_text() {
+    pub(super) fn root_aliases_are_exact_and_physical_protection_is_not_path_text() { root_aliases_are_exact_and_physical_protection_is_not_path_text_data_check(); }
+
+    pub(super) fn root_aliases_are_exact_and_physical_protection_is_not_path_text_data_check() {
         let root = DirectoryIdentity { dev: 1, ino: 2, mode: 0o40755, uid: 0, gid: 0 };
         assert!(PhysicalRole::Root.protected(root) && PhysicalRole::Private.protected(root) && PhysicalRole::Var.protected(root));
         assert!(!PhysicalRole::Private.protected(DirectoryIdentity { uid: 501, ..root }));
@@ -893,7 +897,9 @@ mod tests {
         assert!(matches!(result, Err(Reason::UserCancelled))); assert!(book.settled());
     }
     #[test]
-    pub(super) fn public_images_keep_private_leaf_policy_and_full_roster_bounds() {
+    pub(super) fn public_images_keep_private_leaf_policy_and_full_roster_bounds() { public_images_keep_private_leaf_policy_and_full_roster_bounds_data_check(); }
+
+    pub(super) fn public_images_keep_private_leaf_policy_and_full_roster_bounds_data_check() {
         let common = DirectoryIdentity { dev: 1, ino: 2, mode: 0o100644, uid: 501, gid: 20 };
         let file = FileIdentity { common, nlink: 1, size: 10, mtime: (1, 2), ctime: (3, 4) };
         for mode in [0o100444, 0o100644, 0o100664] {
@@ -927,7 +933,9 @@ mod tests {
         }
     }
     #[test]
-    pub(super) fn image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown() {
+    pub(super) fn image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown() { image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown_data_check(); }
+
+    pub(super) fn image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown_data_check() {
         for native_unknown in [false, true] {
             let mut book = SourceBook::new(); book.begin(3, 0, 0).unwrap();
             let first = book.reserve(None, b"first").unwrap();

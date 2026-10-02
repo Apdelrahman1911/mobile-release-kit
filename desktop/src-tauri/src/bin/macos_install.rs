@@ -11,16 +11,15 @@ mod installer {
     use std::{collections::{BTreeMap, BTreeSet}, os::fd::{AsFd, OwnedFd}, path::Path, time::{Duration, Instant}};
     use nix::{errno::Errno, fcntl::{self, AtFlags, OFlag}, mount::MntFlags,
         sys::{stat::{self, FileStat, Mode, SFlag}, statfs}, unistd};
-    use serde::Deserialize;
     use sha2::{Digest, Sha256};
-    use mobile_release_desktop::{macos_install_paths as paths, protocol::strict_json, runtime::safe_payload_path};
+    use mobile_release_desktop::{macos_install_paths as paths,
+        macos_install_record::{self as installation_record, Entry, Inventory}, runtime::safe_payload_path};
     use mrk_macos_installed_native as native;
     type Result<T> = std::result::Result<T, &'static str>;
-    const FILES: usize = 2048; // Also fits strict_json's independent node bound.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown }
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Role { Reader, PayloadWriter, ReceiptWriter }
+    enum Role { Reader, PayloadWriter, MetadataWriter, ReceiptWriter }
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Identity { dev: i64, ino: u64, mode: u32, uid: u32, gid: u32, links: u64, size: i64,
         mtime: i64, mtime_ns: i64, ctime: i64, ctime_ns: i64 }
@@ -39,15 +38,10 @@ mod installer {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
+        metadata: installation_record::Progress,
         #[cfg(feature = "macos-installed-installer-fixture")]
         fixture: Option<fixture::Context>,
     }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct Inventory { schema_version: u32, release: String, runtime_manifest_sha256: String, files: Vec<Entry> }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Entry { path: String, sha256: String, size: u64, executable: bool }
     fn check(ok: bool, why: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(why) } }
     fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
     fn component(value: &str) -> bool { value.is_ascii() && value.len() <= 255 && safe_payload_path(value) && !value.contains('/') }
@@ -306,6 +300,7 @@ mod installer {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
+                metadata:installation_record::Progress::default(),
                 #[cfg(feature = "macos-installed-installer-fixture")]
                 fixture: None }
         }
@@ -325,7 +320,11 @@ mod installer {
         }
         fn adopt(&mut self, n: usize, result: nix::Result<OwnedFd>) -> Result<usize> {
             match result {
-                Ok(fd) => { self.originals[n].fd = Some(fd); self.originals[n].state = State::Owned; Ok(n) }
+                Ok(fd) => {
+                    self.originals[n].fd = Some(fd); self.originals[n].state = State::Owned;
+                    if self.originals[n].role == Role::MetadataWriter { self.metadata.opened()?; }
+                    Ok(n)
+                }
                 Err(_error) => {
                     self.originals[n].state = State::NoHandle;
                     #[cfg(feature = "macos-installed-installer-fixture")]
@@ -347,7 +346,9 @@ mod installer {
         }
         fn create_file(&mut self, parent: usize, name: &str, role: Role) -> Result<usize> {
             check(component(name), "file-component")?;
-            let n = self.reserve(Some(parent), name, role)?; self.originals[n].state = State::Acquiring;
+            let n = self.reserve(Some(parent), name, role)?;
+            if role == Role::MetadataWriter { self.metadata.attempted()?; }
+            self.originals[n].state = State::Acquiring;
             let flags = OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
             let opened = fcntl::openat(self.fd(parent)?, name, flags, Mode::from_bits_truncate(0o600));
             self.adopt(n, opened)?;
@@ -455,9 +456,15 @@ mod installer {
             check(count == size, "size-changed")?; self.check_name(n, true)?;
             Ok((hash.finalize().iter().map(|b| format!("{b:02x}")).collect(), bytes))
         }
-        fn write_all(&self, n: usize, mut bytes: &[u8]) -> Result<()> {
-            while !bytes.is_empty() { self.clock()?; let count = unistd::write(self.fd(n)?, bytes).map_err(|_| "write-refused")?;
-                check(count != 0, "write-zero")?; bytes = &bytes[count..]; } Ok(())
+        fn write_all(&mut self, n: usize, mut bytes: &[u8]) -> Result<()> {
+            while !bytes.is_empty() {
+                self.clock()?;
+                let count = unistd::write(self.fd(n)?, bytes).map_err(|_| "write-refused")?;
+                check(count != 0 && count <= bytes.len(), "write-zero-or-bound")?;
+                if self.originals[n].role == Role::MetadataWriter { self.metadata.wrote(count)?; }
+                bytes = &bytes[count..];
+            }
+            Ok(())
         }
         fn seal_file(&mut self, n: usize, executable: bool) -> Result<()> {
             self.check_name(n, false)?;
@@ -469,6 +476,10 @@ mod installer {
         }
         fn payload_writers_settled(&self) -> bool { self.originals.iter().filter(|r| r.role == Role::PayloadWriter)
             .all(|r| r.fd.is_none() && matches!(r.state, State::Closed | State::NoHandle)) }
+        fn metadata_writers_settled(&self) -> bool {
+            self.originals.iter().filter(|r| r.role == Role::MetadataWriter)
+                .all(|r| r.fd.is_none() && matches!(r.state, State::Closed | State::NoHandle))
+        }
         fn original_summary(&self, n: Option<usize>) -> serde_json::Value { n.and_then(|n| self.originals[n].identity)
             .map_or(serde_json::Value::Null, |id| serde_json::json!({"device":id.dev,"inode":id.ino})) }
         fn creation_summary(&self) -> Vec<serde_json::Value> {
@@ -481,6 +492,7 @@ mod installer {
             let bytes = serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"release":paths::RELEASE,"phase":phase,
                 "runtimePublication":self.runtime_publication,"appPublication":self.app_publication,
                 "payloadVerified":self.payload_verified,"payloadWritersSettled":self.payload_writers_settled(),
+                "installationMetadata":self.metadata.snapshot(self.metadata_writers_settled()),
                 "originalSettlement":"pending-final-closes","stage":self.original_summary(self.stage),
                 "runtime":self.original_summary(self.runtime),"app":self.original_summary(self.app),"createdAncestors":self.creation_summary(),
                 "inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")})).map_err(|_| "receipt-shape")?;
@@ -587,7 +599,7 @@ mod installer {
             self.check_name(root, true)?; self.protected(root, true, Some(0o555))?; self.absent(stage, source)?;
             self.persist(stage, false)?; self.persist(destination, false)
         }
-        fn input(&mut self, source: &str) -> Result<(usize, Inventory)> {
+        fn input(&mut self, source: &str) -> Result<(usize, Inventory, Vec<u8>)> {
             check(unistd::getuid().is_root() && unistd::geteuid().is_root() && unistd::getgid().as_raw() == 0
                 && unistd::getegid().as_raw() == 0, "administrator-required")?;
             native::platform().map_err(|_| "macos26-arm64-required")?;
@@ -608,13 +620,11 @@ mod installer {
             let size = u64::try_from(self.identity(manifest)?.size).map_err(|_| "inventory-size")?;
             let (digest, bytes) = self.read(manifest, size, true)?;
             check(Some(digest.as_str()) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256"), "inventory-anchor")?;
-            let inventory: Inventory = serde_json::from_value(strict_json(&bytes).map_err(|_| "inventory-json")?).map_err(|_| "inventory-shape")?;
-            check(inventory.schema_version == 1 && inventory.release == paths::RELEASE && !inventory.files.is_empty() && inventory.files.len() <= FILES
-                && sha(&inventory.runtime_manifest_sha256)
-                && Some(inventory.runtime_manifest_sha256.as_str()) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
-                && option_env!("MRK_BUNDLED_PROTOCOL_SHA256") == Some(paths::PROTOCOL_SHA), "inventory-binding")?;
+            let inventory = Inventory::parse(&bytes,
+                option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").ok_or("inventory-binding")?)?;
+            check(option_env!("MRK_BUNDLED_PROTOCOL_SHA256") == Some(paths::PROTOCOL_SHA), "inventory-binding")?;
             self.forward_close(manifest, "inventory-close")?;
-            Ok((input, inventory))
+            Ok((input, inventory, bytes))
         }
         fn support_root(&mut self) -> Result<usize> {
             let root = self.open(None, "/", true)?; self.protected_as(root, true, None, AclRole::SystemRoot)?;
@@ -623,22 +633,12 @@ mod installer {
             Ok(support)
         }
         fn install(&mut self, source: &str) -> Result<()> {
-            let (input, inventory) = self.input(source)?;
-            let mut files = BTreeMap::new(); let mut directories = BTreeSet::from(["app".to_owned(),"runtime".to_owned()]);
-            let mut total = 0u64; let mut previous = "";
-            for item in &inventory.files {
-                check(item.path.is_ascii() && safe_payload_path(&item.path) && item.path.len() <= 1024 && item.path.split('/').count() <= 17
-                    && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
-                    && item.path.as_str() > previous && sha(&item.sha256), "inventory-path")?;
-                check(item.executable == matches!(item.path.as_str(), "app/Contents/MacOS/mobile-release-kit-desktop" | "app/Contents/Helpers/mrk-vault-keychain" | "runtime/python/bin/python3"), "inventory-executable-scope")?;
-                total = total.checked_add(item.size).ok_or("inventory-bound")?; check(total <= 512*1024*1024, "inventory-bound")?;
-                previous = &item.path; files.insert(item.path.clone(), item);
-                let mut path = item.path.as_str(); while let Some((parent,_)) = path.rsplit_once('/') { directories.insert(parent.to_owned()); path = parent; }
-            }
-            check(directories.len() <= 2048 && files.contains_key("app/Contents/MacOS/mobile-release-kit-desktop")
-                && files.contains_key("app/Contents/Info.plist") && files.contains_key("app/Contents/Helpers/mrk-vault-keychain") && files.contains_key("runtime/python/bin/python3")
-                && files.get("runtime/manifest.json").is_some_and(|f| f.sha256 == inventory.runtime_manifest_sha256), "inventory-required")?;
-            let mut folded = BTreeSet::new(); for name in files.keys().chain(directories.iter()) { check(folded.insert(name.to_ascii_lowercase()), "inventory-collision")?; }
+            let (input, inventory, inventory_bytes) = self.input(source)?;
+            let indexed = inventory.index()?;
+            check(indexed.payload_bytes.checked_add(inventory_bytes.len() as u64)
+                .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64))
+                .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT), "inventory-bound")?;
+            let files = indexed.files; let directories = indexed.directories;
             let support = self.support_root()?;
             #[cfg(not(feature = "macos-installed-installer-fixture"))]
             let destination = self.directory(support, "MobileReleaseKit", false, 0o755)?;
@@ -650,6 +650,7 @@ mod installer {
             self.fixture_before_release_absence(versions)?;
             self.absent(versions, paths::RELEASE)?;
             let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "stage-identity")?;
+            check(nonce.iter().any(|byte| *byte != 0), "stage-identity")?;
             let name = format!(".install-{}", nonce.iter().map(|b| format!("{b:02x}")).collect::<String>());
             self.stage_name = Some(name.clone()); // Reserve the effect identity before mkdir.
             let stage = self.directory(destination, &name, true, 0o700)?; self.stage = Some(stage);
@@ -667,12 +668,70 @@ mod installer {
             self.fixture_before_runtime_publication(release)?;
             self.publish(runtime, stage, "runtime", release, "runtime", true)?;
             self.receipt("runtime-publication-confirmed")?;
+            self.record_metadata(destination, release, &name[9..], &inventory_bytes)?;
             #[cfg(feature = "macos-installed-installer-fixture")]
             self.fixture_before_app_publication(destination)?;
             self.publish(app, stage, "app", destination, paths::APP_NAME, false)?;
             // Not an "installed/settled" receipt: remaining original descriptors
             // still have to close. Only final exit/output can report that fact.
             self.receipt("both-publications-confirmed")?; Ok(())
+        }
+        fn recorded_directory(&self, n: usize) -> Result<installation_record::DirectoryIdentity> {
+            self.clock()?; self.check_name(n, false)?; self.protected(n, true, Some(0o755))?;
+            native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_| "installation-directory-attributes")?;
+            let actual = stat::fstat(self.fd(n)?).map_err(|_| "installation-directory-stat")?;
+            let original = &self.originals[n];
+            let named = self.named(original.parent, &original.name).map_err(|_| "installation-directory-name")?;
+            self.clock()?;
+            check(Identity::of(&actual) == Identity::of(&named) && actual.st_flags == 0 && named.st_flags == 0,
+                "installation-directory-correspondence")?;
+            let data = installation_record::DirectoryIdentity { device:i64::from(actual.st_dev),inode:actual.st_ino,
+                mode:u32::from(actual.st_mode),uid:actual.st_uid,gid:actual.st_gid,flags:actual.st_flags };
+            check(data.valid(), "installation-directory-policy")?; Ok(data)
+        }
+        fn metadata_file(&mut self, release: usize, name: &str, bytes: &[u8]) -> Result<()> {
+            let writer = self.create_file(release, name, Role::MetadataWriter)?;
+            self.write_all(writer, bytes)?; self.seal_file(writer, false)?;
+            let reader = self.open(Some(release), name, false)?;
+            check(self.identity(writer)?.same_object(self.identity(reader)?), "installation-file-original")?;
+            self.protected(reader, false, Some(0o444))?;
+            native::no_xattrs(self.fd(reader)?.as_fd()).map_err(|_| "installation-file-attributes")?;
+            check(stat::fstat(self.fd(reader)?).map_err(|_| "installation-file-flags")?.st_flags == 0,
+                "installation-file-flags")?;
+            let expected: String = format!("{:x}", Sha256::digest(bytes));
+            check(self.read(reader, bytes.len() as u64, false)?.0 == expected, "installation-file-readback")?;
+            check(stat::fstat(self.fd(reader)?).map_err(|_| "installation-file-flags")?.st_flags == 0,
+                "installation-file-flags")?;
+            self.forward_close(reader, "installation-readback-close")
+        }
+        fn record_metadata(&mut self, destination: usize, release: usize, instance: &str, inventory: &[u8]) -> Result<()> {
+            #[cfg(not(feature = "macos-installed-installer-fixture"))]
+            let kind = installation_record::Kind::Ordinary;
+            #[cfg(feature = "macos-installed-installer-fixture")]
+            let kind = installation_record::Kind::Fixture;
+            let expected = installation_record::Expected { kind,
+                source_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or("installation-source-binding")?,
+                runtime_manifest:option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").ok_or("installation-runtime-binding")?,
+                install_root:self.recorded_directory(destination)?,release_directory:self.recorded_directory(release)? };
+            let record = installation_record::Record::encode(instance, inventory, &expected)?;
+            self.clock()?;
+            let total = (inventory.len() as u64).checked_add(record.len() as u64).ok_or("installation-metadata-plan")?;
+            self.metadata.begin(total)?;
+            self.metadata_file(release, installation_record::INVENTORY_NAME, inventory)?;
+            #[cfg(feature = "macos-installed-installer-fixture")]
+            self.fixture_before_descriptor(release)?;
+            self.metadata_file(release, installation_record::RECORD_NAME, &record)?;
+            check(self.recorded_directory(destination)? == expected.install_root
+                && self.recorded_directory(release)? == expected.release_directory, "installation-directory-changed")?;
+            let expected_roster: BTreeSet<String> = ["runtime", installation_record::INVENTORY_NAME, installation_record::RECORD_NAME]
+                .into_iter().map(str::to_owned).collect();
+            check(self.roster(release)?.keys().cloned().collect::<BTreeSet<_>>() == expected_roster, "installation-release-roster")?;
+            self.persist(release, false)?;
+            self.check_name(release, false)?; self.clock()?;
+            // Both metadata_file calls returned only after their real writer and
+            // readback closes. The same original parent sync has just returned.
+            // This does not describe outstanding ancestors or the whole install.
+            self.metadata.record(self.metadata_writers_settled())
         }
         fn originals_settled(&self) -> bool {
             !self.unknown && self.originals.iter().all(|r| r.fd.is_none() && matches!(r.state, State::Closed | State::NoHandle))
@@ -691,7 +750,8 @@ mod installer {
         fn result_record(&self, result: &FinalResult) -> serde_json::Value {
             serde_json::json!({"schemaVersion":1,"state":result.state,"reason":result.reason,"release":paths::RELEASE,
                 "runtimePublication":self.runtime_publication,"appPublication":self.app_publication,"staging":self.stage_name,
-                "payloadVerified":self.payload_verified,"payloadWritersSettled":self.payload_writers_settled(),"originalsSettled":self.originals_settled(),
+                "payloadVerified":self.payload_verified,"payloadWritersSettled":self.payload_writers_settled(),
+                "installationMetadata":self.metadata.snapshot(self.metadata_writers_settled()),"originalsSettled":self.originals_settled(),
                 "deadlineMetAfterFinalCloses":result.deadline_met,"createdAncestors":self.creation_summary(),"cleanup":"original-closes-only-no-deletion",
                 "sourceCommit":option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),"inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256"),
                 "runtimeManifestSha256":option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")})
@@ -708,7 +768,7 @@ mod installer {
     #[cfg(feature = "macos-installed-installer-fixture")]
     pub(super) fn run() -> i32 { fixture::run() }
 
-    // Exactly seven separately named cases, inside the one approved standard
+    // Exactly eight separately named cases, inside the one approved standard
     // Installer fixture package. This module/entry/hooks do not exist in the
     // ordinary installer, and accept no scenario/destination/environment override.
     #[cfg(feature = "macos-installed-installer-fixture")]
@@ -717,22 +777,23 @@ mod installer {
         const MARKER: &[u8] = b"MRK_MACOS_INSTALLER_FIXTURE_OCCUPANT\n";
         const BASE_PREFIX: &str = "MobileReleaseKit-InstallerFixture-";
         #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Case { OccupiedApp, OccupiedRelease, RuntimeCollision, StagingCollision, FirstOnly, BeforePersistence, AfterPersistence }
-        const CASES: [Case; 7] = [Case::OccupiedApp, Case::OccupiedRelease, Case::RuntimeCollision, Case::StagingCollision,
-            Case::FirstOnly, Case::BeforePersistence, Case::AfterPersistence];
+        enum Case { OccupiedApp, OccupiedRelease, RuntimeCollision, StagingCollision, FirstOnly, BeforePersistence, AfterPersistence, MetadataCollision }
+        const CASES: [Case; 8] = [Case::OccupiedApp, Case::OccupiedRelease, Case::RuntimeCollision, Case::StagingCollision,
+            Case::FirstOnly, Case::BeforePersistence, Case::AfterPersistence, Case::MetadataCollision];
         impl Case {
             fn name(self) -> &'static str { match self {
                 Self::OccupiedApp => "occupied-app", Self::OccupiedRelease => "occupied-release",
                 Self::RuntimeCollision => "runtime-publication-collision", Self::StagingCollision => "staging-file-collision",
                 Self::FirstOnly => "first-publication-second-refusal", Self::BeforePersistence => "prepublication-persistence-report",
-                Self::AfterPersistence => "postruntime-persistence-report" } }
+                Self::AfterPersistence => "postruntime-persistence-report", Self::MetadataCollision => "metadata-descriptor-collision" } }
             fn expected(self) -> (&'static str, &'static str, &'static str, &'static str, bool, i32) { match self {
                 Self::OccupiedApp | Self::OccupiedRelease => ("destination-occupied","not-attempted","not-attempted","refused-staging-retained",false,1),
                 Self::RuntimeCollision => ("exclusive-publication-refused-or-unknown","occupied-refused","not-attempted","refused-staging-retained",true,1),
                 Self::StagingCollision => ("open-refused","not-attempted","not-attempted","refused-staging-retained",false,1),
                 Self::FirstOnly => ("exclusive-publication-refused-or-unknown","confirmed","occupied-refused","partial-installation-retained",true,20),
                 Self::BeforePersistence => ("fixture-reported-persistence-failure","not-attempted","not-attempted","refused-staging-retained",false,1),
-                Self::AfterPersistence => ("fixture-reported-persistence-failure","confirmed","not-attempted","partial-installation-retained",true,20) } }
+                Self::AfterPersistence => ("fixture-reported-persistence-failure","confirmed","not-attempted","partial-installation-retained",true,20),
+                Self::MetadataCollision => ("open-refused","confirmed","not-attempted","partial-installation-retained",true,20) } }
         }
         #[derive(Clone, Copy, PartialEq, Eq)]
         pub(super) enum PersistPoint { BeforePublication, AfterRuntimeRename }
@@ -804,6 +865,17 @@ mod installer {
                 }
                 Ok(())
             }
+            pub(super) fn fixture_before_descriptor(&mut self, release: usize) -> Result<()> {
+                if self.fixture_case()? == Case::MetadataCollision {
+                    self.absent(release, installation_record::RECORD_NAME)?;
+                    self.fixture.as_mut().ok_or("fixture-context-missing")?.absence_observed = true;
+                    let visible = format!("versions/{}/{}", paths::RELEASE, installation_record::RECORD_NAME);
+                    let witness = self.fixture_file_occupant(release, installation_record::RECORD_NAME, Some(visible))?;
+                    self.persist(release, false)?;
+                    self.fixture.as_mut().ok_or("fixture-context-missing")?.witness = Some(witness);
+                }
+                Ok(())
+            }
             pub(super) fn fixture_before_payload_create(&mut self, parent: usize, name: &str) -> Result<()> {
                 if self.fixture_case()? == Case::StagingCollision && self.fixture.as_ref().is_some_and(|f| f.witness.is_none()) {
                     self.absent(parent, name)?;
@@ -819,7 +891,8 @@ mod installer {
                 let Some(context) = self.fixture.as_mut() else { return; };
                 let Some(witness) = &context.witness else { return; };
                 let original = &self.originals[index];
-                if context.case == Case::StagingCollision && original.role == Role::PayloadWriter
+                if ((context.case == Case::StagingCollision && original.role == Role::PayloadWriter)
+                    || (context.case == Case::MetadataCollision && original.role == Role::MetadataWriter))
                     && original.parent == Some(witness.parent) && original.name == witness.name {
                     if context.staging_errno.is_some() { self.unknown = true; }
                     else { context.staging_errno = Some(error as i32); }
@@ -869,7 +942,7 @@ mod installer {
                 _ => context.witness.as_ref().is_some_and(|w| w.after == Some(w.before) && w.sha256 == marker_hash()),
             };
             let native_collision_ok = match case {
-                Case::StagingCollision => context.absence_observed && context.staging_errno == Some(Errno::EEXIST as i32),
+                Case::StagingCollision | Case::MetadataCollision => context.absence_observed && context.staging_errno == Some(Errno::EEXIST as i32),
                 Case::RuntimeCollision | Case::FirstOnly => context.absence_observed && context.staging_errno.is_none(),
                 _ => !context.absence_observed && context.staging_errno.is_none(),
             };
@@ -879,7 +952,14 @@ mod installer {
                         PersistPoint::BeforePublication } else { PersistPoint::AfterRuntimeRename }),
                 _ => context.persistence.is_none(),
             };
-            let passed = proof.is_ok() && occupant_ok && native_collision_ok && persistence_ok && !install.unknown
+            let metadata = install.metadata.snapshot(install.metadata_writers_settled());
+            let metadata_ok = match case {
+                Case::FirstOnly => metadata["state"] == "recorded" && metadata["openedFiles"] == 2,
+                Case::MetadataCollision => metadata["state"] == "incomplete" && metadata["attemptedFiles"] == 2
+                    && metadata["openedFiles"] == 1 && metadata["writtenBytes"].as_u64().is_some_and(|n| n > 0),
+                _ => metadata["state"] == "not-attempted",
+            };
+            let passed = proof.is_ok() && occupant_ok && native_collision_ok && persistence_ok && metadata_ok && !install.unknown
                 && install.originals_settled() && result.deadline_met && result.reason == Some(reason) && result.state == state && result.exit == exit
                 && install.runtime_publication == runtime && install.app_publication == app && install.payload_verified == verified
                 && install.payload_writers_settled();

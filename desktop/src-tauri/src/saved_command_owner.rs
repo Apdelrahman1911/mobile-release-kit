@@ -54,6 +54,23 @@ const OFFLINE_HARD: Duration = Duration::from_secs(1810);
 const ANDROID_WORK: Duration = Duration::from_secs(3000);
 const ANDROID_HARD: Duration = Duration::from_secs(3010);
 const SETTLEMENT: Duration = Duration::from_secs(10);
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn publish_macos_returned_failure(
+    returned: Option<crate::installed_runtime::AdmissionFailure>,
+    original_first: impl FnOnce() -> Option<(crate::installed_runtime::AdmissionFailure, Instant)>,
+    publish: &mut dyn FnMut(Option<(crate::installed_runtime::AdmissionFailure, Instant)>),
+) {
+    // Capture this original Err BEFORE querying its Book or borrowing its
+    // owner's publication latch. Neither a later getter nor a join supplies F.
+    let returned = returned.map(|failure| (failure, Instant::now()));
+    let first = original_first();
+    // The existing owner latch selects min(F). Publish BOTH facts: a later
+    // Unknown must remain absorbing even when an earlier cause owns F.
+    publish(first);
+    if returned.is_some() { publish(returned); }
+}
+
 // This private closed sum is not a runner API. No operation descriptors,
 // callbacks, extension traits, caller argv or caller deadlines enter the owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -717,6 +734,12 @@ impl Session {
             AdmissionFailure::Unknown => Reason::CleanupUnknown,
             _ if self.domain == SavedCommandDomain::AndroidBuild => Reason::ToolchainUnavailable,
             _ => Reason::RuntimeUnavailable };
+        self.observe_failure_at(reason, at, failure == AdmissionFailure::Unknown);
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn observe_failure_at(&self, reason: Reason, at: Instant, unknown: bool) {
+        // The caller already captured F. Preserve its finite reason without
+        // acquiring Registry or replacing this original Session's min latch.
         let first = match self.native_failure.lock() {
             Ok(mut first) => {
                 if first.is_none_or(|(_, before)| at < before) { *first = Some((reason, at)); }
@@ -724,7 +747,7 @@ impl Session {
             },
             Err(_) => { self.resource_unknown.store(true, Ordering::SeqCst); Some(self.clocks.admitted) },
         };
-        if failure == AdmissionFailure::Unknown { self.resource_unknown.store(true, Ordering::SeqCst); }
+        if unknown { self.resource_unknown.store(true, Ordering::SeqCst); }
         let audit = self.clocks.audit_end(first); let cleanup = self.clocks.cleanup_end(first);
         self.native_audit_cutoff.send_if_modified(|current| if audit < *current { *current = audit; true } else { false });
         self.native_cleanup_cutoff.send_if_modified(|current| if cleanup < *current { *current = cleanup; true } else { false });
@@ -1019,7 +1042,8 @@ impl IOSNativeBooks {
         if self.phase != NativePhase::New { return Err(BridgeError::cleanup_unknown()); }
         self.phase = NativePhase::Inspecting;
         let inspected = runtime.resolve_ios_archive_installed(&mut self.runtime, end, stop);
-        publish(self.runtime.first_failure().or_else(|| inspected.as_ref().err().map(|_| (AdmissionFailure::Inventory, Instant::now()))));
+        publish_macos_returned_failure(inspected.as_ref().err().map(|_| AdmissionFailure::Inventory),
+            || self.runtime.first_failure(), publish);
         let selected = match inspected {
             Ok(selected) => selected,
             Err(error) => { self.phase = NativePhase::Refused; self.failure.get_or_insert(AdmissionFailure::Inventory); return Err(error); },
@@ -1029,7 +1053,8 @@ impl IOSNativeBooks {
         let tools = if self.signed && self.recovery { Err(AdmissionFailure::Inventory) }
             else if self.recovery { self.tools.inspect_recovery_once(end, stop) }
             else if self.signed { self.tools.inspect_signed_once(end, stop) } else { self.tools.inspect_once(end, stop) };
-        publish(self.tools.first_failure().or_else(|| tools.as_ref().err().map(|failure| (*failure, Instant::now()))));
+        publish_macos_returned_failure(tools.as_ref().err().copied(),
+            || self.tools.first_failure(), publish);
         if let Err(failure) = tools {
             self.phase = NativePhase::Refused; self.failure.get_or_insert(failure);
             return Err(SavedCommandDomain::IOSArchive.unavailable());
@@ -1068,7 +1093,8 @@ impl IOSNativeBooks {
             if (&original.python, &original.bootstrap, &original.core, &original.cwd)
                 != (&selected.python, &selected.bootstrap, &selected.core, &selected.cwd) { return Err(AdmissionFailure::Identity); }
             let result = self.tools.check_before_spawn(end, stop);
-            publish(self.tools.first_failure().or_else(|| result.as_ref().err().map(|failure| (*failure, Instant::now()))));
+            publish_macos_returned_failure(result.as_ref().err().copied(),
+                || self.tools.first_failure(), publish);
             result
         })();
         if let Err(failure) = result { self.failure.get_or_insert(failure); self.phase = NativePhase::Refused; }
@@ -1096,10 +1122,12 @@ impl IOSNativeBooks {
             // Publish the first audit's actual F BEFORE entering its sibling.
             // Audits retain audit_end; native frees/FD closes use cleanup_end.
             let runtime = self.runtime.ios_check_after_use(end, &self.audit);
-            let _ = expired(self.runtime.first_failure().or_else(|| runtime.as_ref().err().map(|failure| (*failure, Instant::now()))));
+            publish_macos_returned_failure(runtime.as_ref().err().copied(),
+                || self.runtime.first_failure(), &mut |first| { let _ = expired(first); });
             if let Err(failure) = runtime { self.failure.get_or_insert(failure); integrity = false; }
             let tools = self.tools.check_after_use(end);
-            let _ = expired(self.tools.first_failure().or_else(|| tools.as_ref().err().map(|failure| (*failure, Instant::now()))));
+            publish_macos_returned_failure(tools.as_ref().err().copied(),
+                || self.tools.first_failure(), &mut |first| { let _ = expired(first); });
             if let Err(failure) = tools { self.failure.get_or_insert(failure); integrity = false; }
         }
         let tools = self.tools.settle_originals(expired);
@@ -2436,6 +2464,8 @@ fn acquire_offline_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     if crate::runtime::macos_installed_environment(&mut command).is_err() {
+        let at = Instant::now();
+        owner.observe_failure_at(Reason::RuntimeUnavailable, at, false);
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
     let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
@@ -2808,9 +2838,15 @@ fn spawn_ios_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, 
     command.args(["-I", "-S", "-B"]).arg(&runtime.bootstrap).arg(&runtime.core);
     command.current_dir(&runtime.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-    if crate::runtime::macos_installed_environment(&mut command).is_err()
-        || native.check_before_spawn(&runtime, owner.clocks.work, &owner.stop.subscribe(),
-            &mut |first| owner.publish_native_failure(first)).is_err() {
+    if crate::runtime::macos_installed_environment(&mut command).is_err() {
+        let at = Instant::now();
+        owner.observe_failure_at(Reason::ToolchainMismatch, at, false);
+        inner.stop(owner, Reason::ToolchainMismatch); return;
+    }
+    if let Err(failure) = native.check_before_spawn(&runtime, owner.clocks.work, &owner.stop.subscribe(),
+        &mut |first| owner.publish_native_failure(first)) {
+        let at = Instant::now();
+        owner.observe_failure_at(Reason::ToolchainMismatch, at, failure == AdmissionFailure::Unknown);
         inner.stop(owner, Reason::ToolchainMismatch); return;
     }
     let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
@@ -2934,24 +2970,40 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let (inspect_start, inspect_enter) = oneshot::channel();
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
-        inspect_enter.blocking_recv().map_err(|_| domain.unavailable())?;
+        inspect_enter.blocking_recv().map_err(|_| {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            if domain == SavedCommandDomain::OfflinePreflight {
+                inspection_owner.observe_failure_at(Reason::RuntimeUnavailable, Instant::now(), false);
+            }
+            domain.unavailable()
+        })?;
         match domain {
             SavedCommandDomain::OfflinePreflight => {
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 if let Some(native) = offline_installed {
-                    let mut slots = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    let mut slots = native.lock().map_err(|_| {
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        inspection_owner.publish_native_failure(Some((AdmissionFailure::Unknown, Instant::now())));
+                        BridgeError::cleanup_unknown()
+                    })?;
                     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                     {
                         let armed = slots.arm_acl_once(end, &stop);
-                        inspection_owner.publish_native_failure(slots.first_failure());
+                        publish_macos_returned_failure(armed.as_ref().err().copied(),
+                            || slots.first_failure(), &mut |first| inspection_owner.publish_native_failure(first));
                         armed.map_err(|_| domain.unavailable())?;
                     }
                     let result = runtime.resolve_offline_preflight_installed(&mut slots, end, &stop);
                     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                    inspection_owner.publish_native_failure(slots.first_failure());
+                    publish_macos_returned_failure(result.as_ref().err().map(|_| AdmissionFailure::Native),
+                        || slots.first_failure(), &mut |first| inspection_owner.publish_native_failure(first));
                     return result;
                 }
-                runtime.resolve_offline_preflight(end)
+                let result = runtime.resolve_offline_preflight(end);
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                publish_macos_returned_failure(result.as_ref().err().map(|_| AdmissionFailure::Native),
+                    || None, &mut |first| inspection_owner.publish_native_failure(first));
+                result
             },
             SavedCommandDomain::ProjectRecovery => {
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -2964,14 +3016,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                     {
                         let armed = slots.arm_acl_once(end, &stop);
-                        inspection_owner.publish_native_failure(slots.first_failure()
-                            .or_else(|| armed.as_ref().err().map(|failure| (*failure, Instant::now()))));
+                        publish_macos_returned_failure(armed.as_ref().err().copied(),
+                            || slots.first_failure(), &mut |first| inspection_owner.publish_native_failure(first));
                         armed.map_err(|_| domain.unavailable())?;
                     }
                     let result = runtime.resolve_project_recovery_installed(&mut slots, end, &stop);
                     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                    inspection_owner.publish_native_failure(slots.first_failure()
-                        .or_else(|| result.as_ref().err().map(|_| (AdmissionFailure::Native, Instant::now()))));
+                    publish_macos_returned_failure(result.as_ref().err().map(|_| AdmissionFailure::Native),
+                        || slots.first_failure(), &mut |first| inspection_owner.publish_native_failure(first));
                     return result;
                 }
                 runtime.resolve_project_recovery(end)
@@ -3610,6 +3662,64 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
                 || !final_clock_clear(&r, &original, projection_at) { return false; }
         }
     }
+    // Real returned-error publisher and SAME original Session latch, while its
+    // Registry is already held. No task/native object or positive join exists.
+    for kind in 0..3 {
+        let (application, original) = inert(Instant::now() - Duration::from_secs(5));
+        let t = original.clocks.admitted; let before = Instant::now();
+        let queried = std::cell::Cell::new(None); let returned = std::cell::Cell::new(None);
+        let cleanup = original.native_cleanup_cutoff.subscribe();
+        let mut r = application.inner.lock();
+        publish_macos_returned_failure(Some(AdmissionFailure::Identity), || {
+            let at = Instant::now(); queried.set(Some(at));
+            match kind {
+                1 => Some((AdmissionFailure::Ownership, t + Duration::from_secs(1))),
+                2 => Some((AdmissionFailure::Unknown, at + Duration::from_secs(1))),
+                _ => None,
+            }
+        }, &mut |first| {
+            if let Some((AdmissionFailure::Identity, at)) = first { returned.set(Some(at)); }
+            original.publish_native_failure(first);
+        });
+        let Some(returned_at) = returned.get() else { return false; };
+        let expected = if kind == 1 { t + Duration::from_secs(1) } else { returned_at };
+        let clock_f = expected.max(t).min(original.clocks.work);
+        let cutoff = original.clocks.cleanup_end(Some(clock_f));
+        if returned_at < before || !queried.get().is_some_and(|at| returned_at <= at)
+            || *original.native_failure.lock().unwrap() != Some((Reason::RuntimeUnavailable, expected))
+            || *cleanup.borrow() != cutoff
+            || r.active.as_ref().unwrap().first_stop.is_some()
+            || original.resource_unknown.load(Ordering::SeqCst) != (kind == 2)
+            || original.driver_joined.load(Ordering::SeqCst)
+            || original.watchdog_joined.load(Ordering::SeqCst) { return false; }
+        let delayed = clock_f + Duration::from_secs(5);
+        application.inner.stop_locked(&mut r, &original, Reason::RuntimeUnavailable, delayed);
+        application.inner.advance_locked(&mut r, &original, delayed);
+        if r.active.as_ref().unwrap().first_stop != Some(clock_f)
+            || *cleanup.borrow() != cutoff
+            || original.clocks.work != t + RECOVERY_WORK || original.clocks.finality != t + RECOVERY_HARD
+            || r.active.as_ref().unwrap().unknown != (kind == 2) { return false; }
+    }
+    {
+        let (application, original) = inert(Instant::now() - Duration::from_secs(5));
+        let observed = Instant::now(); let cleanup = original.native_cleanup_cutoff.subscribe();
+        let clock_f = observed.max(original.clocks.admitted).min(original.clocks.work);
+        let cutoff = original.clocks.cleanup_end(Some(clock_f));
+        let mut r = application.inner.lock();
+        // SAME method used by iOS environment/check errors: keep the caller's
+        // original finite reason, with F captured before this held Registry.
+        original.observe_failure_at(Reason::ToolchainMismatch, observed, false);
+        original.publish_native_failure(Some((AdmissionFailure::Unknown, observed + Duration::from_secs(1))));
+        if *original.native_failure.lock().unwrap() != Some((Reason::ToolchainMismatch, observed))
+            || !original.resource_unknown.load(Ordering::SeqCst)
+            || *cleanup.borrow() != cutoff
+            || r.active.as_ref().unwrap().first_stop.is_some() { return false; }
+        application.inner.advance_locked(&mut r, &original, clock_f + Duration::from_secs(2));
+        if r.active.as_ref().unwrap().first_stop != Some(clock_f)
+            || r.active.as_ref().unwrap().projection.reason !=
+                (if observed < original.clocks.work { Reason::ToolchainMismatch } else { Reason::TimedOut })
+            || !r.active.as_ref().unwrap().unknown { return false; }
+    }
     for observed in [Duration::from_secs(1), Duration::from_secs(121)] {
         let (application, original) = inert(Instant::now() - Duration::from_secs(122)); let t = original.clocks.admitted;
         original.publish_native_failure(Some((AdmissionFailure::Native, t + observed)));
@@ -3673,6 +3783,50 @@ fn installed_project_recovery_retains_original_clocks_review_and_finality() {
 }
 
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+fn macos_saved_return_data_check() -> bool {
+    use std::cell::Cell;
+    let before = Instant::now(); let queried = Cell::new(None); let mut facts = Vec::new();
+    publish_macos_returned_failure(Some(AdmissionFailure::Native), || {
+        queried.set(Some(Instant::now())); None
+    }, &mut |first| facts.push(first));
+    let [None, Some((AdmissionFailure::Native, returned_at))] = facts.as_slice() else { return false; };
+    if *returned_at < before || !queried.get().is_some_and(|at| *returned_at <= at) { return false; }
+    let admitted = *returned_at; let delayed = admitted + Duration::from_secs(5);
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
+        let clocks = Clocks::new(domain, admitted);
+        if clocks.cleanup_end(Some(*returned_at)) != *returned_at + SETTLEMENT
+            || clocks.settlement(Some(*returned_at)) != *returned_at + SETTLEMENT
+            || clocks.cleanup_end(Some(*returned_at)) == clocks.cleanup_end(Some(delayed)) { return false; }
+    }
+    // Existing signed/recovery policies are DATA here, never replaced by the
+    // Supervisor's two-second grace or a test-supplied product clock.
+    let signed = Clocks { cleanup: admitted + IOS_SIGNED_CLEANUP, finality: admitted + IOS_SIGNED_HARD,
+        signed: true, ..Clocks::new(SavedCommandDomain::IOSArchive, admitted) };
+    let recovery = Clocks { work: admitted + IOS_RECOVERY_WORK, cleanup: admitted + IOS_RECOVERY_CLEANUP,
+        finality: admitted + IOS_RECOVERY_HARD, recovery: true, ..Clocks::new(SavedCommandDomain::IOSArchive, admitted) };
+    for clocks in [signed, recovery] {
+        if clocks.cleanup_end(Some(*returned_at)) != *returned_at + Duration::from_secs(120)
+            || clocks.settlement(Some(*returned_at)) != *returned_at + Duration::from_secs(130)
+            || clocks.cleanup_end(Some(clocks.finality)) != clocks.cleanup
+            || clocks.settlement(Some(clocks.finality)) != clocks.finality { return false; }
+    }
+
+    let mut slots = OfflinePreflightRuntimeSlots::new();
+    let (_sender, stop) = watch::channel(true); let before = Instant::now();
+    // This is the actual native-free stopped arm guard and the SAME return
+    // publisher called by the registered offline inspector, not a native mock.
+    let armed = slots.arm_acl_once(before + Duration::from_secs(30), &stop);
+    let mut reports = Vec::new();
+    publish_macos_returned_failure(armed.as_ref().err().copied(), || slots.first_failure(),
+        &mut |first| reports.push(first));
+    let after = Instant::now();
+    if !matches!(armed, Err(AdmissionFailure::Stopped)) || !slots.never_started()
+        || !reports.iter().any(|row| matches!(row, Some((AdmissionFailure::Stopped, at))
+            if before <= *at && *at <= after)) { return false; }
+    true
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn installed_offline_owner_data_check() -> bool {
     // Inert state/clock models only. Exclude the qualification test's real
     // Prepare/getrandom call, hosted fixtures, runtime inspection and native IO.
@@ -3683,6 +3837,7 @@ pub(crate) fn installed_offline_owner_data_check() -> bool {
     offline_tests::complete_negative_is_provisional_and_not_first_failure();
     offline_tests::late_terminal_never_reverses_timeout_or_unknown_in_either_delivery_order();
     offline_tests::repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks();
+    if !macos_saved_return_data_check() { return false; }
     if !matches!(wire::Profile::current(), Some(wire::Profile::MacosArm64))
         || wire::CONSENT != "saved-offline-android-v1" { return false; }
     let runtime = RuntimeConfig::packaged(std::path::PathBuf::from("/inert-mrk-offline-owner-not-opened"));

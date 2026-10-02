@@ -428,6 +428,13 @@ macro_rules! slots {
             pub(crate) fn prepare_once_observed(&mut self, end: Instant, stop: &watch::Receiver<bool>,
                 publish: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)) -> Result<&VerifiedRuntime> {
                 let result = if self.claimed { Err(AdmissionFailure::AlreadyUsed) } else { self.original.prepare(end, stop) };
+                // G1: a non-ACL return has its own actual F. Capture before
+                // first_failure (which can note Unknown) or the owner callback;
+                // retain it in the SAME original latch with any earlier ACL F.
+                if let Err(failure) = &result {
+                    let detected_at = Instant::now();
+                    self.original.note_acl(*failure, detected_at);
+                }
                 publish(self.original.first_failure()); // Original native return, before any later owner borrow/join.
                 result?; Ok(&self.selection)
             }
@@ -500,12 +507,115 @@ macro_rules! slots {
 }
 slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
 slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
+slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);
+slots!(GitHubReleaseRuntimeSlots, GitHubReleaseInstalledRuntime, runtime::GitHubReleaseInstalledProfile);
 slots!(ConfigurationRuntimeSlots, ConfigurationInstalledRuntime, runtime::ConfigurationInstalledProfile);
 slots!(GitHubWorkflowRuntimeSlots, GitHubWorkflowInstalledRuntime, runtime::GitHubWorkflowInstalledProfile);
 slots!(MetadataTextRuntimeSlots, MetadataTextInstalledRuntime, runtime::MetadataTextInstalledProfile);
 slots!(MetadataImagesRuntimeSlots, MetadataImagesInstalledRuntime, runtime::MetadataImagesInstalledProfile);
 slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
+
+// Inert checks over the same COMMON Book used by both new action slots.
+// No SnapshotBook/native handle is created; entered/missing are negative DATA.
+#[cfg(test)]
+pub(crate) fn installed_github_actions_slots_data_check() -> bool {
+    use std::any::TypeId;
+    let types = [TypeId::of::<PassiveRuntimeSlots>(), TypeId::of::<GitHubReadOnlyRuntimeSlots>(),
+        TypeId::of::<GitHubPreflightRuntimeSlots>(), TypeId::of::<GitHubReleaseRuntimeSlots>()];
+    for (index, original) in types.iter().enumerate() { if types[index + 1..].contains(original) { return false; } }
+    macro_rules! inert_action {
+        ($slot:ty) => {{
+            let mut empty = <$slot>::new();
+            if !empty.never_started() || !empty.no_child_effect() || empty.settled()
+                || empty.first_failure().is_some() || empty.capability().is_ok() || empty.transfer_once().is_ok()
+                || empty.retained_bytes() != Some(std::mem::size_of::<$slot>()) { return false; }
+            if empty.settle_originals(&mut |_| false) != CloseOutcome::Settled || !empty.settled()
+                || empty.never_started() || empty.capability().is_ok()
+                || empty.settle_originals(&mut |_| false) != CloseOutcome::Unknown { return false; }
+            let mut missing = <$slot>::new();
+            missing.inspection = None;
+            if missing.never_started() || missing.no_child_effect() || missing.capability().is_ok()
+                || missing.first_failure().is_none() || missing.retained_bytes().is_some()
+                || missing.settle_originals(&mut |_| false) != CloseOutcome::Unknown || missing.settled() { return false; }
+            let mut entered = <$slot>::new();
+            entered.inspection.as_mut().unwrap().acl_entered = true;
+            if entered.never_started() || entered.retained_bytes().is_some() || entered.transfer_once().is_ok()
+                || entered.settle_originals(&mut |_| false) != CloseOutcome::Unknown || entered.settled() { return false; }
+            let mut interrupted = <$slot>::new();
+            interrupted.mark_interrupted();
+            if interrupted.never_started() || interrupted.retained_bytes().is_some()
+                || interrupted.settle_originals(&mut |_| false) != CloseOutcome::Unknown || interrupted.settled() { return false; }
+            let now = Instant::now();
+            let early = now.checked_sub(std::time::Duration::from_millis(1)).unwrap_or(now);
+            let failed = <$slot>::new();
+            let original = failed.inspection.as_ref().unwrap();
+            original.note_acl(AdmissionFailure::Ownership, early);
+            original.note_acl(AdmissionFailure::Native, now);
+            original.invalid_acl();
+            if failed.first_failure() != Some((AdmissionFailure::Ownership, early))
+                || failed.retained_bytes().is_some() { return false; }
+        }};
+    }
+    inert_action!(GitHubPreflightRuntimeSlots);
+    inert_action!(GitHubReleaseRuntimeSlots);
+    macro_rules! actual_prepare_return {
+        ($capability:ident) => {{
+            let selection = || VerifiedRuntime { python: PathBuf::from("/inert/python"),
+                bootstrap: PathBuf::from("/inert/bootstrap"), core: PathBuf::from("/inert/core"),
+                cwd: PathBuf::from("/inert") };
+            let (_sender, stop) = watch::channel(false);
+            let mut original = $capability { original: Book::new(), selection: selection(), claimed: false, no_effect: false };
+            let before = Instant::now();
+            let end = before + std::time::Duration::from_secs(10);
+            let mut events = Vec::new(); let mut reported = None; let mut callback_at = None;
+            // Calls the REAL original prepare_once_observed. The uninspected
+            // Book's first guard returns before real_user, a frame or any FD.
+            let refused = matches!(original.prepare_once_observed(end, &stop, &mut |first| {
+                events.push("publish"); reported = first; callback_at = Some(Instant::now());
+            }), Err(AdmissionFailure::AlreadyUsed));
+            events.push("return");
+            let later_claim_refused = original.claim_once().is_err();
+            events.push("later-claim");
+            let Some((failure, detected_at)) = reported else { return false; };
+            if !refused || !later_claim_refused || events != ["publish", "return", "later-claim"]
+                || failure != AdmissionFailure::AlreadyUsed || detected_at < before
+                || !callback_at.is_some_and(|at| detected_at <= at)
+                || original.original.first_failure() != reported || original.original.acl_entered
+                || original.original.acl.is_some() || !original.original.records.is_empty()
+                || original.original.retained_heap_bytes() != Some(0) { return false; }
+            let mut repeated = None;
+            if !matches!(original.prepare_once_observed(end, &stop, &mut |first| repeated = first),
+                    Err(AdmissionFailure::AlreadyUsed)) || repeated != reported { return false; }
+            let early = before.checked_sub(std::time::Duration::from_millis(1)).unwrap_or(before);
+            let mut prior = $capability { original: Book::new(), selection: selection(), claimed: false, no_effect: false };
+            prior.original.note_acl(AdmissionFailure::Ownership, early);
+            let mut prior_report = None;
+            if !matches!(prior.prepare_once_observed(end, &stop, &mut |first| prior_report = first),
+                    Err(AdmissionFailure::AlreadyUsed))
+                || prior_report != Some((AdmissionFailure::Ownership, early))
+                || prior.original.first_failure() != prior_report { return false; }
+            let mut entered = $capability { original: Book::new(), selection: selection(), claimed: false, no_effect: false };
+            entered.original.acl_entered = true;
+            let mut entered_report = None;
+            if !matches!(entered.prepare_once_observed(end, &stop, &mut |first| entered_report = first),
+                    Err(AdmissionFailure::AlreadyUsed))
+                || !matches!(entered_report, Some((AdmissionFailure::AlreadyUsed, _)))
+                || !entered.original.acl_invalid.get() || entered.original.retained_heap_bytes().is_some()
+                || entered.original.first_failure() != entered_report
+                || entered.original.settle(&mut |_| false) != CloseOutcome::Unknown
+                || entered.original.settled() { return false; }
+        }};
+    }
+    actual_prepare_return!(GitHubPreflightInstalledRuntime);
+    actual_prepare_return!(GitHubReleaseInstalledRuntime);
+    true
+}
+#[cfg(test)]
+#[test]
+fn installed_github_action_original_slots_are_inert_and_uncertainty_is_absorbing() {
+    assert!(installed_github_actions_slots_data_check());
+}
 
 // This existing installed-shell DATA route never constructs a SnapshotBook or
 // touches a descriptor. It tests missing/empty custody, not native free evidence.

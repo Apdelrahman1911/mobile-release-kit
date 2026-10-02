@@ -25,7 +25,7 @@ use crate::{error::BridgeError, github_connection_protocol::{self as github_prot
 use crate::installed_runtime::{AdmissionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::GitHubReadOnlyRuntimeSlots;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{GitHubPreflightRuntimeSlots, GitHubReleaseRuntimeSlots};
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 use crate::installed_runtime_windows::{InspectionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
@@ -376,12 +376,18 @@ pub(crate) fn common_acl_owner_data_check() -> bool {
 #[derive(Debug)]
 struct AcquisitionError {
     original: std::io::Error,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    detected_at: Instant,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     cause: Option<crate::error::LinuxPassiveCause>,
 }
 impl From<std::io::Error> for AcquisitionError {
     fn from(original: std::io::Error) -> Self {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let detected_at = Instant::now();
         Self { original,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            detected_at,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             cause: None,
         }
@@ -389,7 +395,24 @@ impl From<std::io::Error> for AcquisitionError {
 }
 impl AcquisitionError {
     fn unsupported(message: &'static str) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Unsupported, message).into()
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let detected_at = Instant::now();
+            Self { original: std::io::Error::new(std::io::ErrorKind::Unsupported, message), detected_at }
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        { std::io::Error::new(std::io::ErrorKind::Unsupported, message).into() }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn with_macos_first_failure(mut self, first: Option<(PassiveAdmissionFailure, Instant)>) -> Self {
+        if let Some((_, at)) = first { self.detected_at = self.detected_at.min(at); }
+        self
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn macos_action_failure(&self) -> (BridgeError, Instant) {
+        // A closed BORROWED projection; no new time or consumption of the
+        // original acquisition error before the original join.
+        (self.bridge_error(), self.detected_at)
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn with_cause(mut self, cause: crate::error::LinuxPassiveCause) -> Self {
@@ -423,6 +446,8 @@ impl AcquisitionError {
         error
     }
     fn returned_spawn(original: std::io::Error) -> Self {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let detected_at = Instant::now();
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let cause = {
             use crate::error::LinuxSpawnFailure as F;
@@ -439,11 +464,14 @@ impl AcquisitionError {
             }
         };
         Self { original,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            detected_at,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             cause: Some(crate::error::LinuxPassiveCause::ReturnedSpawn(cause)),
         }
     }
-    fn into_bridge_error(self) -> BridgeError {
+    fn into_bridge_error(self) -> BridgeError { self.bridge_error() }
+    fn bridge_error(&self) -> BridgeError {
         let error = BridgeError::unavailable("The selected isolated core could not start.");
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let error = error.with_linux_passive_cause(self.cause);
@@ -475,9 +503,9 @@ struct Resources {
     passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     github_readonly: Option<Arc<Mutex<GitHubReadOnlyRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     github_preflight: Option<Arc<Mutex<GitHubPreflightRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     github_release: Option<Arc<Mutex<GitHubReleaseRuntimeSlots>>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_settlement: Option<JoinHandle<CloseOutcome>>,
@@ -527,6 +555,21 @@ impl Owner {
         drop(state);
         if expired { self.changed.notify_waiters(); }
         expired
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn fail_at(&self, error: BridgeError, detected_at: Instant) {
+        // The original return supplies F BEFORE this possibly delayed lock.
+        // OwnerState keeps the earlier cause/deadline and sticky Unknown.
+        let mut state = lock(&self.state);
+        if state.terminal { return; }
+        state.fail_at(error, detected_at);
+        drop(state);
+        self.stop.send_replace(true); self.changed.notify_waiters();
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn observe_macos_action_acquisition_failure(&self, original: &AcquisitionError) {
+        let (error, detected_at) = original.macos_action_failure();
+        self.fail_at(error, detected_at);
     }
     fn fail(&self, error: BridgeError) {
         let mut state = lock(&self.state);
@@ -841,11 +884,11 @@ impl Supervisor {
                 github_readonly: if github_installed_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())))
                 } else { None },
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 github_preflight: if github_preflight_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubPreflightRuntimeSlots::new())))
                 } else { None },
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 github_release: if github_release_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubReleaseRuntimeSlots::new())))
                 } else { None },
@@ -1303,11 +1346,11 @@ fn github_installed_selected(profile: Profile) -> bool {
         && matches!(profile, Profile::GitHubReadOnly)
 }
 fn github_preflight_selected(profile: Profile) -> bool {
-    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
         not(all(feature = "development-runtime", debug_assertions)))) && matches!(profile, Profile::GitHubPreflight)
 }
 fn github_release_selected(profile: Profile) -> bool {
-    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
         not(all(feature = "development-runtime", debug_assertions)))) && matches!(profile, Profile::GitHubRelease)
 }
 fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
@@ -1360,11 +1403,11 @@ fn passive_worker_lost(resources: &Resources) {
     if let Some(native) = &resources.github_readonly {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if let Some(native) = &resources.github_preflight {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if let Some(native) = &resources.github_release {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
@@ -1495,9 +1538,9 @@ enum InstalledSettlementSlots {
     Passive(Arc<Mutex<PassiveRuntimeSlots>>),
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     GitHubReadOnly(Arc<Mutex<GitHubReadOnlyRuntimeSlots>>),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     GitHubPreflight(Arc<Mutex<GitHubPreflightRuntimeSlots>>),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     GitHubRelease(Arc<Mutex<GitHubReleaseRuntimeSlots>>),
 }
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
@@ -1506,14 +1549,14 @@ fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result
     {
         if github_installed_selected(profile) {
             if resources.passive.is_some() { return Err(BridgeError::cleanup_unknown()); }
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             if resources.github_preflight.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
             return resources.github_readonly.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubReadOnly(slots.clone())))
                 .ok_or_else(BridgeError::cleanup_unknown);
         }
         if resources.github_readonly.is_some() { return Err(BridgeError::cleanup_unknown()); }
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if github_preflight_selected(profile) {
             if resources.passive.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
@@ -1542,9 +1585,9 @@ impl InstalledSettlementSlots {
             Self::Passive(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubReadOnly(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubPreflight(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubRelease(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
         }
     }
@@ -1557,6 +1600,16 @@ impl InstalledSettlementSlots {
                 slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
             },
             Self::GitHubReadOnly(native) => {
+                let mut slots = match native.lock() { Ok(slots) => slots,
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
+            },
+            Self::GitHubPreflight(native) => {
+                let mut slots = match native.lock() { Ok(slots) => slots,
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
+            },
+            Self::GitHubRelease(native) => {
                 let mut slots = match native.lock() { Ok(slots) => slots,
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
                 slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
@@ -1575,12 +1628,12 @@ impl InstalledSettlementSlots {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubPreflight(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubRelease(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
@@ -1592,9 +1645,9 @@ impl InstalledSettlementSlots {
             Self::Passive(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubReadOnly(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubPreflight(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubRelease(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
         }
     }
@@ -1616,7 +1669,7 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             }
             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
         },
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Some(InstalledSettlementSlots::GitHubPreflight(native)) => {
             let (inspection, acquisition) = passive_borrows(resources);
             if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
@@ -1630,7 +1683,7 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
         },
 
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Some(InstalledSettlementSlots::GitHubRelease(native)) => {
             let (inspection, acquisition) = passive_borrows(resources);
             if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
@@ -1684,17 +1737,31 @@ fn acquire_github_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mu
     Err(AcquisitionError::unsupported("The installed GitHub read-only runtime is unavailable in this profile"))
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 fn acquire_preflight_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubPreflightRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub preflight original custody is unavailable"))?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let mut preparation_first = None;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let prepared = runtime.prepare_once_observed(owner.endpoint(), &stop, &mut |first| {
+        preparation_first = first; owner.observe_native_failure(first);
+    });
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let selected = prepared.map_err(|failure| AcquisitionError::preparation(failure)
+        .with_macos_first_failure(preparation_first))?;
     let mut command = Command::new(&selected.python);
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    // Fixed Darwin preparation is before the original serialized claim;
+    // no environment/native call is added between claim and child creation.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
         Profile::GitHubPreflight, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
@@ -1704,23 +1771,37 @@ fn acquire_preflight_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mu
     drop(state); drop(owners);
     command.spawn().map_err(AcquisitionError::returned_spawn)
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_preflight_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubPreflightRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub preflight runtime is unavailable in this profile"))
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 fn acquire_release_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubReleaseRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub release original custody is unavailable"))?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let mut preparation_first = None;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let prepared = runtime.prepare_once_observed(owner.endpoint(), &stop, &mut |first| {
+        preparation_first = first; owner.observe_native_failure(first);
+    });
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let selected = prepared.map_err(|failure| AcquisitionError::preparation(failure)
+        .with_macos_first_failure(preparation_first))?;
     let mut command = Command::new(&selected.python);
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    // Fixed Darwin preparation is before the original serialized claim;
+    // no environment/native call is added between claim and child creation.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
         Profile::GitHubRelease, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
@@ -1730,7 +1811,7 @@ fn acquire_release_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
     drop(state); drop(owners);
     command.spawn().map_err(AcquisitionError::returned_spawn)
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_release_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubReleaseRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub release runtime is unavailable in this profile"))
@@ -1905,9 +1986,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let inspection_native = resources.passive.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let inspection_github = resources.github_readonly.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let inspection_preflight = resources.github_preflight.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let inspection_release = resources.github_release.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_stop = owner.stop.subscribe();
@@ -1982,20 +2063,84 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 config.resolve_github_readonly(endpoint)?
             },
             Profile::GitHubPreflight => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 if github_preflight_selected(profile) {
-                    let native = inspection_preflight.ok_or_else(BridgeError::cleanup_unknown)?;
-                    let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    return config.resolve_github_preflight_installed(&mut originals, endpoint, &inspection_stop);
+                    let native = inspection_preflight.ok_or_else(|| {
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        let detected_at = Instant::now();
+                        let error = BridgeError::cleanup_unknown();
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        inspection_owner.fail_at(error.clone(), detected_at);
+                        error
+                    })?;
+                    let mut originals = native.lock().map_err(|_| {
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        let detected_at = Instant::now();
+                        let error = BridgeError::cleanup_unknown();
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        inspection_owner.fail_at(error.clone(), detected_at);
+                        error
+                    })?;
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let armed = originals.arm_acl_once(endpoint, &inspection_stop);
+                        let detected_at = Instant::now();
+                        inspection_owner.observe_native_failure(originals.first_failure());
+                        if armed.is_err() {
+                            let error = BridgeError::unavailable("The original Mac ACL inspection could not be armed.");
+                            inspection_owner.fail_at(error.clone(), detected_at);
+                            return Err(error);
+                        }
+                    }
+                    let result = config.resolve_github_preflight_installed(&mut originals, endpoint, &inspection_stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let detected_at = Instant::now();
+                        inspection_owner.observe_native_failure(originals.first_failure());
+                        if let Err(error) = &result { inspection_owner.fail_at(error.clone(), detected_at); }
+                    }
+                    return result;
                 }
                 return Err(BridgeError::unavailable("The GitHub preflight action runtime is not qualified."));
             },
             Profile::GitHubRelease => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 if github_release_selected(profile) {
-                    let native = inspection_release.ok_or_else(BridgeError::cleanup_unknown)?;
-                    let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    return config.resolve_github_release_installed(&mut originals, endpoint, &inspection_stop);
+                    let native = inspection_release.ok_or_else(|| {
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        let detected_at = Instant::now();
+                        let error = BridgeError::cleanup_unknown();
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        inspection_owner.fail_at(error.clone(), detected_at);
+                        error
+                    })?;
+                    let mut originals = native.lock().map_err(|_| {
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        let detected_at = Instant::now();
+                        let error = BridgeError::cleanup_unknown();
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        inspection_owner.fail_at(error.clone(), detected_at);
+                        error
+                    })?;
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let armed = originals.arm_acl_once(endpoint, &inspection_stop);
+                        let detected_at = Instant::now();
+                        inspection_owner.observe_native_failure(originals.first_failure());
+                        if armed.is_err() {
+                            let error = BridgeError::unavailable("The original Mac ACL inspection could not be armed.");
+                            inspection_owner.fail_at(error.clone(), detected_at);
+                            return Err(error);
+                        }
+                    }
+                    let result = config.resolve_github_release_installed(&mut originals, endpoint, &inspection_stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let detected_at = Instant::now();
+                        inspection_owner.observe_native_failure(originals.first_failure());
+                        if let Err(error) = &result { inspection_owner.fail_at(error.clone(), detected_at); }
+                    }
+                    return result;
                 }
                 return Err(BridgeError::unavailable("The GitHub release action runtime is not qualified."));
             },
@@ -2047,9 +2192,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let acquisition_native = resources.passive.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let acquisition_github = resources.github_readonly.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let acquisition_preflight = resources.github_preflight.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let acquisition_release = resources.github_release.clone();
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
@@ -2058,6 +2203,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     resources.acquisition = Some(tokio::task::spawn_blocking(move || {
         if acquire_enter.blocking_recv().is_err() {
             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease) {
+                acquiring_owner.observe_macos_action_acquisition_failure(&error);
+            }
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let error = error.with_cause(crate::error::LinuxPassiveCause::AcquisitionEntryNotReleased);
             return Err(error);
@@ -2085,21 +2234,39 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             };
             return acquire_github_original(&acquiring_inner, &acquiring_owner, &native);
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if github_preflight_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_preflight else {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                let error = AcquisitionError::unsupported("original GitHub preflight custody is missing");
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                acquiring_owner.observe_macos_action_acquisition_failure(&error);
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
-                return Err(AcquisitionError::unsupported("original GitHub preflight custody is missing"));
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                let error = AcquisitionError::unsupported("original GitHub preflight custody is missing");
+                return Err(error);
             };
-            return acquire_preflight_original(&acquiring_inner, &acquiring_owner, &native);
+            let result = acquire_preflight_original(&acquiring_inner, &acquiring_owner, &native);
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
+            return result;
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if github_release_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_release else {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                let error = AcquisitionError::unsupported("original GitHub release custody is missing");
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                acquiring_owner.observe_macos_action_acquisition_failure(&error);
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
-                return Err(AcquisitionError::unsupported("original GitHub release custody is missing"));
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                let error = AcquisitionError::unsupported("original GitHub release custody is missing");
+                return Err(error);
             };
-            return acquire_release_original(&acquiring_inner, &acquiring_owner, &native);
+            let result = acquire_release_original(&acquiring_inner, &acquiring_owner, &native);
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
+            return result;
         }
         spawn_original(runtime, acquiring_owner).map_err(AcquisitionError::from)
     }));
@@ -2425,13 +2592,125 @@ pub(crate) fn macos_github_readonly_original_contract() {
     for profile in [Profile::Passive(Method::Capabilities), Profile::GitHubPreflight, Profile::GitHubRelease] {
         assert!(!github_installed_selected(profile));
     }
-    assert!(!github_preflight_selected(Profile::GitHubPreflight) && !github_release_selected(Profile::GitHubRelease));
+    // Each action is a separate selector; neither is read-only custody.
+    assert!(!github_preflight_selected(Profile::GitHubReadOnly) && !github_release_selected(Profile::GitHubReadOnly));
     #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
     github_installed_contract_tests::exact_original_book_contract();
 }
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn macos_github_readonly_original_data_contract() { macos_github_readonly_original_contract(); }
+
+// DATA only: original gate decisions and fresh empty books, never a
+// Supervisor registration, native ACL frame, child, credential or dispatch.
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn macos_github_actions_original_contract() {
+    // The original error is still owned while its closed projection publishes.
+    // Fixed later DATA simulates a delayed owner borrow/join, not a new clock.
+    let before = Instant::now();
+    let original = AcquisitionError::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    let after = Instant::now();
+    let (projected, detected_at) = original.macos_action_failure();
+    assert!(before <= detected_at && detected_at <= after);
+    assert_eq!(original.original.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(original.macos_action_failure(), (projected.clone(), detected_at));
+    let endpoint = detected_at + OPERATION_TIME;
+    let delayed = detected_at + Duration::from_secs(5);
+    let mut delayed_state = OwnerState::new(endpoint, None);
+    delayed_state.fail_at(BridgeError::timeout(), delayed);
+    delayed_state.unknown = true;
+    delayed_state.fail_at(projected.clone(), detected_at);
+    assert_eq!(delayed_state.error, Some(projected));
+    assert_eq!(delayed_state.cleanup_endpoint, Some(detected_at + CLEANUP_TIME));
+    assert_eq!(delayed_state.endpoint, endpoint);
+    assert!(delayed_state.unknown);
+    let early = detected_at.checked_sub(Duration::from_millis(1)).unwrap_or(detected_at);
+    let acl_error = BridgeError::unavailable("first original native DATA refusal");
+    delayed_state.fail_at(acl_error.clone(), early);
+    let original = original.with_macos_first_failure(Some((PassiveAdmissionFailure::Ownership, early)));
+    let (projected, replay_at) = original.macos_action_failure();
+    assert_eq!(replay_at, early);
+    assert_eq!(original.original.kind(), std::io::ErrorKind::PermissionDenied);
+    delayed_state.fail_at(projected, replay_at);
+    assert_eq!(delayed_state.error, Some(acl_error));
+    assert_eq!(delayed_state.cleanup_endpoint, Some(early + CLEANUP_TIME));
+    assert!(delayed_state.unknown && delayed_state.endpoint == endpoint);
+    let selected = !cfg!(all(feature = "development-runtime", debug_assertions));
+    assert_eq!(github_preflight_selected(Profile::GitHubPreflight), selected);
+    assert_eq!(github_release_selected(Profile::GitHubRelease), selected);
+    for profile in [Profile::Passive(Method::Capabilities), Profile::GitHubReadOnly] {
+        assert!(!github_preflight_selected(profile) && !github_release_selected(profile));
+    }
+    assert!(!github_preflight_selected(Profile::GitHubRelease) && !github_release_selected(Profile::GitHubPreflight));
+    let now = Instant::now();
+    for expected in [Profile::GitHubPreflight, Profile::GitHubRelease] {
+        let mut state = OwnerState::new(now + OPERATION_TIME, None);
+        let clear = |state: &OwnerState, original, profile, at, stopping, disabled, stop|
+            preflight_claim_clear(original, profile, expected, state, at, stopping, disabled, stop);
+        assert!(clear(&state, true, expected, now, false, false, false));
+        for wrong in [Profile::Passive(Method::Capabilities), Profile::GitHubReadOnly,
+            if matches!(expected, Profile::GitHubPreflight) { Profile::GitHubRelease } else { Profile::GitHubPreflight }] {
+            assert!(!clear(&state, true, wrong, now, false, false, false));
+        }
+        assert!(!github_claim_clear(true, expected, &state, now, false, false, false));
+        assert!(!passive_claim_clear(true, expected, &state, now, false, false, false));
+        assert!(!clear(&state, false, expected, now, false, false, false));
+        assert!(!clear(&state, true, expected, state.endpoint, false, false, false));
+        for (stopping, disabled, stop) in [(true, false, false), (false, true, false), (false, false, true)] {
+            assert!(!clear(&state, true, expected, now, stopping, disabled, stop));
+        }
+        state.fail_at(BridgeError::timeout(), now);
+        assert!(!clear(&state, true, expected, now, false, false, false));
+        state.error = None; // Negative DATA: the original cleanup endpoint still vetoes a claim.
+        assert!(!clear(&state, true, expected, now, false, false, false));
+        state.cleanup_endpoint = None; state.unknown = true;
+        assert!(!clear(&state, true, expected, now, false, false, false));
+        state.unknown = false; state.terminal = true;
+        assert!(!clear(&state, true, expected, now, false, false, false));
+    }
+    #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+    {
+        macro_rules! original_action {
+            ($profile:expr, $field:ident, $slot:ty, $variant:ident, $other_field:ident, $other_slot:ty) => {{
+                let mut resources = Resources::default();
+                assert!(installed_settlement_slots(&resources, $profile).is_err());
+                let original = Arc::new(Mutex::new(<$slot>::new()));
+                resources.$field = Some(original.clone());
+                let selected = match installed_settlement_slots(&resources, $profile).unwrap() {
+                    Some(InstalledSettlementSlots::$variant(slots)) => slots,
+                    _ => panic!("the exact original action book is required"),
+                };
+                assert!(Arc::ptr_eq(&selected, &original));
+                for wrong in [Profile::Passive(Method::Capabilities), Profile::GitHubReadOnly,
+                    if matches!($profile, Profile::GitHubPreflight) { Profile::GitHubRelease } else { Profile::GitHubPreflight }] {
+                    assert!(installed_settlement_slots(&resources, wrong).is_err());
+                }
+                resources.passive = Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())));
+                assert!(installed_settlement_slots(&resources, $profile).is_err());
+                resources.passive = None;
+                resources.github_readonly = Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())));
+                assert!(installed_settlement_slots(&resources, $profile).is_err());
+                resources.github_readonly = None;
+                resources.$other_field = Some(Arc::new(Mutex::new(<$other_slot>::new())));
+                assert!(installed_settlement_slots(&resources, $profile).is_err());
+                resources.$other_field = None;
+                // Represents a RETURNED worker error only, not cancellation of
+                // a pending borrower or a simulated successful native close.
+                passive_worker_lost(&resources);
+                let mut slots = original.lock().unwrap();
+                assert!(!slots.never_started() && !slots.settled() && slots.retained_bytes().is_none());
+                assert!(slots.capability().is_err() && slots.transfer_once().is_err());
+            }};
+        }
+        original_action!(Profile::GitHubPreflight, github_preflight, GitHubPreflightRuntimeSlots, GitHubPreflight,
+            github_release, GitHubReleaseRuntimeSlots);
+        original_action!(Profile::GitHubRelease, github_release, GitHubReleaseRuntimeSlots, GitHubRelease,
+            github_preflight, GitHubPreflightRuntimeSlots);
+    }
+}
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn macos_github_actions_original_data_contract() { macos_github_actions_original_contract(); }
 
 // Finite hosted fixtures only. Nothing in this module selects a runtime, grants
 // custody, changes the command, or substitutes for an original join/close.

@@ -5161,6 +5161,7 @@ mod installed_macos_observation {
         // Historical Case returned by the original one-use registration. It
         // does not confer native/private-input availability or a live permit.
         input_case: Option<crate::shell::installed_observation::ios::Case>,
+        vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
     }
     fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
         match (project_fields, input_case) {
@@ -5170,7 +5171,12 @@ mod installed_macos_observation {
         }
     }
     impl SessionBook {
-        fn original_limit(&self) -> Option<u32> { session_original_limit(self.project_fields.is_some(), self.input_case) }
+        fn original_limit(&self) -> Option<u32> {
+            if let Some(control) = &self.vault {
+                return (self.project_fields.is_none() && self.input_case.is_none()).then_some(control.case.maximum_original());
+            }
+            session_original_limit(self.project_fields.is_some(), self.input_case)
+        }
     }
     pub(crate) struct SessionSnapshot {
         pub(crate) status: Value, pub(crate) originals: usize, pub(crate) originals_settled: bool,
@@ -5236,6 +5242,133 @@ mod installed_macos_observation {
                 && facts.release_queued && facts.released) { return None; }
         Some(witness)
     }
+    pub(crate) struct VaultSnapshot {
+        pub(crate) unknown: bool, pub(crate) originals: usize, pub(crate) originals_settled: bool, pub(crate) empty: bool,
+        pub(crate) state: Option<&'static str>, pub(crate) key_present: bool, pub(crate) initialize_preview: bool,
+        pub(crate) preview_consumed: bool, pub(crate) storage: Option<vault::QualificationStorage>,
+        pub(crate) initialize: Option<crate::vault_keyring_macos::QualificationSnapshot>,
+        pub(crate) lookup: Option<crate::vault_keyring_macos::QualificationSnapshot>,
+    }
+    impl DocumentBinding {
+        pub(crate) fn register_installed_macos_vault(&self,
+            token: crate::shell::installed_observation::vault::Registration) -> Result<(), BridgeError> {
+            let state = self.lock();
+            if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+                || state.vault.is_some() || state.context.is_some() || state.quit.is_some() || state.lost_observed
+                || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+                || !self.inner.bridge.installed_project_selection_available() || !self.inner.bridge.supervisor.can_exit()
+                || !self.inner.bridge.edits.can_exit() { return Err(BridgeError::invalid()); }
+            self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
+            let mut book = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if book.is_some() { return Err(BridgeError::invalid()); }
+            let control = token.consume(&self.inner.session_identity)?;
+            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control) });
+            Ok(())
+        }
+        pub(crate) fn installed_macos_vault_action(&self, action: crate::shell::installed_observation::vault::Action) -> Result<AssetStatus, AssetError> {
+            use crate::shell::installed_observation::vault::Action;
+            use vault::{Qualification, QualifiedAction};
+            let (selection, root, token) = {
+                let state = self.lock();
+                let book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+                let book = book.as_ref().ok_or_else(AssetError::invalid)?;
+                let control = book.vault.as_ref().ok_or_else(AssetError::invalid)?;
+                let roster = self.inner.bridge.native_roster().map_err(|_| AssetError::new(Reason::ContextStale))?;
+                if !live(&state) || state.next_operation != action.previous_original()
+                    || !book.originals.iter().all(|(owner,_)|session_original_settled(&self.inner,owner))
+                    || book.originals.len() != state.next_operation as usize || roster.generation != 2 || roster.roots.len() != 1
+                    || roster.roots[0].path != control.project() { return Err(AssetError::new(Reason::ContextStale)); }
+                let token = if action == Action::Initialize {
+                    let slot = state.slot.as_ref().ok_or_else(AssetError::invalid)?;
+                    let preview = slot.preview.as_ref().filter(|p|vault::initialize_preview_valid(&state, slot, p)).ok_or_else(AssetError::invalid)?;
+                    Some(preview.token.0.clone())
+                } else { None };
+                let selection = control.select(&self.inner.session_identity, action, state.next_operation).ok_or_else(AssetError::invalid)?;
+                (selection, control.root().to_path_buf(), token)
+            };
+            match action {
+                Action::Open => self.open_encrypted_selected(&root, Qualification::Installed(selection), QualifiedAction::Open),
+                Action::Reopen => self.open_encrypted_selected(&root, Qualification::Installed(selection), QualifiedAction::Reopen),
+                Action::Prepare => self.prepare_vault_initialize_selected(Qualification::Installed(selection)),
+                Action::Initialize => self.commit_vault_selected(token.as_deref().ok_or_else(AssetError::invalid)?, Qualification::Installed(selection)),
+                Action::Unlock => self.unlock_vault_selected(Qualification::Installed(selection)),
+                Action::LockInitialized | Action::LockUnlocked => {
+                    // This is the same ordinary credential Lock, not a new
+                    // original or a native Keychain lock. Consume the selector
+                    // once against the current document before calling it.
+                    {
+                        let state = self.lock();
+                        if !selection.consume(&self.inner.session_identity, action, state.next_operation, None) { return Err(AssetError::invalid()); }
+                    }
+                    self.lock_session()
+                },
+            }
+        }
+        pub(crate) fn installed_macos_vault_checkpoint(&self, owner: &Arc<OriginalWork>,
+            checkpoint: crate::shell::installed_observation::vault::Checkpoint) -> Result<(), crate::vault_keyring_macos::Problem> {
+            use crate::{shell::installed_observation::vault::Checkpoint, vault_keyring_macos::Problem};
+            let mut state = self.lock(); self.expire(&mut state, Instant::now());
+            let control = {
+                let book = self.inner.installed_macos_session.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                let Some(book) = book.as_ref() else { return Ok(()); };
+                let Some(control) = book.vault.as_ref() else { return Ok(()); };
+                if !control.wants(checkpoint) || control.stopped_at_checkpoint() { return Ok(()); }
+                if !control.permits(&self.inner.session_identity) || owner.interrupted() { return Ok(()); }
+                if !live(&state) || state.next_operation != 4 || !original_call(&self.inner, owner)
+                    || !book.originals.last().is_some_and(|(saved,kind)|Arc::ptr_eq(saved,owner) && *kind == Some(Operation::Initialize))
+                    || !state.slot.as_ref().is_some_and(|slot|Arc::ptr_eq(&slot.owner,owner)
+                        && slot.operation == Operation::Initialize && slot.phase == Phase::Assessing && slot.cleanup_end.is_none()) {
+                    return Err(Problem::CleanupUnknown);
+                }
+                control.clone()
+            };
+            let reached = {
+                let book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                match checkpoint { Checkpoint::BeforeGo => book.qualification_before_go(),
+                    Checkpoint::SuccessfulAddTerminal => book.qualification_added_checkpoint() }
+            }; // Provider is released before the ordinary same-slot STOP.
+            if !reached { return Ok(()); }
+            if !control.record_stop(&self.inner.session_identity) { return Err(Problem::CleanupUnknown); }
+            let at = Instant::now();
+            state.slot.as_mut().ok_or(Problem::CleanupUnknown)?.stop(Reason::UserCancelled, at);
+            // Latch immediately, even when this pump also returned done/EOF.
+            // Do not let finish_driver misclassify the already-observed STOP.
+            let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            book.fail_at(Problem::Interrupted, at); keyring_constrain_cleanup(&state, owner, &mut book); drop(book);
+            self.bump(&mut state); Ok(())
+        }
+        pub(crate) fn installed_macos_vault_snapshot(&self) -> Option<VaultSnapshot> {
+            let state = self.inner.state.try_lock().ok()?;
+            let book = self.inner.installed_macos_session.try_lock().ok()?; let book = book.as_ref()?;
+            let control = book.vault.as_ref()?;
+            if !control.bound(&self.inner.session_identity) || book.originals.len() != state.next_operation as usize { return None; }
+            let (vault_state,key_present) = vault::qualification_state(&state);
+            let mut initialize = None; let mut lookup = None; let mut storage = None; let mut preview_consumed = false;
+            for (owner,kind) in &book.originals {
+                if *kind == Some(Operation::Initialize) {
+                    initialize = owner.keyring.try_lock().ok()?.qualification_snapshot();
+                    let (observed, consumed) = vault::qualification_storage(owner)?; storage = Some(observed); preview_consumed = consumed;
+                } else if *kind == Some(Operation::Unlock) { lookup = owner.keyring.try_lock().ok()?.qualification_snapshot(); }
+            }
+            Some(VaultSnapshot { unknown:state.unknown || state.exhausted || state.lost_observed || !state.lifetime.original_bound(),
+                originals:book.originals.len(),originals_settled:book.originals.iter().all(|(o,_)|session_original_settled(&self.inner,o)),
+                empty:quiet(&state) && session_data_empty(&state) && state.vault.is_none(),state:vault_state,key_present,
+                initialize_preview:state.slot.as_ref().is_some_and(|slot|slot.preview.as_ref().is_some_and(|p|vault::initialize_preview_valid(&state,slot,p))),
+                preview_consumed,storage,initialize,lookup })
+        }
+        fn macos_vault_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
+            let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; }; let Some(book) = book.as_ref() else { return false; };
+            let Some(control) = &book.vault else { return false; }; let Some(owner) = project.owner.upgrade() else { return false; };
+            control.bound(&self.inner.session_identity) && control.completed() && state.vault.is_none()
+                && same_document(&self.inner,&project.document) && self.macos_registered(project)
+                && book.originals.len() == control.quit_id() as usize && state.next_operation == control.quit_id()
+                && book.originals.first().is_some_and(|(first,kind)|Arc::ptr_eq(first,&owner) && *kind == Some(Operation::ChooseProject))
+                && book.originals.last().is_some_and(|(last,kind)|last.id == control.quit_id() && kind.is_none())
+                && book.originals.iter().enumerate().all(|(i,(owner,_))|owner.id as usize == i + 1 && session_original_settled(&self.inner,owner))
+                && completed(&self.inner,&owner,NativeResponse::Accept,true,false).is_some_and(|r|r.selected.as_deref() == Some(project.root.path.as_path()))
+        }
+    }
+
     fn same_project(left: &Project, right: &Project) -> bool {
         left.id == right.id && left.name == right.name && left.path == right.path
     }
@@ -5261,7 +5394,7 @@ mod installed_macos_observation {
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let input_case = token.consume(&self.inner.session_identity)?;
             self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case) }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None }); Ok(())
         }
         pub(crate) fn installed_macos_project_fields_identity(&self) -> Weak<()> { Arc::downgrade(&self.inner.session_identity) }
         pub(crate) fn register_installed_macos_project_fields(&self,
@@ -5274,7 +5407,7 @@ mod installed_macos_observation {
             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity, self.inner.bridge.installed_project_path_selection_available())?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None }); Ok(())
         }
         pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
@@ -5290,6 +5423,19 @@ mod installed_macos_observation {
                     _ => false,
                 };
                 if !control.bound(&self.inner.session_identity) || !expected { return Err(AssetError::new(Reason::Unqualified)); }
+            }
+            if let Some(control) = &book.vault {
+                // Lock/retirement reuses the attached original. Allow the same
+                // ordinary early Quit after a refusal, never a fabricated slot.
+                let expected = match (owner.id, operation) {
+                    (1, Some(Operation::ChooseProject)) | (2, Some(Operation::OpenVault))
+                        | (3, Some(Operation::PrepareInitialize)) | (4, Some(Operation::Initialize)) => true,
+                    (5, Some(Operation::OpenVault)) | (6, Some(Operation::Unlock)) =>
+                        control.case == crate::shell::installed_observation::vault::Case::RoundTrip,
+                    (2..=7, None) => true,
+                    _ => false,
+                };
+                if !expected || !control.bound(&self.inner.session_identity) { return Err(AssetError::new(Reason::Unqualified)); }
             }
             // Closed original-registration bound: Android input journey18,
             // existing input/P2 journeys12. Historical binding survives an
@@ -5531,7 +5677,8 @@ mod installed_macos_observation {
                     && (self.macos_selected(&state, project)
                         && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
                             && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
-                        || self.macos_session_selected(&state, project) || self.macos_project_fields_selected(&state, project)),
+                        || self.macos_session_selected(&state, project) || self.macos_project_fields_selected(&state, project)
+                         || self.macos_vault_selected(&state, project)),
                 (Some(project), None, true) => self.macos_project_loss(&state, project),
                 (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
                 _ => false,
@@ -5552,7 +5699,7 @@ mod installed_macos_observation {
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
-    SessionSnapshot as InstalledMacSessionSnapshot,
+    SessionSnapshot as InstalledMacSessionSnapshot, VaultSnapshot as InstalledMacVaultSnapshot,
     ProjectSelectionData as InstalledMacProjectSelectionData, SelectionCustody as InstalledMacSelectionCustody,
     selection_path_bounded as installed_macos_selection_path_bounded, selection_saved_data_checks as installed_macos_selection_saved_data_checks};
 

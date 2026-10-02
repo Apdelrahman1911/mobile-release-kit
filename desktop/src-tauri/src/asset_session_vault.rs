@@ -7,6 +7,19 @@ use crate::{vault_crypto as crypto, vault_format as format, vault_store as store
 // Compiler/codec tests and a same-UID service are not native qualification.
 const DURABLE_QUALIFIED: bool = false;
 
+// Explicit one-use qualification selection exists only in the installed Mac
+// observer. Normal callers always select Ordinary; no UI/global gate is opened.
+#[cfg(feature = "desktop-shell")]
+pub(super) enum Qualification {
+    Ordinary,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    Installed(crate::shell::installed_observation::vault::Selection),
+}
+#[cfg(feature = "desktop-shell")]
+#[derive(Clone, Copy)]
+pub(super) enum QualifiedAction { Open, Prepare, Initialize, Reopen, Unlock }
+
+
 pub(crate) struct KeyringInitializationAdmission { identity: format::Identity }
 impl KeyringInitializationAdmission {
     pub(crate) fn into_identity(self) -> format::Identity { self.identity }
@@ -69,6 +82,10 @@ pub(super) struct Work {
     // continuation. That continuation reuses this OriginalWork/child slot; it
     // cannot turn failure/STOP into a second work attempt or a renewed lease.
     original_join: Option<JoinReceipt>, failed_child_join: Option<JoinReceipt>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    observed_storage: QualificationStorage,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    observed_preview_consumed: bool,
 }
 
 #[derive(Default)]
@@ -709,6 +726,8 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
             Ok(ChildResult::Released)
         },
     })();
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    { if initialization { owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?.observed_storage = QualificationStorage::from_original(&book); } }
     remember(owner, &book, mutation)?;
     if initialization {
         owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?.outcome = Some(initial_outcome(&book, result.is_ok()));
@@ -1488,8 +1507,22 @@ async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: J
 #[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
     fn durable_gate(&self, state: &DocumentState, write: bool) -> Result<(), AssetError> {
+        self.durable_gate_selected(state, write, Qualification::Ordinary, QualifiedAction::Open, None)
+    }
+    fn durable_gate_selected(&self, state: &DocumentState, write: bool, selection: Qualification,
+        _action: QualifiedAction, _path: Option<&std::path::Path>) -> Result<(), AssetError> {
         self.gate(state, false)?;
-        if !DURABLE_QUALIFIED { return Err(AssetError::new(Reason::Unqualified)); }
+        let qualified = match selection {
+            Qualification::Ordinary => DURABLE_QUALIFIED,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            Qualification::Installed(selection) => {
+                use crate::shell::installed_observation::vault::Action;
+                let action = match _action { QualifiedAction::Open => Action::Open, QualifiedAction::Prepare => Action::Prepare,
+                    QualifiedAction::Initialize => Action::Initialize, QualifiedAction::Reopen => Action::Reopen, QualifiedAction::Unlock => Action::Unlock };
+                !write && selection.consume(&self.inner.session_identity, action, state.next_operation, _path)
+            },
+        };
+        if !qualified { return Err(AssetError::new(Reason::Unqualified)); }
         if state.session { return Err(AssetError::new(Reason::Busy)); }
         if write && !writable(state) { return Err(AssetError::new(state.vault.as_ref().map_or(Reason::Closed, Session::reason_for_access))); }
         Ok(())
@@ -1506,7 +1539,11 @@ impl DocumentBinding {
         slot.vault.generation = Some(session.registry_generation); slot.vault.lease = Some(session.store.clone()); Ok(slot)
     }
     pub(crate) fn open_encrypted(&self, application_data: &std::path::Path) -> Result<AssetStatus, AssetError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.durable_gate(&state, false)?; idle(&state)?;
+        self.open_encrypted_selected(application_data, Qualification::Ordinary, QualifiedAction::Open)
+    }
+    pub(super) fn open_encrypted_selected(&self, application_data: &std::path::Path, selection: Qualification, action: QualifiedAction) -> Result<AssetStatus, AssetError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        self.durable_gate_selected(&state, false, selection, action, Some(application_data))?; idle(&state)?;
         if state.vault.is_some() { return Ok(self.snapshot(&state)); }
         let location = store::Location::application_data(application_data).map_err(|error| AssetError::new(problem(error)))?;
         let roster = self.vault_roster(&mut state)?;
@@ -1517,7 +1554,11 @@ impl DocumentBinding {
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
     pub(crate) fn prepare_vault_initialize(&self) -> Result<AssetStatus, AssetError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.durable_gate(&state, false)?; idle(&state)?;
+        self.prepare_vault_initialize_selected(Qualification::Ordinary)
+    }
+    pub(super) fn prepare_vault_initialize_selected(&self, selection: Qualification) -> Result<AssetStatus, AssetError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        self.durable_gate_selected(&state, false, selection, QualifiedAction::Prepare, None)?; idle(&state)?;
         let session = state.vault.as_ref().filter(|session| session.state == State::Uninitialized && !session.revoked && session.key.is_none())
             .ok_or_else(|| AssetError::new(Reason::VaultInterrupted))?;
         let root = session.root.as_ref().map(store::RootWitness::registered);
@@ -1528,7 +1569,11 @@ impl DocumentBinding {
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
     pub(crate) fn unlock_vault(&self) -> Result<AssetStatus, AssetError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.durable_gate(&state, false)?; idle(&state)?;
+        self.unlock_vault_selected(Qualification::Ordinary)
+    }
+    pub(super) fn unlock_vault_selected(&self, selection: Qualification) -> Result<AssetStatus, AssetError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        self.durable_gate_selected(&state, false, selection, QualifiedAction::Unlock, None)?; idle(&state)?;
         let session = state.vault.as_ref().filter(|session| !session.revoked).ok_or_else(|| AssetError::new(Reason::Closed))?;
         if session.key.is_some() && matches!(session.state, State::Unlocked | State::Interrupted) { return Ok(self.snapshot(&state)); }
         if !matches!(session.state, State::Locked | State::Interrupted) { return Err(AssetError::new(session.reason_for_access())); }
@@ -1571,7 +1616,11 @@ impl DocumentBinding {
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
     pub(super) fn commit_vault(&self, token: &str) -> Result<AssetStatus, AssetError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.durable_gate(&state, false)?;
+        self.commit_vault_selected(token, Qualification::Ordinary)
+    }
+    pub(super) fn commit_vault_selected(&self, token: &str, selection: Qualification) -> Result<AssetStatus, AssetError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        self.durable_gate_selected(&state, false, selection, QualifiedAction::Initialize, None)?;
         let preview = self.consume_preview(&mut state, token, false)?;
         let decision = (|| -> Result<(Slot, Job), AssetError> {
             let roster = self.vault_roster(&mut state)?;
@@ -1582,6 +1631,8 @@ impl DocumentBinding {
                 if state.vault.as_ref().is_none_or(|session| session.state != State::Uninitialized || session.revoked || session.key.is_some()) { return Err(AssetError::invalid()); }
                 let mut slot = self.vault_owner(&mut state, Operation::Initialize, None, None, review, false)?;
                 slot.phase = Phase::Mutating; slot.vault.initialize = Some(identity); slot.vault.generation = Some(roster.generation);
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+                { slot.owner.vault.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.observed_preview_consumed = true; }
                 slot.owner.vault.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.outcome = Some(store::StorageOutcome {
                     effect: store::Effect::NotStarted, durability: store::Durability::NotRun, cleanup: store::Cleanup::Pending });
                 slot.vault.outcome = Some(store::StorageOutcome { effect: store::Effect::NotStarted,
@@ -1668,4 +1719,30 @@ impl DocumentBinding {
         let start = self.install(&mut state, slot, super::Job::Vault(job))?;
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }
+}
+
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[derive(Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QualificationStorage { reservation: (bool, bool), header: (bool, bool), durability: (bool, bool) }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+impl QualificationStorage {
+    fn from_original(book: &store::StoreBook) -> Self {
+        let (reservation, header) = book.initialization_effects();
+        Self { reservation, header, durability: book.initialization_durability() }
+    }
+    pub(crate) fn value(self) -> Value { serde_json::json!(self) }
+    pub(crate) fn reservation_durable(self) -> bool { self.reservation == (true, true) && self.durability.0 }
+    pub(crate) fn header_durable(self) -> bool { self.header == (true, true) && self.durability.1 }
+    pub(crate) fn header_entered(self) -> bool { self.header.0 }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+pub(super) fn qualification_state(state: &DocumentState) -> (Option<&'static str>, bool) {
+    state.vault.as_ref().map_or((None, false), |s|(Some(s.state.name()), s.key.is_some()))
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+pub(super) fn qualification_storage(owner: &OriginalWork) -> Option<(QualificationStorage, bool)> {
+    let work = owner.vault.try_lock().ok()?;
+    Some((work.observed_storage, work.observed_preview_consumed))
 }

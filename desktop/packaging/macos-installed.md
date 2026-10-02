@@ -324,7 +324,7 @@ plus checked readback and installed-tree evidence. Observation JSON retains the
 inner DTO and bounded export identity/hash with that explicit finality basis.
 This source change is not itself native Installer or Aqua qualification.
 
-## Fixed seven-case Installer fixture — separate package, not a runner
+## Fixed eight-case Installer fixture — separate package, not a runner
 
 `macos-installed-installer-fixture` selects one compile-time entry using the same
 `Install` helpers, sole native calls and finalizer. It is forbidden with
@@ -343,7 +343,7 @@ Installer is built separately per feature; neither app nor interpreter is rebuil
 
 The fixture creates a fresh root:wheel 0755
 `/Library/Application Support/MobileReleaseKit-InstallerFixture-<source12>-<nonce32>`
-with exactly seven fixed case directories. Staging remains root:wheel **0700**.
+with exactly eight fixed case directories. Staging remains root:wheel **0700**.
 Each case retains its own original 120-second deadline and descriptor book;
 setup has its own original 120-second deadline. Unexpected native errors,
 Unknown closes or expiry fail the fixture and prevent later cases. No retry,
@@ -355,20 +355,21 @@ rollback, repair, overwrite, deletion or staging-access permission is added.
 | `occupied-release` | Existing release/runtime occupant unchanged; no publication. |
 | `runtime-publication-collision` | Observe absence, create occupant, actual `RENAME_EXCL` returns EEXIST; no publication. |
 | `staging-file-collision` | Observe absence, create marker, actual payload `O_EXCL` returns EEXIST; no publication. |
-| `first-publication-second-refusal` | Runtime published; actual exclusive app rename refuses occupied app; retained partial/20. |
+| `first-publication-second-refusal` | Runtime and both installation metadata files published; actual exclusive app rename refuses occupied app; retained partial/20. |
 | `prepublication-persistence-report` | Actual payload-file persistence succeeds, then a fixture-only reported failure prevents publication. |
 | `postruntime-persistence-report` | Actual stage persistence after runtime rename succeeds, then reported failure retains runtime/unpublished app, partial/20. |
+| `metadata-descriptor-collision` | Runtime and exact inventory published; a separate descriptor occupant causes actual metadata `O_EXCL` EEXIST. Preserve runtime, inventory and occupant; no app publication, partial/20. |
 
 The tiny shared close/deadline table checks before/at/after endpoint, first-error
 preservation and absorbing Unknown while unrelated Closed facts remain positive.
 Its reported error is fed to an **inert Closing/no-FD record**; no live descriptor
-is invalidated, closed twice or reconstructed. The seven actual cases close each
+is invalidated, closed twice or reconstructed. The eight actual cases close each
 acquired original once and fail, rather than pass, on unexpected native failure.
 
 `MRK_MACOS_INSTALL_FIXTURE_RESULT` distinguishes real native returns from the two
-reported persistence faults. Nonroot readback validates the exact seven-case
+reported persistence faults. Nonroot readback validates the exact eight-case
 schema and explicit source/inventory/runtime anchors, preserved accessible
-occupant identities/hashes and every byte/mode of both published runtime copies.
+occupant identities/hashes and every byte/mode of all three published runtime copies.
 It checks staging metadata only and **never opens or chmods staging**. A matching
 source-prefixed nonce component is the only report-derived path portion.
 
@@ -377,6 +378,42 @@ proof**. Reported persistence/close-classification errors are **not actual APFS
 EIO, a native close failure or power-loss durability**. The workflow runs this
 separate standard Installer package and its readback before the ordinary package;
 any unexpected result stops that route. Actual app/Save/Aqua remain separate.
+
+## Recorded installation inventory (B1a)
+
+After the runtime's confirmed publication/persistence receipt, and **before**
+app publication, the same original Installer writes two root:wheel 0444 files
+under the fixed `versions/<release>/` directory:
+
+- `install-inventory.json`: the exact authenticated input bytes, not a new
+  serialization or a self-referential inventory.
+- `installation-v1.json`: a bounded, closed DATA descriptor binding the package,
+  bundle, version, release, source, protocol, runtime manifest, inventory hash
+  and length, the original 16-byte stage instance, and stable protected-root
+  and release-directory identities.
+
+The descriptor records `inventory-recorded`, **not installed/finalized**.
+Mutable directory times, size and link count are not generation identity;
+current original/name, full stat, ACL/mount/protection and roster observations
+remain separately required. The descriptor does not authenticate its own
+historical writer completion, Developer ID signature, a package hash, execution,
+or permission to delete/repair/adopt anything.
+
+Both exclusive opens, actual bytes written, persistence, readback and consuming
+closes use the Installer's original 120-second endpoint and existing original
+book. Any metadata failure prevents app publication and retains partial evidence;
+there is no rollback or overwrite. The source-bound inner result and phase
+receipts now require `installationMetadata` with `state`, `attemptedFiles`,
+`openedFiles`, `plannedBytes`, `writtenBytes`, and `writersSettled`. The existing
+outer export wrapper and final original status remain the finality basis.
+
+Ordinary and fixture nonroot observations compare exact installed inventory
+bytes, the descriptor tuple/stable directory identities, flags and complete
+release roster before consuming all read originals. The ordinary preview
+consumer also requires the metadata observation and exact returned-byte counts.
+B1a adds no background service or maintenance action. The separate B1b ordinary
+application reader/assessment/UI integration and its native verification are
+not established by these DATA records or inert parser tests.
 
 ## Reused payload and explicit build bindings
 
@@ -547,7 +584,7 @@ build directories. It must include:
    termination/reload. Observe original task/native dismissal/IO/child/lease
    settlement and application exit; no late publication or document rebinding,
    replacement cleanup, renewed clocks or false success after Unknown.
-5. Beyond the seven deterministic/reported-policy fixture cases, actual APFS
+5. Beyond the eight deterministic/reported-policy fixture cases, actual APFS
    concurrent race, persistence/lock/journal and native original-close failure
    edges require a separately reviewed finite native command plan. Preserve
    occupied bytes and root-owned partial evidence. Do not promote the fixture's

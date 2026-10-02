@@ -37,6 +37,22 @@ const REVIEW: Duration = Duration::from_secs(15 * 60);
 const SOFT_STOP: Duration = Duration::from_secs(8);
 const FINALIZATION: Duration = Duration::from_secs(10);
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn publish_macos_returned_failure(
+    returned: Option<crate::installed_runtime::AdmissionFailure>,
+    original_first: impl FnOnce() -> Option<(crate::installed_runtime::AdmissionFailure, Instant)>,
+    publish: &mut dyn FnMut(Option<(crate::installed_runtime::AdmissionFailure, Instant)>),
+) {
+    // Capture this original Err BEFORE querying its Book or borrowing its
+    // owner's publication latch. Neither a later getter nor a join supplies F.
+    let returned = returned.map(|failure| (failure, Instant::now()));
+    let first = original_first();
+    // The existing owner latch selects min(F). Publish BOTH facts: a later
+    // Unknown must remain absorbing even when an earlier cause owns F.
+    publish(first);
+    if returned.is_some() { publish(returned); }
+}
+
 fn qualified(domain: EditDomain, configuration_fixture: bool) -> bool {
     match domain {
         EditDomain::Configuration => NATIVE_EDIT_QUALIFIED || configuration_fixture,
@@ -144,24 +160,28 @@ impl InstalledEditSlots {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
-                    _publish(slots.first_failure());
+                    publish_macos_returned_failure(armed.as_ref().err().copied(),
+                        || slots.first_failure(), _publish);
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_configuration_installed(slots, end, stop);
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                _publish(slots.first_failure());
+                publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
+                    || slots.first_failure(), _publish);
                 result
             },
             Self::GitHubWorkflows(slots) => {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
-                    _publish(slots.first_failure());
+                    publish_macos_returned_failure(armed.as_ref().err().copied(),
+                        || slots.first_failure(), _publish);
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_github_workflow_installed(slots, end, stop);
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                _publish(slots.first_failure());
+                publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
+                    || slots.first_failure(), _publish);
                 result
             },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -169,12 +189,14 @@ impl InstalledEditSlots {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
-                    _publish(slots.first_failure());
+                    publish_macos_returned_failure(armed.as_ref().err().copied(),
+                        || slots.first_failure(), _publish);
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_metadata_text_installed(slots, end, stop);
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                _publish(slots.first_failure());
+                publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
+                    || slots.first_failure(), _publish);
                 result
             },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -182,12 +204,14 @@ impl InstalledEditSlots {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
-                    _publish(slots.first_failure());
+                    publish_macos_returned_failure(armed.as_ref().err().copied(),
+                        || slots.first_failure(), _publish);
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_release_version_installed(slots, end, stop);
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                _publish(slots.first_failure());
+                publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
+                    || slots.first_failure(), _publish);
                 result
             },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -195,12 +219,14 @@ impl InstalledEditSlots {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
-                    _publish(slots.first_failure());
+                    publish_macos_returned_failure(armed.as_ref().err().copied(),
+                        || slots.first_failure(), _publish);
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_metadata_images_installed(slots, end, stop);
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                _publish(slots.first_failure());
+                publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
+                    || slots.first_failure(), _publish);
                 result
             },
         }
@@ -2631,7 +2657,11 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let (release, enter) = oneshot::channel();
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
-        if enter.blocking_recv().is_err() { return Err(edit_unknown()); }
+        if enter.blocking_recv().is_err() {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            inspection_owner.observe_native_failure(Some((crate::installed_runtime::AdmissionFailure::Native, Instant::now())));
+            return Err(edit_unknown());
+        }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let result = if let Some(native) = installed {
             match native.lock() {
@@ -2641,11 +2671,18 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
                     let _ = &inspection_owner;
                 }),
-                Err(_) => Err(edit_unknown()),
+                Err(_) => {
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.observe_native_failure(Some((crate::installed_runtime::AdmissionFailure::Unknown, Instant::now())));
+                    Err(edit_unknown())
+                },
             }
         } else { runtime.resolve_edit(endpoint) };
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let result = { let _ = stop; runtime.resolve_edit(endpoint) };
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
+            || None, &mut |first| inspection_owner.observe_native_failure(first));
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
         schedule.inspected(result.is_ok());
         result
@@ -3287,6 +3324,75 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
 #[path = "edit_hosted_tests.rs"]
 mod hosted_tests;
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+fn macos_inspection_return_data_check() -> bool {
+    use crate::installed_runtime::AdmissionFailure;
+    use std::cell::Cell;
+    let before = Instant::now(); let queried = Cell::new(None); let mut facts = Vec::new();
+    publish_macos_returned_failure(Some(AdmissionFailure::Native), || {
+        queried.set(Some(Instant::now())); None
+    }, &mut |first| facts.push(first));
+    let after = Instant::now();
+    let [None, Some((AdmissionFailure::Native, returned_at))] = facts.as_slice() else { return false; };
+    if *returned_at < before || *returned_at > after
+        || !queried.get().is_some_and(|at| *returned_at <= at)
+        || FINALIZATION != Duration::from_secs(10) { return false; }
+    // Fixed later DATA represents delayed owner publication, not a clock hook.
+    let delayed = *returned_at + Duration::from_secs(5);
+    if *returned_at + FINALIZATION >= delayed + FINALIZATION { return false; }
+
+    let early = before.checked_sub(Duration::from_millis(1)).unwrap_or(before);
+    for later_unknown in [false, true] {
+        let first = Cell::new(None); let mut reports = Vec::new();
+        publish_macos_returned_failure(Some(AdmissionFailure::Identity), || {
+            // Derive later DATA INSIDE the getter, after the returned Err was
+            // stamped, rather than rely on a one-second scheduling assumption.
+            let observed = if later_unknown { (AdmissionFailure::Unknown, Instant::now() + Duration::from_secs(1)) }
+                else { (AdmissionFailure::Ownership, early) };
+            first.set(Some(observed)); Some(observed)
+        }, &mut |failure| reports.push(failure));
+        let [native, Some((AdmissionFailure::Identity, returned_at))] = reports.as_slice() else { return false; };
+        if *native != first.get() { return false; }
+        // A later Unknown is delivered, not filtered out by a min-only helper.
+        if later_unknown && !native.is_some_and(|(failure, at)| failure == AdmissionFailure::Unknown && *returned_at < at) {
+            return false;
+        }
+    }
+
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mrk-edit-first-return-not-opened"));
+    let (_sender, stop) = watch::channel(true);
+    let originals = [
+        InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new()),
+        InstalledEditSlots::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new()),
+        InstalledEditSlots::MetadataText(MetadataTextRuntimeSlots::new()),
+        InstalledEditSlots::ReleaseVersion(ReleaseVersionRuntimeSlots::new()),
+        InstalledEditSlots::MetadataImages(MetadataImagesRuntimeSlots::new()),
+    ];
+    for mut slots in originals {
+        let domain = slots.domain(); let before = Instant::now(); let mut reports = Vec::new();
+        // REAL inspect_once -> arm_acl_once -> stopped checkpoint. This guard
+        // returns before SnapshotBook allocation, real_user or any FD/native IO.
+        let result = slots.inspect_once(domain, &runtime, before + ACTIVE, &stop,
+            &mut |first| reports.push(first));
+        let returned = Instant::now();
+        let native_free = match &slots {
+            InstalledEditSlots::Configuration(book) => book.never_started(),
+            InstalledEditSlots::GitHubWorkflows(book) => book.never_started(),
+            InstalledEditSlots::MetadataText(book) => book.never_started(),
+            InstalledEditSlots::ReleaseVersion(book) => book.never_started(),
+            InstalledEditSlots::MetadataImages(book) => book.never_started(),
+        };
+        if result.is_ok() || !native_free
+            || !reports.iter().any(|row| matches!(row, Some((AdmissionFailure::Stopped, at))
+                if before <= *at && *at <= returned)) { return false; }
+    }
+    let mut wrong = InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new());
+    let mut called = false;
+    if wrong.inspect_once(EditDomain::GitHubWorkflows, &runtime, Instant::now(), &stop,
+        &mut |_| called = true).is_ok() || called { return false; }
+    true
+}
+
 // The installed-shell target has harness=false: its explicit, reviewed main
 // must invoke this contract rather than count merely compiled #[test] bodies.
 #[cfg(test)]
@@ -3295,6 +3401,7 @@ pub(crate) fn assert_installed_configuration_owner_contract() {
     {
         assert!(crate::installed_runtime::common_acl_data_check());
         assert!(crate::supervisor::common_acl_owner_data_check());
+        assert!(macos_inspection_return_data_check());
     }
     installed_configuration_data_tests::contract();
 }
@@ -3312,7 +3419,7 @@ pub(crate) fn assert_installed_metadata_owner_contract() {
 #[cfg(test)]
 pub(crate) fn assert_installed_images_owner_contract() {
     installed_configuration_data_tests::images_contract();
-    workflow_domain_tests::image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains();
+    workflow_domain_tests::image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains_data_check();
 }
 
 #[cfg(test)]
@@ -3346,7 +3453,7 @@ mod installed_configuration_data_tests {
         workflow_adapter_cannot_borrow_or_close_another_domain();
     }
     pub(super) fn metadata_contract() {
-        saved_text_version_capability_requires_supported_platform_profile_and_document();
+        saved_text_version_capability_requires_supported_platform_profile_and_document_data_check();
         workflow_selection_and_exact_domain_equality_are_closed();
         registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration();
         installed_configuration_claim_refuses_stop_late_inspection_loss_quit_and_wrong_original();
@@ -3368,7 +3475,7 @@ mod installed_configuration_data_tests {
     }
 
     pub(super) fn images_contract() {
-        saved_text_version_capability_requires_supported_platform_profile_and_document();
+        saved_text_version_capability_requires_supported_platform_profile_and_document_data_check();
         registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration();
         installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -3376,7 +3483,9 @@ mod installed_configuration_data_tests {
     }
 
     #[test]
-    fn saved_text_version_capability_requires_supported_platform_profile_and_document() {
+    fn saved_text_version_capability_requires_supported_platform_profile_and_document() { saved_text_version_capability_requires_supported_platform_profile_and_document_data_check(); }
+
+    fn saved_text_version_capability_requires_supported_platform_profile_and_document_data_check() {
         let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")));
         let domains = [EditDomain::MetadataText, EditDomain::ReleaseVersion, EditDomain::MetadataImages];
         for domain in domains {
@@ -3570,12 +3679,12 @@ mod installed_configuration_data_tests {
         for wrong in [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText, EditDomain::ReleaseVersion] {
             let mut slots = InstalledEditSlots::MetadataImages(MetadataImagesRuntimeSlots::new());
             assert_eq!(slots.domain(), EditDomain::MetadataImages);
-            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop, &mut |_| panic!("wrong edit domain must refuse before native callbacks")).is_err());
             assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
-            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop, &mut |_| panic!("wrong edit domain must refuse before native callbacks")).is_err());
             assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
             assert!(slots.no_child_effect(EditDomain::MetadataImages)); // Only the original EMPTY slots.
-            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(wrong, &mut |_| panic!("wrong edit domain must refuse before native callbacks")), CloseOutcome::Unknown);
             assert!(!slots.settled(wrong) && !slots.settled(EditDomain::MetadataImages));
         }
         for mut slots in [
@@ -3585,12 +3694,12 @@ mod installed_configuration_data_tests {
             InstalledEditSlots::ReleaseVersion(ReleaseVersionRuntimeSlots::new()),
         ] {
             let original = slots.domain();
-            assert!(slots.inspect_once(EditDomain::MetadataImages, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.inspect_once(EditDomain::MetadataImages, &runtime, Instant::now(), &stop, &mut |_| panic!("wrong edit domain must refuse before native callbacks")).is_err());
             assert!(slots.transfer_once(EditDomain::MetadataImages).is_err() && slots.claim_once(EditDomain::MetadataImages).is_err());
-            assert!(slots.prepare_once(EditDomain::MetadataImages, Instant::now(), &stop).is_err());
+            assert!(slots.prepare_once(EditDomain::MetadataImages, Instant::now(), &stop, &mut |_| panic!("wrong edit domain must refuse before native callbacks")).is_err());
             assert!(!slots.no_child_effect(EditDomain::MetadataImages) && !slots.settled(EditDomain::MetadataImages));
             assert!(slots.no_child_effect(original));
-            assert_eq!(slots.settle_originals(EditDomain::MetadataImages), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(EditDomain::MetadataImages, &mut |_| panic!("wrong edit domain must refuse before native callbacks")), CloseOutcome::Unknown);
             assert!(!slots.settled(original));
         }
     }
@@ -4048,7 +4157,9 @@ mod workflow_domain_tests {
         }
     }
     #[test]
-    pub(super) fn image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains() {
+    pub(super) fn image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains() { image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains_data_check(); }
+
+    pub(super) fn image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains_data_check() {
         assert!(!NATIVE_METADATA_IMAGES_EDIT_QUALIFIED);
         for fixture in [false,true] { assert!(!qualified(EditDomain::MetadataImages,fixture)); }
         for sent in 0..3 {

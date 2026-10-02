@@ -206,6 +206,34 @@ impl GitHubReadOnlyInstalledProfile {
     }
 }
 
+// Two separate action families. Fixed installed selection is DATA, not
+// read-only authority, native/service qualification, or permission to dispatch.
+// No launch-time environment or renderer value selects a publisher binding.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct GitHubPreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl GitHubPreflightInstalledProfile {
+    fn bindings_match() -> bool { macos_bindings() && crate::github_preflight_protocol::publisher_bound() }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_preflight_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct GitHubReleaseInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl GitHubReleaseInstalledProfile {
+    fn bindings_match() -> bool { macos_bindings() && crate::github_release_protocol::publisher_bound() }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_release_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
 // Explicit inert entry for the Mac harness=false observer as well as libtest.
 // Selection and fresh empty slots only: no inventory/native/network execution.
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
@@ -218,7 +246,10 @@ pub(crate) fn macos_github_readonly_profile_contract() {
     assert_eq!(profile.is_ok(), expected);
     assert_eq!(GitHubReadOnlyInstalledProfile { _private: () }.selection().is_ok(), expected);
     assert!(!GITHUB_TLS_PROFILE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
-    assert!(!runtime.github_preflight_profile_available() && !runtime.github_release_profile_available());
+    // Other families require their own compiled publisher binding; the
+    // read-only selection above supplies neither action grant.
+    assert_eq!(runtime.github_preflight_profile_available(), expected && crate::github_preflight_protocol::publisher_bound());
+    assert_eq!(runtime.github_release_profile_available(), expected && crate::github_release_protocol::publisher_bound());
     assert_ne!(TypeId::of::<GitHubReadOnlyInstalledProfile>(), TypeId::of::<PassiveInstalledProfile>());
     assert_ne!(TypeId::of::<crate::installed_runtime::GitHubReadOnlyRuntimeSlots>(),
         TypeId::of::<crate::installed_runtime::PassiveRuntimeSlots>());
@@ -241,6 +272,51 @@ pub(crate) fn macos_github_readonly_profile_contract() {
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn macos_github_readonly_profile_data_contract() { macos_github_readonly_profile_contract(); }
+
+// Explicitly invoked by the existing harness=false DATA entry. Even a
+// positive publisher binding never arms an ACL book or performs inspection.
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn macos_github_actions_profile_contract() {
+    use std::any::TypeId;
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-github-actions-data-only"));
+    let preflight = macos_bindings() && crate::github_preflight_protocol::publisher_bound();
+    let release = macos_bindings() && crate::github_release_protocol::publisher_bound();
+    assert!(!GITHUB_TLS_PROFILE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
+    let types = [TypeId::of::<PassiveInstalledProfile>(), TypeId::of::<GitHubReadOnlyInstalledProfile>(),
+        TypeId::of::<GitHubPreflightInstalledProfile>(), TypeId::of::<GitHubReleaseInstalledProfile>()];
+    for (index, original) in types.iter().enumerate() { assert!(!types[index + 1..].contains(original)); }
+    assert_eq!(runtime.github_preflight_profile_available(), preflight);
+    assert_eq!(runtime.github_release_profile_available(), release);
+    assert_eq!(runtime.github_preflight_installed_profile().is_ok(), preflight);
+    assert_eq!(runtime.github_release_installed_profile().is_ok(), release);
+    let selected = [
+        (GitHubPreflightInstalledProfile { _private: () }.selection(), preflight, "github_preflight_bootstrap.py"),
+        (GitHubReleaseInstalledProfile { _private: () }.selection(), release, "github_release_bootstrap.py"),
+    ];
+    let root = crate::installed_runtime::runtime_root();
+    for (selection, expected, bootstrap) in selected {
+        assert_eq!(selection.is_ok(), expected);
+        if let Ok(selection) = selection {
+            assert_eq!(selection.cwd, root);
+            assert_eq!(selection.python, root.join("python/bin/python3"));
+            assert_eq!(selection.bootstrap, root.join(bootstrap));
+            assert_eq!(selection.core, root.join("core.zip"));
+        }
+    }
+    // Regardless of compiled binding, these unarmed originals cannot inspect,
+    // transfer or acquire. No stopped fixture may create a native ACL frame.
+    let now = Instant::now();
+    let (_sender, stop) = tokio::sync::watch::channel(true);
+    let mut preflight_slots = crate::installed_runtime::GitHubPreflightRuntimeSlots::new();
+    let mut release_slots = crate::installed_runtime::GitHubReleaseRuntimeSlots::new();
+    assert!(runtime.resolve_github_preflight_installed(&mut preflight_slots, now, &stop).is_err());
+    assert!(runtime.resolve_github_release_installed(&mut release_slots, now, &stop).is_err());
+    assert!(preflight_slots.never_started() && preflight_slots.no_child_effect() && preflight_slots.capability().is_err());
+    assert!(release_slots.never_started() && release_slots.no_child_effect() && release_slots.capability().is_err());
+}
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn macos_github_actions_profile_data_contract() { macos_github_actions_profile_contract(); }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl GitHubWorkflowInstalledProfile {
@@ -1432,10 +1508,15 @@ impl RuntimeConfig {
         originals.inspect_once(self.github_readonly_installed_profile()?, end, stop)
     }
     pub(crate) fn github_preflight_profile_available(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.github_preflight_installed_profile().is_ok() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn github_preflight_installed_profile(&self) -> Result<GitHubPreflightInstalledProfile, BridgeError> {
+        if !GitHubPreflightInstalledProfile::bindings_match() { return Err(unavailable()); }
+        Ok(GitHubPreflightInstalledProfile { _private: () })
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -1468,16 +1549,21 @@ impl RuntimeConfig {
         }
         Err(BridgeError::unavailable("The installed GitHub preflight action profile is not qualified."))
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     pub(crate) fn resolve_github_preflight_installed(&self, originals: &mut crate::installed_runtime::GitHubPreflightRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.github_preflight_installed_profile()?, end, stop)
     }
     pub(crate) fn github_release_profile_available(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.github_release_installed_profile().is_ok() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn github_release_installed_profile(&self) -> Result<GitHubReleaseInstalledProfile, BridgeError> {
+        if !GitHubReleaseInstalledProfile::bindings_match() { return Err(unavailable()); }
+        Ok(GitHubReleaseInstalledProfile { _private: () })
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -1507,7 +1593,7 @@ impl RuntimeConfig {
         }
         Err(BridgeError::unavailable("The installed GitHub release action profile is not qualified."))
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     pub(crate) fn resolve_github_release_installed(&self, originals: &mut crate::installed_runtime::GitHubReleaseRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.github_release_installed_profile()?, end, stop)
@@ -2075,8 +2161,8 @@ pub(crate) fn assert_installed_workflow_profile_contract() {
 // explicitly; compiling their #[test] definitions is not execution evidence.
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn assert_installed_macos_text_version_profile_contract() {
-    tests::macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites();
-    tests::macos_saved_text_version_profiles_share_fixed_bindings_not_custody();
+    tests::macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites_data_check();
+    tests::macos_saved_text_version_profiles_share_fixed_bindings_not_custody_data_check();
     #[cfg(not(all(feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
         not(feature = "macos-installed-installer"))))]
@@ -2244,7 +2330,9 @@ mod tests {
         }
     }
     #[test]
-    pub(super) fn macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites() {
+    pub(super) fn macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites() { macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites_data_check(); }
+
+    pub(super) fn macos_installed_allowlist_includes_saved_text_and_version_read_prerequisites_data_check() {
         for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
             "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate",
             "artifacts.candidate.observe", "release.evidence.observe"] {
@@ -2261,7 +2349,10 @@ mod tests {
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
-    pub(super) fn macos_saved_text_version_profiles_share_fixed_bindings_not_custody() {
+    pub(super) fn macos_saved_text_version_profiles_share_fixed_bindings_not_custody() { macos_saved_text_version_profiles_share_fixed_bindings_not_custody_data_check(); }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(super) fn macos_saved_text_version_profiles_share_fixed_bindings_not_custody_data_check() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-text-version-data-only"));
         let admitted = macos_bindings();
         assert_eq!(runtime.metadata_text_edit_profile_available(), admitted);

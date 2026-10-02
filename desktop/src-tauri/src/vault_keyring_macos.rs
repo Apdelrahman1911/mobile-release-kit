@@ -68,6 +68,8 @@ pub(crate) struct LookupBook{
     terminal:Option<Terminal>,terminal_seen:bool,output_failed:bool,stderr_seen:bool,
     work:Option<Instant>,cleanup:Option<Instant>,first:Option<(Problem,Instant)>,uncertain:bool,effect:u32,
     candidate:Option<WrappingKeyCandidate>,disposed:bool,postchecked:bool,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    qualification: QualificationBook,
 }
 pub(crate) const LOOKUP_CONTROL_BYTES:usize=std::mem::size_of::<LookupBook>()+std::mem::size_of::<LookupInput>()
     + std::mem::size_of::<VaultHelperSlots>() + 8192;
@@ -84,7 +86,9 @@ impl LookupBook{
         kill_attempted:false,kill_failed:false,pipes:std::array::from_fn(|_|Pipe::new()),clock:None,request:None,request_bytes:Zeroizing::new([0;wire::REQUEST_BYTES]),
         go:false,write_attempted:false,request_sent:false,stop_attempted:false,stop_sent:false,output:Zeroizing::new([0;wire::RESPONSE_LIMIT+1]),
         used:0,notice_seen:false,terminal_start:0,terminal:None,terminal_seen:false,output_failed:false,stderr_seen:false,
-        work:None,cleanup:None,first:None,uncertain:false,effect:0,candidate:None,disposed:false,postchecked:false}}
+        work:None,cleanup:None,first:None,uncertain:false,effect:0,candidate:None,disposed:false,postchecked:false,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        qualification: QualificationBook::default()}}
     pub(crate) fn started(&self)->bool{self.entered}
     pub(crate) fn memory_held(&self)->bool{self.charge.is_some()}
     pub(crate) fn problem(&self)->Option<Problem>{self.first.map(|(p,_)|p)}
@@ -224,6 +228,13 @@ impl LookupBook{
         self.terminal=Some(terminal);self.terminal_seen=true;
         if self.used!=start+wire::TERMINAL_BYTES{self.output_failed=true;self.fail(Problem::Protocol);}
     }
+    fn needs_stop_control(&self)->bool{
+        // Only a real request-bound decoded terminal can retire this route.
+        // It says nothing about EOF, wait, close, join or operation success.
+        let input_retired=self.request.is_some() && self.terminal_seen
+            && self.terminal.as_ref().is_some_and(|t|t.valid && t.input_closed);
+        self.first.is_some() && self.request_sent && !self.stop_attempted && self.exit.is_none() && !input_retired
+    }
     fn write_control(&mut self){
         if self.go && !self.write_attempted && self.first.is_none(){
             self.write_attempted=true;
@@ -242,7 +253,7 @@ impl LookupBook{
         if self.first.is_some() && !self.request_sent && self.pipes[0].state==PipeState::Held {
             if !self.pipes[0].close(){self.fail(Problem::CleanupUnknown);}
         }
-        if self.first.is_some() && self.request_sent && !self.stop_attempted && self.exit.is_none(){
+        if self.needs_stop_control(){
             self.stop_attempted=true;
             let encoded=(||{
                 let clock=self.clock.as_ref()?;let first=clock.earlier_endpoint(self.first?.1)?;
@@ -285,7 +296,12 @@ impl LookupBook{
     fn observe_exit(&mut self){
         if self.exit.is_some() || self.wait_failed{return;}
         if let Some(child)=self.child.as_mut(){
-            match child.try_wait(){Ok(Some(exit))=>{
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            { self.qualification.try_wait_entered = true; self.qualification.try_wait_returned = false; }
+            let result = child.try_wait();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            { self.qualification.try_wait_returned = true; }
+            match result{Ok(Some(exit))=>{
                     self.exit=Some(exit);if !exit.success(){self.fail(Problem::Unavailable);}
                 },Ok(None)=>{},
                 Err(_)=>{self.wait_failed=true;self.fail(Problem::CleanupUnknown);}}
@@ -374,6 +390,8 @@ impl LookupBook{
         if !self.request_sent && self.write_attempted{self.uncertain=true;}
         if self.first.is_none() && !self.transport_success(){self.fail(Problem::Unavailable);}
         Self::project_cleanup(&mut self.first,&mut self.cleanup,&mut self.uncertain,None,project);
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        { self.qualification.driver_before_cleanup = self.cleanup.is_some_and(|end| Instant::now() < end); }
         self.driver_returned=true;
         let result=if self.uncertain{Err(Problem::CleanupUnknown)}else if let Some(p)=self.problem(){Err(p)}else{Ok(())};
         self.driver_result=Some(result);result
@@ -402,6 +420,8 @@ impl LookupBook{
             let mut bytes=Zeroizing::new([0;32]);
             let start=self.terminal_start+wire::TERMINAL_BYTES-32;bytes.copy_from_slice(&self.output[start..start+32]);
             self.candidate=Some(WrappingKeyCandidate{bytes});
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            { self.qualification.application_constructed = true; }
         }
         self.output.zeroize();self.request_bytes.zeroize();
     }
@@ -432,10 +452,18 @@ impl LookupBook{
     pub(crate) fn consume_settled_key<R>(&mut self,authenticate:impl FnOnce(WrappingKeyCandidate)->R)->Result<R,Problem>{
         if !self.resources_settled() || !self.memory_held() || self.first.is_some() || !self.joined
             || self.work.is_none_or(|end|Instant::now()>=end){return Err(self.problem().unwrap_or(Problem::CleanupUnknown));}
-        let candidate=self.candidate.take().ok_or(Problem::CleanupUnknown)?;Ok(authenticate(candidate))
+        let candidate=self.candidate.take().ok_or(Problem::CleanupUnknown)?;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        { self.qualification.application_taken = true; }
+        let result = authenticate(candidate);
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        { self.qualification.application_returned = true; }
+        Ok(result)
     }
     pub(crate) fn dispose_settled_storage(&mut self)->bool{
         if self.disposed || !self.memory_held() || !self.resources_settled(){return false;}
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        { self.qualification.saved = self.qualification_snapshot(); }
         self.input=None;self.request=None;self.command=None;self.slots=None;
         if let Some(child)=self.child.take(){drop(ManuallyDrop::into_inner(child));}
         self.candidate=None;self.output.zeroize();self.request_bytes.zeroize();
@@ -474,6 +502,22 @@ mod tests {
         out[88..96].copy_from_slice(&request.maximum_cleanup.to_le_bytes());
         out[100..104].copy_from_slice(&1u32.to_le_bytes());
         out
+    }
+    #[test]
+    fn only_valid_decoded_terminal_input_retirement_suppresses_stop_control(){
+        let mut book=LookupBook::new();book.request=Some(request(wire::Operation::Initialize));
+        book.request_sent=true;book.first=Some((Problem::Interrupted,Instant::now()));
+        assert!(book.needs_stop_control()); // No terminal, regardless of notice/effect.
+        book.notice_seen=true;book.effect=1;assert!(book.needs_stop_control());
+        for (valid,closed) in [(false,false),(false,true),(true,false),(true,true)]{
+            book.terminal=Some(Terminal{first:0,cleanup:12,effect:0,valid,add:None,lookup:None,
+                auth_settled:false,filesystem_settled:false,input_closed:closed,candidate:false});
+            book.terminal_seen=false;assert!(book.needs_stop_control());
+            book.terminal_seen=true;assert_eq!(book.needs_stop_control(),!(valid && closed));
+            assert!(!book.resources_settled());assert!(book.candidate.is_none());
+            assert_eq!(book.problem(),Some(Problem::Interrupted));
+        }
+        book.request=None;assert!(book.needs_stop_control());
     }
     #[test]
     fn first_failure_contracts_once_and_never_erases_an_actual_add(){
@@ -578,3 +622,187 @@ impl LookupBook {
         book
     }
 }
+
+// Observer DATA is absent from every normal app/helper profile. It is captured
+// before disposal, and it never becomes an admission or cleanup token.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+mod qualification {
+    use super::*;
+    #[derive(Default)]
+    pub(super) struct Book {
+        pub(super) application_constructed: bool, pub(super) application_taken: bool, pub(super) application_returned: bool,
+        pub(super) driver_before_cleanup: bool, pub(super) saved: Option<Snapshot>,
+        pub(super) try_wait_entered: bool, pub(super) try_wait_returned: bool,
+    }
+    #[derive(Clone, Copy, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct Snapshot {
+        pub(crate) go: bool, pub(crate) request_sent: bool, write_attempted: bool, stop_attempted: bool, stop_sent: bool,
+        notice: bool, terminal: bool, pub(crate) successful_add_terminal: bool, output_failed: bool, stderr_seen: bool,
+        terminal_success: bool, auth_settled: Option<bool>, filesystem_settled: Option<bool>, native_input_closed: Option<bool>,
+        add_outcome: Option<&'static str>, add_settled: Option<bool>, lookup_settled: Option<bool>, add_effect: u32,
+        add_item_calls_absent: Option<bool>, add_prerequisite_refused: Option<bool>,
+        pub(crate) native_candidate_consumed: Option<bool>,
+        try_wait_entered: bool, try_wait_returned: bool, wait_entered: bool, exit_observed: bool, exit_success: Option<bool>, wait_failed: bool, kill_attempted: bool, kill_failed: bool,
+        stdout_eof: bool, stderr_eof: bool, pipe_closed: [bool; 3], helper_slots_settled: bool,
+        driver_returned: bool, driver_before_cleanup: bool, blocking_child_joined: bool, resources_settled: bool, allocations_released: bool,
+        first_failure: Option<&'static str>, cleanup_contracted: bool, cleanup_unknown: bool,
+        pub(crate) application_candidate_constructed: bool, application_candidate_taken: bool, application_callback_returned: bool,
+    }
+    fn outcome(value: Outcome) -> &'static str { match value {
+        Outcome::Pending=>"pending",Outcome::Added=>"added",Outcome::Candidate=>"candidate",Outcome::Missing=>"missing",
+        Outcome::Duplicate=>"duplicate",Outcome::Locked=>"locked",Outcome::InteractionRequired=>"interaction-required",
+        Outcome::AuthenticationFailed=>"authentication-failed",Outcome::UserCanceled=>"user-canceled",Outcome::Unavailable=>"unavailable",
+        Outcome::Unsupported=>"unsupported",Outcome::InvalidInput=>"invalid-input",Outcome::InvalidResult=>"invalid-result",
+        Outcome::Allocation=>"allocation",Outcome::Stopped=>"stopped",Outcome::CustodyUnknown=>"custody-unknown",
+        Outcome::NativeFailure=>"native-failure",Outcome::NativeException=>"native-exception",
+    } }
+    fn problem(value: Problem) -> &'static str { match value {
+        Problem::Interrupted=>"interrupted",Problem::CleanupUnknown=>"cleanup-unknown",Problem::Capacity=>"capacity",
+        Problem::Locked=>"locked",Problem::MissingKey=>"missing-key",Problem::Denied=>"denied",Problem::UnsupportedProvider=>"unsupported-provider",
+        Problem::Unavailable=>"unavailable",Problem::InvalidInput=>"invalid-input",Problem::IdentityMismatch=>"identity-mismatch",
+        Problem::Crypto=>"crypto",Problem::Protocol=>"protocol",
+    } }
+    impl Snapshot {
+        pub(crate) fn value(&self) -> serde_json::Value { serde_json::json!(self) }
+        pub(crate) fn final_settlement(&self) -> bool {
+            self.driver_returned && self.driver_before_cleanup && self.blocking_child_joined && self.resources_settled
+                && self.allocations_released && self.exit_observed && self.try_wait_entered && self.try_wait_returned
+                && !self.wait_entered && !self.wait_failed && !self.kill_attempted && !self.kill_failed && !self.output_failed && !self.stderr_seen
+                && self.stdout_eof && self.stderr_eof && self.pipe_closed == [true;3] && self.helper_slots_settled && !self.cleanup_unknown
+                && (!self.write_attempted || self.terminal && self.auth_settled == Some(true) && self.filesystem_settled == Some(true)
+                    && self.native_input_closed == Some(true) && self.add_settled.is_none_or(|v|v) && self.lookup_settled.is_none_or(|v|v))
+        }
+        pub(crate) fn successful_consumption(&self) -> bool {
+            self.final_settlement() && self.go && self.request_sent && self.terminal_success && self.first_failure.is_none()
+                && self.exit_success == Some(true) && self.native_candidate_consumed == Some(true)
+                && self.application_candidate_constructed && self.application_candidate_taken && self.application_callback_returned
+        }
+        pub(crate) fn stopped_without_application_candidate(&self) -> bool {
+            self.final_settlement() && self.first_failure == Some("interrupted") && self.cleanup_contracted
+                && !self.application_candidate_constructed && !self.application_candidate_taken && !self.application_callback_returned
+        }
+        pub(crate) fn provider_negative(&self) -> bool {
+            self.final_settlement() && self.go && self.request_sent && self.terminal && !self.terminal_success
+                && matches!(self.add_outcome, Some("missing"|"locked"|"interaction-required"|"authentication-failed"|"unavailable"|"unsupported"|"native-failure"))
+                && self.add_effect == 0 && self.add_settled == Some(true) && self.lookup_settled.is_none()
+                && self.add_item_calls_absent == Some(true) && self.add_prerequisite_refused == Some(true)
+                && self.first_failure.is_some() && self.first_failure != Some("interrupted")
+                && self.native_candidate_consumed.is_none() && !self.application_candidate_constructed
+                && !self.application_candidate_taken && !self.application_callback_returned
+        }
+    }
+    pub(crate) fn data_checks() -> bool {
+        // Predicate DATA only; no child/native receipt/key is constructed.
+        let settled = Snapshot { go:true,request_sent:true,write_attempted:true,stop_attempted:false,stop_sent:false,
+            notice:false,terminal:true,successful_add_terminal:true,terminal_success:true,output_failed:false,stderr_seen:false,
+            auth_settled:Some(true),filesystem_settled:Some(true),native_input_closed:Some(true),
+            add_outcome:Some("added"),add_settled:Some(true),lookup_settled:Some(true),add_effect:1,
+            add_item_calls_absent:Some(false),add_prerequisite_refused:Some(false),native_candidate_consumed:Some(true),
+            try_wait_entered:true,try_wait_returned:true,wait_entered:false,exit_observed:true,exit_success:Some(true),
+            wait_failed:false,kill_attempted:false,kill_failed:false,stdout_eof:true,stderr_eof:true,pipe_closed:[true;3],
+            helper_slots_settled:true,driver_returned:true,driver_before_cleanup:true,blocking_child_joined:true,
+            resources_settled:true,allocations_released:true,first_failure:None,cleanup_contracted:false,cleanup_unknown:false,
+            application_candidate_constructed:true,application_candidate_taken:true,application_callback_returned:true };
+        if !settled.successful_consumption() { return false; }
+        for field in 0..16 {
+            let mut s=settled;
+            match field {
+                0=>s.try_wait_entered=false,1=>s.try_wait_returned=false,2=>s.exit_observed=false,
+                3=>s.wait_entered=true,4=>s.wait_failed=true,5=>s.stdout_eof=false,6=>s.stderr_eof=false,
+                7=>s.pipe_closed[0]=false,8=>s.helper_slots_settled=false,9=>s.driver_returned=false,
+                10=>s.driver_before_cleanup=false,11=>s.blocking_child_joined=false,12=>s.resources_settled=false,
+                13=>s.allocations_released=false,14=>s.output_failed=true,_=>s.stderr_seen=true,
+            }
+            if s.final_settlement() || s.successful_consumption() { return false; }
+        }
+        let mut stopped=settled;stopped.first_failure=Some("interrupted");stopped.cleanup_contracted=true;
+        stopped.application_candidate_constructed=false;stopped.application_candidate_taken=false;stopped.application_callback_returned=false;
+        if !stopped.stopped_without_application_candidate() || stopped.successful_consumption() { return false; }
+        for field in 0..5 {
+            let mut s=stopped;
+            match field {0=>s.application_candidate_constructed=true,1=>s.application_candidate_taken=true,
+                2=>s.application_callback_returned=true,3=>s.cleanup_contracted=false,_=>s.cleanup_unknown=true}
+            if s.stopped_without_application_candidate() { return false; }
+        }
+        let mut negative=stopped;negative.first_failure=Some("locked");negative.terminal_success=false;
+        negative.add_outcome=Some("locked");negative.add_effect=0;negative.lookup_settled=None;
+        negative.native_candidate_consumed=None;negative.add_item_calls_absent=Some(true);negative.add_prerequisite_refused=Some(true);
+        if !negative.provider_negative() { return false; }
+        for field in 0..5 {
+            let mut s=negative;
+            match field {0=>s.add_effect=3,1=>s.add_item_calls_absent=Some(false),2=>s.add_prerequisite_refused=Some(false),
+                3=>s.lookup_settled=Some(true),_=>s.native_candidate_consumed=Some(true)}
+            if s.provider_negative() { return false; }
+        }
+        true
+    }
+    impl LookupBook {
+        pub(crate) fn qualification_before_go(&self) -> bool {
+            self.driver_entered && self.launch == Launch::Returned && !self.go && !self.write_attempted && !self.request_sent
+                && self.first.is_none() && !self.uncertain && !self.joined
+                && self.request.as_ref().is_some_and(|r|r.operation == wire::Operation::Initialize)
+        }
+        pub(crate) fn qualification_added_checkpoint(&self) -> bool {
+            // Notice always denotes F; only the actual successful decoded
+            // Initialize terminal can satisfy this checkpoint, including EOF.
+            self.driver_entered && self.go && self.request_sent && self.first.is_none() && !self.uncertain && !self.joined
+                && self.candidate.is_none() && !self.qualification.application_constructed
+                && self.request.as_ref().is_some_and(|r| r.operation == wire::Operation::Initialize
+                    && self.terminal.as_ref().is_some_and(|t|t.success(r.operation) && t.add.as_ref().is_some_and(|a|a.added())))
+        }
+        pub(crate) fn qualification_snapshot(&self) -> Option<Snapshot> {
+            if !self.entered { return None; }
+            if let Some(mut saved) = self.qualification.saved {
+                // Disposal removes only storage. Later failure/finality facts
+                // remain actual and cannot be hidden by this retained history.
+                saved.allocations_released = self.allocations_released();
+                saved.resources_settled &= self.resources_settled();
+                saved.blocking_child_joined &= self.joined;
+                saved.driver_returned &= self.driver_returned;
+                saved.output_failed |= self.output_failed; saved.stderr_seen |= self.stderr_seen;
+                saved.wait_failed |= self.wait_failed; saved.kill_failed |= self.kill_failed;
+                saved.first_failure = self.first.map(|(p,_)|problem(p));
+                saved.cleanup_contracted = self.first.is_some_and(|(_,at)|self.cleanup.is_some_and(|end|
+                    at.checked_add(Duration::from_secs(2)).is_some_and(|maximum|end <= maximum)));
+                saved.cleanup_unknown |= self.cleanup_unknown();
+                return Some(saved);
+            }
+            let terminal = self.terminal.as_ref();
+            Some(Snapshot { go:self.go,request_sent:self.request_sent,write_attempted:self.write_attempted,
+                stop_attempted:self.stop_attempted,stop_sent:self.stop_sent,notice:self.notice_seen,terminal:self.terminal_seen,
+                output_failed:self.output_failed,stderr_seen:self.stderr_seen,
+                successful_add_terminal:terminal.is_some_and(|t|t.success(wire::Operation::Initialize) && t.add.as_ref().is_some_and(|a|a.added())),
+                terminal_success:self.request.as_ref().is_some_and(|r|terminal.is_some_and(|t|t.success(r.operation))),
+                auth_settled:terminal.map(|t|t.auth_settled),filesystem_settled:terminal.map(|t|t.filesystem_settled),
+                native_input_closed:terminal.map(|t|t.input_closed),
+                add_outcome:terminal.and_then(|t|t.add.as_ref()).map(|r|outcome(r.facts().outcome())),
+                add_settled:terminal.and_then(|t|t.add.as_ref()).map(|r|r.settled()),
+                lookup_settled:terminal.and_then(|t|t.lookup.as_ref()).map(|r|r.settled()),add_effect:self.effect,
+                add_item_calls_absent:terminal.and_then(|t|t.add.as_ref()).map(|r|r.facts().security_calls()
+                    .is_some_and(|calls|calls.iter().all(|c|!matches!(c.phase,10|11)))),
+                add_prerequisite_refused:terminal.and_then(|t|t.add.as_ref()).map(|r|matches!(r.facts().first_refusal_phase(),
+                    Some(2|3|4|5|6|17|18|19))),
+                native_candidate_consumed:terminal.and_then(|t|t.lookup.as_ref()).map(|r|r.candidate_consumed()),
+                try_wait_entered:self.qualification.try_wait_entered,try_wait_returned:self.qualification.try_wait_returned,
+                wait_entered:self.wait_entered,exit_observed:self.exit.is_some(),exit_success:self.exit.map(|e|e.success()),
+                wait_failed:self.wait_failed,kill_attempted:self.kill_attempted,kill_failed:self.kill_failed,
+                stdout_eof:self.pipes[1].eof,stderr_eof:self.pipes[2].eof,pipe_closed:self.pipes.each_ref().map(|p|p.settled()),
+                helper_slots_settled:self.slots.as_ref().is_some_and(VaultHelperSlots::settled),
+                driver_returned:self.driver_returned,driver_before_cleanup:self.qualification.driver_before_cleanup,
+                blocking_child_joined:self.joined,resources_settled:self.resources_settled(),allocations_released:self.allocations_released(),
+                first_failure:self.first.map(|(p,_)|problem(p)),
+                cleanup_contracted:self.first.is_some_and(|(_,at)|self.cleanup.is_some_and(|end|
+                    at.checked_add(Duration::from_secs(2)).is_some_and(|maximum|end <= maximum))),
+                cleanup_unknown:self.cleanup_unknown(),application_candidate_constructed:self.qualification.application_constructed,
+                application_candidate_taken:self.qualification.application_taken,application_callback_returned:self.qualification.application_returned })
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+use qualification::Book as QualificationBook;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use qualification::Snapshot as QualificationSnapshot;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use qualification::data_checks as qualification_data_checks;

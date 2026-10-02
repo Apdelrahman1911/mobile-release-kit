@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from mobile_release import _desktop_github_preflight_engine as engine
 from mobile_release import _github_preflight_journal as journal
@@ -112,6 +116,73 @@ class GitHubPreflightFrameTests(unittest.TestCase):
             result["token"] = PRIVATE
             with self.assertRaises(ValueError):
                 engine.encode_result(request, result)
+
+
+
+class GitHubPreflightBootstrapTests(unittest.TestCase):
+    """Fixed bootstrap SOURCE plus recording DATA; no runtime or network call."""
+
+    @staticmethod
+    def _bootstrap():
+        path = Path(__file__).resolve().parents[2] / "desktop" / "github_preflight_bootstrap.py"
+        spec = importlib.util.spec_from_file_location("_mrk_preflight_bootstrap_contract", path)
+        if spec is None or spec.loader is None:
+            raise AssertionError("fixed bootstrap SOURCE is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _system(**changes):
+        values = dict(argv=["fixed-bootstrap", "/inert/core.zip"],
+                      flags=SimpleNamespace(isolated=True, no_site=True),
+                      dont_write_bytecode=True, version_info=(3, 11),
+                      platform="darwin", path=[])
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    @staticmethod
+    def _run(module, system, *, source="/inert/runtime/github_preflight_bootstrap.py"):
+        # Replacing this module's references never edits the process sys.path or
+        # clock. The already imported fixed engine entry is a recording double.
+        with patch.object(module, "sys", system), patch.object(module, "__file__", source), \
+             patch.object(module, "time", SimpleNamespace(monotonic=lambda: 11.0)), \
+             patch.object(engine, "main", return_value=17) as entry:
+            code = module.main()
+        return code, entry
+
+    def test_exact_linux_and_darwin_admit_only_the_fixed_engine_family(self):
+        module = self._bootstrap()
+        for platform in ("linux", "darwin"):
+            system = self._system(platform=platform)
+            with self.subTest(platform=platform):
+                code, entry = self._run(module, system)
+                self.assertEqual(code, 17)
+                entry.assert_called_once_with(started=11.0, runtime_dir="/inert/runtime")
+                self.assertEqual(system.path, ["/inert/core.zip"])
+
+    def test_other_platforms_flags_and_unbound_paths_refuse_before_engine_entry(self):
+        module = self._bootstrap()
+        cases = [dict(platform=value) for value in ("linux2", "Darwin", "win32", "freebsd", "")]
+        cases += [dict(argv=value) for value in ([], ["fixed-bootstrap"],
+                  ["fixed-bootstrap", "/inert/core.zip", "extra"], ["fixed-bootstrap", "relative.zip"])]
+        cases += [dict(flags=SimpleNamespace(isolated=False, no_site=True)),
+                  dict(flags=SimpleNamespace(isolated=True, no_site=False)),
+                  dict(dont_write_bytecode=False), dict(version_info=(3, 10))]
+        for changes in cases:
+            system = self._system(**changes)
+            with self.subTest(changes=changes):
+                code, entry = self._run(module, system)
+                self.assertEqual(code, 78)
+                entry.assert_not_called()
+                self.assertEqual(system.path, [])
+        for source in ("github_preflight_bootstrap.py", ""):
+            system = self._system()
+            with self.subTest(source=source):
+                code, entry = self._run(module, system, source=source)
+                self.assertEqual(code, 78)
+                entry.assert_not_called()
+                self.assertEqual(system.path, [])
 
 
 if __name__ == "__main__":

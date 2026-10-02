@@ -23,6 +23,8 @@ pub(crate) mod ios;
 pub(crate) mod session;
 #[path = "installed_shell_observation_macos_project_fields.rs"]
 pub(crate) mod project_fields;
+#[path = "installed_shell_observation_macos_vault.rs"]
+pub(crate) mod vault;
 pub(crate) use session::Command as SessionCommand;
 
 // Closed public categories only. The first winner is published before failure;
@@ -67,6 +69,7 @@ const FAILURE_REASONS: &[&str] = &[
     "session-request-contract", "session-result-contract", "session-original-contract", "session-dom-contract",
     "project-fields-request-contract", "project-fields-result-contract", "project-fields-original-contract",
     "project-fields-fixture-contract", "project-fields-dom-contract",
+    "vault-request-contract", "vault-result-contract", "vault-original-contract", "vault-finality-contract",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
 fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) -> bool {
@@ -166,16 +169,17 @@ const CONFIG: &[u8] = br#"{
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields }
+enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case) }
 impl Case {
     fn name(self) -> &'static str { match self {
         Self::FirstSave => "first-save", Self::NoopStale => "noop-stale",
         Self::PickerLoss => "picker-loss", Self::SaveLoss => "save-loss",
         Self::Ios(case) => case.name(),
-        Self::ProjectFields => project_fields::NAME,
+        Self::ProjectFields => project_fields::NAME, Self::Vault(case) => case.name(),
     }}
     fn selected_id(self) -> u32 { if self == Self::FirstSave { 2 } else { 1 } }
     fn quit_id(self) -> u32 { if let Self::Ios(case) = self { if case.inputs() { return session::quit_original(case); } }
+        if let Self::Vault(case) = self { return case.maximum_original(); }
         if self == Self::ProjectFields { 12 } else if self == Self::FirstSave { 4 } else { 2 } }
     fn inputs(self) -> bool { matches!(self, Self::Ios(case) if case.inputs()) }
     fn file_index(self, id: u32) -> Option<u8> { match self { Self::Ios(case) => session::file_index(case,id), _ => None } }
@@ -201,7 +205,7 @@ impl Case {
     } }
     fn methods(self) -> usize { METHODS.len() }
     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
-    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields => 0 } }
+    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) => 0 } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -214,7 +218,7 @@ enum Step {
     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
     PickerPending, Reload, Lost,
-    Ios(ios::Step), Session(session::Step), ProjectFields(project_fields::Step),
+    Ios(ios::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
@@ -868,6 +872,7 @@ struct Record {
     loss_seen: bool, loss_settled: bool, relay_joined: bool, actual_exit: bool, originals_final: bool,
     failure_close_requested: bool, failure_quit_attempted: bool,
     ios_record: Option<ios::Record>, session_record: Option<session::Record>, project_field_record: Option<project_fields::Record>,
+    vault_record: Option<vault::Record>,
     panel_history: Vec<OpenHistory>, file_attached: [bool; 7], file_actions: [bool; 7],
     field_attached: [bool; project_fields::COUNT], field_actions: [bool; project_fields::COUNT],
     fixture: Fixture,
@@ -1051,16 +1056,17 @@ pub(crate) struct Observation {
     // retains the exact receiver/token/owners here past the finite wait.
     open_custody: Mutex<Option<OpenFlight>>,
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, input_paths: Vec<PathBuf>, field_paths: Vec<PathBuf>, base: Value,
-    ios: Option<Arc<ios::Control>>, project_fields: Option<Arc<project_fields::Control>>,
+    ios: Option<Arc<ios::Control>>, project_fields: Option<Arc<project_fields::Control>>, vault: Option<Arc<vault::Control>>,
     failed: AtomicBool, failure_reason: AtomicU8, diagnostic: DiagnosticWriter, record: Mutex<Record>,
 }
 impl Observation {
     fn new(case: Case, fixture: Fixture) -> Result<Self, ()> {
         let base = crate::protocol::strict_json(if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
-        let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else { 45 });
+        let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(_)) { 120 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let project_path = fixture.root.clone();
+        let vault = if let Case::Vault(c) = case { Some(vault::Control::new(c, &project_path, fixture.uid)?) } else { None };
         let input_paths = if let Case::Ios(c) = case { session::targets(&project_path, c).ok_or(())? } else { Vec::new() };
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let record = Mutex::new(Record {
@@ -1086,12 +1092,13 @@ impl Observation {
                 ios_record: matches!(case, Case::Ios(c) if !c.input_only()).then(ios::Record::default),
                 session_record: ios.as_ref().filter(|c| c.case.inputs()).map(|c| session::Record::new(c.case)),
                 project_field_record: (case == Case::ProjectFields).then(project_fields::Record::new),
+                vault_record: matches!(case, Case::Vault(_)).then(vault::Record::default),
                 panel_history: Vec::new(), file_attached: [false;7], file_actions: [false;7],
                 field_attached: [false;project_fields::COUNT], field_actions: [false;project_fields::COUNT], fixture,
             });
         let diagnostic = DiagnosticWriter::new()?; // All fallible setup precedes spawn/registration.
         Ok(Self { open_custody: Mutex::new(None), case, main: std::thread::current().id(), end,
-            project_path, input_paths, field_paths, base, ios, project_fields,
+            project_path, input_paths, field_paths, base, ios, project_fields, vault,
             failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
     }
     fn fail(&self) { self.fail_with("observer-invariant"); }
@@ -1604,6 +1611,7 @@ impl Observation {
                 r.step = Step::Environment;
             }
             match r.step {
+                Step::Vault(step) => { drop(r); self.vault_tick(&state.document, step); return; },
                 Step::CancelSettled => {
                     if !r.cancel_returned { return; }
                     let Some(w) = state.document.installed_macos_cancelled(1) else { return; };
@@ -2344,7 +2352,7 @@ impl Observation {
             Step::Session(session::Step::Native(i)) => (self.case.input_id(i).ok_or("native-step")?,PanelKind::File),
             Step::ProjectFields(project_fields::Step::Native(i)) if self.case == Case::ProjectFields =>
                 (project_fields::id(i).ok_or("native-step")?,project_fields::kind(i).ok_or("native-step")?),
-            Step::QuitCancel => (3,PanelKind::Quit), Step::Quit => (self.case.quit_id(),PanelKind::Quit), _ => return Err("native-step"),
+            Step::QuitCancel => (3,PanelKind::Quit), Step::Quit => (self.quit_id(),PanelKind::Quit), _ => return Err("native-step"),
         };
         let open = self.case.open_id(step) == Some(id);
         {
@@ -2636,6 +2644,7 @@ impl Observation {
             Step::ChooseCancel => { r.project_calls += 1; Step::CancelProject }, Step::ReadCancelled => Step::ChooseProject,
             Step::ChooseProject => { r.project_calls += 1; if self.case == Case::PickerLoss { Step::PickerPending } else { Step::OpenProject } },
             Step::Snapshot => if self.case.inputs() { Step::Session(session::Step::Navigate) }
+                else if matches!(self.case, Case::Vault(_)) { Step::Vault(vault::Step::Open) }
                 else if self.case == Case::ProjectFields { Step::ProjectFields(project_fields::Step::Navigate(0)) }
                 else if matches!(self.case, Case::Ios(_)) { Step::Ios(ios::Step::Navigate) } else { Step::Settings },
             Step::Settings => if self.case == Case::NoopStale { Step::Draft } else { Step::Suggest },
@@ -2676,13 +2685,16 @@ impl Observation {
     pub(super) fn actual_exit(&self, ready: bool, document: &DocumentBinding, edits: &EditOwner) {
         if let Ok(status) = edits.status() { self.edit_status(&status,edits); } else { self.fail_with("exit-edit-status"); }
         let session = (self.case.inputs() || self.case == Case::ProjectFields).then(|| document.installed_macos_session_snapshot()).flatten();
+        let vault_snapshot = self.vault.as_ref().and_then(|_| document.installed_macos_vault_snapshot());
         let Some(mut r) = self.record() else { return; };
-        let finality = document.installed_macos_final(self.case.quit_id(),r.project_witness.as_ref(),r.picker_witness.as_ref(),self.case.loses_document());
+        let finality = document.installed_macos_final(self.quit_id(),r.project_witness.as_ref(),r.picker_witness.as_ref(),self.case.loses_document());
         if !ready || !finality || !r.relay_joined || r.actual_exit || r.step != Step::Exit || r.pending.is_some()
             || !r.native_actions_returned[3] || !r.sessions.iter().all(|s| s.finality.is_some())
             || self.case.inputs() && !r.session_record.as_mut().is_some_and(|record| session.as_ref().is_some_and(|s| record.final_originals(s)))
             || self.case == Case::ProjectFields && !r.project_field_record.as_mut().is_some_and(|record|
-                session.as_ref().is_some_and(|s| record.final_originals(s))) {
+                session.as_ref().is_some_and(|s| record.final_originals(s)))
+            || self.vault.as_ref().is_some_and(|control| !r.vault_record.as_mut().is_some_and(|record|
+                vault_snapshot.as_ref().is_some_and(|s|record.final_originals(s, control)))) {
             self.fail_with("exit-finality-contract"); return;
         }
         r.originals_final = true; r.actual_exit = true;
@@ -2709,6 +2721,9 @@ impl Observation {
             && (self.case == Case::FirstSave || r.panel_attached == [true,true,false,false])
             && r.project_calls == (if self.case == Case::FirstSave { 2 } else { 1 });
         let specific = match self.case {
+            Case::Vault(_) => r.project_settled && r.snapshots == 1 && r.close_count == 1
+                && r.native_actions_returned == [false,true,false,true] && r.session_record.is_none() && r.ios_record.is_none()
+                && r.vault_record.as_ref().zip(self.vault.as_ref()).is_some_and(|(record,control)|record.report(control).is_some()),
             Case::FirstSave => r.cancel_settled && r.project_settled && r.keep_reviewing && r.saved_visible && r.guidance_visible
                 && r.snapshots == 2 && r.quit_cancelled && r.close_count == 2 && r.native_actions_returned == [true;4]
                 && r.panel_attached == [true;4] && r.fixture.written && !r.fixture.mutated,
@@ -2768,6 +2783,7 @@ impl Observation {
                 "secondStarted":r.loss_seen,"originalLossSettled":r.loss_settled,"webProcessCrashTested":false},
             "originalRelayJoined":r.relay_joined,"actualExit":r.actual_exit,
             "scope":"programmatic genuine controls; no Store, release, distribution or physical-device evidence"});
+        if let Some(control) = self.vault.as_ref() { report["vaultHelper"] = r.vault_record.as_ref()?.report(control)?; }
         if let Case::Ios(case) = self.case {
             if case.operation().is_some() { report["iosArchive"] = r.ios_record.as_ref()?.report(case)?; }
             if case.inputs() {
@@ -3338,11 +3354,13 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     let expected = Path::new(crate::macos_install_paths::APP).join("Contents/MacOS/mobile-release-kit-desktop");
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
-    let suffix = if case == Case::ProjectFields { "-project-fields" } else { "" };
+    let suffix = if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" } else { "" };
     let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
     if let Case::Ios(case) = case {
         if case == ios::Case::AndroidInputs { directory(&root,uid,0o700,ANDROID_INPUT_ROSTER).ok()?; }
         else { directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None).ok()?; }
+    } else if matches!(case,Case::Vault(_)) {
+        directory(&root,uid,0o700,&["vault-helper-roundtrip","vault-helper-stop-before-go","vault-helper-stop-after-add","state"]).ok()?;
     } else if case == Case::ProjectFields {
         directory(&root,uid,0o700,&[project_fields::NAME,"state"]).ok()?;
     } else { directory(&root,uid,0o700,&["first-save","noop-stale","picker-loss","save-loss","state"]).ok()?; }
@@ -3536,6 +3554,7 @@ fn observer_data_checks() -> bool {
     crate::installation::assert_installation_description_contract();
     crate::installation::assert_installation_reveal_request_contract();
     crate::asset_session::assert_installation_reveal_document_gate_contract();
+    crate::macos_install_record::assert_installation_record_data_contract();
     crate::android_build_protocol::assert_macos_toolchain_data_contract();
     crate::android_toolchain_catalog::assert_catalog_data_contract();
     crate::android_toolchain_macos_policy::assert_macos_toolchain_policy_data_contract();
@@ -3562,6 +3581,9 @@ fn observer_data_checks() -> bool {
     crate::asset_session::DocumentBinding::assert_installed_macos_images_control_contract();
     crate::runtime::macos_github_readonly_profile_contract();
     crate::supervisor::macos_github_readonly_original_contract();
+    crate::runtime::macos_github_actions_profile_contract();
+    crate::supervisor::macos_github_actions_original_contract();
+    if !crate::installed_runtime::installed_github_actions_slots_data_check() { return false; }
     crate::asset_session::assert_installed_evidence_gate_contract();
     crate::bridge::assert_native_capability_intersection_contract();
     if !crate::runtime::installed_macos_evidence_profile_data_check()
@@ -3576,7 +3598,7 @@ fn observer_data_checks() -> bool {
     if !mrk_macos_installed_native::installed_observation_flags_data_check()
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
         || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks()
-        || !session::data_checks() || !project_fields::data_checks() { return false; }
+        || !session::data_checks() || !project_fields::data_checks() || !vault::data_checks() { return false; }
     for ios_case in ios::Case::ALL {
         let case = Case::Ios(ios_case);
         if case.panel_index(Step::Quit) != Some(1) || case.quit_id() != if ios_case.inputs() { session::quit_original(ios_case) } else { 2 } { return false; }
@@ -3813,6 +3835,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(v) if v == OsStr::new("first-save") => Case::FirstSave, Some(v) if v == OsStr::new("noop-stale") => Case::NoopStale,
         Some(v) if v == OsStr::new("picker-loss") => Case::PickerLoss, Some(v) if v == OsStr::new("save-loss") => Case::SaveLoss,
         Some(v) if v == OsStr::new(project_fields::NAME) => Case::ProjectFields,
+        Some(v) if vault::Case::parse(v).is_some() => Case::Vault(vault::Case::parse(v).expect("exact vault selector")),
         Some(v) if ios::Case::parse(v).is_some() => Case::Ios(ios::Case::parse(v).expect("exact iOS selector")),
         _ => { super::diagnostic(b"MRK_MACOS_AQUA=route-refused\n"); return std::process::ExitCode::FAILURE; },
     };

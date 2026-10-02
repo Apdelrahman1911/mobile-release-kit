@@ -1,5 +1,9 @@
 //! Fixed release selection DATA shared by the app and one-shot Installer.
 pub const INSTALL_ROOT: &str = "/Library/Application Support/MobileReleaseKit";
+pub const PACKAGE_ID: &str = "dev.mobile-release-kit.desktop.installed";
+pub const FIXTURE_PACKAGE_ID: &str = "dev.mobile-release-kit.desktop.installed-fixture";
+pub const PACKAGE_VERSION: &str = "0.1.0";
+pub const BUNDLE_ID: &str = "dev.mobile-release-kit.desktop";
 pub const RELEASE: &str = "macos26-arm64-project-draft-01";
 pub const APP_NAME: &str = "Mobile Release Kit.app";
 pub const APP: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app";

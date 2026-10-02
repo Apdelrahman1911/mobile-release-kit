@@ -7,6 +7,8 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;
 #[path = "../src/installation.rs"] mod installation;
+#[path = "../src/macos_install_paths.rs"] mod macos_install_paths;
+#[path = "../src/macos_install_record.rs"] mod macos_install_record;
 #[path = "../src/release_version_protocol.rs"] mod release_version_protocol;
 #[path = "../src/candidate_evidence_protocol.rs"] mod candidate_evidence_protocol;
 #[path = "../src/lifecycle_evidence_protocol.rs"] mod lifecycle_evidence_protocol;

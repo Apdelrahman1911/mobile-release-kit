@@ -11,6 +11,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;
 #[path = "../src/installation.rs"] mod installation;
+#[path = "../src/macos_install_paths.rs"] mod macos_install_paths;
+#[path = "../src/macos_install_record.rs"] mod macos_install_record;
 #[path = "../src/release_version_protocol.rs"] mod release_version_protocol;
 #[path = "../src/candidate_evidence_protocol.rs"] mod candidate_evidence_protocol;
 #[path = "../src/lifecycle_evidence_protocol.rs"] mod lifecycle_evidence_protocol;
@@ -37,8 +39,6 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/installed_runtime_macos.rs"] mod installed_runtime;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 #[path = "../src/installed_runtime_windows.rs"] mod installed_runtime_windows;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[path = "../src/macos_install_paths.rs"] mod macos_install_paths;
 #[path = "../src/supervisor.rs"] mod supervisor;
 #[path = "../src/bridge.rs"] mod bridge;
 #[path = "../src/document_lifetime.rs"] mod document_lifetime;

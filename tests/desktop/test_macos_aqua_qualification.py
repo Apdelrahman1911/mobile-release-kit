@@ -87,6 +87,10 @@ class InertFixtures:
         M._ios_report(report, case)
         return self.readback(case)
 
+    def readback_vault(self, case, report):
+        M._vault_helper_report(report, case)
+        return self.readback(case)
+
 
 def context_data():
     return {"pending": {"kind": "native", "step": "CancelProject"},
@@ -4657,7 +4661,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertFalse(fixtures.inflight)
         source = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
         route = source.split("fn route(case: Case)", 1)[1].split("fn native_recheck_data_check()", 1)[0]
-        self.assertIn('let suffix = if case == Case::ProjectFields { "-project-fields" } else { "" };', route)
+        self.assertIn('let suffix = if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" } else { "" };', route)
         self.assertIn('format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")', route)
         self.assertIn("directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None)", route)
         self.assertIn('directory(&root,uid,0o700,&[project_fields::NAME,"state"])', route)
@@ -6499,12 +6503,12 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "    name: aqua-${{ matrix.scope }}\n"
             "    permissions:\n"
             "      contents: read\n"
+            "      actions: read\n"
             "    strategy:\n"
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
-            "          - project-fields-android-inputs\n"
-            "          - wrapping-keychain-private\n"
+            "          - project-fields\n"
             "    runs-on: macos-26\n"
             "    timeout-minutes: 75\n"
         )
@@ -6624,7 +6628,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                   and node.targets[0].id == "scope_cases"]
         self.assertEqual(len(tables), 1)
         cases = ast.literal_eval(tables[0].value)
-        self.assertEqual(set(cases), {"project-fields", "android-inputs", "ios-current-synthetic", "project-fields-android-inputs"})
+        self.assertEqual(set(cases), {"project-fields", "android-inputs", "ios-current-synthetic", "project-fields-android-inputs", M.VAULT_HELPER_SCOPE})
         self.assertEqual(cases["project-fields-android-inputs"][1], ["project-fields", "android-inputs"])
         selection = 'selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else [aqua_scope]'
         diagnostic = steps["Export bounded diagnostics without altering original command evidence"]
@@ -8549,6 +8553,190 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
         upload = workflow.split('      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n', 1)[1]
         for forbidden in ('wrapping-codec-tests.stdout', 'wrapping-codec-tests.stderr', 'wrapping-codec-target', '*.json'):
             self.assertNotIn(forbidden, upload)
+
+
+class ShippingVaultHelperAquaDataTests(unittest.TestCase):
+    """SOURCE/parser/custody DATA, never native Keychain or helper qualification."""
+
+    def test_closed_scope_uses_disjoint_real_home_route_and_original_invocation(self):
+        self.assertEqual(M.selected_cases(M.VAULT_HELPER_SCOPE), M.VAULT_HELPER_CASES)
+        self.assertEqual(M.argument_scope(["--scope", M.VAULT_HELPER_SCOPE]), M.VAULT_HELPER_SCOPE)
+        self.assertEqual([M.case_timeout(case) for case in M.VAULT_HELPER_CASES], [135] * 3)
+        with self.assertRaises(M.Refused):
+            BINDING.root(project_fields=True, vault_helper=True)
+        for home in ("/", "relative", "/Users//runner", "/Users/../runner", "/Users/runner/"):
+            with self.assertRaises(M.Refused):
+                M.vault_fixture_path(BINDING, home, M.VAULT_HELPER_CASES[0])
+        home = "/Users/runner"
+        path = M.vault_fixture_path(BINDING, home, M.VAULT_HELPER_CASES[0])
+        self.assertEqual(path, Path(home) / "Library/Application Support" /
+            f"mrk-macos-aqua-vault-{BINDING.source}-{BINDING.run}-{BINDING.attempt}" /
+            M.VAULT_HELPER_CASES[0] / "dev.mobile-release-kit.desktop")
+        fixtures, emitted, calls = InertFixtures(), [], []
+        fixtures.cases = M.VAULT_HELPER_CASES
+        def returned(argv, **kwargs):
+            case = argv[1]
+            self.assertEqual(argv, [M.EXECUTABLE, case])
+            state = BINDING.root(vault_helper=True) / "state" / case
+            self.assertEqual(kwargs["cwd"], state)
+            self.assertEqual(kwargs["timeout"], 135)
+            self.assertEqual(kwargs["environ"], M.app_environment(state, UID, "runner"))
+            calls.append(case)
+            return CompletedProcess(argv, 0, captured(M.expected_result(BINDING, case)), b"")
+        result = M.run_cases(BINDING, fixtures, returned, UID, "runner", emitted.append, M.VAULT_HELPER_SCOPE)
+        self.assertEqual(result, ())
+        self.assertEqual(calls, list(M.VAULT_HELPER_CASES))
+        self.assertEqual(fixtures.reads, calls)
+        self.assertEqual([row["case"] for row in emitted], calls)
+
+    def test_missing_actual_receipts_and_finality_or_application_consumption_mutations_fail(self):
+        for case in M.VAULT_HELPER_CASES:
+            report = M.expected_result(BINDING, case)
+            self.assertEqual(M.parse_result(captured(report), b"", BINDING, case), report)
+            absent = deepcopy(report); del absent["vaultHelper"]
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(absent), b"", BINDING, case)
+            helper = report["vaultHelper"]["initializeHelper"]
+            for field in ("tryWaitEntered", "tryWaitReturned", "exitObserved", "stdoutEof", "stderrEof",
+                          "helperSlotsSettled", "driverReturned", "driverBeforeCleanup", "blockingChildJoined",
+                          "resourcesSettled", "allocationsReleased"):
+                bad = deepcopy(report); bad["vaultHelper"]["initializeHelper"][field] = False
+                with self.subTest(case=case, field=field), self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+            for field in ("waitEntered", "waitFailed", "killAttempted", "killFailed", "cleanupUnknown", "outputFailed", "stderrSeen"):
+                bad = deepcopy(report); bad["vaultHelper"]["initializeHelper"][field] = True
+                with self.subTest(case=case, field=field), self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+            for index in range(3):
+                bad = deepcopy(report); bad["vaultHelper"]["initializeHelper"]["pipeClosed"][index] = False
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+            for field in ("allOriginalsSettled", "finalDocumentEmpty", "previewConsumedOnce"):
+                bad = deepcopy(report); bad["vaultHelper"][field] = False
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+            if case != M.VAULT_HELPER_CASES[0]:
+                for field in ("applicationCandidateConstructed", "applicationCandidateTaken", "applicationCallbackReturned"):
+                    bad = deepcopy(report); bad["vaultHelper"]["initializeHelper"][field] = True
+                    with self.assertRaises(M.Refused):
+                        M.parse_result(captured(bad), b"", BINDING, case)
+                bad = deepcopy(report); bad["vaultHelper"]["storage"]["header"] = [True, True]
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+            self.assertIs(type(helper["tryWaitEntered"]), bool)
+
+    def test_preadd_refusal_is_not_executed_not_a_fake_positive_and_other_cases_continue(self):
+        fixtures, emitted = InertFixtures(), []
+        fixtures.cases = M.VAULT_HELPER_CASES
+        def returned(argv, **_):
+            case = argv[1]; report = M.expected_result(BINDING, case)
+            if case != M.VAULT_HELPER_CASES[1]:
+                report["vaultHelper"] = M._expected_vault_helper(case, negative=True)
+            return CompletedProcess(argv, 0, captured(report), b"")
+        result = M.run_cases(BINDING, fixtures, returned, UID, "runner", emitted.append, M.VAULT_HELPER_SCOPE)
+        self.assertEqual(result, (M.VAULT_HELPER_CASES[0], M.VAULT_HELPER_CASES[2]))
+        self.assertEqual(fixtures.reads, list(M.VAULT_HELPER_CASES))
+        self.assertEqual([row["observer"]["vaultHelper"]["testResult"] for row in emitted],
+                         ["not-executed", "expected-stop", "not-executed"])
+        report = M._expected_vault_helper(M.VAULT_HELPER_CASES[2], negative=True)
+        for field, value in (("addEffect", 3), ("addItemCallsAbsent", False), ("addPrerequisiteRefused", False),
+                             ("nativeCandidateConsumed", True), ("lookupSettled", True), ("addSettled", None)):
+            bad = deepcopy(report); bad["initializeHelper"][field] = value
+            with self.subTest(field=field), self.assertRaises(M.Refused):
+                M._vault_helper_report(bad, M.VAULT_HELPER_CASES[2])
+        bad = deepcopy(report); bad["testResult"] = "expected-stop"
+        with self.assertRaises(M.Refused):
+            M._vault_helper_report(bad, M.VAULT_HELPER_CASES[2])
+        source = PATH.read_text()
+        self.assertIn("return 2 if not_executed else 0", source)
+        self.assertIn("focusedCasesPassed=not not_executed", source)
+
+    def test_native_parent_preparation_refuses_collisions_and_unsafe_ancestry_without_repair(self):
+        # No real home/account file is touched: only fixed fake namespace DATA.
+        native = SimpleNamespace(pw_uid=UID, pw_dir="/Users/runner")
+        safe = SimpleNamespace(st_dev=7, st_ino=100, st_mode=stat.S_IFDIR | 0o755,
+            st_uid=UID, st_gid=GID, st_nlink=2, st_size=4096, st_mtime_ns=1, st_ctime_ns=1)
+        fixtures = M.Fixtures(BINDING, UID, GID, M.VAULT_HELPER_SCOPE)
+        with patch("pwd.getpwuid", return_value=native), patch.object(fixtures, "_open", return_value=50), \
+             patch.object(M.os, "fstat", return_value=safe), patch.object(M.os, "stat", return_value=safe), \
+             patch.object(fixtures, "_mkdir", side_effect=FileExistsError("occupied")) as mkdir:
+            with self.assertRaises(FileExistsError):
+                fixtures._prepare_vault_parents()
+            self.assertEqual(mkdir.call_count, 1)
+            self.assertEqual(mkdir.call_args.args[1], f"mrk-macos-aqua-vault-{BINDING.source}-{BINDING.run}-{BINDING.attempt}")
+        unsafe = SimpleNamespace(**{**vars(safe), "st_mode": stat.S_IFDIR | 0o777})
+        fixtures = M.Fixtures(BINDING, UID, GID, M.VAULT_HELPER_SCOPE)
+        with patch("pwd.getpwuid", return_value=native), patch.object(fixtures, "_open", return_value=50), \
+             patch.object(M.os, "fstat", return_value=unsafe), patch.object(M.os, "stat", return_value=unsafe), \
+             patch.object(fixtures, "_mkdir") as mkdir:
+            with self.assertRaises(M.Refused):
+                fixtures._prepare_vault_parents()
+            mkdir.assert_not_called()
+
+    def test_private_output_accounting_is_bounded_and_refuses_links_modes_and_unexpected_files(self):
+        # Disposable DATA files: no encrypted vault/provider/native qualification.
+        for mutation in (None, "size", "mode", "link", "extra"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(prefix="mrk-vault-readback-data-") as temporary:
+                root = Path(temporary); case = M.VAULT_HELPER_CASES[0]
+                (root / case / "dev.mobile-release-kit.desktop" / "credential-vault-v1").mkdir(parents=True)
+                parent = root / case; app = parent / "dev.mobile-release-kit.desktop"; vault = app / "credential-vault-v1"
+                for path in (parent, app, vault): path.chmod(0o700)
+                for name, length in (("vault-lock", 0), ("initialization-reservation", 48), ("vault-header", 104)):
+                    (vault / name).write_bytes(b"x" * length); (vault / name).chmod(0o600)
+                if mutation == "size": (vault / "vault-header").write_bytes(b"x" * 105)
+                if mutation == "mode": (vault / "initialization-reservation").chmod(0o644)
+                if mutation == "link":
+                    (vault / "initialization-reservation").unlink()
+                    (vault / "initialization-reservation").symlink_to("vault-header")
+                if mutation == "extra": (vault / "unrelated").write_bytes(b"not admitted")
+                fixtures = M.Fixtures(BINDING, M.os.getuid(), M.os.getgid(), M.VAULT_HELPER_SCOPE)
+                fixtures.vault_namespace = fixtures._open(str(root), directory=True)
+                fixtures.vault_parents[case] = fixtures._open(case, fixtures.vault_namespace, directory=True)
+                fixtures.last_returned = True
+                try:
+                    with patch.object(fixtures, "readback", return_value={"sourceUnchanged": True}), \
+                         patch.object(fixtures, "_vault_namespace_current") as ancestry:
+                        if mutation is not None:
+                            with self.assertRaises((M.Refused, OSError)):
+                                fixtures.readback_vault(case, M._expected_vault_helper(case))
+                        else:
+                            result = fixtures.readback_vault(case, M._expected_vault_helper(case))
+                            self.assertEqual(result["vaultOutput"]["retainedPrivateBytes"], 152)
+                            self.assertEqual(result["vaultOutput"]["controlFileCount"], 3)
+                            self.assertFalse(result["vaultOutput"]["privateContentsExported"])
+                            ancestry.assert_called_once_with()
+                            with self.assertRaises(M.Refused):
+                                fixtures.readback_vault(case, M._expected_vault_helper(case))
+                finally:
+                    fixtures.close()
+                self.assertFalse(fixtures.fds)
+
+    def test_workflow_adds_only_closed_support_and_keeps_default_matrix_and_helper_graph(self):
+        root = PATH.parents[2]
+        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        header = workflow.split("    steps:\n", 1)[0]
+        self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
+        self.assertIn("        scope:\n          - project-fields\n", header)
+        self.assertNotIn("          - vault-helper-shipping", header)
+        blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
+        run = blocks["Three serial shipping-helper journeys through the original document and invocation owner"]
+        self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping'", run)
+        self.assertEqual(run.count("macos_aqua_qualification.py --scope vault-helper-shipping"), 1)
+        self.assertIn("[[ $status == 0 ]]", run)
+        for forbidden in ("security unlock", "create-keychain", "default-keychain", "list-keychains", "continue-on-error"):
+            self.assertNotIn(forbidden, run)
+        self.assertIn("aqua-vault-helper-results.jsonl", workflow)
+        self.assertNotIn("mrk-macos-aqua-vault-*", workflow)
+        driver = (root / "desktop/src-tauri/src/asset_session_keyring_macos.rs").read_text()
+        checkpoint = driver.index("Checkpoint::SuccessfulAddTerminal")
+        self.assertLess(checkpoint, driver.index("if done{break;}", checkpoint))
+        provider = (root / "desktop/src-tauri/src/vault_keyring_macos.rs").read_text()
+        self.assertIn("self.terminal.as_ref().is_some_and(|t|t.valid && t.input_closed)", provider)
+        self.assertIn("fn only_valid_decoded_terminal_input_retirement_suppresses_stop_control", provider)
+        vault = (root / "desktop/src-tauri/src/asset_session_vault.rs").read_text()
+        self.assertIn("DURABLE_QUALIFIED: bool = false", vault)
+        self.assertIn("Qualification::Ordinary => DURABLE_QUALIFIED", vault)
+        self.assertIn("self.gate(state, false)?;", vault)
 
 if __name__ == "__main__":
     unittest.main()

@@ -775,8 +775,8 @@ pub(crate) fn public_images_routing_data_check() -> bool {
         DialogChoice::ProjectPath(crate::asset_commands::ProjectPathField::MetadataRoot)] {
         if matches!(panel_kind(choice, None), Ok(PanelKind::PublicImages)) { return false; }
     }
-    tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal();
-    tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch();
+    tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal_data_check();
+    tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch_data_check();
     true
 }
 
@@ -833,7 +833,9 @@ mod tests {
         assert!(public_images_routing_data_check());
     }
     #[test]
-    pub(super) fn native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal() {
+    pub(super) fn native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal() { native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal_data_check(); }
+
+    pub(super) fn native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal_data_check() {
         for reason in [Reason::SourceRefused, Reason::UserCancelled] {
             // Inert projection DATA only. No panel, callback, original owner or
             // permission is constructed by this classifier regression.
@@ -854,7 +856,9 @@ mod tests {
         }
     }
     #[test]
-    pub(super) fn response_mapping_preserves_other_and_missing_facts_poison_dispatch() {
+    pub(super) fn response_mapping_preserves_other_and_missing_facts_poison_dispatch() { response_mapping_preserves_other_and_missing_facts_poison_dispatch_data_check(); }
+
+    pub(super) fn response_mapping_preserves_other_and_missing_facts_poison_dispatch_data_check() {
         assert!(response_kind(PanelResponse::Accept) == NativeResponse::Accept);
         assert!(response_kind(PanelResponse::Decline) == NativeResponse::Decline);
         assert!(response_kind(PanelResponse::Other) == NativeResponse::Other);
