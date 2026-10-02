@@ -2450,6 +2450,22 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("for (unsigned previous = 0; previous < queued; ++previous)", roster)
         self.assertIn("previous != at && pass->nodes[previous] && CFEqual(node, pass->nodes[previous])", roster)
         self.assertIn("mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]], MRK_AX_ATTR_PARENT)", roster)
+        # Excluded surfaces need a real typed Role, not ancestry or failure-as-absence.
+        # Every eligible Group/SplitGroup/Button retains Parent proof before use.
+        classified = [
+            "CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);",
+            "if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;",
+            "pass->roles[at] = s->result.last_role = mrk_ax_role(role);",
+            "if (!at && pass->roles[at] != MRK_ROLE_SHEET) return mrk_ax_fail(s, MRK_OPEN_CHANGED);",
+            "if (at && !CFEqual(role, kAXGroupRole) && !CFEqual(role, kAXSplitGroupRole)\n"
+            "            && !CFEqual(role, kAXButtonRole)) continue;",
+            "if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]], MRK_AX_ATTR_PARENT)) return NO;",
+            "if (CFEqual(role, kAXButtonRole)) {",
+            "mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0, MRK_AX_ATTR_CHILDREN)",
+        ]
+        positions = [roster.index(item) for item in classified]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(roster.count("kAXParentAttribute"), 1)
         self.assertIn("rechecking ? &s->result.recheck_nodes_examined : &s->result.initial_nodes_examined", roster)
         begun = "s->result.last_depth = pass->depths[at]; s->result.last_role = MRK_ROLE_NOT_READ;"
         self.assertLess(roster.index(begun), roster.index("if (at) (*examined)++"))
@@ -2483,6 +2499,7 @@ class AquaDataTests(unittest.TestCase):
                      "at ? original->nodes[original->parents[at]] : parent", "s->result.last_role != original->roles[at]",
                      "MRK_ROLE_SHEET", "MRK_ROLE_GROUP", "MRK_ROLE_SPLIT_GROUP", "MRK_ROLE_BUTTON"):
             self.assertIn(fact, path)
+        self.assertIn("if (!mrk_ax_equal_attribute(s, node, kAXParentAttribute, at ? original->nodes[original->parents[at]] : parent, MRK_AX_ATTR_PARENT)) return NO;", path)
         reset = "s->result.last_depth = original->depths[at]; s->result.last_role = MRK_ROLE_NOT_READ;"
         for call in ("mrk_ax_type(s, node", "kAXParentAttribute", "kAXRoleAttribute"):
             self.assertLess(path.index(reset), path.index(call))

@@ -1583,11 +1583,15 @@ static BOOL mrk_ax_control_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRe
         for (unsigned previous = 0; previous < queued; ++previous)
             if (previous != at && pass->nodes[previous] && CFEqual(node, pass->nodes[previous]))
                 return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
-        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]], MRK_AX_ATTR_PARENT)) return NO;
         CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
         pass->roles[at] = s->result.last_role = mrk_ax_role(role);
         if (!at && pass->roles[at] != MRK_ROLE_SHEET) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+        // Prove exclusion from the actual Role, never from a failed Parent read.
+        // Every eligible ancestor/control still binds its Parent before use.
+        if (at && !CFEqual(role, kAXGroupRole) && !CFEqual(role, kAXSplitGroupRole)
+            && !CFEqual(role, kAXButtonRole)) continue;
+        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]], MRK_AX_ATTR_PARENT)) return NO;
         if (CFEqual(role, kAXButtonRole)) {
             CFTypeRef title = mrk_ax_copy(s, node, kAXTitleAttribute, YES, MRK_AX_ATTR_TITLE);
             if (s->result.error) return NO;
