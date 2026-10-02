@@ -1034,9 +1034,10 @@ impl NotesContext {
         let forward=if restore{self.graph.moves.iter().find(|m|m.key==movement.forward).ok_or(Fault::Key)?}else{&movement};
         if !forward.finalized||self.objects[i].edge.as_ref()!=Some(&forward.to){return Err(Fault::Incomplete)}
         if restore&&!self.graph.transitions.iter().any(|p|p.key==t.paired&&p.accepted){return Err(Fault::Phase)}
+        let forward_parent=forward.to.parent;
         let before=self.snapshot(i)?;
         let policy=if restore{Arc::clone(self.objects[i].private.as_ref().ok_or(Fault::Phase)?)}else{
-            let parent=self.active_object(forward.to.parent)?;
+            let parent=self.active_object(forward_parent)?;
             self.ticket_validate_inherited_parent(i,parent)?;
             Arc::clone(self.objects[i].target.as_ref().ok_or(Fault::Phase)?)
         };

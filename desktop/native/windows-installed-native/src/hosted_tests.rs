@@ -11,7 +11,7 @@ pub(super) fn write_unavailable(book: &NativeBook, observation: &Result<bool>, o
     let Some((call, returned)) = book.first_unavailable else { return; };
     let (api, selector, kind) = match call {
         Call::Architecture => ("IsWow64Process2", "null", "boolean"),
-        Call::Folder => ("SHGetFolderPathW", "null", "hresult"),
+        Call::Folder | Call::FolderX86 => ("SHGetFolderPathW", "null", "hresult"),
         Call::WindowsDirectory => ("GetSystemWindowsDirectoryW", "null", "count"),
         Call::SystemDirectory => ("GetSystemDirectoryW", "null", "count"),
         Call::Mapping => ("QueryDosDeviceW", "null", "count"),

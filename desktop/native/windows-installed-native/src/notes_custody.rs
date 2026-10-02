@@ -281,7 +281,7 @@ impl Custody {
                 a.unicode.Buffer=a.input.as_mut_ptr();a.attributes.Length=size_of::<OBJECT_ATTRIBUTES>() as u32;
                 a.attributes.RootDirectory=original.parent.map(|p|self.book.handle(p).map_err(fault)).transpose()?.unwrap_or(null_mut());
                 a.attributes.ObjectName=&a.unicode;a.attributes.Attributes=F::OBJ_DONT_REPARSE;
-                a.attributes.SecurityDescriptor=descriptor.as_ref().map_or(null_mut(),|d|d.raw.as_ptr() as S::PSECURITY_DESCRIPTOR);
+                a.attributes.SecurityDescriptor=descriptor.as_ref().map_or(null(),|d|d.raw.as_ptr().cast::<S::SECURITY_DESCRIPTOR>());
             },
             Api::Read{slot,count,offset}|Api::Write{slot,count,offset}=>{
                 if *count==0||*count>BUFFER||*offset>i64::MAX as u64{return Err(Fault::Bounds)}
