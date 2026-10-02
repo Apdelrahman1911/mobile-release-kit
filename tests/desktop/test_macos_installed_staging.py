@@ -399,7 +399,8 @@ class MacInstalledData(unittest.TestCase):
             with self.subTest(reason=reason), mock.patch.object(TOOL, "app_command", side_effect=TOOL.Refused(reason)), \
                     contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
                 TOOL.main(["app", "--binary", "/inert/app", "--vault-helper", "/inert/helper",
-                           "--expected-vault-helper", "a" * 64, "--output", "/inert/output"])
+                           "--expected-vault-helper", "a" * 64, "--output", "/inert/output",
+                           "--bundletool-archive", "/inert/bundletool", "--aapt2-archive", "/inert/aapt2"])
             self.assertEqual(stopped.exception.code, 1)
             self.assertEqual(stderr.getvalue(), expected + "\n")
 
@@ -1558,6 +1559,32 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
 
 
+def android_support_fixture(root=Path("/synthetic-mrk-support")):
+    # Tiny inert ZIP inputs under a replaced SOURCE manifest, never vendor code.
+    rows, values, files, archives = [], {}, {}, []
+    for identity, filename, url, members in TOOL.ANDROID_SUPPORT_LAYOUT:
+        notices = []
+        buffer = io.BytesIO()
+        with TOOL.zipfile.ZipFile(buffer, "w", compression=TOOL.zipfile.ZIP_DEFLATED) as archive:
+            for member in members:
+                body = ("Synthetic public notice: " + identity + "/" + member + "\n").encode()
+                archive.writestr(member, body)
+                path = TOOL.ANDROID_SUPPORT_PREFIX + "notices/" + identity + "/" + member
+                notices.append({"member": member, "resourcePath": path, "size": len(body), "sha256": TOOL.digest(body)})
+                files[path] = (body, 0o644)
+        body = buffer.getvalue(); path = root / filename
+        values[path] = body; archives.append(path)
+        resource = TOOL.ANDROID_SUPPORT_PREFIX + filename
+        files[resource] = (body, 0o644)
+        rows.append({"id": identity, "fileName": filename, "resourcePath": resource, "url": url,
+                     "size": len(body), "sha256": TOOL.digest(body), "notices": notices})
+    manifest = {"schemaVersion": 1, "platform": "macos", "archives": rows}
+    manifest_path = root / "android-support.json"
+    values[manifest_path] = TOOL.canonical(manifest)
+    return SimpleNamespace(manifest=manifest, manifest_path=manifest_path, values=values, files=files,
+                           bundletool_archive=archives[0], aapt2_archive=archives[1])
+
+
 def normal_cargo_fixture(target=None):
     target = target or Path("/synthetic-mrk-preview/cargo-target")
     binary = target / "aarch64-apple-darwin/release/mobile-release-kit-desktop"
@@ -1578,6 +1605,124 @@ def cargo_lines(*items):
 
 
 @unittest.skipUnless(TOOL is not None, "POSIX DATA definitions only")
+class MacAndroidSupportData(unittest.TestCase):
+    def test_source_recipe_is_closed_and_not_a_user_download_configuration(self):
+        source_sha, rows = TOOL.android_support_manifest()
+        self.assertEqual(source_sha, TOOL.digest(TOOL.ANDROID_SUPPORT_MANIFEST.read_bytes()))
+        self.assertEqual([row["id"] for row in rows], ["bundletool", "aapt2"])
+        self.assertEqual(sum(row["size"] for row in rows), 36859873)
+        self.assertEqual(sum(n["size"] for row in rows for n in row["notices"]), 182223)
+        good = android_support_fixture().manifest
+        mutations = [lambda v: v.update(extra=True), lambda v: v.update(schemaVersion=True),
+            lambda v: v["archives"].reverse(), lambda v: v["archives"][0].update(url="https://untrusted.invalid/tool"),
+            lambda v: v["archives"][0].update(size=True), lambda v: v["archives"][0].update(sha256="A" * 64),
+            lambda v: v["archives"][0]["notices"][0].update(resourcePath="../LICENSE"),
+            lambda v: v["archives"][0]["notices"][0].update(size=1024 * 1024 + 1)]
+        for change in mutations:
+            value = TOOL.decode(TOOL.canonical(good)); change(value)
+            with mock.patch.object(TOOL, "read", return_value=TOOL.canonical(value)), self.assertRaises(TOOL.Refused):
+                TOOL.android_support_manifest()
+
+    def test_original_archives_and_notices_are_nonexecuting_data_with_exact_readback(self):
+        fixture = android_support_fixture()
+        with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+                mock.patch.object(TOOL, "read", side_effect=lambda path, *_: fixture.values[path]), \
+                mock.patch.object(TOOL, "write_tree") as output:
+            source_sha, files = TOOL.android_support_files(fixture)
+            self.assertEqual(files, fixture.files)
+            self.assertEqual(TOOL.android_support_input(files), source_sha)
+            result = TOOL.android_support_command(fixture)
+            self.assertEqual(result["androidSupportManifestSha256"], source_sha)
+            self.assertEqual(result["fileCount"], 10)
+            self.assertEqual(result["payloadBytes"], sum(len(body) for body, _ in files.values()))
+            self.assertEqual({mode for _, mode in files.values()}, {0o644})
+            output.assert_not_called()
+
+    def test_archive_identity_is_checked_before_any_zip_parsing(self):
+        for change in (lambda b: b + b"extra", lambda b: bytes([b[0] ^ 1]) + b[1:]):
+            fixture = android_support_fixture()
+            fixture.values[fixture.bundletool_archive] = change(fixture.values[fixture.bundletool_archive])
+            with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+                    mock.patch.object(TOOL, "read", side_effect=lambda path, *_: fixture.values[path]), \
+                    mock.patch.object(TOOL.zipfile, "ZipFile") as parser, self.assertRaisesRegex(TOOL.Refused, "android-support-archive"):
+                TOOL.android_support_files(fixture)
+            parser.assert_not_called()
+
+    def test_missing_duplicate_or_changed_notice_refuses_before_any_app_output(self):
+        for failure in ("missing", "duplicate", "changed"):
+            fixture = android_support_fixture()
+            first = fixture.manifest["archives"][0]
+            buffer = io.BytesIO()
+            with TOOL.zipfile.ZipFile(buffer, "w", compression=TOOL.zipfile.ZIP_DEFLATED) as archive:
+                for index, notice in enumerate(first["notices"]):
+                    data = fixture.files[notice["resourcePath"]][0]
+                    if index == 0 and failure == "missing":
+                        continue
+                    if index == 0 and failure == "changed":
+                        data = b"!" + data[1:]
+                    archive.writestr(notice["member"], data)
+                    if index == 0 and failure == "duplicate":
+                        with self.assertWarns(UserWarning):
+                            archive.writestr(notice["member"], data)
+            archive_bytes = buffer.getvalue()
+            first.update(size=len(archive_bytes), sha256=TOOL.digest(archive_bytes))
+            fixture.values[fixture.bundletool_archive] = archive_bytes
+            fixture.values[fixture.manifest_path] = TOOL.canonical(fixture.manifest)
+            _, binary, _, body = normal_cargo_fixture()
+            helper = Path("/synthetic-mrk-support/helper")
+            fixture.values.update({binary: body, helper: body})
+            args = SimpleNamespace(binary=binary, vault_helper=helper, expected_vault_helper=TOOL.digest(body),
+                output=Path("/synthetic-mrk-support/app"), bundletool_archive=fixture.bundletool_archive,
+                aapt2_archive=fixture.aapt2_archive)
+            original_read = TOOL.read
+            with self.subTest(failure=failure), mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+                    mock.patch.object(TOOL, "read", side_effect=lambda path, *limit: fixture.values[path] if path in fixture.values else original_read(path, *limit)), \
+                    mock.patch.object(TOOL, "write_tree") as output, self.assertRaisesRegex(TOOL.Refused, "android-support-notice"):
+                TOOL.app_command(args)
+            output.assert_not_called()
+
+    def test_both_explicit_archive_arguments_are_required_and_never_discovered(self):
+        for command, rest in (("android-support", []), ("app", ["--binary", "/a", "--vault-helper", "/h",
+                "--expected-vault-helper", "a" * 64, "--output", "/out"])):
+            for absent in ("--bundletool-archive", "--aapt2-archive"):
+                flags = ["--aapt2-archive", "/aapt2"] if absent == "--bundletool-archive" else ["--bundletool-archive", "/bundletool"]
+                with mock.patch.object(TOOL, "read") as reader, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:
+                    TOOL.main([command, *rest, *flags])
+                self.assertEqual(stopped.exception.code, 2)
+                reader.assert_not_called()
+
+    def test_workflows_download_fixed_originals_without_configuration_or_credentials(self):
+        root = Path(__file__).absolute().parents[2]
+        _, rows = TOOL.android_support_manifest()
+        name = "Acquire and verify the two fixed Android support archives as DATA"
+        for filename, assembly in (("desktop-macos-installed.yml", "Assemble and ad-hoc sign the app only (never --deep or the runtime)"),
+                                   ("desktop-macos-aqua.yml", "Assemble the instrumented engineering app; ad-hoc sign only the app")):
+            workflow = (root / ".github/workflows" / filename).read_text()
+            block = workflow_step(workflow, name)
+            self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", block)
+            self.assertEqual(block.count("/usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$work\""), 3)
+            self.assertEqual(block.count("/usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3"), 2)
+            self.assertEqual(block.count("--proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 90"), 2)
+            self.assertIn("set -o noclobber", block)
+            self.assertIn("umask 077", block)
+            for flag, row in zip(("bundletool", "aapt2"), rows):
+                self.assertIn("--url '" + row["url"] + "'", block)
+                self.assertIn("--max-filesize " + str(row["size"]), block)
+                self.assertIn('> "$work/' + row["fileName"] + '"', block)
+                self.assertIn('--' + flag + '-archive "$work/' + row["fileName"] + '"', block)
+                self.assertIn('--' + flag + '-archive "$MRK_MACOS_WORK/' + row["fileName"] + '"', workflow_step(workflow, assembly))
+            for forbidden in ("GH_TOKEN", "github.token", "--retry", "--netrc", "--insecure", "--location-trusted", "java "):
+                self.assertNotIn(forbidden, block)
+            self.assertIn("stage_macos_installed.py android-support", block)
+            self.assertLess(workflow.index(name), workflow.index("Build and sign the separate fixed vault helper before binding the app"))
+            if filename == "desktop-macos-aqua.yml":
+                condition = block.splitlines()[0]
+                self.assertEqual(condition, workflow_step(workflow, assembly).splitlines()[0])
+                self.assertNotIn("xcode-installed-classification", condition)
+                self.assertNotIn("wrapping-keychain-private", condition)
+
+
+@unittest.skipUnless(TOOL is not None, "POSIX DATA definitions only")
 class MacNormalPreviewData(unittest.TestCase):
     def test_real_app_copy_preserves_signed_helper_mode_bytes_and_normal_binding(self):
         # Real isolated filesystem copy; the bounded synthetic Mach-O is DATA,
@@ -1593,16 +1738,22 @@ class MacNormalPreviewData(unittest.TestCase):
             messages = cargo_lines(item, {"reason": "build-finished", "success": True})
             cargo = work / "cargo.jsonl"
             cargo.write_bytes(messages)
+            support = android_support_fixture(work)
+            for path, data in support.values.items():
+                path.write_bytes(data)
             originals = {path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
-                         for path in (binary, helper, cargo)}
+                         for path in (binary, helper, cargo, *support.values)}
             output = work / "Mobile Release Kit.app"
-            result = TOOL.app_command(SimpleNamespace(binary=binary, output=output,
-                normal_cargo_messages=cargo, normal_cargo_target_dir=target,
-                vault_helper=helper, expected_vault_helper=TOOL.digest(body)))
+            with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                result = TOOL.app_command(SimpleNamespace(binary=binary, output=output,
+                    normal_cargo_messages=cargo, normal_cargo_target_dir=target,
+                    bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
+                    vault_helper=helper, expected_vault_helper=TOOL.digest(body)))
             expected = {TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
                         "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/Info.plist").read_bytes(), 0o644),
                         "Contents/PkgInfo": (b"APPL????", 0o644),
                         "Contents/Resources/icon.png": ((TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes(), 0o644)}
+            expected.update(support.files)
             self.assertEqual(TOOL.tree(output), expected)
             self.assertEqual(result["vaultHelperSha256"], TOOL.digest(body))
             self.assertEqual(result["normalCargoArtifact"], TOOL.normal_cargo_artifact(messages, binary, target, body))
@@ -1639,10 +1790,14 @@ class MacNormalPreviewData(unittest.TestCase):
                   Path("/synthetic-mrk-preview/cargo.jsonl"): messages,
                   TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
                   TOOL.DESKTOP / "src-tauri/icons/icon.png": b"synthetic-icon"}
+        support = android_support_fixture()
+        values.update(support.values)
         args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
             normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=target,
+            bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
             vault_helper=Path("/synthetic-mrk-preview/helper"), expected_vault_helper=TOOL.digest(body))
         with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
+                mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path), \
                 mock.patch.object(TOOL, "write_tree") as output:
             staged = TOOL.app_command(args)
         self.assertEqual(staged["normalCargoArtifact"], result)
@@ -1750,18 +1905,27 @@ class MacNormalPreviewData(unittest.TestCase):
             output=Path("/inert/output"))
         app = {TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
                "Contents/Info.plist": (info, 0o644), "Contents/_CodeSignature/CodeResources": (b"signature-data", 0o644)}
+        support = android_support_fixture()
+        app.update(support.files)
         runtime = {"python/bin/python3": (b"interpreter-data", 0o755)}
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime),
               mock.patch.object(TOOL, "tree", return_value=app) as tree,
-              mock.patch.object(TOOL, "read", return_value=info),
+              mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path),
+              mock.patch.object(TOOL, "read", side_effect=lambda path, *_: support.values[path] if path == support.manifest_path else info),
               mock.patch.object(TOOL, "write_tree") as output):
             TOOL.input_command(args)
             files = output.call_args.args[1]
             self.assertEqual(files["app/" + TOOL.VAULT_HELPER], (body, 0o555))
+            for path, (data, _) in support.files.items():
+                self.assertEqual(files["app/" + path], (data, 0o444))
             for mutation, reason in (
                 ({name: value for name, value in app.items() if name != TOOL.VAULT_HELPER}, "signed-app-roster"),
                 ({**app, TOOL.VAULT_HELPER: (body + b"changed", 0o555)}, "nested-helper-signature-bytes-changed"),
                 ({**app, "Contents/Helpers/foreign": (body, 0o555)}, "input-executable-scope"),
+                ({name: value for name, value in app.items() if name != next(iter(support.files))}, "android-support-roster"),
+                ({**app, TOOL.ANDROID_SUPPORT_PREFIX + "extra": (b"extra", 0o644)}, "android-support-roster"),
+                ({**app, next(iter(support.files)): (b"changed", 0o644)}, "android-support-resource"),
+                ({**app, next(iter(support.files)): (support.files[next(iter(support.files))][0], 0o755)}, "android-support-resource"),
             ):
                 output.reset_mock(); tree.return_value = mutation
                 with self.subTest(reason=reason), self.assertRaisesRegex(TOOL.Refused, reason):

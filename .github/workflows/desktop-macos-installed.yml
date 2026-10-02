@@ -339,6 +339,30 @@ jobs:
           with os.fdopen(fd, "wb") as stream:
               stream.write(data); stream.flush(); os.fsync(stream.fileno())
           PYDATA
+      - name: Acquire and verify the two fixed Android support archives as DATA
+        timeout-minutes: 4
+        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          set -o noclobber
+          umask 077
+          work='${{ steps.work.outputs.root }}'
+          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]]
+          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
+            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \
+            --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \
+            --url 'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar' \
+            > "$work/bundletool-all-1.18.3.jar"
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
+            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \
+            --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \
+            --url 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar' \
+            > "$work/aapt2-8.9.2-12782657-osx.jar"
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
+            '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/stage_macos_installed.py android-support \
+            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \
+            > "$work/android-support-result.json"
       - name: Download only the exact accepted interpreter supplier archive (no rebuild or fallback)
         timeout-minutes: 3
         shell: bash
@@ -959,6 +983,8 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+            --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \
+            --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \
             --binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop" \
             --normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
             --normal-cargo-target-dir "$CARGO_TARGET_DIR" \
@@ -1683,6 +1709,7 @@ jobs:
             ${{ steps.work.outputs.root }}/native-acl-cleanup.status
             ${{ steps.work.outputs.root }}/native-acl-probe-result.json
             ${{ steps.work.outputs.root }}/runtime-result.json
+            ${{ steps.work.outputs.root }}/android-support-result.json
             ${{ steps.work.outputs.root }}/vault-helper-build.status
             ${{ steps.work.outputs.root }}/vault-helper-build.jsonl
             ${{ steps.work.outputs.root }}/vault-helper-build.stderr

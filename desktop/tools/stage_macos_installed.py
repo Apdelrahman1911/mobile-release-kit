@@ -37,6 +37,16 @@ INSTALL_ROOT = Path("/Library/Application Support/MobileReleaseKit")
 APP_NAME = "Mobile Release Kit.app"
 APP_BINARY = "Contents/MacOS/mobile-release-kit-desktop"
 VAULT_HELPER = "Contents/Helpers/mrk-vault-keychain"
+ANDROID_SUPPORT_PREFIX = "Contents/Resources/android-support/"
+ANDROID_SUPPORT_MANIFEST = DESKTOP / "macos-installed-inputs/android-support.json"
+ANDROID_SUPPORT_LAYOUT = (
+    ("bundletool", "bundletool-all-1.18.3.jar",
+     "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar",
+     ("LICENSE", "NOTICE", "META-INF/LICENSE", "META-INF/LICENSE.txt", "macos/NOTICE", "linux/NOTICE", "windows/NOTICE")),
+    ("aapt2", "aapt2-8.9.2-12782657-osx.jar",
+     "https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar",
+     ("NOTICE",)),
+)
 PACKAGE_ID = "dev.mobile-release-kit.desktop.installed"
 PACKAGE_VERSION = "0.1.0"
 BUNDLE_ID = "dev.mobile-release-kit.desktop"
@@ -109,6 +119,11 @@ class Refused(Exception):
 
 GENERIC_REFUSAL = "Mac package staging/observation refused; preserve original outputs, no automatic cleanup or retry."
 PACKAGE_REFUSALS = {
+    "android-support-manifest": "MRK_MACOS_PACKAGE_REFUSED=android-support-manifest",
+    "android-support-archive": "MRK_MACOS_PACKAGE_REFUSED=android-support-archive",
+    "android-support-notice": "MRK_MACOS_PACKAGE_REFUSED=android-support-notice",
+    "android-support-roster": "MRK_MACOS_PACKAGE_REFUSED=android-support-roster",
+    "android-support-resource": "MRK_MACOS_PACKAGE_REFUSED=android-support-resource",
     "output-mode": "MRK_MACOS_PACKAGE_REFUSED=output-mode",
     "compressed-data-bound": "MRK_MACOS_PACKAGE_REFUSED=compressed-data-bound",
     "xar-header-bound": "MRK_MACOS_PACKAGE_REFUSED=xar-header-bound",
@@ -884,6 +899,82 @@ def preview_command(args):
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "packageSha256": digest(package),
             "fileCount": 3, "qualification": "normal-early-preview-not-launched-or-product-qualified"}
 
+def android_support_manifest():
+    # Reviewed source DATA, not a user recipe, runtime network grant or sidecar.
+    body = read(ANDROID_SUPPORT_MANIFEST, 16384)
+    value = decode(body)
+    need(type(value) is dict and set(value) == {"schemaVersion", "platform", "archives"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["platform"] == "macos" and type(value["archives"]) is list
+         and len(value["archives"]) == len(ANDROID_SUPPORT_LAYOUT), "android-support-manifest")
+    destinations = set()
+    total = notices_total = 0
+    for row, (identity, filename, url, members) in zip(value["archives"], ANDROID_SUPPORT_LAYOUT):
+        need(type(row) is dict and set(row) == {"id", "fileName", "resourcePath", "url", "size", "sha256", "notices"}
+             and row["id"] == identity and row["fileName"] == filename and row["url"] == url
+             and row["resourcePath"] == ANDROID_SUPPORT_PREFIX + filename
+             and type(row["size"]) is int and 0 < row["size"] <= 64 * 1024 * 1024 and sha(row["sha256"])
+             and type(row["notices"]) is list and len(row["notices"]) == len(members), "android-support-manifest")
+        total += row["size"]
+        destinations.add(row["resourcePath"])
+        for notice, member in zip(row["notices"], members):
+            expected = ANDROID_SUPPORT_PREFIX + "notices/" + identity + "/" + member
+            need(type(notice) is dict and set(notice) == {"member", "resourcePath", "size", "sha256"}
+                 and notice["member"] == member and notice["resourcePath"] == expected
+                 and type(notice["size"]) is int and 0 < notice["size"] <= 1024 * 1024
+                 and sha(notice["sha256"]) and expected not in destinations, "android-support-manifest")
+            notices_total += notice["size"]
+            destinations.add(expected)
+    need(total <= 64 * 1024 * 1024 and notices_total <= 1024 * 1024, "android-support-manifest")
+    directories(destinations)  # Same path, case-fold and file/directory policy.
+    return digest(body), value["archives"]
+
+
+def android_support_files(args):
+    manifest_sha, rows = android_support_manifest()
+    files = {}
+    for row, path in zip(rows, (args.bundletool_archive, args.aapt2_archive)):
+        body = read(path, row["size"])
+        # Authenticate the complete original before parsing even its directory.
+        need(len(body) == row["size"] and digest(body) == row["sha256"], "android-support-archive")
+        files[row["resourcePath"]] = (body, 0o644)
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            entries = archive.infolist()
+            need(0 < len(entries) <= 32768, "android-support-archive")
+            for notice in row["notices"]:
+                selected = [entry for entry in entries if entry.filename == notice["member"]]
+                need(len(selected) == 1, "android-support-notice")
+                entry = selected[0]
+                need(not entry.is_dir() and not entry.flag_bits & 1 and entry.file_size == notice["size"]
+                     and entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED), "android-support-notice")
+                with archive.open(entry) as stream:
+                    text = stream.read(notice["size"] + 1)
+                need(len(text) == notice["size"] and digest(text) == notice["sha256"]
+                     and b"\0" not in text, "android-support-notice")
+                text.decode("utf-8", "strict")
+                files[notice["resourcePath"]] = (text, 0o644)
+    return manifest_sha, files
+
+
+def android_support_input(app):
+    manifest_sha, rows = android_support_manifest()
+    expected = {row["resourcePath"]: row for row in rows}
+    expected.update({notice["resourcePath"]: notice for row in rows for notice in row["notices"]})
+    need({name for name in app if name.startswith(ANDROID_SUPPORT_PREFIX)} == set(expected), "android-support-roster")
+    for name, row in expected.items():
+        body, mode = app[name]
+        need(mode in (0o444, 0o644) and len(body) == row["size"] and digest(body) == row["sha256"],
+             "android-support-resource")
+    return manifest_sha
+
+
+def android_support_command(args):
+    manifest_sha, files = android_support_files(args)
+    return {"schemaVersion": 1, "androidSupportManifestSha256": manifest_sha,
+            "fileCount": len(files), "payloadBytes": sum(len(body) for body, _ in files.values()),
+            "qualification": "original-archive-and-notice-data-only-no-vendor-execution"}
+
+
 def app_command(args):
     cargo_messages = getattr(args, "normal_cargo_messages", None)
     cargo_target = getattr(args, "normal_cargo_target_dir", None)
@@ -904,11 +995,14 @@ def app_command(args):
     files = {APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555), "Contents/Info.plist": (info, 0o644),
              "Contents/PkgInfo": (b"APPL????", 0o644),
              "Contents/Resources/icon.png": (read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024), 0o644)}
+    support_sha, support = android_support_files(args)
+    files.update(support)
     # Native codesign is a SEPARATE fixed workflow command after this returned
     # copy. It may modify the app only; the runtime is not nested in the app.
     # Root/Contents must remain writable to that original codesign writer.
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
-    result = {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper), "qualification": "app-copied-not-signed-or-launched"}
+    result = {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper),
+              "androidSupportManifestSha256": support_sha, "qualification": "app-copied-not-signed-or-launched"}
     if normal is not None:
         result["normalCargoArtifact"] = normal
     return result
@@ -935,6 +1029,7 @@ def input_command(args):
     macho(app[VAULT_HELPER][0], system_only=True)
     need(sha(args.expected_vault_helper) and digest(app[VAULT_HELPER][0]) == args.expected_vault_helper,
          "nested-helper-signature-bytes-changed")
+    support_sha = android_support_input(app)
     files = {}
     for prefix, source in (("runtime/", runtime), ("app/", app)):
         for name, (body, mode) in source.items():
@@ -951,6 +1046,7 @@ def input_command(args):
     files["install-inventory.json"] = (inventory, 0o444)
     write_tree(args.output, files)
     return {"schemaVersion": 1, "inventorySha256": digest(inventory), "runtimeManifestSha256": args.expected_manifest,
+            "androidSupportManifestSha256": support_sha,
             "fileCount": len(rows), "qualification": "fresh-install-input-not-installed"}
 
 
@@ -1881,6 +1977,11 @@ def main(argv=None):
     app.add_argument("--output", required=True, type=Path)
     app.add_argument("--normal-cargo-messages", type=Path)
     app.add_argument("--normal-cargo-target-dir", type=Path)
+    app.add_argument("--bundletool-archive", required=True, type=Path)
+    app.add_argument("--aapt2-archive", required=True, type=Path)
+    support = commands.add_parser("android-support", help="Verify only the two fixed original support archives and notices; never execute them")
+    support.add_argument("--bundletool-archive", required=True, type=Path)
+    support.add_argument("--aapt2-archive", required=True, type=Path)
     preview = commands.add_parser("preview")
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)
@@ -1943,14 +2044,14 @@ def main(argv=None):
         return status
     action = {"describe-runtime": runtime_command, "runtime": runtime_command,
               "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command, "preview": preview_command,
-              "input": input_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
+              "input": input_command, "android-support": android_support_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,
               "check-installer-result-absent": installer_result_absent_command,
               "observe-installation": observation_command, "observe-installer-fixture": fixture_observation_command}[args.command]
     try:
         result = action(args)
     except Refused as error:
-        if args.command in ("app", "package-format-input", "prepare-package", "audit-package"):
+        if args.command in ("app", "android-support", "input", "package-format-input", "prepare-package", "audit-package"):
             print(package_refusal_message(error), file=sys.stderr)
             raise SystemExit(1)
         raise

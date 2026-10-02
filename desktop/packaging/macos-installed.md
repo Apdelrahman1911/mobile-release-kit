@@ -12,6 +12,33 @@ Do not push the verification branch or use these commands before separate
 actual-source/command review; integration is not proof that this revision works.
 
 
+## App-owned Android support archives
+
+`desktop/macos-installed-inputs/android-support.json` is the reviewed, closed
+source recipe for bundletool1.18.3 and AGP AAPT2 8.9.2-12782657. The developer
+stager requires both original archives explicitly; the user still selects only
+JDK, SDK and Gradle through the application. There is no fourth picker or cache
+discovery. The workflows acquire these two public files with an empty
+credential/configuration environment, HTTPS-only redirects and fixed byte/time
+bounds, then authenticate every original and its selected notices before builds.
+
+The original JARs remain non-executable DATA under
+`Contents/Resources/android-support/`, with all eight selected original public
+license/notice members under `notices/`. This adds ten leaves /37,042,096 bytes;
+existing app, inventory and memory bounds remain unchanged. No vendor program
+is extracted, executed, re-signed or altered by packaging, and no SDK license is
+accepted for the user. This placement follows Apple's
+[TN2206 Resources guidance](https://developer.apple.com/library/archive/technotes/tn2206/_index.html).
+
+Before Installer inputs are published, the signed app is reread and its entire
+owned support-resource roster, bytes and non-executable modes must match the
+source recipe. Archives/notices copy as0644 and normalize to0444 in the protected
+installation. Missing, extra, changed or executable support resources refuse
+before output. The recorded manifest digest is DATA, not runtime authorization.
+Native signature/Installer/readback checks remain required on the current
+package. Packaging equality alone does **not** qualify the complete Android
+supplier, grant protected registration, or prove a build/sign operation.
+
 ## Fixed Mac vault helper integration — source draft, not qualified
 
 The ordinary app still cannot call Add/Lookup directly. The separate

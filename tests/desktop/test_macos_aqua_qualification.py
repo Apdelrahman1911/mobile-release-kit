@@ -6422,6 +6422,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Check current owner pins before native preparation",
             "Compile headless Mac libraries and run thirteen exact DATA regressions first",
             "Fail fast on native Scripts ownership and package format (never Installer)",
+            "Acquire and verify the two fixed Android support archives as DATA",
             "Download only the exact accepted M archive (no rebuild or fallback)",
             "Reuse accepted Mac supplier and prepare only the current source payload",
             "Build and sign the separate fixed vault helper before binding the app",

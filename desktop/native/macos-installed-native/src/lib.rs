@@ -2629,7 +2629,7 @@ mod tests {
             (8, 1, PanelResponse::Accept), (8, 0, PanelResponse::Decline),
             (8, -1000, PanelResponse::Other), (8, -1001, PanelResponse::Other),
             (8, 1000, PanelResponse::Other), (8, 1001, PanelResponse::Other),
-            (8, i64::MIN, PanelResponse::Other), (10, 1, PanelResponse::Other),
+            (8, i64::MIN, PanelResponse::Other), (i32::MAX, 1, PanelResponse::Other),
             (9, 1, PanelResponse::Accept), (9, 0, PanelResponse::Decline),
             (4, -1000, PanelResponse::Other), (7, 1001, PanelResponse::Other),
             (3, -1000, PanelResponse::Other), (3, 1001, PanelResponse::Other),
@@ -2643,9 +2643,24 @@ mod tests {
             // SAFETY: fixed primitive DATA into a pure classifier, no handles
             // or AppKit construction and no ownership transfer.
             let actual = unsafe { mrk_panel_response(kind, code, 0) };
-            assert_eq!(panel_response(actual).ok(), Some(expected));
+            assert_eq!(panel_response(actual).ok(), Some(expected), "kind={kind} code={code}");
             let programmatic = unsafe { mrk_panel_response(kind, code, 1) };
-            assert_eq!(panel_response(programmatic).ok(), Some(PanelResponse::Other));
+            assert_eq!(panel_response(programmatic).ok(), Some(PanelResponse::Other), "programmatic kind={kind} code={code}");
+        }
+        // Android purposes are actual open panels, not unknown-kind sentinels.
+        // Use the public purpose mapping while testing the same native classifier.
+        for purpose in [PanelKind::AndroidJdk, PanelKind::AndroidSdk, PanelKind::AndroidGradle] {
+            let kind = purpose.code();
+            for (code, expected) in [(1, PanelResponse::Accept), (0, PanelResponse::Decline),
+                (-1000, PanelResponse::Other), (-1001, PanelResponse::Other),
+                (1000, PanelResponse::Other), (1001, PanelResponse::Other),
+                (i64::MIN, PanelResponse::Other), (i64::MAX, PanelResponse::Other)] {
+                // SAFETY: fixed scalar DATA, no AppKit object or native permit.
+                let actual = unsafe { mrk_panel_response(kind, code, 0) };
+                assert_eq!(panel_response(actual).ok(), Some(expected), "kind={kind} code={code}");
+                let programmatic = unsafe { mrk_panel_response(kind, code, 1) };
+                assert_eq!(panel_response(programmatic).ok(), Some(PanelResponse::Other), "programmatic kind={kind} code={code}");
+            }
         }
         assert!(panel_response(-1).is_err());
         assert!(panel_response(3).is_err());
