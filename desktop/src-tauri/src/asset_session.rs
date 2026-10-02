@@ -5354,6 +5354,8 @@ mod installed_macos_observation {
         pub(crate) preview_consumed: bool, pub(crate) storage: Option<vault::QualificationStorage>,
         pub(crate) initialize: Option<crate::vault_keyring_macos::QualificationSnapshot>,
         pub(crate) lookup: Option<crate::vault_keyring_macos::QualificationSnapshot>,
+        pub(crate) initialize_transport: Option<crate::vault_keyring_macos::QualificationTransportSnapshot>,
+        pub(crate) lookup_transport: Option<crate::vault_keyring_macos::QualificationTransportSnapshot>,
     }
     impl DocumentBinding {
         pub(crate) fn register_installed_macos_vault(&self,
@@ -5450,11 +5452,20 @@ mod installed_macos_observation {
             if !control.bound(&self.inner.session_identity) || book.originals.len() != state.next_operation as usize { return None; }
             let (vault_state,key_present) = vault::qualification_state(&state);
             let mut initialize = None; let mut lookup = None; let mut storage = None; let mut preview_consumed = false;
+            let mut initialize_transport = None; let mut lookup_transport = None;
             for (owner,kind) in &book.originals {
                 if *kind == Some(Operation::Initialize) {
-                    initialize = owner.keyring.try_lock().ok()?.qualification_snapshot();
+                    (initialize, initialize_transport) = {
+                        let keyring = owner.keyring.try_lock().ok()?;
+                        (keyring.qualification_snapshot(), keyring.qualification_transport_snapshot())
+                    };
                     let (observed, consumed) = vault::qualification_storage(owner)?; storage = Some(observed); preview_consumed = consumed;
-                } else if *kind == Some(Operation::Unlock) { lookup = owner.keyring.try_lock().ok()?.qualification_snapshot(); }
+                } else if *kind == Some(Operation::Unlock) {
+                    (lookup, lookup_transport) = {
+                        let keyring = owner.keyring.try_lock().ok()?;
+                        (keyring.qualification_snapshot(), keyring.qualification_transport_snapshot())
+                    };
+                }
             }
             let original_bound = state.lifetime.original_bound();
             Some(VaultSnapshot { unknown:state.unknown || state.exhausted || state.lost_observed || !original_bound,
@@ -5465,7 +5476,7 @@ mod installed_macos_observation {
                 originals:book.originals.len(),originals_settled:book.originals.iter().all(|(o,_)|session_original_settled(&self.inner,o)),
                 empty:quiet(&state) && session_data_empty(&state) && state.vault.is_none(),state:vault_state,key_present,
                 initialize_preview:state.slot.as_ref().is_some_and(|slot|slot.preview.as_ref().is_some_and(|p|vault::initialize_preview_valid(&state,slot,p))),
-                preview_consumed,storage,initialize,lookup })
+                preview_consumed,storage,initialize,lookup,initialize_transport,lookup_transport })
         }
         fn macos_vault_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
             let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; }; let Some(book) = book.as_ref() else { return false; };

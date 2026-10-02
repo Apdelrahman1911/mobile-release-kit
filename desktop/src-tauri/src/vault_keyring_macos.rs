@@ -628,6 +628,7 @@ impl LookupBook {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
 mod qualification {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
     #[derive(Default)]
     pub(super) struct Book {
         pub(super) application_constructed: bool, pub(super) application_taken: bool, pub(super) application_returned: bool,
@@ -648,6 +649,13 @@ mod qualification {
         driver_returned: bool, driver_before_cleanup: bool, blocking_child_joined: bool, resources_settled: bool, allocations_released: bool,
         first_failure: Option<&'static str>, cleanup_contracted: bool, cleanup_unknown: bool,
         pub(crate) application_candidate_constructed: bool, application_candidate_taken: bool, application_callback_returned: bool,
+    }
+    /// Original returned status and byte count only. No pipe bytes, native
+    /// terminal, cleanup receipt or new process observation is manufactured.
+    #[derive(Clone, Copy, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct TransportSnapshot {
+        exit_code: Option<i32>, exit_signal: Option<i32>, response_bytes: usize,
     }
     fn outcome(value: Outcome) -> &'static str { match value {
         Outcome::Pending=>"pending",Outcome::Added=>"added",Outcome::Candidate=>"candidate",Outcome::Missing=>"missing",
@@ -735,9 +743,29 @@ mod qualification {
                 3=>s.lookup_settled=Some(true),_=>s.native_candidate_consumed=Some(true)}
             if s.provider_negative() { return false; }
         }
+        // Inert DATA statuses, not an executed helper or native exit receipt.
+        let mut book=LookupBook::new();
+        if book.qualification_transport_snapshot().is_some() { return false; }
+        book.entered=true;
+        let Some(empty)=book.qualification_transport_snapshot() else { return false; };
+        if empty.exit_code.is_some() || empty.exit_signal.is_some() || empty.response_bytes!=0 { return false; }
+        book.exit=Some(ExitStatus::from_raw(64 << 8));book.used=wire::RESPONSE_LIMIT+1;
+        let Some(refused)=book.qualification_transport_snapshot() else { return false; };
+        if refused.exit_code!=Some(64) || refused.exit_signal.is_some() || refused.response_bytes!=16385 { return false; }
+        book.exit=Some(ExitStatus::from_raw(9));
+        let Some(signaled)=book.qualification_transport_snapshot() else { return false; };
+        if signaled.exit_code.is_some() || signaled.exit_signal!=Some(9) { return false; }
         true
     }
     impl LookupBook {
+        pub(crate) fn qualification_transport_snapshot(&self) -> Option<TransportSnapshot> {
+            // Both fields stay in this original book after settled storage
+            // disposal; do not inspect the already-zeroized output buffer.
+            self.entered.then(|| TransportSnapshot {
+                exit_code:self.exit.as_ref().and_then(ExitStatus::code),
+                exit_signal:self.exit.as_ref().and_then(ExitStatusExt::signal),response_bytes:self.used,
+            })
+        }
         pub(crate) fn qualification_before_go(&self) -> bool {
             self.driver_entered && self.launch == Launch::Returned && !self.go && !self.write_attempted && !self.request_sent
                 && self.first.is_none() && !self.uncertain && !self.joined
@@ -803,6 +831,9 @@ mod qualification {
 use qualification::Book as QualificationBook;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use qualification::Snapshot as QualificationSnapshot;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use qualification::TransportSnapshot as QualificationTransportSnapshot;
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use qualification::data_checks as qualification_data_checks;

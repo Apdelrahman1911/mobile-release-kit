@@ -141,7 +141,9 @@ def vault_failure_context_data():
                           "operationSettlement": "unknown", "state": "interrupted", "keyPresent": False,
                           "initializePreview": False, "previewConsumed": True,
                           "storage": {"reservation": [True, False], "header": [False, False], "durability": [False, False]},
-                          "initialize": helper, "lookup": None}}}
+                          "initialize": helper, "lookup": None,
+                          "initializeTransport": {"exitCode": None, "exitSignal": None, "responseBytes": 0},
+                          "lookupTransport": None}}}
 
 
 def action_context_data(step="CancelProject", *, site=None, domain="objc-exception", error="io"):
@@ -8747,7 +8749,8 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         good = vault_failure_context_data()
         before = deepcopy(good)
         before["vault"]["snapshot"].update(operationId=None, operationPhase=None, operationReason=None,
-                                            operationSettlement=None, state=None, storage=None, initialize=None)
+                                            operationSettlement=None, state=None, storage=None, initialize=None,
+                                            initializeTransport=None)
         historical = deepcopy(good); del historical["vault"]
         for case in M.VAULT_HELPER_CASES:
             for value in (good, before, historical):
@@ -8755,6 +8758,14 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
                 self.assertEqual(M.failure_context(b"", row, case), value)
                 with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
                     M.parse_result(captured(M.expected_result(BINDING, case)), row, BINDING, case)
+        for code, signal, count in ((64, None, 0), (0, None, 16385), (255, None, 1),
+                                    (None, 9, 8), (None, 127, 32), (None, None, 16384)):
+            value = deepcopy(good)
+            value["vault"]["snapshot"]["initializeTransport"] = {"exitCode": code, "exitSignal": signal, "responseBytes": count}
+            row = project_selection_row(value, "vault-finality-contract", "Vault(Initialized)")
+            self.assertEqual(M.failure_context(b"", row, M.VAULT_HELPER_CASES[0]), value)
+            with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+                M.parse_result(captured(M.expected_result(BINDING, M.VAULT_HELPER_CASES[0])), row, BINDING, M.VAULT_HELPER_CASES[0])
         # Retain every closed partial outcome, not only provider-success and
         # provider-negative subsets used by successful result parsing.
         provider = (PATH.parents[1] / "src-tauri/src/vault_keyring_macos.rs").read_text()
@@ -8789,6 +8800,14 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
                          ("addOutcome", "PRIVATE"), ("firstFailure", "PRIVATE")):
             value = deepcopy(good); value["vault"]["snapshot"]["initialize"][key] = bad; variants.append(value)
         value = deepcopy(good); value["vault"]["snapshot"]["lookup"] = {}; variants.append(value)
+        for transport in ({}, [], {"exitCode": None, "exitSignal": None, "responseBytes": 0, "privatePath": "PRIVATE"},
+                          {"exitCode": 64, "exitSignal": 9, "responseBytes": 0}):
+            value = deepcopy(good); value["vault"]["snapshot"]["initializeTransport"] = transport; variants.append(value)
+        for key, bad in (("exitCode", True), ("exitCode", -1), ("exitCode", 256), ("exitCode", "64"),
+                         ("exitSignal", False), ("exitSignal", 0), ("exitSignal", 128), ("exitSignal", 9.0),
+                         ("responseBytes", None), ("responseBytes", True), ("responseBytes", -1), ("responseBytes", 16386)):
+            value = deepcopy(good); value["vault"]["snapshot"]["initializeTransport"][key] = bad; variants.append(value)
+        value = deepcopy(good); value["vault"]["snapshot"]["lookupTransport"] = {}; variants.append(value)
         for value in variants:
             with self.subTest(value=value):
                 self.assertIsNone(M.failure_context(b"", project_selection_row(value, "vault-finality-contract", "Vault(Initialized)"),
@@ -8840,6 +8859,8 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
                       pipeClosed=[False, False, False])
         snapshot.update(initialize=helper, lookup=deepcopy(helper),
                         storage={key: [False, False] for key in ("reservation", "header", "durability")})
+        for key in ("initializeTransport", "lookupTransport"):
+            snapshot[key] = {"exitCode": None, "exitSignal": None, "responseBytes": 16385}
         row = project_selection_row(value, "vault-finality-contract", "Vault(Initialized)")
         self.assertLessEqual(len(json.dumps(value, separators=(",", ":")).encode("ascii")), 8192)
         self.assertLessEqual(len(row), 8448)
@@ -8862,6 +8883,11 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         self.assertEqual(sample.count("state.lifetime.original_bound()"), 1)
         self.assertIn("|| !original_bound", sample)
         self.assertIn("document_unknown:state.unknown,exhausted:state.exhausted,lost_observed:state.lost_observed,original_bound", sample)
+        for name in ("initialize", "lookup"):
+            pair = sample.split(f"({name}, {name}_transport) = {{", 1)[1].split("};", 1)[0]
+            self.assertEqual(pair.count("owner.keyring.try_lock()"), 1)
+            self.assertIn("(keyring.qualification_snapshot(), keyring.qualification_transport_snapshot())", pair)
+            self.assertNotIn("qualification_storage", pair)
         frame = observer.split("struct FailureSnapshot", 1)[1].split("fn failure_context(", 1)[0]
         self.assertIn("vault: r.vault_failure", frame)
         self.assertIn("self.vault = None;", frame.split("fn at_expiry(", 1)[1].split("fn frame(", 1)[0])

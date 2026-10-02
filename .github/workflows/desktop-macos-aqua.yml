@@ -49,20 +49,20 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping || "$MRK_MACOS_AQUA_SCOPE" == installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping-installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private ]]
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
-          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]]
-          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
-          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]]
-          [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]]
-          [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]]
-          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
-          [[ "$(/usr/bin/id -u)" != 0 ]]
+          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping || "$MRK_MACOS_AQUA_SCOPE" == installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping-installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private ]] || exit 1
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
+          [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
           if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private ]]; then
             # Supplier/CLT admission belongs only to the unchanged build routes.
-            [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == b030d127c8507ddcc3db4641ac03f440c6ac4c8128fa08053eb12e00856f429b ]]
-            [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 4dee7a2c1f59b742fde0128df49efad5e848958b35d8d2683a595706615e7659 ]]
-            [[ -d "$DEVELOPER_DIR" ]]
+            [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == b030d127c8507ddcc3db4641ac03f440c6ac4c8128fa08053eb12e00856f429b ]] || exit 1
+            [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 4dee7a2c1f59b742fde0128df49efad5e848958b35d8d2683a595706615e7659 ]] || exit 1
+            [[ -d "$DEVELOPER_DIR" ]] || exit 1
           fi
       - name: Check out exact reviewed source without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -94,8 +94,8 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]]
-          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]] || exit 1
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-aqua.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
@@ -105,8 +105,8 @@ jobs:
         run: |
           set -euo pipefail
           set -o noclobber
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]] || exit 1
           "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
           import hashlib, json, os, stat, subprocess, sys
           def git(*args):
@@ -318,7 +318,7 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/headless-build.status"
-          [[ $status == 0 ]]
+          [[ $status == 0 ]] || exit "$status"
           "$MRK_PYTHON" -I -S -B - <<'PY_HEADLESS'
           import hashlib, importlib.util, json, os, pathlib, re, stat, subprocess, sys
           work = pathlib.Path(os.environ["MRK_MACOS_WORK"])
@@ -517,7 +517,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          [[ -d "$DEVELOPER_DIR" ]]
+          [[ -d "$DEVELOPER_DIR" ]] || exit 1
           # Existing pinned loader + run_owned, no new executor or fixture CLI.
           # Cargo/rustc cwd remains below desktop/rust-toolchain.toml.
           # Select the native package as root; its standalone Cargo.lock is the
@@ -2204,10 +2204,10 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(/usr/bin/id -u)" != 0 ]]
+          [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py package-format-input \
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
-          [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
@@ -2217,7 +2217,7 @@ jobs:
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
           # BSD tar pads stdout even when compressed; use the fresh private file.
-          [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-format-scripts" || exit
@@ -2228,10 +2228,10 @@ jobs:
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-format-tar.status"
-          [[ $tar_status == 0 ]]
+          [[ $tar_status == 0 ]] || exit "$tar_status"
           # xar is not a streaming/O_EXCL tool: reserve its private output parent.
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-format-final"
-          [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-format-parts" || exit
@@ -2242,7 +2242,7 @@ jobs:
           xar_status=$?
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-format-xar.status"
-          [[ $xar_status == 0 ]]
+          [[ $xar_status == 0 ]] || exit "$xar_status"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
@@ -2256,7 +2256,7 @@ jobs:
           set -o noclobber
           umask 077
           work='${{ steps.work.outputs.root }}'
-          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]]
+          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1
           # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
             /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \
@@ -2460,7 +2460,7 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
-          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
@@ -2470,7 +2470,7 @@ jobs:
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
           # BSD tar pads stdout even when compressed; use the fresh private file.
-          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/scripts" || exit
@@ -2481,10 +2481,10 @@ jobs:
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"
-          [[ $tar_status == 0 ]]
+          [[ $tar_status == 0 ]] || exit "$tar_status"
           # xar is not a streaming/O_EXCL tool: reserve its private output parent.
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-final"
-          [[ ! -e "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-parts" || exit
@@ -2495,7 +2495,7 @@ jobs:
           xar_status=$?
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
-          [[ $xar_status == 0 ]]
+          [[ $xar_status == 0 ]] || exit "$xar_status"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
@@ -2534,7 +2534,7 @@ jobs:
           capture_status_saved=$?
           set -e
           if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
-          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]] || exit 1
           # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
           # A collision, partial publication, unknown close or timeout fails
           # here. Keep originals; no uninstall, rollback, retries or repair.
@@ -2560,7 +2560,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope project-fields \
@@ -2568,7 +2568,7 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua-project-fields.status"
-          [[ $status == 0 ]]
+          [[ $status == 0 ]] || exit "$status"
           # The original helper returns zero only after original calls/readbacks,
           # fixture closes and complete-record publication. Failure remains job
           # failure; the separate fixture namespace remains evidence.
@@ -2582,7 +2582,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope android-inputs \
@@ -2590,7 +2590,7 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua-android-inputs.status"
-          [[ $status == 0 ]]
+          [[ $status == 0 ]] || exit "$status"
           # The original helper returns zero only after original calls/readbacks,
           # fixture closes and complete-record publication. Failure remains job
           # failure; the separate fixture namespace remains evidence.
@@ -2604,7 +2604,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope vault-helper-shipping \
@@ -2612,7 +2612,7 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua-vault-helper.status"
-          [[ $status == 0 ]]
+          [[ $status == 0 ]] || exit "$status"
           # A provider-prerequisite NOT_EXECUTED returns2, never green native
           # qualification. No Keychain creation/unlock/default/search changes.
           # Synthetic core-created rows and bounded private vault fixtures stay
@@ -2627,7 +2627,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope installation-inspection \
@@ -2635,7 +2635,7 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua-installation-inspection.status"
-          [[ $status == 0 ]]
+          [[ $status == 0 ]] || exit "$status"
           # Separate original invocation and fixture namespace: real first-read
           # Cancel1/joins, matching original2, then ordinary Quit3/no-project finality.
           # Shipping-helper output cannot satisfy this journey or its readbacks.
@@ -2649,7 +2649,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope ios-current-synthetic \
@@ -2657,7 +2657,7 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua.status"
-          [[ $status == 0 ]]
+          [[ $status == 0 ]] || exit "$status"
           # No retry/open/launchctl/TCC changes or false success after an owner
           # exception. Missing output does not establish original app finality.
       - name: Recheck admitted classification/private-native source even after an incomplete observation
@@ -2666,9 +2666,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD --
-          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]] || exit 1
           # Source-only POST: no build, fixture, Keychain or shared-cache cleanup.
       - name: Verify source stayed unchanged; retire only disposable owned build output
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
@@ -2676,13 +2676,13 @@ jobs:
         run: |
           set -euo pipefail
           git -c core.fsmonitor=false diff --exit-code HEAD --
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ "$CARGO_TARGET_DIR" == "$MRK_MACOS_WORK/cargo-target" && "$MRK_MACOS_WORK" == "$RUNNER_TEMP"/mrk-macos-aqua.* ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$CARGO_TARGET_DIR" == "$MRK_MACOS_WORK/cargo-target" && "$MRK_MACOS_WORK" == "$RUNNER_TEMP"/mrk-macos-aqua.* ]] || exit 1
           # All compiler/Installer/original application calls returned; the
           # retained package, source/result records and synthetic fixtures are
           # verification evidence. Never delete a shared tool/dependency cache.
           for path in "$CARGO_TARGET_DIR" "$MRK_MACOS_WORK/vault-helper-target" "$MRK_MACOS_WORK/npm-cache" "$GITHUB_WORKSPACE/desktop/node_modules" "$GITHUB_WORKSPACE/desktop/dist"; do
-            [[ -d "$path" && ! -L "$path" && -O "$path" ]]
+            [[ -d "$path" && ! -L "$path" && -O "$path" ]] || exit 1
             /bin/rm -rf -- "$path"
           done
       - name: Export bounded diagnostics without altering original command evidence

@@ -316,7 +316,8 @@ pub(super) fn data_checks() -> bool {
     let mut snapshot=InstalledMacVaultSnapshot {unknown:false,originals:5,originals_settled:true,empty:true,state:None,
         document_unknown:false,exhausted:false,lost_observed:false,original_bound:true,
         operation_id:None,operation_phase:None,operation_reason:None,operation_settlement:None,
-        key_present:false,initialize_preview:false,preview_consumed:true,storage:None,initialize:None,lookup:None};
+        key_present:false,initialize_preview:false,preview_consumed:true,storage:None,initialize:None,lookup:None,
+        initialize_transport:None,lookup_transport:None};
     if !record.final_originals(&snapshot,&control) { return false; }
     snapshot.unknown=true;if record.final_originals(&snapshot,&control) { return false; }snapshot.unknown=false;
     snapshot.originals_settled=false;if record.final_originals(&snapshot,&control) { return false; }snapshot.originals_settled=true;

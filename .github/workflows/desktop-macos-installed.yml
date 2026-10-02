@@ -39,18 +39,18 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
-          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ) ]]
-          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
-          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ) ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
           # Historical archive reuse supplies the interpreter, not the current core.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == b030d127c8507ddcc3db4641ac03f440c6ac4c8128fa08053eb12e00856f429b ]]
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 4dee7a2c1f59b742fde0128df49efad5e848958b35d8d2683a595706615e7659 ]]
-          [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]]
-          [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]]
-          [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]]
-          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
-          [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == b030d127c8507ddcc3db4641ac03f440c6ac4c8128fa08053eb12e00856f429b ]] || exit 1
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 4dee7a2c1f59b742fde0128df49efad5e848958b35d8d2683a595706615e7659 ]] || exit 1
+          [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
+          [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
+          [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
       - name: Check out exact reviewed source without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         env:
@@ -85,8 +85,8 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
-          [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]] || exit 1
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
@@ -142,8 +142,8 @@ jobs:
         run: |
           set -euo pipefail
           set -o noclobber
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]] || exit 1
           "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
           import hashlib, json, os, stat, subprocess, sys
           def git(*args):
@@ -191,10 +191,10 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(/usr/bin/id -u)" != 0 ]]
+          [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py package-format-input \
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
-          [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
@@ -204,7 +204,7 @@ jobs:
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
           # BSD tar pads stdout even when compressed; use the fresh private file.
-          [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-format-scripts" || exit
@@ -215,10 +215,10 @@ jobs:
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-format-tar.status"
-          [[ $tar_status == 0 ]]
+          [[ $tar_status == 0 ]] || exit "$tar_status"
           # xar is not a streaming/O_EXCL tool: reserve its private output parent.
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-format-final"
-          [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-format-parts" || exit
@@ -229,7 +229,7 @@ jobs:
           xar_status=$?
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-format-xar.status"
-          [[ $xar_status == 0 ]]
+          [[ $xar_status == 0 ]] || exit "$xar_status"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
@@ -242,8 +242,8 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(/usr/bin/id -u)" != 0 && "$GITHUB_SHA" == "$MRK_MACOS_INSTALL_SOURCE_COMMIT" ]]
-          [[ ! -e "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" ]]
+          [[ "$(/usr/bin/id -u)" != 0 && "$GITHUB_SHA" == "$MRK_MACOS_INSTALL_SOURCE_COMMIT" ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" ]] || exit 1
           # Two reviewed translation units, one compile/link product. No root,
           # application, interpreter build, GUI, network or general scenario runner.
           set +e
@@ -255,18 +255,18 @@ jobs:
           printf '%s\n' "${compile_status[*]}" > "$MRK_MACOS_WORK/native-acl-compile.status"
           compile_status_saved=$?
           set -e
-          [[ ${#compile_status[@]} == 2 ]]
+          [[ ${#compile_status[@]} == 2 ]] || exit 1
           if [[ ${compile_status[0]} != 0 ]]; then exit "${compile_status[0]}"; fi
-          [[ ${compile_status[1]} == 0 && $compile_status_saved == 0 ]]
-          [[ -f "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" && -O "$MRK_MACOS_WORK/acl-probe" ]]
+          [[ ${compile_status[1]} == 0 && $compile_status_saved == 0 ]] || exit 1
+          [[ -f "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" && -O "$MRK_MACOS_WORK/acl-probe" ]] || exit 1
           binary_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$MRK_MACOS_WORK/acl-probe")
-          [[ -n "$binary_identity" ]]
+          [[ -n "$binary_identity" ]] || exit 1
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/acl-probe-data"
-          [[ -d "$MRK_MACOS_WORK/acl-probe-data" && ! -L "$MRK_MACOS_WORK/acl-probe-data" && -O "$MRK_MACOS_WORK/acl-probe-data" ]]
+          [[ -d "$MRK_MACOS_WORK/acl-probe-data" && ! -L "$MRK_MACOS_WORK/acl-probe-data" && -O "$MRK_MACOS_WORK/acl-probe-data" ]] || exit 1
           # Children legitimately change directory size/timestamps/link count.
           # Device/inode/type/owner/group/mode remain the original identity.
           directory_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p' "$MRK_MACOS_WORK/acl-probe-data")
-          [[ -n "$directory_identity" ]]
+          [[ -n "$directory_identity" ]] || exit 1
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$MRK_MACOS_WORK/acl-probe" "$MRK_MACOS_WORK/acl-probe-data" 2>&1 \
             | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/native-acl-probe.log"
@@ -293,9 +293,9 @@ jobs:
           printf '%s %s\n' "$binary_cleanup" "$directory_cleanup" > "$MRK_MACOS_WORK/native-acl-cleanup.status"
           cleanup_status_saved=$?
           set -e
-          [[ ${#probe_status[@]} == 2 ]]
+          [[ ${#probe_status[@]} == 2 ]] || exit 1
           if [[ ${probe_status[0]} != 0 ]]; then exit "${probe_status[0]}"; fi
-          [[ ${probe_status[1]} == 0 && $probe_status_saved == 0 && $cleanup_status_saved == 0 && $binary_cleanup == 0 && $directory_cleanup == 0 ]]
+          [[ ${probe_status[1]} == 0 && $probe_status_saved == 0 && $cleanup_status_saved == 0 && $binary_cleanup == 0 && $directory_cleanup == 0 ]] || exit 1
           "$MRK_PYTHON" -I -S -B - <<'PYDATA'
           import hashlib, json, os, re, stat
           root = os.environ["MRK_MACOS_WORK"]
@@ -347,7 +347,7 @@ jobs:
           set -o noclobber
           umask 077
           work='${{ steps.work.outputs.root }}'
-          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]]
+          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1
           # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
             /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \
@@ -452,7 +452,7 @@ jobs:
           set -e
           printf '%s\n' "$cargo_status" > "$MRK_MACOS_WORK/normal-build.status"
           /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-build.stderr" > "$MRK_MACOS_WORK/normal-build.stderr.tail.txt"
-          [[ "$cargo_status" == 0 ]]
+          [[ "$cargo_status" == 0 ]] || exit "$cargo_status"
       - name: Record the effective pinned compiler from the successful build context
         timeout-minutes: 1
         shell: bash
@@ -1034,8 +1034,8 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(/usr/bin/id -u)" != 0 && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" ]]
-          [[ "$MRK_MACOS_INSTALL_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(/usr/bin/id -u)" != 0 && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_INSTALL_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
           # Keep the original Cargo/tee/tail statuses, including on failure.
           # The retained tail is at most 128 KiB per fixed invocation. No retry.
           run_focused() {
@@ -1047,9 +1047,9 @@ jobs:
             statuses=("${PIPESTATUS[@]}")
             set -e
             printf '%s\n' "${statuses[*]}" > "$MRK_MACOS_WORK/$label.status"
-            [[ ${#statuses[@]} == 3 ]]
+            [[ ${#statuses[@]} == 3 ]] || exit 1
             if (( statuses[0] != 0 )); then return "${statuses[0]}"; fi
-            (( statuses[1] == 0 && statuses[2] == 0 ))
+            (( statuses[1] == 0 && statuses[2] == 0 )) || return 1
           }
           # Multiple FULL names belong after Cargo's --; libtest --exact is not a prefix filter.
           run_focused dialog-regressions cargo test --manifest-path desktop/src-tauri/Cargo.toml \
@@ -1128,7 +1128,7 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts-fixture" > "$MRK_MACOS_WORK/scripts-fixture-result.json"
-          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \
             --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.0 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"
@@ -1138,7 +1138,7 @@ jobs:
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
           # BSD tar pads stdout even when compressed; use the fresh private file.
-          [[ ! -e "$MRK_MACOS_WORK/package-fixture-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-fixture-parts/Scripts" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-fixture-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-fixture-parts/Scripts" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/scripts-fixture" || exit
@@ -1149,10 +1149,10 @@ jobs:
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-fixture-tar.status"
-          [[ $tar_status == 0 ]]
+          [[ $tar_status == 0 ]] || exit "$tar_status"
           # xar is not a streaming/O_EXCL tool: reserve its private output parent.
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-fixture-final"
-          [[ ! -e "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" && ! -L "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" && ! -L "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-fixture-parts" || exit
@@ -1163,7 +1163,7 @@ jobs:
           xar_status=$?
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-fixture-xar.status"
-          [[ $xar_status == 0 ]]
+          [[ $xar_status == 0 ]] || exit "$xar_status"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package --fixture \
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
@@ -1201,7 +1201,7 @@ jobs:
           capture_status_saved=$?
           set -e
           if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
-          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]] || exit 1
           # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
@@ -1235,7 +1235,7 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
-          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
@@ -1245,7 +1245,7 @@ jobs:
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
           # BSD tar pads stdout even when compressed; use the fresh private file.
-          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/scripts" || exit
@@ -1256,10 +1256,10 @@ jobs:
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"
-          [[ $tar_status == 0 ]]
+          [[ $tar_status == 0 ]] || exit "$tar_status"
           # xar is not a streaming/O_EXCL tool: reserve its private output parent.
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-final"
-          [[ ! -e "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" ]]
+          [[ ! -e "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" ]] || exit 1
           set +e
           (
             cd "$MRK_MACOS_WORK/package-parts" || exit
@@ -1270,7 +1270,7 @@ jobs:
           xar_status=$?
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
-          [[ $xar_status == 0 ]]
+          [[ $xar_status == 0 ]] || exit "$xar_status"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
@@ -1308,7 +1308,7 @@ jobs:
           capture_status_saved=$?
           set -e
           if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
-          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]] || exit 1
           # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
           # A collision, partial publication, unknown close or timeout fails
           # here. Keep originals; no uninstall, rollback, retries or repair.
@@ -1359,9 +1359,9 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]]
-          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]]
-          [[ ! -e "$MRK_MACOS_WORK/normal-ui" && ! -L "$MRK_MACOS_WORK/normal-ui" ]]
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]] || exit 1
+          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/normal-ui" && ! -L "$MRK_MACOS_WORK/normal-ui" ]] || exit 1
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui"
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui/tmp"
           clean() {
@@ -1385,7 +1385,7 @@ jobs:
           set -e
           printf '%s\n' "$build_status" > "$MRK_MACOS_WORK/normal-ui/build.status"
           /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/build.log" > "$MRK_MACOS_WORK/normal-ui/build.tail.txt"
-          [[ "$build_status" == 0 ]]
+          [[ "$build_status" == 0 ]] || exit "$build_status"
       - name: Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally
         id: normal_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success'
@@ -1422,7 +1422,7 @@ jobs:
           set -e
           printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/test.status"
           /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/test.log" > "$MRK_MACOS_WORK/normal-ui/test.tail.txt"
-          [[ "$test_status" == 0 ]]
+          [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim
         id: normal_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'
@@ -1444,7 +1444,7 @@ jobs:
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/summary.status"
           /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/summary.stderr" > "$MRK_MACOS_WORK/normal-ui/summary.stderr.tail.txt"
-          [[ "$summary_status" == 0 ]]
+          [[ "$summary_status" == 0 ]] || exit "$summary_status"
           "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
           import hashlib, json, os, stat
           from pathlib import Path
@@ -1513,6 +1513,141 @@ jobs:
                   stream.write(data); stream.flush(); os.fsync(fd)
           finally: os.close(fd)
           print("One normal-app launch/Cancel/navigation/Quit UI scenario passed; POSIX exit and all-worker finality remain unavailable.")
+          PY_UI_RESULT
+      - name: Use the normal app to select a project and persist reviewed local edits and images
+        id: normal_project_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
+        timeout-minutes: 7
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
+          # One 300s journey, after the accepted basic gate; outer ceiling420s.
+          set +e
+          clean /usr/bin/xcodebuild test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
+            -disableAutomaticPackageResolution \
+            > "$MRK_MACOS_WORK/normal-ui/project-test.log" 2>&1
+          test_status=$?
+          set -e
+          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
+          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/project-test.log" > "$MRK_MACOS_WORK/normal-ui/project-test.tail.txt"
+          [[ "$test_status" == 0 ]] || exit "$test_status"
+      - name: Verify the one selected project journey against its original XCTest result
+        id: normal_project_ui_result
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
+            --path "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" --compact \
+            > "$MRK_MACOS_WORK/normal-ui/project-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/project-summary.stderr"
+          summary_status=$?
+          set -e
+          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/project-summary.status"
+          /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/project-summary.stderr" > "$MRK_MACOS_WORK/normal-ui/project-summary.stderr.tail.txt"
+          [[ "$summary_status" == 0 ]] || exit "$summary_status"
+          "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
+          import hashlib, json, os, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          def read(path, limit):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or before.st_size > limit:
+                      raise ValueError("UI result input shape refused")
+                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                  after = os.fstat(fd)
+                  named = os.stat(path, follow_symlinks=False)
+                  identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                  if len(data) != before.st_size or identity(before) != identity(after) or identity(before) != identity(named):
+                      raise ValueError("UI result input changed")
+                  return data
+              finally: os.close(fd)
+          def unique(pairs):
+              return_value = {}
+              for key, item in pairs:
+                  if key in return_value: raise ValueError("duplicate result field")
+                  return_value[key] = item
+              return return_value
+          def document(path, limit):
+              return json.loads(read(path, limit), object_pairs_hook=unique)
+          preview = document(root / "preview/PREVIEW.json", 65536)
+          if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
+                  or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
+                  or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                  or preview["platform"] != "macOS26-arm64" or preview["instrumented"] is not False
+                  or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
+              raise ValueError("UI result is not bound to this original normal package")
+          basic = document(root / "normal-ui/result.json", 65536)
+          if (basic["scope"] != "normal-app-launch-cancel-navigation-quit-ui-only"
+                  or basic["applicationSourceCommit"] != preview["sourceCommit"]
+                  or basic["runId"] != preview["runId"] or basic["runAttempt"] != preview["runAttempt"]
+                  or basic["launchRenderCancelNavigationQuitUI"] != "passed"
+                  or basic["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"):
+              raise ValueError("project journey requires this original accepted basic UI gate")
+          for name in ("build", "project-test", "project-summary"):
+              if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
+                  raise ValueError("original native command did not pass")
+          summary_bytes = read(root / "normal-ui/project-summary.raw.json", 262144)
+          summary = json.loads(summary_bytes, object_pairs_hook=unique)
+          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
+              # Only key names are diagnostic; do not export an unrestricted native result.
+              print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
+              raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
+                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
+          result = {"schemaVersion": 1, "scope": "normal-app-project-config-workflows-text-version-images-ui",
+                    "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
+                    "sourceTree": preview["sourceTree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
+                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "platform": preview["platform"], "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
+                    "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
+                    "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
+                    "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
+                    "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
+                    "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
+                    "localProjectEditsAndImagesUI": "passed", "applicationStateAfterNormalQuit": "notRunning",
+                    "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
+                    "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+          data = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          fd = os.open(root / "normal-ui/project-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as stream:
+                  stream.write(data); stream.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          print("One normal-app project/config/workflows/text/version/images UI journey passed; POSIX exit and all-worker finality remain unavailable.")
           PY_UI_RESULT
       - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
         id: normal_persistence_ui_test
@@ -1594,7 +1729,7 @@ jobs:
                   json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
           finally: os.close(fd)
           PY_PERSISTENCE_DIAGNOSTICS
-          [[ "$test_status" == 0 ]]
+          [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind the single persistence journey to original XCTest and app-helper evidence
         id: normal_persistence_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'
@@ -1615,7 +1750,7 @@ jobs:
           summary_status=$?
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/persistence-summary.status"
-          [[ "$summary_status" == 0 ]]
+          [[ "$summary_status" == 0 ]] || exit "$summary_status"
           "$MRK_PYTHON" -I -S -B - <<'PY_PERSISTENCE_RESULT'
           import hashlib, json, os, re, stat
           from pathlib import Path
@@ -1705,141 +1840,6 @@ jobs:
           finally: os.close(fd)
           print("One ordinary synthetic persistence UI journey passed; restart, signing and all-worker finality remain unproved.")
           PY_PERSISTENCE_RESULT
-      - name: Use the normal app to select a project and persist reviewed local edits and images
-        id: normal_project_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
-        timeout-minutes: 7
-        shell: bash
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          clean() {
-            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
-              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
-              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
-              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
-          }
-          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # One 300s journey, after the accepted basic gate; outer ceiling420s.
-          set +e
-          clean /usr/bin/xcodebuild test-without-building \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
-            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
-            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
-            -parallel-testing-enabled NO -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
-            -disableAutomaticPackageResolution \
-            > "$MRK_MACOS_WORK/normal-ui/project-test.log" 2>&1
-          test_status=$?
-          set -e
-          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
-          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/project-test.log" > "$MRK_MACOS_WORK/normal-ui/project-test.tail.txt"
-          [[ "$test_status" == 0 ]]
-      - name: Verify the one selected project journey against its original XCTest result
-        id: normal_project_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
-        timeout-minutes: 1
-        shell: bash
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          set +e
-          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
-            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
-            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
-            --path "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" --compact \
-            > "$MRK_MACOS_WORK/normal-ui/project-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/project-summary.stderr"
-          summary_status=$?
-          set -e
-          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/project-summary.status"
-          /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/project-summary.stderr" > "$MRK_MACOS_WORK/normal-ui/project-summary.stderr.tail.txt"
-          [[ "$summary_status" == 0 ]]
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
-          import hashlib, json, os, stat
-          from pathlib import Path
-          root = Path(os.environ["MRK_MACOS_WORK"])
-          def read(path, limit):
-              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-              try:
-                  before = os.fstat(fd)
-                  if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or before.st_size > limit:
-                      raise ValueError("UI result input shape refused")
-                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
-                  after = os.fstat(fd)
-                  named = os.stat(path, follow_symlinks=False)
-                  identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-                  if len(data) != before.st_size or identity(before) != identity(after) or identity(before) != identity(named):
-                      raise ValueError("UI result input changed")
-                  return data
-              finally: os.close(fd)
-          def unique(pairs):
-              return_value = {}
-              for key, item in pairs:
-                  if key in return_value: raise ValueError("duplicate result field")
-                  return_value[key] = item
-              return return_value
-          def document(path, limit):
-              return json.loads(read(path, limit), object_pairs_hook=unique)
-          preview = document(root / "preview/PREVIEW.json", 65536)
-          if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
-                  or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
-                  or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
-                  or preview["platform"] != "macOS26-arm64" or preview["instrumented"] is not False
-                  or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
-              raise ValueError("UI result is not bound to this original normal package")
-          basic = document(root / "normal-ui/result.json", 65536)
-          if (basic["scope"] != "normal-app-launch-cancel-navigation-quit-ui-only"
-                  or basic["applicationSourceCommit"] != preview["sourceCommit"]
-                  or basic["runId"] != preview["runId"] or basic["runAttempt"] != preview["runAttempt"]
-                  or basic["launchRenderCancelNavigationQuitUI"] != "passed"
-                  or basic["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"):
-              raise ValueError("project journey requires this original accepted basic UI gate")
-          for name in ("build", "project-test", "project-summary"):
-              if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
-                  raise ValueError("original native command did not pass")
-          summary_bytes = read(root / "normal-ui/project-summary.raw.json", 262144)
-          summary = json.loads(summary_bytes, object_pairs_hook=unique)
-          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
-          if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
-              # Only key names are diagnostic; do not export an unrestricted native result.
-              print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
-              raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
-          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
-                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
-                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
-          if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
-          result = {"schemaVersion": 1, "scope": "normal-app-project-config-workflows-text-version-images-ui",
-                    "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
-                    "sourceTree": preview["sourceTree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
-                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                    "platform": preview["platform"], "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
-                    "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
-                    "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
-                    "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
-                    "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
-                    "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
-                    "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
-                    "localProjectEditsAndImagesUI": "passed", "applicationStateAfterNormalQuit": "notRunning",
-                    "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
-                    "fullUIQualified": False, "distributionQualified": False, "productReady": False}
-          data = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          fd = os.open(root / "normal-ui/project-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "wb", closefd=False) as stream:
-                  stream.write(data); stream.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          print("One normal-app project/config/workflows/text/version/images UI journey passed; POSIX exit and all-worker finality remain unavailable.")
-          PY_UI_RESULT
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
         if: always() && steps.work.outputs.root != ''

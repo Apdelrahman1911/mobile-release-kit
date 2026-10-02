@@ -2513,7 +2513,7 @@ def _vault_failure_context(value, source, step, reason, case):
     flags = {"unknown", "originalsSettled", "empty", "documentUnknown", "exhausted", "lostObserved", "originalBound",
              "keyPresent", "initializePreview", "previewConsumed"}
     fields = {"originals", "operationId", "operationPhase", "operationReason", "operationSettlement",
-              "state", "storage", "initialize", "lookup"}
+              "state", "storage", "initialize", "lookup", "initializeTransport", "lookupTransport"}
     need(type(snapshot) is dict and set(snapshot) == flags | fields
          and all(type(snapshot[k]) is bool for k in flags) and snapshot["unknown"]
          and snapshot["unknown"] == (snapshot["documentUnknown"] or snapshot["exhausted"] or snapshot["lostObserved"] or not snapshot["originalBound"])
@@ -2539,6 +2539,15 @@ def _vault_failure_context(value, source, step, reason, case):
     for key in ("initialize", "lookup"):
         if snapshot[key] is not None:
             _vault_original_failure_data(snapshot[key])
+        transport = snapshot[key + "Transport"]
+        if transport is not None:
+            need(type(transport) is dict and set(transport) == {"exitCode", "exitSignal", "responseBytes"}, "failure-context")
+            code, signal, count = (transport[k] for k in ("exitCode", "exitSignal", "responseBytes"))
+            need((code is None or type(code) is int and 0 <= code <= 255)
+                 and (signal is None or type(signal) is int and 1 <= signal <= 127)
+                 and (code is None or signal is None)
+                 and type(count) is int and 0 <= count <= 16385, "failure-context")
+            # Returned process facts do not establish native terminal/finality.
     return value
 
 
