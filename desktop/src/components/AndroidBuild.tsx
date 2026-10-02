@@ -1,11 +1,14 @@
 import { useId } from 'react';
 import type { AndroidBuildController, AndroidBuildState } from '../androidBuild.ts';
-import { androidBuildCancelHelp, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildOwnerReason, androidBuildSignatureHelp } from '../androidBuild.ts';
+import { androidToolchainCatalogHelp, androidBuildCancelHelp, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildOwnerReason, androidBuildSignatureHelp } from '../androidBuild.ts';
 import { ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_SIGNER_MESSAGE, androidBuildAvailabilityText, androidBuildFindingText, androidBuildLimitationText, androidBuildReasonText } from '../androidBuildProtocol.ts';
 import type { AndroidBuildCoreStatus, AndroidBuildPhase, AndroidBuildStage } from '../androidBuildTypes.ts';
 import type { HelpContent } from '../types.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
+import { androidCatalogActive, sameAndroidCatalogSelection } from '../androidToolchainCatalogProtocol.ts';
+import { androidToolSourceHelp, androidToolSourcesActive } from '../androidToolSources.ts';
+import type { AndroidToolSourceRole, AndroidToolSourcesStatus } from '../androidToolSources.ts';
 
 const phases: Record<AndroidBuildPhase, string> = { 'awaiting-consent': 'Awaiting your approval', starting: 'Starting build',
   running: 'Build running', stopping: 'Stopping · waiting for cleanup', terminal: 'Build request finished', unknown: 'Cleanup needs attention' };
@@ -56,12 +59,20 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
   const controls = <div className="button-row">
     <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading build status…' : 'Check build status'}</button>
     {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel this Android build'}</button>}
+    {state.catalogStatus?.availability !== 'unsupported-platform' && <>
+      <button type="button" className="button secondary small" disabled={!controller.canCheckCatalogStatus()} onClick={() => void controller.checkCatalogStatus()}>{state.catalogReadPending ? 'Reading tool status…' : 'Check tool status'}</button>
+      {androidCatalogActive(state.catalogStatus) && <button type="button" className="button secondary small" disabled={!controller.canCancelCatalog()} onClick={() => controller.cancelCatalog()}>{state.catalogCancelClaimed ? 'Tool cancellation requested' : 'Cancel tool read'}</button>}
+    </>}
+    {state.toolSources?.availability !== 'unsupported-platform' && state.sourcesListening && <>
+      <button type="button" className="button secondary small" disabled={!controller.canCheckToolSources()} onClick={() => void controller.checkToolSources()}>{state.sourcesReadPending ? 'Reading folder status…' : 'Check folder status'}</button>
+      {androidToolSourcesActive(state.toolSources) && <button type="button" className="button secondary small" disabled={!controller.canCancelToolSources()} onClick={() => controller.cancelToolSources()}>{state.sourcesCancelClaimed ? 'Folder cancellation requested' : 'Cancel folder selection'}</button>}
+    </>}
     {onHelp && <HelpButton content={androidBuildCancelHelp} onHelp={onHelp} />}
     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>Show in Releases</button>}
   </div>;
   if (compact) return <section className="notice notice-warning offline-global" aria-label="Android build status">
-    <Icon name="shield" size={20} /><div><strong>Android build · {operationProjectName ?? 'build project'}</strong>
-      <p>{op ? phases[op.phase] : 'Waiting for confirmation of this build request.'} {owned}</p>{controls}
+    <Icon name="shield" size={20} /><div><strong>Android tools / build · {operationProjectName ?? projectName ?? 'original application'}</strong>
+      <p>{androidToolSourcesActive(state.toolSources) ? 'Original folder selection: ' + state.toolSources?.phase + '.' : androidCatalogActive(state.catalogStatus) ? 'Original protected-tool read: ' + state.catalogStatus?.phase + '.' : op ? phases[op.phase] : 'Waiting for confirmation of the original request.'} {owned}</p>{controls}
       <p>Cancel is not rollback. Project changes, network effects or signed outputs may already exist.</p>
     </div>
   </section>;
@@ -70,6 +81,8 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     <SectionHeading title="Build Android app" description="Build the selected saved configuration, then inspect its AAB. This does not publish a release.">
       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={androidBuildHelp} onHelp={onHelp} />}
     </SectionHeading>
+    <AndroidToolSources state={state} controller={controller} onHelp={onHelp} />
+    <AndroidToolchainCatalog state={state} controller={controller} onHelp={onHelp} />
     <h3 id={label}>Review the current saved inputs</h3>
     <p><strong>Selected source project:</strong> {projectName ?? 'No project selected'}. {onHelp && <HelpButton content={androidBuildInputHelp} onHelp={onHelp} />}</p>
     <div className="notice notice-warning"><Icon name="shield" /><p>Only build a project you trust. Gradle and project code can run other programs, modify files, read account files, access the network and sign outputs. The toolkit does not request signing, credential loading or Store operations; that does not constrain arbitrary project code. This is not network isolation or a sandbox. Cancel stops further owned work and waits for original cleanup; it does not undo prior effects.</p></div>
@@ -98,6 +111,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       <p>Version <strong>{consent.binding.context.savedVersion.name}</strong>, build <strong>{consent.binding.context.savedVersion.build}</strong>, selected source <code>{consent.binding.context.savedVersion.source}</code>.</p>
       <p>Saved configuration SHA-256: <code>{consent.binding.context.savedConfig.sha256}</code>. Saved version SHA-256: <code>{consent.binding.context.savedVersion.sha256}</code>.</p>
       <p>Inspection: {consent.binding.context.artifactValidation.mode === 'upload-signature' ? <>structure, application version and upload signature; saved upload-certificate SHA-256 <code>{consent.binding.context.artifactValidation.uploadCertificateSha256}</code></> : 'structure and application version only; signer not inspected'}.</p>
+      {consent.binding.toolchainSelection && <p>Protected Mac tool copy: <code>{consent.binding.toolchainSelection.instance}</code> · catalog generation {consent.binding.toolchainSelection.catalogGeneration}. Changing the tool copy retires this review; full native admission is still required at Build.</p>}
       <p>This review expires no later than five minutes after original preparation. Status refresh never renews it. Save, refresh, new version observation, selection change or leaving this unstarted review retires consent.</p>
       <label className="offline-ack"><input type="checkbox" checked={consent.acknowledged} onChange={(event) => controller.setAcknowledged(consent.operationId, consent.ownerGeneration, event.target.checked)} />
         <span>I trust this project and authorize one build of these saved Android inputs with the inspection choice above. I understand project-code effects, that my unsaved draft is not used, and that post-run bytes may be reused/stale. {consent.binding.context.artifactValidation.mode === 'upload-signature' ? 'Verify the captured upload signature against this saved certificate; do not sign or upload. ' : 'The signer is not inspected. '}Completion is not release approval.</span></label>
@@ -118,5 +132,80 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     {controls}
     <p className="save-note">Leaving Releases keeps a started run’s original Status and Cancel available throughout the app. Unknown cleanup stays blocked; reconnecting cannot reset the owner. {onHelp && <HelpButton content={androidBuildOutputHelp} onHelp={onHelp} />}</p>
     <AndroidBuildResultView state={state} operationProjectName={operationProjectName} />
+  </section>;
+}
+
+
+const sourceRoles: AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];
+const sourcePhase: Record<AndroidToolSourcesStatus['phase'], string> = {
+  idle: 'No folder selected yet', picking: 'Choose a folder in the native dialog', checking: 'Checking the selected directory',
+  selected: 'Folder selected · tools not inspected', refused: 'Folder selection could not be used', cancelled: 'Folder selection cancelled',
+  stopping: 'Stopping · waiting for the original folder selection to close', unknown: 'Original folder cleanup could not be confirmed',
+};
+const sourceReason: Record<AndroidToolSourcesStatus['reason'], string> = {
+  none: '', 'not-inspected': 'Supplier contents have not been checked. No protected copy exists.',
+  cancelled: 'The native folder dialog was closed without selecting a folder.',
+  'source-refused': 'Choose a real, readable local folder, not an alias or archive. This check does not inspect the tools inside it.',
+  'source-changed': 'The folder changed while it was being observed. Once cleanup is confirmed, browse again.',
+  'timed-out': 'The original selection reached its time limit. Wait for cleanup before browsing again.',
+  'context-changed': 'The selected project changed. Choose folders for the current project after the original selection settles.',
+  'document-lost': 'The original app window is no longer available. Do not assume its work has finished.',
+  shutdown: 'The app is closing the original selection before it exits.',
+  'cleanup-unknown': 'Status cannot prove that the original work is closed. Further actions remain blocked; a retry does not resolve this.',
+};
+function AndroidToolSources({ state, controller, onHelp }: {
+  state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
+}) {
+  const sources = state.toolSources, reason = controller.sourceActionReason();
+  if (sources?.availability === 'unsupported-platform') return null;
+  const sameProject = sources?.projectId === state.project?.projectId;
+  return <section className="session-review" aria-label="Set up Android tools">
+    <h3>Set up Android tools</h3>
+    <p>Choose the Java, Android SDK and Gradle folders already installed on this Mac. Use Browse; you do not need to copy, rename or move anything.</p>
+    <p className="save-note">This step only remembers the selected directories for this app session. It does not execute, install or change them. Supplier inspection and protected-copy creation are not available in this build yet, so these selections do not enable Build.</p>
+    {sourceRoles.map((role) => {
+      const help = androidToolSourceHelp[role], selected = sameProject ? sources?.selections.find((item) => item.role === role) : null;
+      return <div className="session-review" key={role}>
+        <div className="inline-heading"><h4>{help.label}</h4>{onHelp && <HelpButton content={help} onHelp={onHelp} />}</div>
+        <p>{help.what}</p><p className="save-note">{help.where}</p>
+        <p className="save-note">Required before registering Android tools. {selected ? <>Selected folder: <strong>{selected.displayName}</strong> · contents not inspected.</> : 'No folder selected for this project.'}</p>
+        <button type="button" className="button secondary small" disabled={reason !== null}
+          onClick={() => void controller.chooseToolSource(role)}>{selected ? 'Choose a different folder' : 'Browse for folder'}</button>
+      </div>;
+    })}
+    {reason && <p className="save-note">{reason}</p>}
+    {sources && <p role="status" aria-live="polite"><strong>{sourcePhase[sources.phase]}.</strong> {sourceReason[sources.reason]}</p>}
+    {sources?.projectId && !sameProject && <p className="review-caution">The retained folder status belongs to a different project; it is not a selection for this one.</p>}
+    {state.sourcesUnconfirmed && <p className="review-caution">The original folder request is unconfirmed. Use Check folder status below; do not repeat Browse. Cancel becomes available when the original identity is known.</p>}
+    {state.sourcesError && <ErrorNotice error={state.sourcesError} title="No new folder-selection outcome was confirmed" />}
+  </section>;
+}
+
+function AndroidToolchainCatalog({ state, controller, onHelp }: {
+  state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
+}) {
+  const catalog = state.catalogStatus, reason = controller.catalogActionReason();
+  if (catalog?.availability === 'unsupported-platform') return null;
+  return <section className="session-review" aria-label="Protected Android tools on this Mac">
+    <div className="inline-heading"><h3>Choose Android tools</h3>{onHelp && <HelpButton content={androidToolchainCatalogHelp} onHelp={onHelp} />}</div>
+    <p>The app uses a registered, protected copy of Java, Gradle and Android SDK tools. Refresh the list, compare versions and choose the copy for your build.</p>
+    <p className="save-note">This read lists registration records only. It does not run tools or qualify them; the exact runtime and tool copy are checked at Build. Nothing is installed and no license is accepted automatically.</p>
+    <button type="button" className="button secondary small" disabled={reason !== null} onClick={() => void controller.refreshCatalog()}>{state.catalogPending === 'refresh' ? 'Requesting tool list…' : 'Refresh tool list'}</button>
+    {reason && <p className="save-note">{reason}</p>}
+    {catalog && <p role="status">Tool catalog: {catalog.phase}. {catalog.reason === 'none' ? '' : catalog.reason.replaceAll('-', ' ')}.</p>}
+    {catalog?.phase === 'ready' && catalog.entries.length === 0 && <p>No protected tool copy was found for this macOS account.</p>}
+    {catalog?.entries.map((entry) => {
+      const selected = sameAndroidCatalogSelection(catalog.selected, entry.selection);
+      return <div className="session-review" key={entry.selection.instance}>
+        <div className="inline-heading"><h4>{entry.versions.jdkVendor} Java {entry.versions.jdkVersion}</h4>{selected && <Badge tone="info">Selected</Badge>}</div>
+        <p>Gradle {entry.versions.gradleVersion} · Android plugin {entry.versions.agpVersion} · {entry.versions.sdkPlatform} · build tools {entry.versions.sdkBuildToolsVersion}.</p>
+        <p className="save-note">Copy <code>{entry.selection.instance}</code> · observed catalog {entry.selection.catalogGeneration}.</p>
+        <button type="button" className="button secondary small" disabled={selected || reason !== null}
+          onClick={() => void controller.selectToolchain(entry.selection.instance, entry.selection.recordSha256)}>{selected ? 'This copy is selected' : 'Use this tool copy'}</button>
+      </div>;
+    })}
+    <p className="save-note">Browse above to select source folders. Protected-copy creation is not available yet: browsing does not add a tool copy to this list or make it build-ready. Do not copy tools into application folders yourself.</p>
+    {state.catalogUnconfirmed && <p className="review-caution">The original catalog request is unconfirmed. Use Check tool status or Cancel tool read below; do not repeat the request.</p>}
+    {state.catalogError && <ErrorNotice error={state.catalogError} title="No new tool-catalog outcome was confirmed" />}
   </section>;
 }

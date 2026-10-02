@@ -15,6 +15,7 @@ export const ANDROID_BUILD_EVENT = 'android-build-state-changed';
 export const ANDROID_BUILD_CONSENT = 'saved-android-build-inspect-v2';
 export const ANDROID_BUILD_SCOPE = 'local-post-build-artifact-observation';
 export const ANDROID_BUILD_TOOLCHAIN_PROFILE = 'android-local-linux-gnu-x86_64-v1';
+export const ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE = 'android-registered-macos-arm64-v1';
 export const ANDROID_BUILD_COUNTER_MAX = 0xffff_fffe;
 export const ANDROID_BUILD_IPC_LIMIT = 8192;
 export const ANDROID_BUILD_STATUS_LIMIT = 65536;
@@ -274,10 +275,19 @@ function inspectionCommands(rows: AndroidBuildFinding[], validation: AndroidBuil
   return signatures.length === 1 && signatures[0] === 'PASS' && signers.length > 0 ? 4 : null;
 }
 
+function macToolchainSelection(value: unknown): boolean {
+  return keys(value, ['instance', 'ownerUid', 'catalogGeneration', 'recordSha256', 'inventorySha256', 'osProviderSha256']) &&
+    token(value.instance) && integer(value.ownerUid, 0xffff_fffe, 1) && integer(value.catalogGeneration, 0xffff_fffe, 1) &&
+    sha(value.recordSha256) && sha(value.inventorySha256) && sha(value.osProviderSha256);
+}
 function result(value: unknown): value is AndroidBuildResult {
+  if (!record(value)) return false;
+  const mac = value.toolchainProfile === ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE;
   if (!keys(value, ['schemaVersion', 'scope', 'usedConfig', 'usedVersion', 'selection', 'toolchainProfile', 'command', 'findings', 'summary',
-      'artifacts', 'assurances', 'limitations', 'artifactValidation']) || value.schemaVersion !== 1 || value.scope !== ANDROID_BUILD_SCOPE ||
-      !content(value.usedConfig) || !savedVersion(value.usedVersion) || !artifactValidation(value.artifactValidation) || !selection(value.selection) || value.toolchainProfile !== ANDROID_BUILD_TOOLCHAIN_PROFILE ||
+      'artifacts', 'assurances', 'limitations', 'artifactValidation', ...(mac ? ['toolchainSelection'] : [])]) ||
+      value.schemaVersion !== (mac ? 2 : 1) || value.scope !== ANDROID_BUILD_SCOPE ||
+      (mac ? !macToolchainSelection(value.toolchainSelection) : value.toolchainProfile !== ANDROID_BUILD_TOOLCHAIN_PROFILE) ||
+      !content(value.usedConfig) || !savedVersion(value.usedVersion) || !artifactValidation(value.artifactValidation) || !selection(value.selection) ||
       !commandObservation(value.command) || !exitedZero(value.command) || !Array.isArray(value.artifacts) || value.artifacts.length !== 1 ||
       !artifact(value.artifacts[0]) || !Array.isArray(value.limitations) || value.limitations.length !== ANDROID_BUILD_LIMITATIONS.length) return false;
   const observedLimitations = value.limitations, observed = { findings: value.findings, summary: value.summary };

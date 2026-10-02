@@ -16,6 +16,8 @@ pub(crate) const CONSENT: &str = "saved-android-build-inspect-v2";
 pub(crate) const EVENT: &str = "android-build-state-changed";
 pub(crate) const SCOPE: &str = "local-post-build-artifact-observation";
 pub(crate) const TOOLCHAIN_PROFILE: &str = "android-local-linux-gnu-x86_64-v1";
+pub(crate) const MAC_TOOLCHAIN_PROFILE: &str = "android-registered-macos-arm64-v1";
+pub(crate) const MAC_TOOLCHAIN_PREFIX: &str = "/Library/Application Support/MobileReleaseKit/android";
 pub(crate) const IPC_LIMIT: usize = 8 * 1024;
 pub(crate) const REQUEST_LIMIT: usize = 32 * 1024;
 pub(crate) const RESPONSE_LIMIT: usize = 64 * 1024;
@@ -305,11 +307,15 @@ pub(crate) fn status_request(value: &Value) -> Result<(), BridgeError> {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-pub(crate) enum Profile { #[serde(rename = "linux-gnu-x86_64")] LinuxX64 }
+pub(crate) enum Profile {
+    #[serde(rename = "linux-gnu-x86_64")] LinuxX64,
+    #[serde(rename = "macos-arm64")] MacArm64,
+}
 impl Profile {
     /// Host shape only; this is NEVER native/runtime/toolchain qualification.
     pub(crate) fn current() -> Option<Self> {
-        if cfg!(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64")) { Some(Self::LinuxX64) } else { None }
+        if cfg!(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64")) { Some(Self::LinuxX64) }
+        else if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Some(Self::MacArm64) } else { None }
     }
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -339,10 +345,30 @@ pub(crate) fn native_path(path: &Path) -> Option<&str> {
     }
     Some(text)
 }
+/// Closed comparison DATA copied from the original native catalog selection.
+/// Parsing it does not register, inspect, select or authorize a tool instance.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MacToolchainSelection {
+    pub(crate) instance: String, pub(crate) owner_uid: u32, pub(crate) catalog_generation: u32,
+    pub(crate) record_sha256: String, pub(crate) inventory_sha256: String, pub(crate) os_provider_sha256: String,
+}
+impl MacToolchainSelection {
+    pub(crate) fn valid(&self) -> bool {
+        token(&self.instance) && self.owner_uid != 0 && self.owner_uid != u32::MAX
+            && (1..u32::MAX).contains(&self.catalog_generation)
+            && sha(&self.record_sha256) && sha(&self.inventory_sha256) && sha(&self.os_provider_sha256)
+    }
+    pub(crate) fn root_data(&self) -> std::path::PathBuf {
+        Path::new(MAC_TOOLCHAIN_PREFIX).join(self.owner_uid.to_string()).join(&self.instance)
+    }
+}
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ToolchainBinding {
     schema_version: u32, profile: String, root: String, root_identity: RootIdentity, inventory_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection: Option<MacToolchainSelection>,
 }
 impl ToolchainBinding {
     /// Native-owned caller supplies the original binding. This validates DATA
@@ -351,18 +377,37 @@ impl ToolchainBinding {
     pub(crate) fn new_data(root: &Path, identity: RootIdentity, inventory_sha256: &str) -> Result<Self, BridgeError> {
         if !identity.valid() || !sha(inventory_sha256) { return Err(invalid()); }
         Ok(Self { schema_version: 1, profile: TOOLCHAIN_PROFILE.into(), root: native_path(root).ok_or_else(invalid)?.into(),
-            root_identity: identity, inventory_sha256: inventory_sha256.into() })
+            root_identity: identity, inventory_sha256: inventory_sha256.into(), selection: None })
+    }
+    pub(crate) fn new_macos_data(root: &Path, identity: RootIdentity, selected: &MacToolchainSelection) -> Result<Self, BridgeError> {
+        if !selected.valid() || root != selected.root_data() || !identity.valid() || identity.uid != 0
+            || identity.gid != 0 || identity.mode & 0o7777 != 0o555 { return Err(invalid()); }
+        Ok(Self { schema_version: 2, profile: MAC_TOOLCHAIN_PROFILE.into(),
+            root: native_path(root).ok_or_else(invalid)?.into(), root_identity: identity,
+            inventory_sha256: selected.inventory_sha256.clone(), selection: Some(selected.clone()) })
     }
     fn valid(&self) -> bool {
-        self.schema_version == 1 && self.profile == TOOLCHAIN_PROFILE && self.root_identity.valid()
-            && sha(&self.inventory_sha256) && native_path(Path::new(&self.root)).is_some()
+        if !self.root_identity.valid() || !sha(&self.inventory_sha256) || native_path(Path::new(&self.root)).is_none() { return false; }
+        match self.profile.as_str() {
+            TOOLCHAIN_PROFILE => self.schema_version == 1 && self.selection.is_none(),
+            MAC_TOOLCHAIN_PROFILE => self.schema_version == 2 && self.root_identity.uid == 0 && self.root_identity.gid == 0
+                && self.root_identity.mode & 0o7777 == 0o555 && self.selection.as_ref().is_some_and(|s|
+                    s.valid() && s.inventory_sha256 == self.inventory_sha256 && s.root_data() == Path::new(&self.root)),
+            _ => false,
+        }
+    }
+    fn matches_profile(&self, profile: Profile) -> bool {
+        self.valid() && match profile {
+            Profile::LinuxX64 => self.profile == TOOLCHAIN_PROFILE,
+            Profile::MacArm64 => self.profile == MAC_TOOLCHAIN_PROFILE,
+        }
     }
 }
 /// Only an actual registered native project and a native-selected tool binding
 /// enter this encoder. No savedVersion.source is used as a native path.
 pub(crate) fn request(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding) -> Result<Vec<u8>, BridgeError> {
-    if !token(operation) || !token(generation) || !context.valid() || !toolchain.valid() { return Err(invalid()); }
+    if !token(operation) || !token(generation) || !context.valid() || !toolchain.matches_profile(profile) { return Err(invalid()); }
     // Existing native identity projection is DATA; no offline permit is reused.
     let observed = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
     let identity = RootIdentity { device: observed.device, inode: observed.inode, mode: observed.mode,
@@ -586,14 +631,28 @@ fn limitations(validation: &ArtifactValidation) -> [Limitation; 11] {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ResultData {
     schema_version: u32, scope: String, used_config: Content, used_version: SavedVersion, artifact_validation: ArtifactValidation, selection: Selection,
-    toolchain_profile: String, command: CommandData, findings: Vec<Finding>, summary: Summary,
+    toolchain_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toolchain_selection: Option<MacToolchainSelection>,
+    command: CommandData, findings: Vec<Finding>, summary: Summary,
     artifacts: Vec<Artifact>, assurances: Assurances, limitations: Vec<Limitation>,
 }
 impl ResultData {
+    fn toolchain_valid(&self) -> bool { match self.toolchain_profile.as_str() {
+        TOOLCHAIN_PROFILE => self.schema_version == 1 && self.toolchain_selection.is_none(),
+        MAC_TOOLCHAIN_PROFILE => self.schema_version == 2 && self.toolchain_selection.as_ref().is_some_and(MacToolchainSelection::valid),
+        _ => false,
+    } }
+    fn matches_toolchain(&self, expected: Option<&MacToolchainSelection>) -> bool {
+        self.toolchain_valid() && match expected {
+            Some(selected) => self.toolchain_profile == MAC_TOOLCHAIN_PROFILE && self.toolchain_selection.as_ref() == Some(selected),
+            None => self.toolchain_profile == TOOLCHAIN_PROFILE && self.toolchain_selection.is_none(),
+        }
+    }
     fn valid(&self) -> bool {
-        self.schema_version == 1 && self.scope == SCOPE && self.used_config.valid(CONFIG_LIMIT) && self.used_version.valid()
+        self.toolchain_valid() && self.scope == SCOPE && self.used_config.valid(CONFIG_LIMIT) && self.used_version.valid()
             && self.artifact_validation.valid() && inspection_commands(&self.findings, &self.artifact_validation).is_some()
-            && self.selection.valid() && self.toolchain_profile == TOOLCHAIN_PROFILE && self.command.zero()
+            && self.selection.valid() && self.command.zero()
             && inspection(&self.findings, &self.summary) && self.findings.iter().any(|r| r.check == CheckId::AabStructure)
             && self.findings.iter().all(|r| r.check != CheckId::CoreLifecycle) && self.artifacts.len() == MAX_ARTIFACTS
             && self.artifacts.iter().all(Artifact::valid) && self.assurances == assurances(&self.findings, &self.artifact_validation)
@@ -606,9 +665,14 @@ impl ResultData {
     }
 }
 fn result_shape(value: &Value) -> bool {
-    keys(value, &["schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile", "command",
-        "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation"])
-        && value.get("command").is_some_and(|v| keys(v, &["outcome", "exitCode"]))
+    let common = ["schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile", "command",
+        "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation"];
+    let shape = if value.get("toolchainProfile").and_then(Value::as_str) == Some(MAC_TOOLCHAIN_PROFILE) {
+        let mut selected = common.to_vec(); selected.push("toolchainSelection");
+        keys(value, &selected) && value.get("toolchainSelection").is_some_and(|s| keys(s,
+            &["instance", "ownerUid", "catalogGeneration", "recordSha256", "inventorySha256", "osProviderSha256"]))
+    } else { keys(value, &common) };
+    shape && value.get("command").is_some_and(|v| keys(v, &["outcome", "exitCode"]))
 }
 pub(crate) fn result(value: &Value) -> Result<ResultData, BridgeError> {
     if !structure(value) || !result_shape(value) { return Err(protocol_error()); }
@@ -750,13 +814,22 @@ pub(crate) enum Frame { Accepted, Progress(Stage), Terminal(Terminal) }
 /// and preserve their actual EOF/close records even after this decoder fails.
 pub(crate) struct FrameDecoder {
     operation: String, generation: String, context: Context,
+    expected_macos: Option<MacToolchainSelection>,
     frames: usize, bytes: usize, stage: Stage, terminal: bool, failed: bool,
 }
 impl FrameDecoder {
     pub(crate) fn new(operation: &str, generation: &str, context: &Context) -> Result<Self, BridgeError> {
         if !token(operation) || !token(generation) || !context.valid() { return Err(protocol_error()); }
         Ok(Self { operation: operation.into(), generation: generation.into(), context: context.clone(),
-            frames: 0, bytes: 0, stage: Stage::Accepted, terminal: false, failed: false })
+            expected_macos: None, frames: 0, bytes: 0, stage: Stage::Accepted, terminal: false, failed: false })
+    }
+    /// Called from the original Session snapshot, before either reader starts.
+    /// There is no setter: an inspected/failed stream cannot change its binding.
+    pub(crate) fn new_macos(operation: &str, generation: &str, context: &Context,
+        selected: &MacToolchainSelection) -> Result<Self, BridgeError> {
+        if !selected.valid() { return Err(protocol_error()); }
+        let mut decoder = Self::new(operation, generation, context)?;
+        decoder.expected_macos = Some(selected.clone()); Ok(decoder)
     }
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
         self.bytes = self.bytes.saturating_add(bytes.len());
@@ -783,7 +856,8 @@ impl FrameDecoder {
             },
             "terminal" if self.frames >= 1 => {
                 let terminal = terminal(&envelope.payload, &self.context)?;
-                if terminal.activity.stage < self.stage { return Err(protocol_error()); }
+                if terminal.activity.stage < self.stage || terminal.result.as_ref().is_some_and(|r|
+                    !r.matches_toolchain(self.expected_macos.as_ref())) { return Err(protocol_error()); }
                 Frame::Terminal(terminal)
             },
             _ => return Err(protocol_error()),
@@ -1602,4 +1676,100 @@ pub(crate) mod tests {
         let mut bad = unavailable; bad["availability"] = json!("qualified"); assert!(status(&bad).is_err());
         let mut bad = good; bad["operation"]["result"]["usedVersion"]["build"] = json!(43); assert!(status(&bad).is_err());
     }
+}
+
+
+#[cfg(test)]
+mod mac_toolchain_contract_tests {
+    use super::*;
+    fn selected() -> MacToolchainSelection {
+        MacToolchainSelection { instance: "c".repeat(32), owner_uid: 501, catalog_generation: 1,
+            record_sha256: "d".repeat(64), inventory_sha256: "e".repeat(64), os_provider_sha256: "f".repeat(64) }
+    }
+    fn completed(selected: &MacToolchainSelection) -> Value {
+        let mut value = super::tests::complete_terminal();
+        value["result"]["schemaVersion"] = json!(2);
+        value["result"]["toolchainProfile"] = json!(MAC_TOOLCHAIN_PROFILE);
+        value["result"]["toolchainSelection"] = json!(selected);
+        value
+    }
+    fn frame(sequence: usize, kind: &str, payload: Value) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(&json!({"protocol":PROTOCOL,"operationId":"a".repeat(32),
+            "ownerGeneration":"b".repeat(32),"sequence":sequence,"kind":kind,"payload":payload})).unwrap();
+        bytes.push(b'\n'); bytes
+    }
+    fn decoder(selected: &MacToolchainSelection) -> FrameDecoder {
+        let context = super::tests::context();
+        let mut value = FrameDecoder::new_macos(&"a".repeat(32), &"b".repeat(32), &context, selected).unwrap();
+        value.push(&frame(0, "accepted", json!({"schemaVersion":1,"context":context}))).unwrap();
+        value
+    }
+    pub(super) fn mac_result_uses_a_closed_extension_not_a_second_accepted_string_data() {
+        let selected = selected();
+        assert!(result(&completed(&selected)["result"]).is_ok());
+        for field in ["instance", "ownerUid", "catalogGeneration", "recordSha256", "inventorySha256", "osProviderSha256"] {
+            let mut value = completed(&selected);
+            value["result"]["toolchainSelection"].as_object_mut().unwrap().remove(field);
+            assert!(result(&value["result"]).is_err(), "{field}");
+        }
+        let mut value = completed(&selected); value["result"]["schemaVersion"] = json!(1);
+        assert!(result(&value["result"]).is_err());
+        let mut value = super::tests::complete_terminal();
+        value["result"]["toolchainSelection"] = json!(selected);
+        assert!(result(&value["result"]).is_err()); // Linux key/schema exactness remains unchanged.
+    }
+    pub(super) fn original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data() {
+        let selected = selected();
+        let mut ok = decoder(&selected);
+        ok.push(&frame(1, "terminal", completed(&selected))).unwrap();
+        ok.finish().unwrap();
+        let mut foreign = decoder(&selected);
+        assert!(foreign.push(&frame(1, "terminal", super::tests::complete_terminal())).is_err());
+        for (field, replacement) in [
+            ("instance", json!("1".repeat(32))), ("ownerUid", json!(502)), ("catalogGeneration", json!(2)),
+            ("recordSha256", json!("1".repeat(64))), ("inventorySha256", json!("2".repeat(64))), ("osProviderSha256", json!("3".repeat(64))),
+        ] {
+            let mut value = completed(&selected); value["result"]["toolchainSelection"][field] = replacement;
+            assert!(result(&value["result"]).is_ok()); // Well-shaped but from another selection.
+            let mut original = decoder(&selected);
+            assert!(original.push(&frame(1, "terminal", value)).is_err(), "{field}");
+            assert!(original.push(&frame(1, "terminal", completed(&selected))).is_err()); // Failure is latched.
+        }
+        let context = super::tests::context();
+        let mut linux = FrameDecoder::new(&"a".repeat(32), &"b".repeat(32), &context).unwrap();
+        linux.push(&frame(0, "accepted", json!({"schemaVersion":1,"context":context}))).unwrap();
+        assert!(linux.push(&frame(1, "terminal", completed(&selected))).is_err());
+    }
+    pub(super) fn native_request_binding_rejects_host_root_and_selected_identity_mismatch_data() {
+        let selected = selected();
+        let root = selected.root_data();
+        let identity = RootIdentity { device: "1".into(), inode: "2".into(), mode: 0o040555, uid: 0, gid: 0 };
+        let mac = ToolchainBinding::new_macos_data(&root, identity.clone(), &selected).unwrap();
+        assert!(mac.matches_profile(Profile::MacArm64));
+        assert!(!mac.matches_profile(Profile::LinuxX64));
+        assert!(ToolchainBinding::new_macos_data(Path::new("/tmp/borrowed"), identity.clone(), &selected).is_err());
+        let mut writable = identity.clone(); writable.mode = 0o040755;
+        assert!(ToolchainBinding::new_macos_data(&root, writable, &selected).is_err());
+        let linux = ToolchainBinding::new_data(Path::new("/opt/mobile-release-kit/android/existing"), identity, &"e".repeat(64)).unwrap();
+        assert!(linux.matches_profile(Profile::LinuxX64));
+        assert!(!linux.matches_profile(Profile::MacArm64));
+    }
+    #[test]
+    fn mac_result_uses_a_closed_extension_not_a_second_accepted_string() { mac_result_uses_a_closed_extension_not_a_second_accepted_string_data(); }
+
+    #[test]
+    fn original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux() { original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data(); }
+
+    #[test]
+    fn native_request_binding_rejects_host_root_and_selected_identity_mismatch() { native_request_binding_rejects_host_root_and_selected_identity_mismatch_data(); }
+
+}
+
+// Explicit harness=false DATA bridge; ordinary libtest wrappers use these same
+// inert bodies. No native custody, task, Prepare/Start or qualification is granted.
+#[cfg(test)]
+pub(crate) fn assert_macos_toolchain_data_contract() {
+    mac_toolchain_contract_tests::mac_result_uses_a_closed_extension_not_a_second_accepted_string_data();
+    mac_toolchain_contract_tests::original_mac_decoder_binds_every_selected_anchor_and_cannot_accept_linux_data();
+    mac_toolchain_contract_tests::native_request_binding_rejects_host_root_and_selected_identity_mismatch_data();
 }

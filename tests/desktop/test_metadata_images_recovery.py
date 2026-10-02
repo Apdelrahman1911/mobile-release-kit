@@ -1,6 +1,6 @@
 """Genuine image restart/failure fixtures, not passive/native qualification.
 
-The lead must run this class only in its reviewed Linux filesystem boundary.
+The lead must run this class only in a reviewed Linux or macOS/APFS boundary.
 Each fixture uses its own TemporaryDirectory, the real cancellation/root-lock
 owner, and the existing image staging/rename/rollback primitives. No subprocess,
 external signal, native picker, signing input, network or Store is exercised.
@@ -70,7 +70,11 @@ def _live_lease(root: Path, *, restoring: bool):
 def _project(*, empty: bool = False):
     # The parent container also owns intentionally renamed roots used by the
     # stale-root tests, so failures cannot strand an untracked temporary tree.
-    with tempfile.TemporaryDirectory(prefix="mrk-image-restart-") as directory:
+    # Darwin's default /var or /tmp spelling can be a system alias. Create the
+    # fixture under the actual /private/tmp parent; do not change production
+    # root admission or erase aliases from an arbitrary selected project.
+    with tempfile.TemporaryDirectory(prefix="mrk-image-restart-",
+                                     dir="/private/tmp" if sys.platform == "darwin" else None) as directory:
         root = Path(directory) / "project"
         (root / "release").mkdir(parents=True)
         (root / "release/mobile-release.json").write_text(json.dumps(config()), encoding="utf-8")
@@ -181,7 +185,8 @@ def _prepare_recovery(lease):
 
 class MetadataImagesRecoveryFilesystemTests(unittest.TestCase):
     def setUp(self):
-        self.assertTrue(sys.platform.startswith("linux"), "this explicit native fixture profile is Linux-only")
+        self.assertTrue(sys.platform.startswith("linux") or sys.platform == "darwin",
+                        "this fixture requires a reviewed Linux or macOS/APFS execution boundary")
 
     def _assert_clean(self, root, *, empty=False, committed=False):
         self.assertTrue(all(not (root / state).exists() for state in tx.ALL_STATE_NAMES))

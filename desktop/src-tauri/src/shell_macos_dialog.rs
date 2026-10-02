@@ -1,12 +1,15 @@
-//! Native project/evidence/private-input/Quit panel adapter for the existing OriginalWork, not rfd's
+//! Native project/evidence/private-input/public-image/Quit adapter for the existing OriginalWork, not rfd's
 //! compatibility future. The actual panel and completion live on the main loop.
 use super::*;
 use std::{cell::RefCell, path::PathBuf};
 use crate::asset_session::{GuiCall, GuiFacts};
-use mrk_macos_installed_native::{self as native, Panel, PanelKind, PanelResponse, PanelState};
+use mrk_macos_installed_native::{self as native, ImagesPanelState, Panel, PanelKind, PanelResponse, PanelState,
+    PublicImageRefusal, PublicImageSelection};
 
 type NativeResult = Result<(), ()>;
-type DialogOutcome = Result<Option<PathBuf>, Reason>;
+enum DialogResult { Single(PathBuf), Images(Vec<PathBuf>) }
+type DialogOutcome = Result<Option<DialogResult>, Reason>;
+enum DialogPoll { Showing, Responded(PanelResponse, Result<DialogResult, Reason>), Closed }
 struct OriginalPanel {
     id: u32, panel: Option<Panel>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
@@ -391,7 +394,7 @@ struct DispatchState { cleanup_unknown: bool }
 impl DispatchState {
     fn observe(&mut self, result: NativeResult) { self.cleanup_unknown |= result.is_err(); }
     fn can_continue(&self) -> bool { !self.cleanup_unknown }
-    fn outcome(&mut self, facts: Option<&mut GuiFacts>, quit: bool, interrupted: bool) -> Option<DialogOutcome> {
+    fn outcome(&mut self, facts: Option<&mut GuiFacts>, quit: bool, images: Option<&GuiCall>, interrupted: bool) -> Option<DialogOutcome> {
         if !self.can_continue() { return None; } // Gate BEFORE any outcome/path consumption.
         let Some(facts) = facts else { self.observe(Err(())); return None; };
         if facts.refusal == Some(Reason::CleanupUnknown) { self.observe(Err(())); return None; }
@@ -400,7 +403,12 @@ impl DispatchState {
             if let Some(reason) = facts.refusal { Some(Err(reason)) }
             else if quit || !facts.accepted { Some(Ok(None)) }
             else if interrupted { Some(Err(Reason::UserCancelled)) }
-            else { Some(facts.selected.take().map(Some).ok_or(Reason::SourceRefused)) }
+            else if let Some(call) = images {
+                if facts.selected.is_some() { self.observe(Err(())); None }
+                else { Some(call.take_public_images().and_then(|paths|
+                    paths.map(DialogResult::Images).map(Some).ok_or(Reason::SourceRefused))) }
+            }
+            else { Some(facts.selected.take().map(DialogResult::Single).map(Some).ok_or(Reason::SourceRefused)) }
         } else { None }
     }
 }
@@ -409,6 +417,27 @@ fn response_kind(response: PanelResponse) -> NativeResponse {
         PanelResponse::Decline => NativeResponse::Decline, PanelResponse::Other => NativeResponse::Other }
 }
 fn uncertain(call: &Arc<GuiCall>) -> NativeResult { call.failed(Reason::CleanupUnknown); Err(()) }
+
+fn poll_original(panel: &mut Panel, kind: PanelKind) -> std::io::Result<DialogPoll> {
+    if kind == PanelKind::PublicImages {
+        panel.poll_public_images().map(|state| match state {
+            ImagesPanelState::Showing => DialogPoll::Showing,
+            ImagesPanelState::Closed => DialogPoll::Closed,
+            ImagesPanelState::Responded { response, selection } => DialogPoll::Responded(response, match selection {
+                PublicImageSelection::Paths(paths) => Ok(DialogResult::Images(paths)),
+                PublicImageSelection::Refused(PublicImageRefusal::Count | PublicImageRefusal::Capacity) => Err(Reason::MaterialLimit),
+                PublicImageSelection::Refused(PublicImageRefusal::Path) | PublicImageSelection::Unselected => Err(Reason::SourceRefused),
+            }),
+        })
+    } else {
+        panel.poll().map(|state| match state {
+            PanelState::Showing => DialogPoll::Showing,
+            PanelState::Closed => DialogPoll::Closed,
+            PanelState::Responded { response, path } => DialogPoll::Responded(response,
+                path.map(DialogResult::Single).ok_or(Reason::SourceRefused)),
+        })
+    }
+}
 
 fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std::path::Path>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
@@ -424,7 +453,8 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
     let reserved = PANEL.with(|book| {
         let Ok(mut book) = book.try_borrow_mut() else { return Err(Reason::Busy); };
         if book.is_some() { return Err(Reason::Busy); }
-        let panel = Panel::reserve().map_err(|_| Reason::SourceRefused)?;
+        let panel = if choice == PanelKind::PublicImages { Panel::reserve_public_images() } else { Panel::reserve() }
+            .map_err(|_| Reason::SourceRefused)?;
         // Store the exact original before constructing/presenting any panel.
         *book = Some(OriginalPanel { id: owner.id, panel: Some(panel),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
@@ -489,11 +519,13 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
     call.changed(); Ok(())
 }
 
-fn tick(call: &Arc<GuiCall>, id: u32, quit: bool,
+fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
     completion_return: &mut Option<(u32, native::CompletionReturn)>,
 ) -> NativeResult {
+    let quit = kind == PanelKind::Quit;
+    let images = kind == PanelKind::PublicImages;
     if !native::main_thread() { return uncertain(call); }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
@@ -512,7 +544,7 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool,
                 if !Arc::ptr_eq(&bound_call, call) || bound_owner.id != id { return Err(()); }
             }
             let panel = entry.panel.as_mut().ok_or(())?;
-            let polled = panel.poll();
+            let polled = poll_original(panel, kind);
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
             {
@@ -521,25 +553,36 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool,
                 *completion_return = panel.take_installed_completion_return().map(|data| (id, data));
             }
             match polled {
-                Ok(PanelState::Responded { response, path }) => {
+                Ok(DialogPoll::Responded(response, selected)) => {
                     let first = call.facts().ok_or(())?.response == false;
                     if first {
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-                        call.record_installed_native_response(id, response_kind(response), path.as_deref())?;
+                        if !images {
+                            call.record_installed_native_response(id, response_kind(response), match selected.as_ref().ok() {
+                                Some(DialogResult::Single(path)) => Some(path.as_path()), _ => None,
+                            })?;
+                        }
                         let admitted = call.begin_response(response_kind(response), quit);
                         if admitted == Some(true) && !quit {
-                            call.selected_path(path.ok_or(Reason::SourceRefused).and_then(|path| {
-                                crate::asset_source::path_hint(&path)?; Ok(path)
-                            }));
+                            if images {
+                                call.selected_public_images(selected.and_then(|value| match value {
+                                    DialogResult::Images(paths) => Ok(paths), _ => Err(Reason::CleanupUnknown),
+                                }));
+                            } else {
+                                call.selected_path(selected.and_then(|value| match value {
+                                    DialogResult::Single(path) => { crate::asset_source::path_hint(&path)?; Ok(path) },
+                                    _ => Err(Reason::CleanupUnknown),
+                                }));
+                            }
                         }
                     }
                 }
-                Ok(PanelState::Closed) => {
+                Ok(DialogPoll::Closed) => {
                     let mut facts = call.facts().ok_or(())?;
                     facts.destroyed = true; facts.showing = false; facts.close_ack = true;
                 }
-                Ok(PanelState::Showing) => {}
+                Ok(DialogPoll::Showing) => {}
                 Err(_) => return Err(()), // No close/release native work after uncertainty.
             }
             let close = {
@@ -584,8 +627,14 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool,
 // separate; original native custody still decides whether either can be used.
 fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) -> Result<PanelKind, Reason> {
     match (choice, initial_folder) {
+        (DialogChoice::AndroidToolSource(role), None) => Ok(match role {
+            crate::android_tool_sources::Role::Jdk => PanelKind::AndroidJdk,
+            crate::android_tool_sources::Role::Sdk => PanelKind::AndroidSdk,
+            crate::android_tool_sources::Role::Gradle => PanelKind::AndroidGradle,
+        }),
         (DialogChoice::Project, None) => Ok(PanelKind::Project),
         (DialogChoice::EvidenceFolder, None) => Ok(PanelKind::EvidenceFolder),
+        (DialogChoice::PublicImages, None) => Ok(PanelKind::PublicImages),
         (DialogChoice::File(crate::credential_format::FileKind::AppleP12
             | crate::credential_format::FileKind::AppleProfile | crate::credential_format::FileKind::IosFirebase
             | crate::credential_format::FileKind::AscP8 | crate::credential_format::FileKind::AndroidKeystore
@@ -602,6 +651,24 @@ fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) ->
     }
 }
 pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice,
+    initial_folder: Option<PathBuf>) -> Result<Option<PathBuf>, Reason> {
+    if matches!(choice, DialogChoice::PublicImages) {
+        owner.gui.not_created(Reason::InvalidRequest); return Err(Reason::InvalidRequest);
+    }
+    match run_owned_choice(app, owner, choice, initial_folder).await? {
+        Some(DialogResult::Single(path)) => Ok(Some(path)), None => Ok(None),
+        Some(DialogResult::Images(_)) => Err(Reason::CleanupUnknown),
+    }
+}
+pub(crate) async fn run_owned_images_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<PathBuf>>, Reason> {
+    match run_owned_choice(app, owner, DialogChoice::PublicImages, None).await? {
+        Some(DialogResult::Images(paths)) => Ok(Some(paths)), None => Ok(None),
+        Some(DialogResult::Single(_)) => Err(Reason::CleanupUnknown),
+    }
+}
+// One original panel/create/poll/close/release loop. Images never use the
+// credential path cell and cannot be consumed before the same native finality.
+async fn run_owned_choice(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice,
     initial_folder: Option<PathBuf>) -> DialogOutcome {
     let call = owner.gui.clone();
     let kind = match panel_kind(choice, initial_folder.as_deref()) {
@@ -652,11 +719,19 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
         if !dispatch.can_continue() { std::future::pending::<()>().await; }
         let outcome = {
             let mut facts = call.facts();
-            dispatch.outcome(facts.as_deref_mut(), matches!(choice, DialogChoice::Quit), owner.interrupted())
+            dispatch.outcome(facts.as_deref_mut(), matches!(choice, DialogChoice::Quit),
+                matches!(choice, DialogChoice::PublicImages).then_some(call.as_ref()), owner.interrupted())
         };
         // A failed facts observation also vetoes outcome and the next dispatch.
         if !dispatch.can_continue() { call.failed(Reason::CleanupUnknown); std::future::pending::<()>().await; }
-        if let Some(outcome) = outcome { return outcome; }
+        if let Some(outcome) = outcome {
+            if matches!(choice, DialogChoice::PublicImages) {
+                // Refusal/cancellation also disposes accepted pathname DATA
+                // only after known original settlement, never after Unknown.
+                drop(call.take_public_images()?);
+            }
+            return outcome;
+        }
         let (done, joined) = oneshot::channel(); let observing = call.clone(); let id = owner.id;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
@@ -665,7 +740,7 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
             let mut completion_return = None;
-            let result = tick(&observing, id, matches!(choice, DialogChoice::Quit),
+            let result = tick(&observing, id, kind,
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
                 &mut completion_return,
@@ -687,6 +762,25 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
 }
 
 #[cfg(test)]
+pub(crate) fn public_images_routing_data_check() -> bool {
+    // Purpose DATA only. Neither native poll nor a substitute GuiCall runs.
+    if !matches!(panel_kind(DialogChoice::PublicImages, None), Ok(PanelKind::PublicImages)) { return false; }
+    for root in ["/inert/project", "/", "relative"] {
+        if !matches!(panel_kind(DialogChoice::PublicImages, Some(std::path::Path::new(root))),
+            Err(Reason::UnsupportedPlatform)) { return false; }
+    }
+    for choice in [DialogChoice::Project, DialogChoice::Quit, DialogChoice::EvidenceFolder,
+        DialogChoice::File(crate::credential_format::FileKind::AppleP12),
+        DialogChoice::File(crate::credential_format::FileKind::AndroidKeystore),
+        DialogChoice::ProjectPath(crate::asset_commands::ProjectPathField::MetadataRoot)] {
+        if matches!(panel_kind(choice, None), Ok(PanelKind::PublicImages)) { return false; }
+    }
+    tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal();
+    tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch();
+    true
+}
+
+#[cfg(test)]
 pub(crate) fn evidence_folder_routing_data_check() -> bool {
     // Pure routing through the actual adapter function. No Panel, GuiCall,
     // native callback, filesystem read or substitute original is constructed.
@@ -705,6 +799,14 @@ pub(crate) fn evidence_folder_routing_data_check() -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn android_source_roles_use_the_original_folder_panel_without_renderer_initial_paths() {
+        use crate::android_tool_sources::Role;
+        for (role, kind) in [(Role::Jdk, PanelKind::AndroidJdk), (Role::Sdk, PanelKind::AndroidSdk), (Role::Gradle, PanelKind::AndroidGradle)] {
+            assert!(matches!(panel_kind(DialogChoice::AndroidToolSource(role), None), Ok(actual) if actual == kind));
+            assert!(matches!(panel_kind(DialogChoice::AndroidToolSource(role), Some(std::path::Path::new("/inert/selected"))), Err(Reason::UnsupportedPlatform)));
+        }
+    }
+    #[test]
     fn android_files_reuse_the_private_panel_without_initial_folder_or_image_authority() {
         use crate::credential_format::FileKind;
         use std::path::Path;
@@ -716,7 +818,7 @@ mod tests {
         }
         assert!(matches!(panel_kind(DialogChoice::Project, None), Ok(PanelKind::Project)));
         assert!(matches!(panel_kind(DialogChoice::Quit, None), Ok(PanelKind::Quit)));
-        assert!(matches!(panel_kind(DialogChoice::PublicImages, None), Err(Reason::UnsupportedPlatform)));
+        assert!(matches!(panel_kind(DialogChoice::PublicImages, None), Ok(PanelKind::PublicImages)));
         let field = DialogChoice::ProjectPath(crate::asset_commands::ProjectPathField::VersionSource);
         assert!(matches!(panel_kind(field, None), Err(Reason::SourceRefused)));
         assert!(matches!(panel_kind(field, Some(Path::new("/inert/../project"))), Err(Reason::SourceRefused)));
@@ -727,7 +829,11 @@ mod tests {
         assert!(evidence_folder_routing_data_check());
     }
     #[test]
-    fn native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal() {
+    fn images_have_their_own_purpose_without_single_file_or_project_authority() {
+        assert!(public_images_routing_data_check());
+    }
+    #[test]
+    pub(super) fn native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal() {
         for reason in [Reason::SourceRefused, Reason::UserCancelled] {
             // Inert projection DATA only. No panel, callback, original owner or
             // permission is constructed by this classifier regression.
@@ -736,24 +842,24 @@ mod tests {
                 destroyed: true, released: true, not_created: false, close_queued: true, close_ack: true,
                 release_queued: true, selected: None, refusal: Some(reason) };
             let mut dispatch = DispatchState::default();
-            assert!(dispatch.outcome(Some(&mut facts), true, false).is_some());
+            assert!(dispatch.outcome(Some(&mut facts), true, None, false).is_some());
             dispatch.observe(Err(()));
             assert!(!dispatch.can_continue());
-            assert!(dispatch.outcome(Some(&mut facts), true, false).is_none());
+            assert!(dispatch.outcome(Some(&mut facts), true, None, false).is_none());
             dispatch.observe(Ok(())); // A later known return cannot restore admission.
             facts.not_created = true; // Nor can an otherwise-final projection.
             assert!(!dispatch.can_continue());
-            assert!(dispatch.outcome(Some(&mut facts), true, false).is_none());
+            assert!(dispatch.outcome(Some(&mut facts), true, None, false).is_none());
             assert_eq!(facts.refusal, Some(reason)); // No global first-reason semantics change.
         }
     }
     #[test]
-    fn response_mapping_preserves_other_and_missing_facts_poison_dispatch() {
+    pub(super) fn response_mapping_preserves_other_and_missing_facts_poison_dispatch() {
         assert!(response_kind(PanelResponse::Accept) == NativeResponse::Accept);
         assert!(response_kind(PanelResponse::Decline) == NativeResponse::Decline);
         assert!(response_kind(PanelResponse::Other) == NativeResponse::Other);
         let mut dispatch = DispatchState::default();
-        assert!(dispatch.outcome(None, true, false).is_none());
+        assert!(dispatch.outcome(None, true, None, false).is_none());
         assert!(!dispatch.can_continue());
     }
 }

@@ -213,6 +213,74 @@ fn roster_limit(counts: impl IntoIterator<Item = usize>, leaf: usize) -> Result<
     if total > DESCRIPTOR_LIMIT { return Err(Reason::Capacity); } Ok(total)
 }
 
+// Pure image limits/naming and leaf policy shared by the two POSIX adapters.
+// Private and public leaf permissions are intentionally not interchangeable.
+// The credential entry always selects Private; only the closed image entry
+// can select PublicImage, and both still require an actual regular file.
+#[derive(Clone, Copy)]
+enum LeafPolicy { Private, PublicImage }
+impl LeafPolicy {
+    fn permits(self, identity: FileIdentity) -> bool {
+        match self {
+            Self::Private => private_file(identity.common.mode),
+            // Refuse hardlinks. The separately retained original dev/ino
+            // excludes mount aliases from later target replacement too.
+            // Read permission is checked by the original read-only open;
+            // ordinary public 0644/0664 files need not be credential-private.
+            Self::PublicImage => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
+        }
+    }
+}
+fn public_image_display_name(name: &[u8], ordinal: usize) -> Result<String, Reason> {
+    let extension = name.rsplit(|byte| *byte == b'.').next().ok_or(Reason::UnsupportedFormat)?;
+    let format = if extension.eq_ignore_ascii_case(b"png") { "png" }
+        else if extension.eq_ignore_ascii_case(b"jpg") || extension.eq_ignore_ascii_case(b"jpeg") { "jpg" }
+        else { return Err(Reason::UnsupportedFormat); };
+    if !name.contains(&b'.') { return Err(Reason::UnsupportedFormat); }
+    // Display DATA, not a destination. Core derives portable target names
+    // and shows any rename before Apply. No absolute source spelling leaks.
+    if let Ok(name) = std::str::from_utf8(name) {
+        if !name.is_empty() && name.len() <= 255 && !name.contains(['/', '\\'])
+            && !name.chars().any(|c| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')) {
+            return Ok(name.to_owned());
+        }
+    }
+    Ok(format!("selected-image-{:02}.{format}", ordinal + 1))
+}
+fn public_image_size(total: usize, size: u64) -> Result<(usize, usize), Reason> {
+    let size = usize::try_from(size).map_err(|_| Reason::MaterialLimit)?;
+    let total = total.checked_add(size).ok_or(Reason::MaterialLimit)?;
+    if size == 0 || size > PUBLIC_IMAGE_FILE_BYTES || total > PUBLIC_IMAGE_BATCH_BYTES { return Err(Reason::MaterialLimit); }
+    Ok((size, total))
+}
+fn public_image_token(stop: &mut dyn FnMut() -> bool) -> Result<String, Reason> {
+    if stop() { return Err(Reason::UserCancelled); }
+    let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| Reason::SourceRefused)?;
+    if stop() { return Err(Reason::UserCancelled); }
+    let mut token = String::new(); token.try_reserve_exact(32).map_err(|_| Reason::Capacity)?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes { token.push(char::from(HEX[usize::from(byte >> 4)])); token.push(char::from(HEX[usize::from(byte & 15)])); }
+    Ok(token)
+}
+fn public_protected_source(path: &Path, root: &RegisteredRoot, root_depth: usize,
+    ancestry: &[DirectoryIdentity], root_id: DirectoryIdentity) -> Result<Option<String>, Reason> {
+    let physical = ancestry.iter().position(|identity| identity.same_object(root_id));
+    let lexical = path.strip_prefix(&root.path).ok();
+    match (physical, lexical) {
+        (None, None) => Ok(None),
+        (Some(depth), Some(relative)) if depth == root_depth => {
+            let relative = relative.to_str().filter(|value| !value.is_empty() && value.len() <= PATH_LIMIT
+                && !value.contains('\\') && !value.chars().any(char::is_control)
+                && value.split('/').all(|part| !matches!(part, "" | "." | "..")))
+                .ok_or(Reason::SourceRefused)?;
+            Ok(Some(relative.to_owned()))
+        },
+        // Bind-mount/ancestry aliases cannot hide an original project file
+        // from the core's preserve-source roster. Refuse rather than guess.
+        _ => Err(Reason::SourceRefused),
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod linux {
     use super::*;
@@ -223,23 +291,6 @@ mod linux {
     enum OriginalState { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown }
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Identity { Directory(DirectoryIdentity), File(FileIdentity) }
-    // Private and public leaf permissions are intentionally not interchangeable.
-    // The credential entry always selects Private; only the closed image entry
-    // can select PublicImage, and both still require an actual regular file.
-    #[derive(Clone, Copy)]
-    enum LeafPolicy { Private, PublicImage }
-    impl LeafPolicy {
-        fn permits(self, identity: FileIdentity) -> bool {
-            match self {
-                Self::Private => private_file(identity.common.mode),
-                // Refuse hardlinks. The separately retained original dev/ino
-                // excludes mount aliases from later target replacement too.
-                // Read permission is checked by the original read-only open;
-                // ordinary public 0644/0664 files need not be credential-private.
-                Self::PublicImage => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
-            }
-        }
-    }
     // Observation only. These cells neither own descriptors nor influence the
     // production custody state. Fixed counters are recorded at the real calls.
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
@@ -624,54 +675,7 @@ mod linux {
     }
     fn public_image_name(path: &Path, ordinal: usize) -> Result<String, Reason> {
         let components = parts(path)?;
-        let name = components.last().ok_or(Reason::SourceRefused)?;
-        let extension = name.rsplit(|byte| *byte == b'.').next().ok_or(Reason::UnsupportedFormat)?;
-        let format = if extension.eq_ignore_ascii_case(b"png") { "png" }
-            else if extension.eq_ignore_ascii_case(b"jpg") || extension.eq_ignore_ascii_case(b"jpeg") { "jpg" }
-            else { return Err(Reason::UnsupportedFormat); };
-        if !name.contains(&b'.') { return Err(Reason::UnsupportedFormat); }
-        // Display DATA, not a destination. Core derives portable target names
-        // and shows any rename before Apply. No absolute source spelling leaks.
-        if let Ok(name) = std::str::from_utf8(name) {
-            if !name.is_empty() && name.len() <= 255 && !name.contains(['/', '\\'])
-                && !name.chars().any(|c| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')) {
-                return Ok(name.to_owned());
-            }
-        }
-        Ok(format!("selected-image-{:02}.{format}", ordinal + 1))
-    }
-    fn public_image_size(total: usize, size: u64) -> Result<(usize, usize), Reason> {
-        let size = usize::try_from(size).map_err(|_| Reason::MaterialLimit)?;
-        let total = total.checked_add(size).ok_or(Reason::MaterialLimit)?;
-        if size == 0 || size > PUBLIC_IMAGE_FILE_BYTES || total > PUBLIC_IMAGE_BATCH_BYTES { return Err(Reason::MaterialLimit); }
-        Ok((size, total))
-    }
-    fn public_image_token(stop: &mut dyn FnMut() -> bool) -> Result<String, Reason> {
-        checkpoint(stop)?;
-        let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| Reason::SourceRefused)?;
-        checkpoint(stop)?;
-        let mut token = String::new(); token.try_reserve_exact(32).map_err(|_| Reason::Capacity)?;
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for byte in bytes { token.push(char::from(HEX[usize::from(byte >> 4)])); token.push(char::from(HEX[usize::from(byte & 15)])); }
-        Ok(token)
-    }
-    fn public_protected_source(path: &Path, root: &RegisteredRoot, root_depth: usize,
-        ancestry: &[DirectoryIdentity], root_id: DirectoryIdentity) -> Result<Option<String>, Reason> {
-        let physical = ancestry.iter().position(|identity| identity.same_object(root_id));
-        let lexical = path.strip_prefix(&root.path).ok();
-        match (physical, lexical) {
-            (None, None) => Ok(None),
-            (Some(depth), Some(relative)) if depth == root_depth => {
-                let relative = relative.to_str().filter(|value| !value.is_empty() && value.len() <= PATH_LIMIT
-                    && !value.contains('\\') && !value.chars().any(char::is_control)
-                    && value.split('/').all(|part| !matches!(part, "" | "." | "..")))
-                    .ok_or(Reason::SourceRefused)?;
-                Ok(Some(relative.to_owned()))
-            },
-            // Bind-mount/ancestry aliases cannot hide an original project file
-            // from the core's preserve-source roster. Refuse rather than guess.
-            _ => Err(Reason::SourceRefused),
-        }
+        public_image_display_name(components.last().ok_or(Reason::SourceRefused)?, ordinal)
     }
     pub(crate) fn capture_public_images(book: &mut SourceBook, paths: Vec<PathBuf>, root: &RegisteredRoot, byte_limit: usize,
         stop: &mut dyn FnMut() -> bool, failed: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> {
@@ -1101,7 +1105,11 @@ pub(crate) use linux::assert_project_path_source_contracts;
 #[path = "asset_source_macos.rs"]
 mod macos;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
+pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::assert_installed_macos_images_source_contract;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 #[path = "asset_source_windows.rs"]
@@ -1127,7 +1135,7 @@ pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_p
 
 // Public-image platform adapters are purpose-specific. A Mac/Windows project
 // probe or a credential picker never qualifies this new multi-file operation.
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) fn capture_public_images(_: &mut SourceBook, _: Vec<PathBuf>, _: &RegisteredRoot, _: usize,
     _: &mut dyn FnMut() -> bool, _: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> { Err(Reason::UnsupportedPlatform) }
 

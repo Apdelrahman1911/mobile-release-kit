@@ -2,6 +2,7 @@
 // Each exported step enters at most one allocating/freeing API. The Rust owner
 // observes a refusal BEFORE scheduling cleanup under its original endpoint.
 #include <sys/acl.h>
+#include "vault_helper_control.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -42,6 +43,7 @@ static int resources_settled(mrk_vault_acl_frame *f) {
     return 1;
 }
 static void failure(mrk_vault_acl_frame *f, uint32_t kind, uint32_t at, int rc, int error) {
+    mrk_vault_control_failure(); // Fixed helper stamp; ordinary app build is a no-op.
     if (!f->facts.first_phase) {
         f->facts.first_phase=at; f->facts.first_return=rc; f->facts.first_errno=error >= 0 ? error : EIO;
         f->facts.outcome=kind;

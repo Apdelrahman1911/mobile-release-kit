@@ -120,17 +120,61 @@ pub(crate) struct ConfigurationInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) struct MetadataTextInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct MetadataImagesInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) struct ReleaseVersionInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) struct GitHubWorkflowInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) struct IOSArchiveInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct AndroidBuildInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl AndroidBuildInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("android_build_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl IOSArchiveInstalledProfile {
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
         if !macos_bindings() { return Err(unavailable()); }
         let cwd = crate::installed_runtime::runtime_root();
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("ios_archive_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct OfflinePreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl OfflinePreflightInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("offline_preflight_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+// Separate fixed selections for Check build tools and generic ProjectRecovery.
+// Neither profile borrows Android catalog, offline-preflight or iOS authority.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct EnvironmentDiagnosticsInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl EnvironmentDiagnosticsInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("environment_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct ProjectRecoveryInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl ProjectRecoveryInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("project_recovery_bootstrap.py"), core: cwd.join("core.zip"), cwd })
     }
 }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -208,6 +252,14 @@ impl GitHubWorkflowInstalledProfile {
 }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl MetadataTextInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl MetadataImagesInstalledProfile {
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
         if !macos_bindings() { return Err(unavailable()); }
         let cwd = crate::installed_runtime::runtime_root();
@@ -1087,10 +1139,12 @@ impl RuntimeConfig {
             not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
             not(feature = "macos-installed-installer")))]
         { PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        { macos_bindings() && !cfg!(feature = "windows-runtime-publisher") }
+        #[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
             feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
             not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
-            not(feature = "macos-installed-installer"))))]
+            not(feature = "macos-installed-installer")))))]
         { false }
     }
     pub(crate) fn claim_original_supervisor(&mut self) {
@@ -1513,15 +1567,19 @@ impl RuntimeConfig {
         originals.inspect_once(self.release_version_installed_profile()?, end, stop)
     }
     pub(crate) fn metadata_images_edit_profile_available(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.metadata_images_installed_profile().is_ok() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
     }
     pub(crate) fn metadata_images_selection_profile_available(&self) -> bool {
         // A public selection cannot mint unusable retained bytes under a
         // different profile. Selection and edit share the exact fixed image gate.
         self.metadata_images_edit_profile_available()
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn metadata_images_installed_profile(&self) -> Result<MetadataImagesInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(MetadataImagesInstalledProfile { _private: () }) } else { Err(unavailable()) }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn metadata_images_installed_profile(&self) -> Result<MetadataImagesInstalledProfile, BridgeError> {
@@ -1532,7 +1590,7 @@ impl RuntimeConfig {
         }
         Err(BridgeError::unavailable("The public-image installed runtime and native selection profile are not qualified."))
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     pub(crate) fn resolve_metadata_images_installed(&self, originals: &mut crate::installed_runtime::MetadataImagesRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.metadata_images_installed_profile()?, end, stop)
@@ -1559,9 +1617,9 @@ impl RuntimeConfig {
     // Fixed ordinary selection is shared by the original owner's admission and
     // inspection. It is not observer permission or evidence of native finality.
     pub(crate) fn environment_diagnostics_installed_profile_available(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.environment_diagnostics_installed_profile().is_ok() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1573,15 +1631,20 @@ impl RuntimeConfig {
         }
         Err(BridgeError::unavailable("The build-tool diagnostics installed-runtime selection is unavailable."))
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn environment_diagnostics_installed_profile(&self) -> Result<EnvironmentDiagnosticsInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(EnvironmentDiagnosticsInstalledProfile { _private: () }) }
+        else { Err(BridgeError::unavailable("The build-tool diagnostics installed-runtime selection is unavailable.")) }
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     pub(crate) fn resolve_environment_diagnostics_installed(&self, originals: &mut crate::installed_runtime::EnvironmentDiagnosticsRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.environment_diagnostics_installed_profile()?, end, stop)
     }
     pub(crate) fn offline_preflight_installed_profile_available(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.offline_preflight_installed_profile().is_ok() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1592,15 +1655,20 @@ impl RuntimeConfig {
         }
         Err(BridgeError::unavailable("The saved offline-preflight installed-runtime selection is unavailable."))
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn offline_preflight_installed_profile(&self) -> Result<OfflinePreflightInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(OfflinePreflightInstalledProfile { _private: () }) }
+        else { Err(BridgeError::unavailable("The saved offline-preflight installed-runtime selection is unavailable.")) }
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     pub(crate) fn resolve_offline_preflight_installed(&self, originals: &mut crate::installed_runtime::OfflinePreflightRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
     }
     pub(crate) fn project_recovery_installed_profile_available(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.project_recovery_installed_profile().is_ok() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1611,7 +1679,12 @@ impl RuntimeConfig {
         }
         Err(BridgeError::unavailable("The project recovery installed-runtime selection is unavailable."))
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn project_recovery_installed_profile(&self) -> Result<ProjectRecoveryInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(ProjectRecoveryInstalledProfile { _private: () }) }
+        else { Err(BridgeError::unavailable("The project recovery installed-runtime selection is unavailable.")) }
+    }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     pub(crate) fn resolve_project_recovery_installed(&self, originals: &mut crate::installed_runtime::ProjectRecoveryRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.project_recovery_installed_profile()?, end, stop)
@@ -1628,6 +1701,12 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         if !macos_bindings() { return Err(unavailable()); }
         originals.inspect_once(IOSArchiveInstalledProfile { _private: () }, end, stop)
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn resolve_android_build_installed(&self, originals: &mut crate::installed_runtime::AndroidBuildRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.android_build_installed_runtime_available() { return Err(unavailable()); }
+        originals.inspect_once(AndroidBuildInstalledProfile { _private: () }, end, stop)
     }
     /// Fixed diagnostics bootstrap, never the passive engine or edit protocol.
     /// These source/metadata checks do not qualify the neutral cwd, installed
@@ -2022,6 +2101,109 @@ pub(crate) fn assert_installed_version_profile_contract() {
 }
 
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn installed_macos_doctor_recovery_profile_data_check() -> bool {
+    // Compiled selection/path/type DATA only. Do not resolve, arm or inspect a
+    // runtime here; constructors and selection cannot confer executable custody.
+    use std::any::TypeId;
+    let environment = TypeId::of::<EnvironmentDiagnosticsInstalledProfile>();
+    let recovery = TypeId::of::<ProjectRecoveryInstalledProfile>();
+    if environment == recovery { return false; }
+    for foreign in [TypeId::of::<PassiveInstalledProfile>(), TypeId::of::<OfflinePreflightInstalledProfile>(),
+        TypeId::of::<AndroidBuildInstalledProfile>(), TypeId::of::<IOSArchiveInstalledProfile>()] {
+        if environment == foreign || recovery == foreign { return false; }
+    }
+    let selected = macos_bindings();
+    for path in ["/inert-mrk-doctor-recovery-not-opened", "/inert-foreign-bundle-not-opened"] {
+        let runtime = RuntimeConfig::packaged(PathBuf::from(path));
+        if runtime.environment_diagnostics_installed_profile_available() != selected
+            || runtime.project_recovery_installed_profile_available() != selected { return false; }
+        let environment = runtime.environment_diagnostics_installed_profile();
+        let recovery = runtime.project_recovery_installed_profile();
+        if environment.is_ok() != selected || recovery.is_ok() != selected { return false; }
+        if (EnvironmentDiagnosticsInstalledProfile { _private: () }).selection().is_ok() != selected
+            || (ProjectRecoveryInstalledProfile { _private: () }).selection().is_ok() != selected { return false; }
+        if let (Ok(environment), Ok(recovery)) = (environment, recovery) {
+            let (Ok(environment), Ok(recovery)) = (environment.selection(), recovery.selection()) else { return false; };
+            let cwd = crate::installed_runtime::runtime_root();
+            if environment.python != cwd.join("python/bin/python3") || recovery.python != environment.python
+                || environment.core != cwd.join("core.zip") || recovery.core != environment.core
+                || environment.cwd != cwd || recovery.cwd != cwd
+                || environment.bootstrap != cwd.join("environment_bootstrap.py")
+                || recovery.bootstrap != cwd.join("project_recovery_bootstrap.py")
+                || environment.bootstrap == recovery.bootstrap { return false; }
+        }
+    }
+    // Check build tools is not CLI doctor or a newly admitted passive method.
+    for method in ["doctor", "environment.diagnostics", "prepare_project_recovery", "start_project_recovery"] {
+        if macos_installed_passive_method(method) { return false; }
+    }
+    true
+}
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn installed_macos_doctor_recovery_profiles_are_distinct_fixed_data() {
+    assert!(installed_macos_doctor_recovery_profile_data_check());
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn installed_macos_offline_profile_data_check() -> bool {
+    // Explicit observer/libtest DATA. No inspect, native query, Prepare or IO.
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mrk-offline-profile-not-opened"));
+    let selected = macos_bindings();
+    if runtime.offline_preflight_installed_profile_available() != selected { return false; }
+    for method in ["offline-preflight", "offline.preflight", "preflight.offline",
+        "prepare_offline_preflight", "start_offline_preflight"] {
+        if macos_installed_passive_method(method) { return false; }
+    }
+    match runtime.offline_preflight_installed_profile() {
+        Ok(profile) => {
+            if !selected { return false; }
+            let Ok(selection) = profile.selection() else { return false; };
+            let cwd = crate::installed_runtime::runtime_root();
+            selection.python == cwd.join("python/bin/python3")
+                && selection.bootstrap == cwd.join("offline_preflight_bootstrap.py")
+                && selection.core == cwd.join("core.zip") && selection.cwd == cwd
+        },
+        Err(_) => !selected,
+    }
+}
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn installed_macos_offline_profile_uses_only_its_fixed_entry() {
+    assert!(installed_macos_offline_profile_data_check());
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn installed_macos_images_profile_data_check() -> bool {
+    // Typed profile DATA only. Never resolve an admitted runtime in this check.
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-images-profile-not-opened"));
+    let selected = macos_bindings();
+    if runtime.metadata_images_edit_profile_available() != selected
+        || runtime.metadata_images_selection_profile_available() != selected { return false; }
+    let profile = runtime.metadata_images_installed_profile();
+    if profile.is_ok() != selected { return false; }
+    let mut originals = crate::installed_runtime::MetadataImagesRuntimeSlots::new();
+    if !originals.never_started() || !originals.no_child_effect() || originals.capability().is_ok() { return false; }
+    if let Ok(profile) = profile {
+        let Ok(data) = profile.selection() else { return false; };
+        let root = crate::installed_runtime::runtime_root();
+        if data.cwd != root || data.python != root.join("python/bin/python3")
+            || data.bootstrap != root.join("config_edit_bootstrap.py") || data.core != root.join("core.zip") { return false; }
+    } else {
+        let (_sender, stop) = tokio::sync::watch::channel(false);
+        if runtime.resolve_metadata_images_installed(&mut originals, Instant::now(), &stop).is_ok()
+            || !originals.never_started() || !originals.no_child_effect() || originals.capability().is_ok() { return false; }
+    }
+    true
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn macos_images_selection_and_edit_share_one_sealed_profile() {
+    assert!(installed_macos_images_profile_data_check());
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn installed_macos_evidence_profile_data_check() -> bool {
     // Explicitly called by the harness=false observer. Compiled selection and
     // method DATA only: no runtime resolution, native query or document permit.
@@ -2099,29 +2281,30 @@ mod tests {
                 assert_eq!(selection.core, cwd.join("core.zip"));
             }
         }
-        // Already-stopped inspection returns before any native call/open. Each
-        // distinct original book still owes its OWN one-use settlement.
+        // Unarmed inspection refuses before any native call/open, even when the
+        // profile is admitted. Each inert book owes its OWN one-use settlement.
         let (_sender, stop) = tokio::sync::watch::channel(true);
         let end = Instant::now() + std::time::Duration::from_secs(1);
         let mut metadata = crate::installed_runtime::MetadataTextRuntimeSlots::new();
         let mut version = crate::installed_runtime::ReleaseVersionRuntimeSlots::new();
         assert!(runtime.resolve_metadata_text_installed(&mut metadata, end, &stop).is_err());
         assert!(runtime.resolve_release_version_installed(&mut version, end, &stop).is_err());
-        assert_eq!(metadata.never_started(), !admitted);
-        assert_eq!(version.never_started(), !admitted);
+        assert!(metadata.never_started());
+        assert!(version.never_started());
         assert!(metadata.no_child_effect() && version.no_child_effect());
         assert!(metadata.transfer_once().is_err() && metadata.capability().is_err());
         assert!(version.transfer_once().is_err() && version.capability().is_err());
         assert!(!metadata.settled() && !version.settled());
-        assert_eq!(metadata.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+        assert_eq!(metadata.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
         assert!(metadata.settled() && !version.settled());
-        assert_eq!(version.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+        assert_eq!(version.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
         assert!(version.settled());
-        assert_eq!(metadata.settle_originals(), crate::installed_runtime::CloseOutcome::Unknown);
-        assert_eq!(version.settle_originals(), crate::installed_runtime::CloseOutcome::Unknown);
-        assert!(!runtime.metadata_images_edit_profile_available());
-        assert!(!runtime.metadata_images_selection_profile_available());
-        assert!(!runtime.project_path_selection_profile_available() && !runtime.evidence_selection_profile_available());
+        assert_eq!(metadata.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
+        assert_eq!(version.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
+        assert_eq!(runtime.metadata_images_edit_profile_available(), admitted);
+        assert_eq!(runtime.metadata_images_selection_profile_available(), admitted);
+        assert_eq!(runtime.project_path_selection_profile_available(), INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && admitted);
+        assert_eq!(runtime.evidence_selection_profile_available(), admitted);
     }
     #[cfg(target_os = "macos")]
     #[test]
@@ -2450,6 +2633,9 @@ mod tests {
             let (_sender, stop) = tokio::sync::watch::channel(false);
             assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now(), &stop).is_err());
             assert!(slots.never_started() && !slots.settled() && slots.capability().is_err());
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            assert_eq!(slots.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
             assert!(slots.settled()); // Original EMPTY bookkeeping, not native execution.
         }
@@ -2481,23 +2667,23 @@ mod tests {
             assert_eq!(data.python, root.join("python/bin/python3"));
             assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
             assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
-            // Sticky STOP wins before real-user/any native acquisition.
+            // An unarmed original refuses before real-user/any native acquisition.
             assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
-            assert!(!slots.never_started() && slots.no_child_effect());
+            assert!(slots.never_started() && slots.no_child_effect());
             assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now(), &stop).is_err());
         } else {
             assert!(runtime.resolve_github_workflow_installed(&mut slots, Instant::now(), &stop).is_err());
             assert!(slots.never_started()); // Selector refusal precedes inspection.
         }
         assert!(slots.transfer_once().is_err() && slots.capability().is_err() && !slots.settled());
-        assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled);
+        assert_eq!(slots.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Settled);
         assert!(slots.settled() && slots.capability().is_err());
-        assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Unknown);
+        assert_eq!(slots.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
         let mut interrupted = crate::installed_runtime::GitHubWorkflowRuntimeSlots::new();
         interrupted.mark_interrupted();
         assert!(!interrupted.never_started() && interrupted.no_child_effect());
         assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
-        assert_eq!(interrupted.settle_originals(), crate::installed_runtime::CloseOutcome::Unknown);
+        assert_eq!(interrupted.settle_originals(&mut |_| false), crate::installed_runtime::CloseOutcome::Unknown);
         assert!(!interrupted.settled());
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

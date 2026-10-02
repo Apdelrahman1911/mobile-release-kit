@@ -19,6 +19,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <pthread.h>
+#include "wrapping_interaction_policy.h"
+#include "vault_helper_control.h"
 
 // Only the separately owned debug qualification build may compile these entries.
 // build.rs supplies both definitions after its dedicated-cfg/profile checks;
@@ -45,7 +48,7 @@ extern int mrk_user(uint32_t *uid); // Existing ordinary-user/platform admission
 #define MRK_W_ACL_SNAPSHOTS 400u
 #define MRK_W_ACES 128u
 #define MRK_W_NATIVE_CALLS 300000u
-#define MRK_W_VERSION 2u
+#define MRK_W_VERSION 3u
 
 enum {
     MRK_W_ADD = 1, MRK_W_LOOKUP = 2,
@@ -126,14 +129,17 @@ typedef struct {
     MRKWrappingDescriptor descriptors[MRK_W_FDS];
     MRKWrappingAcl acl;
     MRKWrappingNative native;
+    MRKInteractionPolicy policy;
 } MRKWrappingResult;
 _Static_assert(sizeof(MRKWrappingDescriptor) == 40, "fixed descriptor observations");
 _Static_assert(sizeof(MRKWrappingAcl) == 84, "fixed ACL observations");
 _Static_assert(sizeof(MRKWrappingNative) == 36, "fixed native-call observations");
-_Static_assert(sizeof(MRKWrappingResult) == 3840, "fixed Rust/native wrapping observation ABI v2");
+_Static_assert(sizeof(MRKWrappingResult) == 4052, "fixed Rust/native wrapping observation ABI v3");
 
 typedef uint32_t (*MRKWrappingAdmission)(void *, const MRKWrappingResult *, uint32_t);
 typedef uint32_t (*MRKWrappingConsume)(void *, const uint8_t *, size_t);
+// Fixed Rust cleanup bridge: original child endpoint only; slots3/4 only.
+typedef uint32_t (*MRKWrappingCleanupAdmission)(void *, uint32_t);
 // Prearmed SDK-typed out storage; these pointer bits are not a second +1 ref.
 typedef union {
     SecKeychainRef keychain;
@@ -183,6 +189,155 @@ typedef struct {
     uint32_t root_name_offset;
 } MRKWrappingQualification;
 #endif
+
+typedef struct MRKInteractionGuard {
+    MRKInteractionPolicy *policy;
+    uint32_t acquired;
+    int (*forward)(void *);
+    void *owner;
+    MRKWrappingCleanupAdmission cleanup;
+    void *cleanup_context;
+#if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
+    const MRKWrappingQualificationFixture *fixture;
+#endif
+    // One existing namespace-only child, borrowed only through the outer call.
+    uint32_t *namespace_parent_settled;
+} MRKInteractionGuard;
+
+#if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION) || defined(MRK_WRAPPING_VAULT_HELPER)
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+extern uint32_t mrk_wrapping_vault_helper_role(void) __attribute__((weak_import));
+#else
+// Only the two fixed executable mains define this read-only symbol. Library,
+// libtest, observer and shipping application builds cannot activate a role.
+extern uint32_t mrk_wrapping_private_process_role(void) __attribute__((weak_import));
+#endif
+// ONE process state in this translation unit (fixture.m is included below).
+// Check pthread_main_np BEFORE every access; the inspected SDK setting itself
+// is process/library-instance state, not thread-local or another process's state.
+static struct {
+    pid_t pid;
+    uint32_t role, poisoned, add_after_call;
+    MRKInteractionGuard *active;
+} mrk_w_process;
+static uint32_t mrk_w_private_role(void) {
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+    if (pthread_main_np() != 1 || !mrk_wrapping_vault_helper_role) return 0;
+    return mrk_wrapping_vault_helper_role() == 3 ? 3 : 0;
+#else
+    if (pthread_main_np() != 1 || !mrk_wrapping_private_process_role) return 0;
+    uint32_t role = mrk_wrapping_private_process_role();
+    return role == 1 || role == 2 ? role : 0;
+#endif
+}
+static int mrk_w_policy_final_owner(const MRKInteractionPolicy *policy) {
+    if (pthread_main_np() != 1) return 0;
+    uint32_t role = mrk_w_private_role();
+    return role && policy->role == role && mrk_w_process.pid == getpid()
+        && mrk_w_process.role == role && !mrk_w_process.active && !mrk_w_process.poisoned;
+}
+static int mrk_w_process_original(const MRKInteractionGuard *guard) {
+    if (pthread_main_np() != 1) return 0;
+    return guard && guard->acquired && mrk_w_process.active == guard
+        && mrk_w_process.pid == getpid() && mrk_w_process.role == mrk_w_private_role();
+}
+static int mrk_w_policy_acquire(MRKInteractionGuard *guard, MRKInteractionPolicy *policy,
+    uint32_t kind, uint32_t operation) {
+    uint32_t role = mrk_w_private_role();
+    mrk_p_init(policy, kind, role);
+    guard->policy = policy;
+    if (!role) { mrk_p_fail(policy, MRK_P_SCOPE_FAILURE); mrk_vault_control_failure(); return 0; }
+    // mrk_w_private_role's successful main-thread check precedes process state.
+    pid_t pid = getpid();
+    int matched = !mrk_w_process.pid || (mrk_w_process.pid == pid && mrk_w_process.role == role);
+    if (!mrk_p_scope_permitted(role, kind, operation, 1, matched,
+            mrk_w_process.active != NULL, mrk_w_process.poisoned)) {
+        mrk_p_fail(policy, MRK_P_SCOPE_FAILURE); mrk_vault_control_failure(); return 0;
+    }
+    mrk_w_process.pid = pid; mrk_w_process.role = role;
+    mrk_w_process.active = guard; guard->acquired = 1; policy->scope_admitted = 1;
+    return 1;
+}
+static void mrk_w_policy_call(MRKInteractionGuard *guard, uint32_t slot) {
+    MRKInteractionPolicy *policy = guard->policy;
+    if (!mrk_w_process_original(guard)) { mrk_p_fail(policy, MRK_P_SCOPE_FAILURE); mrk_vault_control_failure(); return; }
+    uint32_t admission = MRK_W_RETAIN;
+    if (slot < MRK_P_RESTORE) {
+        if (guard->forward && guard->owner && guard->forward(guard->owner)) admission = MRK_W_CONTINUE;
+    } else if (guard->cleanup && guard->cleanup_context) {
+        // This fixed leg never accesses the forward closure/Facts/diagnostic I/O.
+        admission = guard->cleanup(guard->cleanup_context, slot);
+    }
+    if (!mrk_p_start(policy, slot, admission)) { mrk_vault_control_failure(); return; }
+    @try {
+        OSStatus status;
+        if (slot == MRK_P_DISABLE || slot == MRK_P_RESTORE) {
+            Boolean requested = (Boolean)policy->calls[slot].value;
+            status = SecKeychainSetUserInteractionAllowed(requested);
+            mrk_p_return(policy, slot, status, requested);
+            if (policy->failed) mrk_vault_control_failure();
+        } else {
+            Boolean observed = (Boolean)255; // No default false observation.
+            status = SecKeychainGetUserInteractionAllowed(&observed);
+            mrk_p_return(policy, slot, status, observed);
+            if (policy->failed) mrk_vault_control_failure();
+        }
+    } @catch (NSException *exception) {
+        (void)exception; mrk_p_exception(policy, slot); mrk_vault_control_failure();
+    }
+}
+static int mrk_w_policy_install(MRKInteractionGuard *guard) {
+    for (uint32_t slot = MRK_P_ORIGINAL; slot <= MRK_P_INSTALLED; ++slot) {
+        mrk_w_policy_call(guard, slot);
+        if (guard->policy->failed) return 0;
+    }
+    return guard->policy->installed == 1;
+}
+static int mrk_w_policy_finish(MRKInteractionGuard *guard, int resources_settled) {
+    MRKInteractionPolicy *policy = guard->policy;
+    if (!guard->acquired) { policy->finished = 1; return 0; }
+    if (!mrk_w_process_original(guard)) {
+        mrk_p_fail(policy, MRK_P_SCOPE_FAILURE); mrk_vault_control_failure(); policy->finished = 1; return 0;
+    }
+    if (policy->restore_due) {
+        // Each original has its own SDK exception boundary/admission. Even an
+        // exception or failure in SetOriginal cannot skip a still-admitted
+        // GetRestored. Equality never repairs a failed/unreturned SetOriginal.
+        mrk_w_policy_call(guard, MRK_P_RESTORE);
+        mrk_w_policy_call(guard, MRK_P_RESTORED);
+    }
+    policy->finished = 1;
+    // An independently refused reentry may have poisoned this original while
+    // its own restoration still returned. Preserve cleanup, never early KNOWN.
+    int settled = mrk_p_finality(policy, resources_settled && !mrk_w_process.poisoned);
+    if (guard->namespace_parent_settled && settled) *guard->namespace_parent_settled = 1;
+    guard->namespace_parent_settled = NULL;
+    if (!settled) { mrk_w_process.poisoned = 1; mrk_vault_control_failure(); } // Absorbing; exit is not restoration.
+    mrk_w_process.add_after_call = 0; mrk_w_process.active = NULL; guard->acquired = 0;
+    return settled;
+}
+#else
+// Ordinary/observer code has no weak role symbol or interaction Get/Set path.
+static int mrk_w_policy_final_owner(const MRKInteractionPolicy *policy) { (void)policy; return 0; }
+static int mrk_w_policy_acquire(MRKInteractionGuard *guard, MRKInteractionPolicy *policy,
+    uint32_t kind, uint32_t operation) {
+    (void)operation; mrk_p_init(policy, kind, 0); guard->policy = policy;
+    mrk_p_fail(policy, MRK_P_SCOPE_FAILURE); mrk_vault_control_failure(); return 0;
+}
+static int mrk_w_policy_install(MRKInteractionGuard *guard) { (void)guard; return 0; }
+static int mrk_w_policy_finish(MRKInteractionGuard *guard, int resources_settled) {
+    (void)resources_settled; guard->policy->finished = 1; return 0;
+}
+#endif
+// Pure finite-data ABI validation; no process, SDK or activation operation.
+uint32_t mrk_wrapping_policy_validate(const MRKInteractionPolicy *policy, uint32_t final) {
+    return policy && final <= 1 && mrk_p_valid(policy, (int)final);
+}
+uint32_t mrk_wrapping_policy_complete(const MRKInteractionPolicy *policy, uint32_t namespace_only) {
+    if (!policy || namespace_only > 1 || !mrk_p_valid(policy, 1)) return 0;
+    return namespace_only ? mrk_p_namespace_complete(policy) : mrk_p_complete(policy);
+}
+
 typedef struct {
     MRKWrappingResult result;
     MRKWrappingOwned owned[MRK_W_REFS];
@@ -199,7 +354,8 @@ typedef struct {
     uuid_t root_uuid, user_uuid;
     char component_names[MRK_W_PATH];
     uint32_t component_offsets[MRK_W_COMPONENTS], component_ends[MRK_W_COMPONENTS];
-    uint32_t independent_fd_cleanup;
+    uint32_t independent_fd_cleanup, resources_settled;
+    MRKInteractionGuard interaction;
 #if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
     MRKWrappingQualification qualification;
 #endif
@@ -217,6 +373,7 @@ static void mrk_w_wipe_key(MRKWrappingFrame *s) {
     s->result.flags |= MRK_W_KEY_WIPED;
 }
 static int mrk_w_fail(MRKWrappingFrame *s, uint32_t outcome) {
+    mrk_vault_control_failure(); // Stamp the actual first failure, before cleanup/callback delivery.
     if (!s->result.failure_phase) s->result.failure_phase = s->result.phase;
     if (s->result.outcome == MRK_W_PENDING || s->result.outcome == MRK_W_ADDED || s->result.outcome == MRK_W_FOUND)
         s->result.outcome = outcome;
@@ -236,9 +393,22 @@ static int mrk_w_admit(MRKWrappingFrame *s, uint32_t checkpoint) {
         && s->result.phase == MRK_W_FD_RELEASE && checkpoint == MRK_W_BEFORE_RELEASE)) return 0;
     if (!s->admission || !s->context) { mrk_w_unknown(s, MRK_W_CUSTODY); return 0; }
     if ((s->result.flags & MRK_W_STOP) && checkpoint == MRK_W_BEFORE_CALL) return 0;
-    uint32_t reply = s->admission(s->context, &s->result, checkpoint);
+    uint32_t reply;
+#if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
+    int add_window = s->interaction.acquired && mrk_w_process_original(&s->interaction)
+        && s->result.operation == MRK_W_ADD && s->result.phase == MRK_W_ADD_CALL
+        && checkpoint == MRK_W_AFTER_CALL && s->result.effect == MRK_W_DID_ADD
+        && s->interaction.policy->installed && !s->interaction.policy->failed;
+    if (add_window) mrk_w_process.add_after_call = 1;
+    @try { reply = s->admission(s->context, &s->result, checkpoint); }
+    @finally { if (add_window) mrk_w_process.add_after_call = 0; }
+#else
+    reply = s->admission(s->context, &s->result, checkpoint);
+#endif
     if (reply != MRK_W_CONTINUE && reply != MRK_W_CUTOFF) {
         s->result.flags |= MRK_W_CALLBACK_UNKNOWN;
+        if (s->result.policy.kind == MRK_P_OPERATION && s->result.policy.scope_admitted)
+            mrk_p_forward_refused(&s->result.policy);
         mrk_w_unknown(s, MRK_W_CUSTODY);
         return 0;
     }
@@ -246,9 +416,20 @@ static int mrk_w_admit(MRKWrappingFrame *s, uint32_t checkpoint) {
         s->result.flags |= MRK_W_STOP;
         mrk_w_fail(s, MRK_W_STOPPED);
     }
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+    // PRIVATE Cutoff means stop forward work while permitting original cleanup.
+    // Shipping helper has a separate ABSOLUTE cleanup limit. Recheck after its
+    //callback too: expiration is never permission for another CF/ACL/FD consume.
+    if (checkpoint == MRK_W_BEFORE_RELEASE && mrk_vault_control_admit(1) != MRK_W_CONTINUE) {
+        mrk_w_unknown(s, MRK_W_CUSTODY); return 0;
+    }
+#endif
     // Cutoff permits only this original's cleanup, never another native query,
     // item effect or key delivery. It cannot undo an already entered add.
     return checkpoint == MRK_W_BEFORE_RELEASE || !(s->result.flags & MRK_W_STOP);
+}
+static int mrk_w_policy_forward(void *owner) {
+    return mrk_w_admit((MRKWrappingFrame *)owner, MRK_W_BEFORE_CALL);
 }
 static MRKWrappingOwned *mrk_w_slot(MRKWrappingFrame *s) {
     if (s->result.slot_count >= MRK_W_REFS) { mrk_w_fail(s, MRK_W_ALLOCATION); return NULL; }
@@ -431,6 +612,9 @@ static int mrk_w_qualifier_free(MRKWrappingFrame *s) {
     ++a->qualifier_free_returned; mrk_w_native_return(s, rc, actual_errno);
     if (rc) { mrk_w_native_fail(s, MRK_W_CUSTODY); mrk_w_unknown(s, MRK_W_CUSTODY); return 0; }
     ++a->qualifier_freed; w->qualifier = NULL;
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+    if (mrk_vault_control_admit(1) != MRK_W_CONTINUE) { mrk_w_unknown(s, MRK_W_CUSTODY); return 0; }
+#endif
     return 1;
 }
 static int mrk_w_acl_dispose(MRKWrappingFrame *s) {
@@ -447,6 +631,9 @@ static int mrk_w_acl_dispose(MRKWrappingFrame *s) {
         ++a->acl_free_returned; mrk_w_native_return(s, rc, actual_errno);
         if (rc) { mrk_w_native_fail(s, MRK_W_CUSTODY); mrk_w_unknown(s, MRK_W_CUSTODY); return 0; }
         ++a->acl_freed; w->acl = NULL; w->entry = NULL;
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+        if (mrk_vault_control_admit(1) != MRK_W_CONTINUE) { mrk_w_unknown(s, MRK_W_CUSTODY); return 0; }
+#endif
     }
     if (w->filesec) {
         if (a->filesec_acquired != a->filesec_free_returned + 1
@@ -458,6 +645,9 @@ static int mrk_w_acl_dispose(MRKWrappingFrame *s) {
         errno = 0; filesec_free(w->filesec); int actual_errno = errno;
         ++a->filesec_free_returned; mrk_w_native_return(s, 0, actual_errno);
         w->filesec = NULL; // Only after the original void call actually returned.
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+        if (mrk_vault_control_admit(1) != MRK_W_CONTINUE) { mrk_w_unknown(s, MRK_W_CUSTODY); return 0; }
+#endif
     }
     return 1;
 }
@@ -970,7 +1160,9 @@ static void mrk_w_operation(MRKWrappingFrame *s) {
     MRK_W_PAIR(kSecAttrService, service->value);
     MRK_W_PAIR(kSecAttrAccount, account->value);
     MRK_W_PAIR(kSecAttrSynchronizable, kCFBooleanFalse);
-    // UIFail, not Skip: an inaccessible item must not masquerade as missing.
+    // Preserve the query shape (never Skip/missing fallback), but classic items
+    // do not establish a per-query UIFail guarantee. The enclosing fixed-helper
+    // process guard supplies/observes noninteraction and exact restoration.
     MRK_W_PAIR(kSecUseAuthenticationUI, kSecUseAuthenticationUIFail);
     MRK_W_PAIR(kSecReturnRef, kCFBooleanTrue);
     if (s->result.operation == MRK_W_ADD) {
@@ -997,12 +1189,12 @@ static void mrk_w_operation(MRKWrappingFrame *s) {
     mrk_w_cf_enter(s, result);
     OSStatus status;
     if (s->result.operation == MRK_W_ADD) {
-        s->result.effect = MRK_W_MAY_HAVE_ADDED;
+        s->result.effect = MRK_W_MAY_HAVE_ADDED; mrk_vault_control_effect(3);
         status = SecItemAdd((CFDictionaryRef)query->value, &result->value);
         mrk_w_return(call, status); mrk_w_cf_return(s, result);
         // These are actual API effect facts, not permission to publish a store.
-        if (status == errSecSuccess) s->result.effect = MRK_W_DID_ADD;
-        else if (status == errSecDuplicateItem) s->result.effect = MRK_W_DID_DUPLICATE;
+        if (status == errSecSuccess) { s->result.effect = MRK_W_DID_ADD; mrk_vault_control_effect(1); }
+        else if (status == errSecDuplicateItem) { s->result.effect = MRK_W_DID_DUPLICATE; mrk_vault_control_effect(2); }
     } else {
         status = SecItemCopyMatching((CFDictionaryRef)query->value, &result->value);
         mrk_w_return(call, status); mrk_w_cf_return(s, result);
@@ -1077,6 +1269,9 @@ static int mrk_w_cf_cleanup(MRKWrappingFrame *s) {
             mrk_w_unknown(s, MRK_W_CUSTODY);
             return 0; // Never retry a possibly consumed pointer or later release.
         }
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+        if (mrk_vault_control_admit(1) != MRK_W_CONTINUE) { mrk_w_unknown(s, MRK_W_CUSTODY); return 0; }
+#endif
     }
     s->key_backing_borrowed = 0;
     return 1;
@@ -1124,6 +1319,11 @@ static int mrk_w_fd_cleanup(MRKWrappingFrame *s) {
             // Never retry this slot, even for EINTR or a possibly reused number.
             s->independent_fd_cleanup = 1;
         }
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+        if (mrk_vault_control_admit(1) != MRK_W_CONTINUE) {
+            s->independent_fd_cleanup = 0; mrk_w_unknown(s, MRK_W_CUSTODY); return 0;
+        }
+#endif
     }
     s->independent_fd_cleanup = 0;
     return all_closed;
@@ -1140,8 +1340,8 @@ static void mrk_w_cleanup(MRKWrappingFrame *s) {
     if (!mrk_w_fd_cleanup(s)) return;
     if ((s->result.outcome == MRK_W_ADDED || s->result.outcome == MRK_W_FOUND)
         && !(s->result.flags & MRK_W_NAMESPACE_VERIFIED)) mrk_w_fail(s, MRK_W_SHAPE);
-    // No public KNOWN bit while any CF, ACL or FD custody remains unsettled.
-    s->result.flags |= MRK_W_KNOWN;
+    // Resource settlement is not policy restoration; do not publish KNOWN yet.
+    s->resources_settled = 1;
 }
 size_t mrk_wrapping_frame_bytes(void) { return sizeof(MRKWrappingFrame); }
 void *mrk_wrapping_frame_new(void) {
@@ -1153,25 +1353,35 @@ void *mrk_wrapping_frame_new(void) {
     return s;
 }
 void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, const uint8_t *generation,
-    const uint8_t *key, MRKWrappingAdmission admission, void *context, MRKWrappingResult *out) {
+    const uint8_t *key, MRKWrappingAdmission admission, void *context,
+    MRKWrappingCleanupAdmission cleanup, void *cleanup_context, MRKWrappingResult *out) {
     if (!frame || !out) return;
     MRKWrappingFrame *s = frame;
     if (s->ran || s->consuming) { mrk_w_unknown(s, MRK_W_CUSTODY); *out = s->result; return; }
     s->ran = 1; s->result.operation = operation; s->result.phase = MRK_W_ENTRY; s->result.flags = 0;
     s->admission = admission; s->context = context;
+    s->interaction.forward = mrk_w_policy_forward; s->interaction.owner = s;
+    s->interaction.cleanup = cleanup; s->interaction.cleanup_context = cleanup_context;
+#if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
+    s->interaction.fixture = s->qualification.observation.mode == MRK_W_Q_FIXTURE
+        && s->qualification.observation.configured ? &s->qualification.fixture : NULL;
+#endif
+    int scope = mrk_w_policy_acquire(&s->interaction, &s->result.policy, MRK_P_OPERATION, operation);
     @try {
         if ((operation != MRK_W_ADD && operation != MRK_W_LOOKUP) || !mrk_w_ids(vault, generation)
             || (operation == MRK_W_ADD ? !key : key != NULL) || !admission || !context
+            || !cleanup || !cleanup_context || !scope
 #if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
             || (s->qualification.observation.version && !s->qualification.observation.configured)
 #endif
             ) {
             mrk_w_fail(s, MRK_W_INPUT);
-        } else {
+            mrk_p_fail(&s->result.policy, MRK_P_SCOPE_FAILURE);
+        } else if (mrk_w_policy_install(&s->interaction)) {
             memcpy(s->vault, vault, 16); memcpy(s->generation, generation, 16);
             if (operation == MRK_W_ADD) { memcpy(s->key, key, MRK_W_KEY); s->result.key_bytes = MRK_W_KEY; }
             mrk_w_operation(s);
-        }
+        } else { mrk_w_unknown(s, MRK_W_CUSTODY); }
     } @catch (NSException *exception) {
         (void)exception;
         s->result.flags |= MRK_W_NATIVE_EXCEPTION;
@@ -1182,6 +1392,10 @@ void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, con
         (void)exception; s->result.flags |= MRK_W_NATIVE_EXCEPTION;
         mrk_w_unknown(s, MRK_W_CUSTODY); // No retry of an interrupted cleanup.
     }
+    // Ordinary cleanup's exception/UNKNOWN cannot skip independent restoration.
+    if (mrk_w_policy_finish(&s->interaction, s->resources_settled && !(s->result.flags & MRK_W_UNKNOWN)))
+        s->result.flags |= MRK_W_KNOWN;
+    else mrk_w_unknown(s, MRK_W_CUSTODY);
     if (s->result.flags & MRK_W_KNOWN) {
         s->result.phase = MRK_W_DELIVERY;
         int deliver = mrk_w_admit(s, MRK_W_BEFORE_DELIVERY);
@@ -1191,17 +1405,24 @@ void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, con
             s->result.flags |= MRK_W_KEY_READY;
         else mrk_w_wipe_key(s);
     }
+#if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION) || defined(MRK_WRAPPING_VAULT_HELPER)
+    if (pthread_main_np() == 1 && (s->result.flags & MRK_W_UNKNOWN || s->result.policy.failed))
+        mrk_w_process.poisoned = 1;
+#endif
     // The retained frame never contains a dangling worker-stack callback.
     s->admission = NULL; s->context = NULL;
+    s->interaction.forward = NULL; s->interaction.owner = NULL;
+    s->interaction.cleanup = NULL; s->interaction.cleanup_context = NULL;
     s->result.phase = MRK_W_RETURN; s->result.run_returned = 1;
     *out = s->result;
 }
 #if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
-uint32_t mrk_wrapping_qualification_abi(void) { return 0x514b0101u; }
+uint32_t mrk_wrapping_qualification_abi(void) { return 0x514b0201u; }
 void mrk_wrapping_qualification_run(void *frame, uint32_t mode,
     const MRKWrappingQualificationFixture *fixture, uint32_t operation,
     const uint8_t *vault, const uint8_t *generation, const uint8_t *key,
-    MRKWrappingAdmission admission, void *context, MRKWrappingResult *out,
+    MRKWrappingAdmission admission, void *context, MRKWrappingCleanupAdmission cleanup,
+    void *cleanup_context, MRKWrappingResult *out,
     MRKWrappingQualificationObservation *observation) {
     if (!frame || !out || !observation) return;
     MRKWrappingFrame *s = frame;
@@ -1223,9 +1444,11 @@ void mrk_wrapping_qualification_run(void *frame, uint32_t mode,
     }
     // No replacement query or duplicated provider/cleanup path. This is the
     // production entry with one checked, cfg-only selection on the same frame.
-    mrk_wrapping_run(frame, operation, vault, generation, key, admission, context, out);
+    mrk_wrapping_run(frame, operation, vault, generation, key, admission, context, cleanup, cleanup_context, out);
     q->observation.run_returned = s->result.run_returned;
-    q->observation.callbacks_cleared = s->admission == NULL && s->context == NULL;
+    q->observation.callbacks_cleared = s->admission == NULL && s->context == NULL
+        && s->interaction.forward == NULL && s->interaction.owner == NULL
+        && s->interaction.cleanup == NULL && s->interaction.cleanup_context == NULL;
     *observation = q->observation;
 }
 #endif
@@ -1234,13 +1457,16 @@ void mrk_wrapping_retain_unknown(void *frame) {
     MRKWrappingFrame *s = frame;
     mrk_w_unknown(s, MRK_W_CUSTODY);
     s->admission = NULL; s->context = NULL;
+    s->interaction.forward = NULL; s->interaction.owner = NULL;
+    s->interaction.cleanup = NULL; s->interaction.cleanup_context = NULL;
 }
 uint32_t mrk_wrapping_consume(void *frame, MRKWrappingConsume consume, void *context) {
     if (!frame || !consume || !context) return 0;
     MRKWrappingFrame *s = frame;
     if (s->consuming || !s->result.run_returned || s->result.operation != MRK_W_LOOKUP
         || !(s->result.flags & MRK_W_KNOWN) || !(s->result.flags & MRK_W_KEY_READY)
-        || !(s->result.flags & MRK_W_NAMESPACE_VERIFIED)
+        || !(s->result.flags & MRK_W_NAMESPACE_VERIFIED) || !mrk_p_complete(&s->result.policy)
+        || !mrk_w_policy_final_owner(&s->result.policy)
         || (s->result.flags & (MRK_W_UNKNOWN | MRK_W_STOP)) || s->result.key_bytes != MRK_W_KEY) return 0;
     s->consuming = 1;
     s->result.flags &= ~MRK_W_KEY_READY; // Spend before the single synchronous callback.
@@ -1251,10 +1477,17 @@ uint32_t mrk_wrapping_consume(void *frame, MRKWrappingConsume consume, void *con
 }
 uint32_t mrk_wrapping_frame_retire(void *frame) {
     if (!frame) return 0;
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+    // Includes Rust finish/consume/Drop callers. No implicit late native free;
+    //a refusal leaves the original allocation retained and never refunds it.
+    if (mrk_vault_control_admit(1) != MRK_W_CONTINUE) return 0;
+#endif
     MRKWrappingFrame *s = frame;
     // No Security/ACL call, CF release, descriptor close or retry in Drop/retire.
     if (s->consuming || !(s->result.flags & MRK_W_KNOWN) || (s->result.flags & MRK_W_UNKNOWN)
-        || s->admission || s->context) return 0;
+        || s->admission || s->context || s->interaction.forward || s->interaction.owner
+        || s->interaction.cleanup || s->interaction.cleanup_context || s->interaction.acquired
+        || (s->ran && (!mrk_p_complete(&s->result.policy) || !mrk_w_policy_final_owner(&s->result.policy)))) return 0;
     for (uint32_t i = 0; i < s->result.slot_count; ++i)
         if (s->owned[i].value || s->result.references[i].nonnull_returned != s->result.references[i].release_returned) return 0;
     if (!mrk_w_acl_settled(s)) return 0;
@@ -1265,6 +1498,11 @@ uint32_t mrk_wrapping_frame_retire(void *frame) {
     }
     mrk_w_wipe(s, sizeof(*s));
     free(s);
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+    // Report the actual returned free truthfully, but latch any elapsed original
+    //cutoff/clock error before a later helper step or candidate can be accepted.
+    (void)mrk_vault_control_admit(1);
+#endif
     return 1; // The adapter-owned allocation's original free actually returned.
 }
 

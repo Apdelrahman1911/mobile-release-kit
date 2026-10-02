@@ -37,6 +37,26 @@ int mrk_user(uint32_t *uid) {
     int platform = mrk_platform(); if (platform) return platform;
     *uid = getuid(); return 0;
 }
+// One ordinary-user request at a fixed URL. The framework owns Finder; this
+// function creates no application worker or completion callback. A returned zero
+// means only that the void AppKit request returned, not that Finder was visible.
+int mrk_reveal_installation(void) {
+    uint32_t uid = 0;
+    int admitted = mrk_user(&uid); if (admitted) return admitted;
+    @try {
+        @autoreleasepool {
+            NSURL *application = [NSURL fileURLWithPath:@"/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app" isDirectory:YES];
+            NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
+            if (!application || !workspace) return ENOMEM;
+            [workspace activateFileViewerSelectingURLs:@[application]];
+        }
+        return 0;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return EIO; // The request might already have reached Finder.
+    }
+}
+
 // Closed first-party diagnostic ABI, shared with Rust and the fixed probe.
 // 1 allocation; 2 snapshot; 3/4/5 owner/group/mode completeness; 6 presence;
 // 7 conversion; 8 object; 9 validation; 10 first entry; 11 ACE; 12 free.
@@ -207,7 +227,7 @@ int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
 // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
 // exercised by narrow native-crate test definitions; no panel is fabricated.
 static BOOL mrk_panel_project_field(int kind) { return kind >= 4 && kind <= 7; }
-static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || mrk_panel_project_field(kind); }
+static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 12) || mrk_panel_project_field(kind); }
 int mrk_panel_response(int kind, int64_t code, int programmatic) {
     if (programmatic) return 0;
     if (mrk_panel_open_kind(kind)) {
@@ -297,6 +317,21 @@ enum { MRK_SELECTION_UNOBSERVED, MRK_SELECTION_EMPTY, MRK_SELECTION_MALFORMED,
 @end
 @implementation MRKInstalledPanel
 @end
+// Only purpose9 reserves this subclass. Purposes1–8 keep their exact original
+// instance layout; a dormant image batch is not charged to Project/Evidence/Quit.
+// All storage belongs to the SAME retained native object and existing release;
+// there is no second allocation, callback owner or independent free obligation.
+@interface MRKInstalledImagePanel : MRKInstalledPanel {
+@public
+    // 0=no selection,1=complete,2=count refusal,3=path refusal.
+    int imageSelection;
+    size_t imageCount;
+    char selectedImages[10][4097];
+}
+@end
+@implementation MRKInstalledImagePanel
+@end
+_Static_assert(sizeof(((MRKInstalledImagePanel *)0)->selectedImages) == 10 * 4097, "bounded original public-image result");
 #ifdef MRK_INSTALLED_OBSERVATION
 static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s);
 static void mrk_panel_completion_selection(MRKInstalledPanel *s);
@@ -305,6 +340,33 @@ static void mrk_panel_completion_selection(MRKInstalledPanel *s);
 void *mrk_panel_reserve(void) {
     if (!pthread_main_np()) return NULL;
     @try { return [[MRKInstalledPanel alloc] init]; } @catch (NSException *e) { (void)e; return NULL; }
+}
+void *mrk_panel_reserve_images(void) {
+    if (!pthread_main_np()) return NULL;
+    @try { return [[MRKInstalledImagePanel alloc] init]; } @catch (NSException *e) { (void)e; return NULL; }
+}
+static int mrk_panel_selected_images(MRKInstalledImagePanel *s) {
+    NSArray *urls = [(NSOpenPanel *)s->window URLs];
+    if (!urls || ![urls isKindOfClass:[NSArray class]]) return 2;
+    NSUInteger count = [urls count];
+    if (count < 1 || count > 10) return 2; // no prefix is copied for an over-limit choice
+    for (NSUInteger index = 0; index < count; ++index) {
+        NSURL *url = [urls objectAtIndex:index];
+        if (!url || ![url isKindOfClass:[NSURL class]] || ![url isFileURL]) return 3;
+        // Check the complete NSString, not just strlen on a possibly embedded
+        // NUL. The bounded file-system bytes are copied only after both checks.
+        NSString *name = [url path];
+        NSUInteger characters = name ? [name length] : 0;
+        if (!characters || characters > 4096 || [name characterAtIndex:0] != '/') return 3;
+        for (NSUInteger offset = 0; offset < characters; ++offset) {
+            if ([name characterAtIndex:offset] == 0) return 3;
+        }
+        const char *path = [url fileSystemRepresentation];
+        size_t length = path ? strnlen(path, 4097) : 0;
+        if (!length || length > 4096 || path[0] != '/') return 3;
+        memcpy(s->selectedImages[index], path, length + 1);
+    }
+    s->imageCount = (size_t)count; return 1;
 }
 static int mrk_panel_initial_directory(MRKInstalledPanel *s, const uint8_t *bytes, size_t length) {
     int result = EIO;
@@ -367,6 +429,9 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
     if (s->attempted || s->unknown) return EALREADY;
     s->attempted = YES; s->kind = kind;
     @try {
+        // An original reservation cannot switch between singleton and batch.
+        // Check before creating/retaining the native parent or window.
+        if ((kind == 9) != [s isKindOfClass:[MRKInstalledImagePanel class]]) return EINVAL;
         // This application has exactly one normal window; never attach to a
         // picker, another sheet or a renderer-supplied object/path.
         NSWindow *main = [NSApp mainWindow];
@@ -376,14 +441,18 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
         if (mrk_panel_open_kind(kind)) {
             NSOpenPanel *panel = [NSOpenPanel openPanel]; s->window = [panel retain];
             NSString *title = kind == 1 ? @"Choose a mobile project folder" : kind == 8 ? @"Choose a release evidence folder"
+                : kind == 10 ? @"Choose an installed Java 17 JDK folder"
+                : kind == 11 ? @"Choose the Android SDK folder"
+                : kind == 12 ? @"Choose an extracted Gradle distribution folder"
+                : kind == 9 ? @"Choose up to 10 public PNG or JPEG listing images"
                 : kind == 3 ? @"Choose a signing or iOS build-input file"
                 : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
                 : kind == 6 ? @"Choose an existing Xcode workspace directory" : @"Choose an existing metadata directory inside the project";
             [panel setTitle:title];
-            [panel setCanChooseFiles:kind == 3 || kind == 4];
-            [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7)];
-            [panel setAllowsMultipleSelection:NO]; [panel setCanCreateDirectories:NO];
-            [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:kind >= 5 && kind <= 7];
+            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9];
+            [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12)];
+            [panel setAllowsMultipleSelection:kind == 9]; [panel setCanCreateDirectories:NO];
+            [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:(kind >= 5 && kind <= 7) || kind == 10];
         } else {
             s->alert = [[NSAlert alloc] init];
             [s->alert setMessageText:@"Quit and discard unsaved drafts?"];
@@ -441,7 +510,15 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
                     if (observed) s->observationCompletion.response = s->response == 1 ? MRK_COMPLETION_ACCEPT
                         : s->response == 2 ? MRK_COMPLETION_DECLINE : MRK_COMPLETION_OTHER;
 #endif
-                    if (s->response == 1 && mrk_panel_open_kind(kind)) {
+                    if (s->response == 1 && kind == 9) {
+                        MRKInstalledImagePanel *images = (MRKInstalledImagePanel *)s;
+                        images->imageSelection = mrk_panel_selected_images(images);
+                        if (images->imageSelection != 1) {
+                            // Known input refusal keeps the genuine Accept. No
+                            // partial batch escapes and ordinary cleanup remains possible.
+                            images->imageCount = 0; memset(images->selectedImages, 0, sizeof(images->selectedImages));
+                        }
+                    } else if (s->response == 1 && mrk_panel_open_kind(kind)) {
                         NSURL *url = [(NSOpenPanel *)s->window URL];
                         const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
                         if (!path || path[0] != '/' || strnlen(path, sizeof(s->selected)) >= sizeof(s->selected)) s->unknown = YES;
@@ -477,8 +554,9 @@ int mrk_panel_start_project_field(void *opaque, int kind, const uint8_t *initial
 int mrk_panel_poll(void *opaque, int *result, uint8_t *path, size_t capacity) {
     if (!pthread_main_np() || !opaque || !result || !path || capacity != 4097) return -1;
     MRKInstalledPanel *s = opaque;
-    if (s->unknown) return -1;
+    if (s->unknown || s->kind == 9) return -1;
     @try {
+        if ([s isKindOfClass:[MRKInstalledImagePanel class]]) return -1;
         // Main-loop serialization observes the actual completion return, not
         // just a flag sampled concurrently with an executing callback.
         if (s->closed) return 2;
@@ -492,6 +570,36 @@ int mrk_panel_poll(void *opaque, int *result, uint8_t *path, size_t capacity) {
         if (s->responded && !s->callbackActive) {
             *result = s->response; memcpy(path, s->selected, sizeof(s->selected)); return 1;
         }
+        return 0;
+    } @catch (NSException *e) { (void)e; s->unknown = YES; return -1; }
+}
+int mrk_panel_poll_images(void *opaque, int *result, int *selection, size_t *count, uint8_t *paths, size_t capacity) {
+    if (!pthread_main_np() || !opaque || !result || !selection || !count || !paths || capacity != 10 * 4097) return -1;
+    *result = 0; *selection = 0; *count = 0; memset(paths, 0, capacity);
+    MRKInstalledPanel *s = opaque;
+    if (s->unknown) return -1;
+    @try {
+        // Even STOP-before-start uses the exact purpose9 reservation. An empty
+        // singleton is not an image original and cannot cross this entry point.
+        if (![s isKindOfClass:[MRKInstalledImagePanel class]]) return -1;
+        MRKInstalledImagePanel *images = (MRKInstalledImagePanel *)s;
+        if (s->kind != 9) {
+            if (s->kind || s->attempted || s->started || s->responded || s->reported || s->callbackActive
+                || s->window || s->parent || s->alert || s->completion || s->initialPath || s->initialDirectory
+                || images->imageSelection || images->imageCount) return -1;
+            return s->closed ? 2 : 0;
+        }
+        if (s->closed) return 2;
+        if (s->responded && !s->reported && !s->callbackActive) {
+            s->reported = YES;
+            *result = s->response; *selection = images->imageSelection; *count = images->imageCount;
+            memcpy(paths, images->selectedImages, sizeof(images->selectedImages)); return 1;
+        }
+        if (s->closeAttempted && s->responded && !s->callbackActive && ![s->window isVisible] && ![s->window sheetParent]) {
+            s->closed = YES; return 2;
+        }
+        // Unlike historical singleton polling, never publish the batch again
+        // while its same original close is pending. The coordinator owns it.
         return 0;
     } @catch (NSException *e) { (void)e; s->unknown = YES; return -1; }
 }

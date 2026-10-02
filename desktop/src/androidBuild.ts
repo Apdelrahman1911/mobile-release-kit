@@ -7,6 +7,11 @@ import { parseReleaseVersionObservation } from './releaseVersion.ts';
 import type { ReleaseVersionState } from './releaseVersion.ts';
 import { savedConfigFromSnapshot } from './offlinePreflightProtocol.ts';
 import type { ApiError, BridgeMode, HelpContent } from './types.ts';
+import { androidToolSourcesActive, androidToolSourcesError, hasAndroidToolSources, parseAndroidToolSourcesStatus, sameAndroidToolSourceIdentity } from './androidToolSources.ts';
+import type { AndroidToolSourceIdentity, AndroidToolSourceRole, AndroidToolSourcesStatus } from './androidToolSources.ts';
+import type { AndroidMacToolchainSelection } from './androidBuildTypes.ts';
+import type { AndroidCatalogIdentity, AndroidToolchainCatalogStatus } from './androidToolchainCatalogTypes.ts';
+import { androidCatalogActive, androidCatalogError, parseAndroidToolchainCatalogStatus, sameAndroidCatalogIdentity, sameAndroidCatalogSelection } from './androidToolchainCatalogProtocol.ts';
 import type { AndroidBuildApi, AndroidBuildArtifactValidation, AndroidBuildContext, AndroidBuildIdentity, AndroidBuildOperation, AndroidBuildSavedConfig,
   AndroidBuildSavedVersion, AndroidBuildSelection, AndroidBuildStatus, PrepareAndroidBuild } from './androidBuildTypes.ts';
 import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_CONSENT_MS, ANDROID_BUILD_COUNTER_MAX, androidBuildAvailabilityText,
@@ -25,12 +30,19 @@ export interface AndroidBuildProject {
   dirtyDraft: boolean; snapshotPending: boolean; versionPending: boolean; saveRecoveryRequired: boolean;
 }
 export interface AndroidBuildBinding {
-  context: AndroidBuildContext; selection: AndroidBuildSavedSelection; observationGeneration: number; versionObservation: VersionObservationBinding;
+  context: AndroidBuildContext; selection: AndroidBuildSavedSelection; toolchainSelection: AndroidMacToolchainSelection | null;
+  observationGeneration: number; versionObservation: VersionObservationBinding;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
 }
 export interface AndroidBuildConsent extends AndroidBuildIdentity { binding: AndroidBuildBinding; acknowledged: boolean; deadline: number }
 export interface AndroidBuildState {
   mode: BridgeMode; project: AndroidBuildProject | null; visible: boolean; selectionPending: boolean; verifyUploadSignature: boolean;
+  catalogStatus: AndroidToolchainCatalogStatus | null; catalogListening: boolean; catalogReadPending: boolean;
+  catalogPending: 'refresh' | 'select' | null; catalogUnconfirmed: boolean; catalogCancelClaimed: AndroidCatalogIdentity | null;
+  catalogError: ApiError | null; catalogIssue: boolean;
+  toolSources: AndroidToolSourcesStatus | null; sourcesListening: boolean; sourcesReadPending: boolean;
+  sourcesPending: boolean; sourcesUnconfirmed: boolean; sourcesIssue: boolean; sourcesError: ApiError | null;
+  sourcesCancelClaimed: AndroidToolSourceIdentity | null;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
   listening: boolean; initialized: boolean; readPending: boolean; status: AndroidBuildStatus | null;
   consent: AndroidBuildConsent | null; pending: 'prepare' | 'start' | null; originalUnconfirmed: boolean;
@@ -38,7 +50,9 @@ export interface AndroidBuildState {
   observationIssue: 'bridge' | 'protocol' | null; nativeBlocked: boolean; integrityFailed: boolean; generationLost: boolean;
 }
 type Port = AndroidBuildApi & { mode: BridgeMode };
-interface Observer { api: Port; active: boolean; generation: number; unlisten: (() => void) | null; reading: Promise<void> | null; status: AndroidBuildStatus | null }
+interface Observer { api: Port; active: boolean; generation: number; unlisten: (() => void) | null; reading: Promise<void> | null; status: AndroidBuildStatus | null;
+  catalogUnlisten: (() => void) | null; catalogReading: Promise<void> | null; catalog: AndroidToolchainCatalogStatus | null;
+  sourcesUnlisten: (() => void) | null; sourcesReading: Promise<void> | null; sources: AndroidToolSourcesStatus | null }
 interface Attempt {
   observer: Observer; binding: AndroidBuildBinding; previous: AndroidBuildIdentity | null; after: number;
   identity: AndroidBuildIdentity | null; prepareSent: boolean; prepareReply: boolean; deadline: number;
@@ -125,6 +139,8 @@ function projectObservation(session: ProjectSession, version: ReleaseVersionStat
 }
 export function androidBuildOwnerReason(state: AndroidBuildState): string | null {
   if (state.nativeBlocked || state.integrityFailed || state.generationLost) return 'Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.';
+  if (state.sourcesUnconfirmed || state.sourcesPending || state.sourcesIssue || androidToolSourcesActive(state.toolSources)) return 'The original Android tool picker or folder check is active or unconfirmed. Keep tool-selection Status and Cancel before conflicting work.';
+  if (state.catalogUnconfirmed || state.catalogPending || state.catalogIssue || androidCatalogActive(state.catalogStatus)) return 'The original Android tool catalog is still reading, stopping or unconfirmed. Keep catalog Status and Cancel before conflicting work.';
   if (state.originalUnconfirmed || state.pending || active(state.status?.operation)) return 'The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.';
   if (state.mode === 'native' && state.observationIssue) return 'The original Android-build status is unverified. Check retained Status before conflicting work.';
   return null;
@@ -134,11 +150,22 @@ export class AndroidBuildController {
   private state: AndroidBuildState = freeze<AndroidBuildState>({ mode: 'unavailable', project: null, visible: false, selectionPending: false, verifyUploadSignature: false,
     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, requestGeneration: 0, listening: false, initialized: false, readPending: false,
     status: null, consent: null, pending: null, originalUnconfirmed: false, historical: false, cancelClaimed: null, error: null,
+    catalogStatus: null, catalogListening: false, catalogReadPending: false, catalogPending: null, catalogUnconfirmed: false,
+    catalogCancelClaimed: null, catalogError: null, catalogIssue: false,
+    toolSources: null, sourcesListening: false, sourcesReadPending: false, sourcesPending: false,
+    sourcesUnconfirmed: false, sourcesIssue: false, sourcesError: null, sourcesCancelClaimed: null,
     observationIssue: null, nativeBlocked: false, integrityFailed: false, generationLost: false });
   private readonly context: Context;
   private observer: Observer | null = null;
   private attempt: Attempt | null = null;
   private cancelClaim: AndroidBuildIdentity | null = null;
+  private catalogAttempt: { observer: Observer; before: number; after: number; identity: AndroidCatalogIdentity | null;
+    selection: AndroidMacToolchainSelection | null; settled: boolean } | null = null;
+  private catalogCancelClaim: AndroidCatalogIdentity | null = null;
+  private sourcesAttempt: { observer: Observer; before: number; after: number; role: AndroidToolSourceRole; projectId: string; retired: boolean;
+    identity: AndroidToolSourceIdentity | null; settled: boolean } | null = null;
+  private sourcesCancelClaim: AndroidToolSourceIdentity | null = null;
+
   private draftReference: ProjectSession['draft'] = null;
   private snapshotReference: ProjectSession['snapshot'] = null;
   private versionReference: ReleaseVersionState['result'] = null;
@@ -179,7 +206,7 @@ export class AndroidBuildController {
     if (relevant.includes(action.type) && (action.projectId === this.state.project?.projectId || action.projectId === this.attempt?.binding.context.projectId))
       this.retire(this.advance('contextGeneration'));
   }
-  selectionIntent(): void { if (!this.disposed) this.retire(this.advance('selectionGeneration')); }
+  selectionIntent(): void { if (!this.disposed) { this.retire(this.advance('selectionGeneration')); if (this.observer) this.stopSources(this.observer); } }
   snapshotIntent(projectId: string): void {
     if (!this.disposed && (projectId === this.state.project?.projectId || projectId === this.attempt?.binding.context.projectId))
       this.retire(this.advance('contextGeneration'));
@@ -206,6 +233,7 @@ export class AndroidBuildController {
     const result = version?.result ?? null, binding = version?.resultBinding ?? null;
     if (sameAndroidBuildData(next, this.state.project) && this.draftReference === draft && this.snapshotReference === snapshot &&
         this.versionReference === result && this.versionBindingReference === binding) return;
+    if (next?.projectId !== this.state.project?.projectId && this.observer) this.stopSources(this.observer);
     this.draftReference = draft; this.snapshotReference = snapshot; this.versionReference = result; this.versionBindingReference = binding;
     const badCounter = next !== null && ![next.draftRevision, next.baselineGeneration, next.observationGeneration].every(androidBuildCounter);
     this.retire({ ...this.advance('contextGeneration'), project: next, generationLost: this.state.generationLost || badCounter ||
@@ -217,23 +245,34 @@ export class AndroidBuildController {
     else this.update({ visible }); // A started run stays app-owned across pages.
   }
   private needsOriginal(observer: Observer): boolean {
-    return this.attempt?.observer === observer && this.attempt.prepareSent && !this.attempt.settled || active(observer.status?.operation);
+    return this.attempt?.observer === observer && this.attempt.prepareSent && !this.attempt.settled || active(observer.status?.operation)
+      || this.catalogAttempt?.observer === observer && !this.catalogAttempt.settled || androidCatalogActive(observer.catalog)
+      || this.observer === observer && this.state.catalogUnconfirmed
+      || this.sourcesAttempt?.observer === observer && !this.sourcesAttempt.settled || androidToolSourcesActive(observer.sources);
   }
   private detach(observer: Observer): void {
     observer.active = false;
     try { observer.unlisten?.(); } catch { /* Listener release is not native settlement. */ }
     observer.unlisten = null;
+    try { observer.catalogUnlisten?.(); } catch { /* Not native settlement. */ }
+    observer.catalogUnlisten = null;
+    try { observer.sourcesUnlisten?.(); } catch { /* Listener release is not native settlement. */ }
+    observer.sourcesUnlisten = null;
   }
   beginConnection(): void {
     if (this.disposed) return;
     this.retire(this.advance('connectionGeneration'));
     const observer = this.observer;
+    if (observer) { this.stopCatalog(observer); this.stopSources(observer); }
     if (observer && (this.needsOriginal(observer) || this.state.nativeBlocked || this.state.integrityFailed)) {
       this.update({ nativeBlocked: true, historical: true }); return; // Never adopt a replacement document/API.
     }
     if (observer) this.detach(observer);
     this.observer = null;
-    this.update({ mode: 'unavailable', listening: false, initialized: false, readPending: false });
+    this.catalogAttempt = null; this.catalogCancelClaim = null; this.sourcesAttempt = null; this.sourcesCancelClaim = null;
+    this.update({ mode: 'unavailable', listening: false, initialized: false, readPending: false,
+      catalogStatus: null, catalogListening: false, catalogReadPending: false, catalogPending: null, catalogUnconfirmed: false, catalogIssue: false,
+      toolSources: null, sourcesListening: false, sourcesReadPending: false, sourcesPending: false, sourcesUnconfirmed: false, sourcesIssue: false, sourcesError: null });
   }
   async connect(api: Port): Promise<void> {
     if (this.disposed || this.observer?.api === api) return;
@@ -241,12 +280,23 @@ export class AndroidBuildController {
     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost || this.observer) return;
     this.update({ mode: api.mode, observationIssue: null, error: null });
     if (api.mode !== 'native') return;
-    const observer: Observer = { api, active: true, generation: this.state.connectionGeneration, unlisten: null, reading: null, status: null };
+    const observer: Observer = { api, active: true, generation: this.state.connectionGeneration, unlisten: null, reading: null, status: null,
+      catalogUnlisten: null, catalogReading: null, catalog: null, sourcesUnlisten: null, sourcesReading: null, sources: null };
     this.observer = observer;
     try {
       const unlisten = await api.subscribeAndroidBuild((value) => { if (observer.active) this.receive(observer, value); });
       if (!observer.active || this.observer !== observer || this.disposed && !this.needsOriginal(observer)) { unlisten(); return; }
       observer.unlisten = unlisten; this.update({ listening: true });
+      const catalogUnlisten = await api.subscribeAndroidToolchainCatalog((value) => { if (observer.active) this.receiveCatalog(observer, value); });
+      if (!observer.active || this.observer !== observer || this.disposed && !this.needsOriginal(observer)) { catalogUnlisten(); return; }
+      observer.catalogUnlisten = catalogUnlisten; this.update({ catalogListening: true });
+      await this.checkCatalogStatus();
+      if (hasAndroidToolSources(api)) {
+        const sourcesUnlisten = await api.subscribeAndroidToolSources!((value) => { if (observer.active) this.receiveSources(observer, value); });
+        if (!observer.active || this.observer !== observer || this.disposed && !this.needsOriginal(observer)) { sourcesUnlisten(); return; }
+        observer.sourcesUnlisten = sourcesUnlisten; this.update({ sourcesListening: true });
+        await this.checkToolSources();
+      }
       await this.checkStatus(); // Subscribe before reading or preparing.
     } catch (error) { if (observer.active) this.fail(error); }
   }
@@ -259,6 +309,7 @@ export class AndroidBuildController {
       sameAndroidBuildData(b.selection, p.selection) && b.context.projectId === p.projectId && b.context.draftRevision === p.draftRevision &&
       b.context.baselineGeneration === p.baselineGeneration && p.savedConfig !== null && p.savedVersion !== null &&
       sameAndroidBuildData(b.context.artifactValidation, this.artifactValidation()) &&
+      sameAndroidCatalogSelection(b.toolchainSelection, this.state.catalogStatus?.selected ?? null) &&
       sameAndroidBuildSavedPair(b.context, { savedConfig: p.savedConfig, savedVersion: p.savedVersion });
   }
   private originCandidate(attempt: Attempt, status: AndroidBuildStatus): boolean {
@@ -306,6 +357,10 @@ export class AndroidBuildController {
       // While Prepare is pending, repeated previous-terminal Status is allowed
       // but belongs to the old review, not this attempt's changed selection.
       const belongsToAttempt = sameAndroidBuildIdentity(attempt.identity, b) || this.originCandidate(attempt, status);
+      if (belongsToAttempt && b?.result && !sameAndroidCatalogSelection(
+          b.result.schemaVersion === 2 ? b.result.toolchainSelection : null, attempt.binding.toolchainSelection)) {
+        this.fail({ code: 'android_build_protocol' }, true); return null;
+      }
       const selected = belongsToAttempt ? b?.activity?.selection : null;
       if (selected && !sameAndroidBuildData({ module: selected.module, variant: selected.variant, applicationId: selected.applicationId }, attempt.binding.selection)) {
         this.fail({ code: 'android_build_protocol' }, true); return null;
@@ -341,6 +396,275 @@ export class AndroidBuildController {
       if (observer.reading === work) { observer.reading = null; if (this.observer === observer) this.update({ readPending: false }); }
     }
   }
+
+  private sourcesFail(error: unknown, protocol = false): void {
+    this.retire({ sourcesError: androidToolSourcesError(error), sourcesIssue: true,
+      nativeBlocked: this.state.nativeBlocked || protocol, integrityFailed: this.state.integrityFailed || protocol });
+  }
+  private receiveSources(observer: Observer, value: unknown): AndroidToolSourcesStatus | null {
+    if (!observer.active) return null;
+    const status = parseAndroidToolSourcesStatus(value), previous = observer.sources, attempt = this.sourcesAttempt;
+    if (!status) { this.sourcesFail(null, true); return null; }
+    if (previous && status.statusRevision < previous.statusRevision) return status;
+    if (previous && status.statusRevision === previous.statusRevision && !sameAndroidBuildData(previous, status)
+        || previous && status.sourceGeneration < previous.sourceGeneration
+        || previous?.phase === 'unknown' && status.phase !== 'unknown') { this.sourcesFail(null, true); return null; }
+    const ours = attempt?.observer === observer;
+    if (ours && status.sourceGeneration === attempt.before + 1 && status.projectId !== attempt.projectId &&
+        !(status.projectId === null && status.selections.length === 0
+          && ['context-changed', 'document-lost', 'shutdown', 'cleanup-unknown'].includes(status.reason))) {
+      this.sourcesFail(null, true); return null;
+    }
+    if (previous && status.sourceGeneration !== previous.sourceGeneration &&
+        (!ours || status.sourceGeneration !== attempt.before + 1 || status.statusRevision <= attempt.after
+          || status.operation?.role !== attempt.role)) { this.sourcesFail(null, true); return null; }
+    if (previous && previous.sourceGeneration === status.sourceGeneration && !sameAndroidToolSourceIdentity(previous.operation, status.operation)
+        || ours && attempt.identity && !sameAndroidToolSourceIdentity(attempt.identity, status.operation)) { this.sourcesFail(null, true); return null; }
+    if (previous && previous.sourceGeneration === status.sourceGeneration &&
+        (!androidToolSourcesActive(previous) && androidToolSourcesActive(status)
+          || ['refused', 'cancelled', 'stopping'].includes(previous.phase) && status.phase === 'selected'
+          || previous.phase === 'checking' && status.phase === 'picking'
+          || previous.phase === 'stopping' && ['picking', 'checking'].includes(status.phase))) {
+      this.sourcesFail(null, true); return null;
+    }
+    if (ours && !attempt.identity && status.sourceGeneration === attempt.before + 1 && status.statusRevision > attempt.after
+        && status.operation?.role === attempt.role) attempt.identity = status.operation;
+    const acknowledged = !!ours && attempt.identity !== null && sameAndroidToolSourceIdentity(attempt.identity, status.operation)
+      && status.statusRevision > attempt.after;
+    if (acknowledged) attempt.settled = !androidToolSourcesActive(status);
+    observer.sources = status;
+    if (observer === this.observer) this.update({ toolSources: status,
+      sourcesPending: acknowledged ? false : this.state.sourcesPending, sourcesUnconfirmed: acknowledged ? false : this.state.sourcesUnconfirmed,
+      nativeBlocked: this.state.nativeBlocked || status.phase === 'unknown' || ['cleanup-unknown', 'document-lost', 'shutdown'].includes(status.availability) });
+    if ((this.disposed || ours && attempt.retired) && androidToolSourcesActive(status)) this.stopSources(observer);
+    if (this.disposed && !this.needsOriginal(observer)) this.detach(observer);
+    return status;
+  }
+  canCheckToolSources(): boolean {
+    return !this.disposed && !!this.observer?.active && hasAndroidToolSources(this.observer.api) && !this.state.sourcesReadPending;
+  }
+  async checkToolSources(): Promise<void> {
+    const observer = this.observer;
+    if (this.disposed || !observer?.active || !hasAndroidToolSources(observer.api)) return;
+    if (observer.sourcesReading) return observer.sourcesReading;
+    const work = Promise.resolve().then(async () => {
+      if (!observer.active) return;
+      try {
+        const status = this.receiveSources(observer, await observer.api.androidToolSourcesStatus!());
+        if (status && status.statusRevision >= (observer.sources?.statusRevision ?? 0) && !this.state.integrityFailed)
+          this.update({ sourcesIssue: false, sourcesError: null });
+      } catch (error) { if (observer.active) this.sourcesFail(error); }
+    });
+    observer.sourcesReading = work; this.update({ sourcesReadPending: true });
+    try { await work; } finally {
+      if (observer.sourcesReading === work) { observer.sourcesReading = null; if (this.observer === observer) this.update({ sourcesReadPending: false }); }
+    }
+  }
+  sourceActionReason = (): string | null => {
+    if (this.disposed || this.state.mode !== 'native' || !this.observer?.active || !hasAndroidToolSources(this.observer.api))
+      return 'Open a supported native app to choose Android tool folders.';
+    if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
+    if (this.observer.generation !== this.state.connectionGeneration || !this.state.sourcesListening || !this.state.toolSources || this.state.sourcesIssue)
+      return 'Check the original tool-selection status before browsing.';
+    if (this.state.sourcesPending || this.state.sourcesUnconfirmed || androidToolSourcesActive(this.state.toolSources))
+      return 'Wait for the original picker and folder checks, or cancel that original selection.';
+    if (this.state.catalogPending || this.state.catalogUnconfirmed || this.state.catalogIssue || androidCatalogActive(this.state.catalogStatus)
+        || this.state.pending || this.state.originalUnconfirmed || active(this.state.status?.operation))
+      return 'Finish or cancel the current tool-catalog or build operation first.';
+    if (!this.state.project || this.state.selectionPending) return 'Choose a mobile project first.';
+    if (this.state.toolSources.availability !== 'available') return androidBuildAvailabilityText[this.state.toolSources.availability];
+    return this.context.otherOperationReason();
+  };
+  async chooseToolSource(role: AndroidToolSourceRole): Promise<void> {
+    this.syncProject();
+    if (!['jdk', 'sdk', 'gradle'].includes(role) || this.sourceActionReason() || !this.observer?.sources || !this.state.project) return;
+    const observer = this.observer, previous = observer.sources!;
+    if (previous.sourceGeneration >= ANDROID_BUILD_COUNTER_MAX - 1) { this.retire({ generationLost: true }); return; }
+    const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role };
+    this.retire(this.advance('contextGeneration'));
+    const attempt = { observer, before: previous.sourceGeneration, after: previous.statusRevision, role, projectId: request.projectId, retired: false,
+      identity: null as AndroidToolSourceIdentity | null, settled: false };
+    this.sourcesAttempt = attempt; this.sourcesCancelClaim = null;
+    this.update({ sourcesPending: true, sourcesUnconfirmed: true, sourcesError: null, sourcesCancelClaimed: null });
+    try {
+      const value = await observer.api.chooseAndroidToolSource!(request);
+      if (!observer.active || this.sourcesAttempt !== attempt) return;
+      const status = parseAndroidToolSourcesStatus(value);
+      if (!status || status.sourceGeneration !== attempt.before + 1 || status.operation?.role !== role || status.statusRevision <= attempt.after) {
+        this.sourcesFail(null, true); return;
+      }
+      this.receiveSources(observer, status);
+    } catch (error) { if (observer.active && this.sourcesAttempt === attempt && !attempt.settled) this.sourcesFail(error); }
+  }
+  canCancelToolSources(): boolean {
+    const observer = this.observer, status = observer?.sources;
+    return !this.disposed && !!observer?.active && hasAndroidToolSources(observer.api) && !!status?.operation
+      && androidToolSourcesActive(status) && !sameAndroidToolSourceIdentity(this.sourcesCancelClaim, status.operation);
+  }
+  cancelToolSources(): boolean { return !!this.observer && this.stopSources(this.observer); }
+  private stopSources(observer: Observer): boolean {
+    // Preserve context/connection/disposal STOP intent even when the chooser
+    // reply was lost and its original identity has not arrived yet.
+    if (this.sourcesAttempt?.observer === observer && !this.sourcesAttempt.settled) this.sourcesAttempt.retired = true;
+    const status = observer.sources;
+    if (!observer.active || !hasAndroidToolSources(observer.api) || !status?.operation || !androidToolSourcesActive(status)
+        || sameAndroidToolSourceIdentity(this.sourcesCancelClaim, status.operation)) return false;
+    const identity = status.operation;
+    this.sourcesCancelClaim = identity; this.update({ sourcesCancelClaimed: identity });
+    void (async () => {
+      try {
+        const value = await observer.api.cancelAndroidToolSource!({ schemaVersion: 1,
+          sourceGeneration: identity.sourceGeneration, operationId: identity.operationId });
+        if (!observer.active) return;
+        const result = parseAndroidToolSourcesStatus(value);
+        if (!result || !sameAndroidToolSourceIdentity(result.operation, identity)) { this.sourcesFail(null, true); return; }
+        this.receiveSources(observer, result);
+      } catch (error) { if (observer.active) this.sourcesFail(error); }
+    })();
+    return true;
+  }
+
+  private catalogFail(error: unknown, protocol = false): void {
+    this.retire({ catalogError: androidCatalogError(error), catalogIssue: true,
+      nativeBlocked: this.state.nativeBlocked || protocol, integrityFailed: this.state.integrityFailed || protocol });
+  }
+  private receiveCatalog(observer: Observer, value: unknown): AndroidToolchainCatalogStatus | null {
+    if (!observer.active) return null;
+    const status = parseAndroidToolchainCatalogStatus(value);
+    if (!status) { this.catalogFail(null, true); return null; }
+    const previous = observer.catalog, attempt = this.catalogAttempt;
+    if (previous && status.statusRevision < previous.statusRevision) return status;
+    if (previous && status.statusRevision === previous.statusRevision && !sameAndroidBuildData(previous, status)) {
+      this.catalogFail(null, true); return null;
+    }
+    if (previous && status.catalogGeneration < previous.catalogGeneration) { this.catalogFail(null, true); return null; }
+    const identity = status.operationId === null ? null : { catalogGeneration: status.catalogGeneration, operationId: status.operationId };
+    const ours = attempt?.observer === observer;
+    if (previous && status.catalogGeneration !== previous.catalogGeneration &&
+        (!ours || attempt.selection !== null || status.catalogGeneration !== attempt.before + 1 || status.statusRevision <= attempt.after)) {
+      this.catalogFail(null, true); return null;
+    }
+    if (previous && previous.catalogGeneration === status.catalogGeneration && previous.operationId !== status.operationId ||
+        ours && attempt.identity && !sameAndroidCatalogIdentity(attempt.identity, identity)) {
+      this.catalogFail(null, true); return null;
+    }
+    if (previous?.phase === 'unknown' && status.phase !== 'unknown' ||
+        previous && previous.catalogGeneration === status.catalogGeneration && ['ready', 'refused', 'cancelled'].includes(previous.phase) &&
+          androidCatalogActive(status)) { this.catalogFail(null, true); return null; }
+    if (ours && !attempt.identity && identity && attempt.selection === null &&
+        status.catalogGeneration === attempt.before + 1 && status.statusRevision > attempt.after) attempt.identity = identity;
+    const acknowledged = !!ours && status.statusRevision > attempt.after &&
+      (attempt.selection === null ? sameAndroidCatalogIdentity(attempt.identity, identity) && identity !== null :
+        status.catalogGeneration === attempt.before && sameAndroidCatalogSelection(status.selected, attempt.selection));
+    if (acknowledged) attempt.settled = !androidCatalogActive(status);
+    if (previous && !sameAndroidCatalogSelection(previous.selected, status.selected)) this.retire(this.advance('contextGeneration'));
+    observer.catalog = status;
+    if (observer === this.observer) {
+      this.update({ catalogStatus: status, catalogPending: acknowledged ? null : this.state.catalogPending,
+        catalogUnconfirmed: acknowledged ? false : this.state.catalogUnconfirmed,
+        nativeBlocked: this.state.nativeBlocked || status.phase === 'unknown' ||
+          ['cleanup-unknown', 'document-lost', 'shutdown'].includes(status.availability) });
+    }
+    if (this.disposed && androidCatalogActive(status)) this.stopCatalog(observer);
+    if (this.disposed && !this.needsOriginal(observer)) this.detach(observer);
+    return status;
+  }
+  canCheckCatalogStatus(): boolean { return !this.disposed && !!this.observer?.active && !this.state.catalogReadPending; }
+  async checkCatalogStatus(): Promise<void> {
+    const observer = this.observer;
+    if (this.disposed || !observer?.active) return;
+    if (observer.catalogReading) return observer.catalogReading;
+    const work = Promise.resolve().then(async () => {
+      if (!observer.active) return;
+      try {
+        const status = this.receiveCatalog(observer, await observer.api.androidToolchainCatalogStatus());
+        if (status && status.statusRevision >= (observer.catalog?.statusRevision ?? 0) && !this.state.integrityFailed)
+          this.update({ catalogIssue: false, catalogError: null });
+      } catch (error) { if (observer.active) this.catalogFail(error); }
+    });
+    observer.catalogReading = work; this.update({ catalogReadPending: true });
+    try { await work; } finally {
+      if (observer.catalogReading === work) { observer.catalogReading = null; if (this.observer === observer) this.update({ catalogReadPending: false }); }
+    }
+  }
+  catalogActionReason = (): string | null => {
+    if (this.disposed || this.state.mode !== 'native') return 'Open the native application to inspect protected Android tool copies.';
+    if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
+    if (this.state.sourcesIssue || this.state.sourcesPending || this.state.sourcesUnconfirmed || androidToolSourcesActive(this.state.toolSources))
+      return 'Settle or confirm the original Android tool picker before changing the protected copy.';
+    const observer = this.observer, catalog = this.state.catalogStatus, op = this.state.status?.operation;
+    if (!observer?.active || observer.generation !== this.state.connectionGeneration || !this.state.catalogListening || !catalog || this.state.catalogIssue)
+      return 'Check the original tool catalog and its subscription before changing the selection.';
+    if (this.state.catalogPending || this.state.catalogUnconfirmed || androidCatalogActive(catalog))
+      return 'Wait for the original catalog read or cancel it; a lost reply is not cleanup.';
+    if (this.state.pending || this.state.originalUnconfirmed || op && !['awaiting-consent', 'terminal'].includes(op.phase))
+      return 'Settle the original build before changing tools.';
+    if (catalog.availability !== 'available') return androidBuildAvailabilityText[catalog.availability];
+    return this.context.otherOperationReason();
+  };
+  async refreshCatalog(): Promise<void> {
+    if (this.catalogActionReason() || !this.observer?.catalog) return;
+    const observer = this.observer, previous = observer.catalog!;
+    if (previous.catalogGeneration >= ANDROID_BUILD_COUNTER_MAX - 1) { this.retire({ generationLost: true }); return; }
+    this.retire(this.advance('contextGeneration'));
+    const attempt = { observer, before: previous.catalogGeneration, after: previous.statusRevision,
+      identity: null as AndroidCatalogIdentity | null, selection: null, settled: false };
+    this.catalogAttempt = attempt; this.catalogCancelClaim = null;
+    this.update({ catalogPending: 'refresh', catalogUnconfirmed: true, catalogCancelClaimed: null, catalogError: null });
+    try {
+      const value = await observer.api.refreshAndroidToolchainCatalog();
+      if (!observer.active || this.catalogAttempt !== attempt) return;
+      const status = parseAndroidToolchainCatalogStatus(value);
+      if (!status || status.catalogGeneration !== attempt.before + 1 || !status.operationId || status.statusRevision <= attempt.after) {
+        this.catalogFail(null, true); return;
+      }
+      this.receiveCatalog(observer, status);
+    } catch (error) { if (observer.active && this.catalogAttempt === attempt && !attempt.settled) this.catalogFail(error); }
+  }
+  async selectToolchain(instance: string, recordSha256: string): Promise<void> {
+    if (this.catalogActionReason() || !this.observer?.catalog) return;
+    const observer = this.observer, previous = observer.catalog!;
+    const selected = previous.entries.find((entry) => entry.selection.instance === instance && entry.selection.recordSha256 === recordSha256)?.selection;
+    if (previous.phase !== 'ready' || !selected) return;
+    this.retire(this.advance('contextGeneration'));
+    const attempt = { observer, before: previous.catalogGeneration, after: previous.statusRevision,
+      identity: previous.operationId ? { catalogGeneration: previous.catalogGeneration, operationId: previous.operationId } : null,
+      selection: selected, settled: false };
+    this.catalogAttempt = attempt;
+    this.update({ catalogPending: 'select', catalogUnconfirmed: true, catalogError: null });
+    try {
+      const value = await observer.api.selectAndroidToolchain({ schemaVersion: 1, catalogGeneration: previous.catalogGeneration, instance, recordSha256 });
+      if (!observer.active || this.catalogAttempt !== attempt) return;
+      const status = parseAndroidToolchainCatalogStatus(value);
+      if (!status || status.statusRevision <= attempt.after || status.catalogGeneration !== attempt.before ||
+          !sameAndroidCatalogSelection(status.selected, selected)) { this.catalogFail(null, true); return; }
+      this.receiveCatalog(observer, status);
+    } catch (error) { if (observer.active && this.catalogAttempt === attempt && !attempt.settled) this.catalogFail(error); }
+  }
+  canCancelCatalog(): boolean {
+    const status = this.observer?.catalog;
+    return !this.disposed && !!this.observer?.active && !!status?.operationId && androidCatalogActive(status) &&
+      !sameAndroidCatalogIdentity(this.catalogCancelClaim, { catalogGeneration: status.catalogGeneration, operationId: status.operationId });
+  }
+  cancelCatalog(): boolean { return this.canCancelCatalog() && !!this.observer && this.stopCatalog(this.observer); }
+  private stopCatalog(observer: Observer): boolean {
+    const status = observer.catalog;
+    if (!observer.active || !status?.operationId || !androidCatalogActive(status)) return false;
+    const identity = { catalogGeneration: status.catalogGeneration, operationId: status.operationId };
+    if (sameAndroidCatalogIdentity(this.catalogCancelClaim, identity)) return false;
+    this.catalogCancelClaim = identity; this.update({ catalogCancelClaimed: identity });
+    void (async () => {
+      try {
+        const value = await observer.api.cancelAndroidToolchainCatalog({ schemaVersion: 1, ...identity });
+        if (!observer.active) return;
+        const status = parseAndroidToolchainCatalogStatus(value);
+        if (!status || !sameAndroidCatalogIdentity(identity, status.operationId === null ? null :
+            { catalogGeneration: status.catalogGeneration, operationId: status.operationId })) { this.catalogFail(null, true); return; }
+        this.receiveCatalog(observer, status);
+      } catch (error) { if (observer.active) this.catalogFail(error); }
+    })();
+    return true;
+  }
   private commonReason(): string | null {
     if (this.disposed || this.state.mode !== 'native') return 'Open the native application. Browser preview cannot prepare or run an Android build.';
     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
@@ -348,6 +672,13 @@ export class AndroidBuildController {
       return 'A current original native Status and subscription are required. Passive diagnostics cannot qualify Android execution.';
     if (this.state.status.statusRevision >= ANDROID_BUILD_COUNTER_MAX) return 'The original status counter is exhausted. No counter or consent can be reused.';
     if (!['available', 'busy'].includes(this.state.status.availability)) return androidBuildAvailabilityText[this.state.status.availability];
+    if (this.state.sourcesIssue || this.state.sourcesPending || this.state.sourcesUnconfirmed || androidToolSourcesActive(this.state.toolSources))
+      return 'Settle or confirm the original Android tool picker before reviewing a build.';
+    if (this.state.catalogIssue || this.state.catalogUnconfirmed || this.state.catalogPending || androidCatalogActive(this.state.catalogStatus))
+      return 'Settle or confirm the original Android tool selection before reviewing this build.';
+    if (!this.state.catalogListening || !this.state.catalogStatus) return 'Check the original Android tool catalog status first.';
+    if (this.state.catalogStatus.availability !== 'unsupported-platform' && this.state.catalogStatus.selected === null)
+      return 'Choose a registered protected Android tool copy before reviewing saved inputs.';
     if (!this.state.visible) return 'Open Releases to review this saved Android build and its project-code disclosure.';
     if (this.state.selectionPending) return 'Finish original project selection before reviewing this build.';
     const project = this.state.project;
@@ -391,6 +722,7 @@ export class AndroidBuildController {
     const counters = this.advance('requestGeneration'); if (counters.generationLost) { this.retire(counters); return; }
     const observer = this.observer;
     const binding: AndroidBuildBinding = freeze({ context: { ...request, platform: 'android', operation: 'android-build-inspect' }, selection: project.selection,
+      toolchainSelection: this.state.catalogStatus?.selected ?? null,
       observationGeneration: project.observationGeneration, versionObservation: project.versionObservation, connectionGeneration: this.state.connectionGeneration,
       selectionGeneration: this.state.selectionGeneration, contextGeneration: this.state.contextGeneration, requestGeneration: counters.requestGeneration! });
     const attempt: Attempt = { observer, binding, previous: observer.status?.operation ? id(observer.status.operation) : null,
@@ -484,12 +816,23 @@ export class AndroidBuildController {
   }
   dispose(): void {
     if (this.disposed) return;
-    this.retire(); this.disposed = true; this.listeners.clear();
+    this.retire(); if (this.observer) { this.stopCatalog(this.observer); this.stopSources(this.observer); }
+    this.disposed = true; this.listeners.clear();
     if (this.observer && !this.needsOriginal(this.observer)) this.detach(this.observer);
     // Sent work retains a retirement-only original observer until actual native
     // terminal settlement. Page navigation must call setVisible, not dispose.
   }
 }
+
+export const androidToolchainCatalogHelp: HelpContent = {
+  label: 'Protected Android tools on this Mac', requiredness: 'conditional',
+  requiredWhen: 'Select a compatible registered tool copy before reviewing a Mac Android build.',
+  what: 'Lists protected copies of Java 17, Gradle, Android SDK tools and bundletool for your macOS account. Listing is not full qualification.',
+  why: 'The build must use the exact tool copy you chose, not a changing PATH, another account’s files or whichever version looks newest.',
+  where: 'Use Refresh tool list for protected copies, or Browse in Set up Android tools to choose source folders. Browsing does not inspect supplier contents or register a protected copy.',
+  format: 'Choose one named copy after checking its version labels. The application retains its catalog generation and byte comparisons; you never enter a UID, hash, path or command.',
+  failure: 'Changed, incompatible or unsafe copies are refused. Full runtime and tool admission runs again at Build. A failed or interrupted read keeps original Status and Cancel; no tools are silently installed or licenses accepted.',
+};
 
 export const androidBuildHelp: HelpContent = {
   label: 'Build saved Android app and inspect AAB', requiredness: 'optional', requiredWhen: 'Use only for an explicitly reviewed local Android build; it is separate from candidate evidence and Store release.',

@@ -17,6 +17,7 @@ pub struct AppInfo {
     pub app_name: &'static str, pub app_version: &'static str,
     pub runtime: RuntimeStatus, pub capabilities: Option<Value>, pub project_selection: ProjectSelectionAvailability,
     pub project_path_selection: ProjectPathSelectionAvailability,
+    pub installation: Option<crate::installation::Description>,
 }
 #[derive(Serialize)]
 pub struct ProjectSelectionAvailability { pub available: bool, pub reason: Option<&'static str> }
@@ -311,6 +312,7 @@ impl DesktopBridge {
         // Display DATA only. Selection does not imply that snapshot or any
         // other core method is available, nor that live native admission holds.
         AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"), runtime, capabilities,
+            installation: crate::installation::description(document.installation_reveal_available()),
             project_selection: ProjectSelectionAvailability::new(document.project_selection_available()),
             project_path_selection: ProjectPathSelectionAvailability::new(document.project_path_selection_available()) }
     }

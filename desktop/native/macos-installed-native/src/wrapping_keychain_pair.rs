@@ -1,7 +1,7 @@
 //! Qualification-only fixed creator/reader record custody. No process launch,
 //! configurable transport, credential getter, Keychain mutation, or Drop cleanup.
 //! Fixed private bytes stay local; reports contain closed scalar observations.
-use super::{qualification::{Case, CaseReturn, OwnerFixturePin, PeerLookup, Refused},
+use super::{CleanupAdmission, ProcessInteractionObservation, qualification::{Case, CaseReturn, OwnerFixturePin, PeerLookup, Refused},
     native_frame_bytes, AddEffect, Admission, Checkpoint, Context, Custody, Facts,
     Outcome, RawResult, ReferenceObservation};
 use std::{any::Any, cell::Cell, ffi::c_void, fmt::{self, Write as FmtWrite},
@@ -272,7 +272,8 @@ pub(super) fn peer_settled(row: &CaseReturn) -> bool {
 }
 pub(super) fn creator_lookup_ready(row: &CaseReturn) -> bool {
     let f = row.facts();
-    row.case() == Case::CreatorControlLookup && peer_settled(row) && f.outcome() == Outcome::Candidate
+    row.case() == Case::CreatorControlLookup && peer_settled(row)
+        && f.process_interaction_restored() && f.raw.policy.role == 1 && f.outcome() == Outcome::Candidate
         && f.add_effect() == AddEffect::NotEntered && f.original_item_verified() && f.namespace_verified()
         && f.observed_keychain_status().is_some_and(|s| s & 1 == 1) && row.scoped_value_present()
         && exact_lookup(f, 0)
@@ -285,7 +286,8 @@ fn exact_lookup(f: &Facts, status: i32) -> bool {
 }
 fn reader_denied(row: &CaseReturn) -> bool {
     let f = row.facts();
-    row.case() == Case::OtherExecutableLookup && peer_settled(row) && exact_lookup(f, -25308)
+    row.case() == Case::OtherExecutableLookup && peer_settled(row)
+        && f.process_interaction_restored() && f.raw.policy.role == 2 && exact_lookup(f, -25308)
         && f.outcome() == Outcome::InteractionRequired && f.add_effect() == AddEffect::NotEntered
         && f.observed_keychain_status().is_some_and(|s| s & 1 == 1) && f.namespace_verified()
         && f.first_refusal_phase() == Some(11) && f.raw.key_bytes == 0 && !row.scoped_value_present()
@@ -523,7 +525,8 @@ impl Reader {
         let Some(peer) = self.peer.as_mut() else { return false; };
         // Retain the entire actual return before diagnostics or inspection. No
         // candidate route on unexpected success, Missing repair, or retry.
-        match unsafe { peer.run(&mut |checkpoint, facts| phase.native(checkpoint, facts, clock)) } {
+        let cleanup = CleanupAdmission::from_original_cutoff(clock.cutoff);
+        match unsafe { peer.run(&mut |checkpoint, facts| phase.native(checkpoint, facts, clock), cleanup) } {
             Ok(actual) => self.original = Some(actual), Err(refused) => self.refused = Some(refused),
         }
         let admitted = phase.marker(11, clock) == Admission::Continue;
@@ -539,7 +542,7 @@ impl Reader {
 
     fn build_report(&mut self) -> fmt::Result {
         self.output.clear(); let out = &mut Bounded { value: &mut self.output };
-        write!(out, "MRK_WRAPPING_PEER_RESULT={{\"schemaVersion\":1,\"scope\":\"wrapping-other-executable-reader\",\"provisional\":true,\"outerFinalityRequired\":true,\"cutoffSeconds\":10,\"adapterInvocationBound\":1,\"runEntered\":{},\"runReturned\":{},\"completed\":{},\"originalSlotRetained\":true,\"registered\":{},\"chargedBytes\":{},\"chargeLimit\":{},\"adapterFrameBytes\":{},\"deadlineObserved\":{},\"poisoned\":{},\"clockChecks\":{},\"callbackOrCallerPanic\":{},\"lookupStarted\":{},\"lookupRefused\":{},\"denialAccepted\":{},\"controls\":",
+        write!(out, "MRK_WRAPPING_PEER_RESULT={{\"schemaVersion\":2,\"scope\":\"wrapping-other-executable-reader\",\"perQueryUIFailQualified\":false,\"processNonInteractionQualified\":false,\"provisional\":true,\"outerFinalityRequired\":true,\"cutoffSeconds\":10,\"adapterInvocationBound\":1,\"runEntered\":{},\"runReturned\":{},\"completed\":{},\"originalSlotRetained\":true,\"registered\":{},\"chargedBytes\":{},\"chargeLimit\":{},\"adapterFrameBytes\":{},\"deadlineObserved\":{},\"poisoned\":{},\"clockChecks\":{},\"callbackOrCallerPanic\":{},\"lookupStarted\":{},\"lookupRefused\":{},\"denialAccepted\":{},\"controls\":",
             self.run_entered,self.run_returned,self.completed,self.registered,self.charged,READER_CHARGE_LIMIT,self.adapter_bytes,
             self.clock.late,self.clock.poisoned,self.clock.checks,self.panic.is_some() || self.original.as_ref().is_some_and(|r| r.facts().callback_panicked()),
             self.peer.as_ref().is_some_and(PeerLookup::started),self.refused.is_some(),self.original.as_ref().is_some_and(reader_denied))?;
@@ -551,7 +554,7 @@ impl Reader {
         self.phase.marker(16, &mut self.clock);
         let mut stdout = io::stdout().lock();
         self.phase.marker(17, &mut self.clock); self.write_entered = true;
-        let fallback = b"MRK_WRAPPING_PEER_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-other-executable-reader\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n";
+        let fallback = b"MRK_WRAPPING_PEER_RESULT={\"schemaVersion\":2,\"scope\":\"wrapping-other-executable-reader\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n";
         let bytes = if self.report_built { self.output.as_bytes() } else { fallback };
         self.phase.marker(18, &mut self.clock);
         self.write_original = Some(IoWrite::write_all(&mut stdout, bytes));
@@ -574,8 +577,7 @@ impl FmtWrite for Bounded<'_> {
 }
 /// Only the source-fixed qualification example calls this entry. Its very first
 /// action starts the original10s clock; there is no general input or CLI.
-pub fn reader_entry() {
-    let entry = Instant::now();
+pub fn reader_entry(entry: Instant) {
     static CLAIMED: AtomicBool = AtomicBool::new(false);
     #[used]
     static ORIGINAL: AtomicPtr<ManuallyDrop<Reader>> = AtomicPtr::new(std::ptr::null_mut());
@@ -634,6 +636,21 @@ pub(super) fn references(out: &mut impl FmtWrite, rows: &[ReferenceObservation])
     }
     out.write_char(']')
 }
+pub(super) fn policy_result(out: &mut impl FmtWrite, policy: &ProcessInteractionObservation) -> fmt::Result {
+    out.write_str("{\"header\":")?;
+    numbers(out, &[policy.version.into(), policy.kind.into(), policy.role.into(), policy.entered.into(),
+        policy.scope_admitted.into(), policy.original_valid.into(), policy.original_value.into(), policy.installed.into(),
+        policy.restore_due.into(), policy.restored.into(), policy.failed.into(), policy.first_failure.into(),
+        policy.finished.into(), policy.callback_refused.into(), policy.cleanup_refused.into(),
+        policy.namespace_entered.into(), policy.namespace_returned.into(), policy.namespace_completed.into()])?;
+    out.write_str(",\"calls\":[")?;
+    for (i, call) in policy.calls.iter().enumerate() {
+        if i != 0 { out.write_char(',')?; }
+        numbers(out, &[call.entered.into(), call.returned.into(), call.refused.into(), call.exception.into(),
+            call.status.into(), call.value.into(), call.value_valid.into()])?;
+    }
+    out.write_str("]}")
+}
 pub(super) fn native_result(out: &mut impl FmtWrite, raw: &RawResult) -> fmt::Result {
     out.write_str("{\"header\":")?;
     numbers(out, &[raw.version.into(), raw.operation.into(), raw.outcome.into(), raw.effect.into(), raw.phase.into(),
@@ -667,5 +684,6 @@ pub(super) fn native_result(out: &mut impl FmtWrite, raw: &RawResult) -> fmt::Re
     out.write_str(",\"native\":")?;
     numbers(out, &[n.entered.into(), n.returned.into(), n.last_call.into(), n.last_returned.into(),
         n.last_result.into(), n.last_errno.into(), n.failure_call.into(), n.failure_result.into(), n.failure_errno.into()])?;
+    out.write_str(",\"policy\":")?; policy_result(out, &raw.policy)?;
     out.write_char('}')
 }

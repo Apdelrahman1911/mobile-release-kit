@@ -2176,6 +2176,8 @@ name = "mrk-macos-installed-native"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "nix",
+ "zeroize",
 ]
 
 [[package]]

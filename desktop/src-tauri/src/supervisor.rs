@@ -154,6 +154,8 @@ struct Owner {
 struct OwnerState {
     endpoint: Instant, cleanup_endpoint: Option<Instant>, error: Option<BridgeError>,
     terminal: bool, unknown: bool,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    native_unknown_pending: bool,
     reply: Option<oneshot::Sender<Result<Value, BridgeError>>>,
     driver_join: ManagementJoin, watchdog_join: ManagementJoin,
     driver_end: Option<DriverEnd>, watchdog_end: Option<WatchdogEnd>,
@@ -291,6 +293,8 @@ enum WatchdogEnd {
 impl OwnerState {
     fn new(endpoint: Instant, reply: Option<oneshot::Sender<Result<Value, BridgeError>>>) -> Self {
         Self { endpoint, cleanup_endpoint: None, error: None, terminal: false, unknown: false, reply,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            native_unknown_pending: false,
             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
             driver_end: None, watchdog_end: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
@@ -309,8 +313,9 @@ impl OwnerState {
     }
     fn fail_at(&mut self, error: BridgeError, now: Instant) {
         if self.terminal { return; }
-        if self.error.is_none() { self.error = Some(error); }
-        if self.cleanup_endpoint.is_none() { self.cleanup_endpoint = Some(now.min(self.endpoint) + CLEANUP_TIME); }
+        let end = now.min(self.endpoint) + CLEANUP_TIME;
+        if self.error.is_none() || self.cleanup_endpoint.is_some_and(|prior| end < prior) { self.error = Some(error); }
+        self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
     }
     fn management_ready(&self) -> bool {
         self.driver_join == ManagementJoin::Returned && self.watchdog_join == ManagementJoin::Returned
@@ -347,6 +352,23 @@ impl OwnerState {
         }
             else { match &self.error { Some(error) => Err(error.clone()), None => result } })
     }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn common_acl_owner_data_check() -> bool {
+    // Original OwnerState DATA only; no native book, owner tasks or handles.
+    let now = Instant::now(); let endpoint = now + Duration::from_secs(20);
+    let early = now + Duration::from_secs(1); let late = now + Duration::from_secs(5);
+    let mut state = OwnerState::new(endpoint, None);
+    state.fail_at(BridgeError::timeout(), late);
+    state.fail_at(BridgeError::unavailable("DATA"), early);
+    if state.cleanup_endpoint != Some(early + CLEANUP_TIME) || state.endpoint != endpoint { return false; }
+    state.unknown = true;
+    state.fail_at(BridgeError::shutdown(), endpoint + CLEANUP_TIME);
+    if !state.unknown || state.cleanup_endpoint != Some(early + CLEANUP_TIME) { return false; }
+    let mut deadline = OwnerState::new(endpoint, None);
+    deadline.fail_at(BridgeError::timeout(), endpoint + CLEANUP_TIME);
+    deadline.cleanup_endpoint == Some(endpoint + CLEANUP_TIME)
 }
 
 // The SAME acquisition's error return, not another owner or receipt. The raw
@@ -473,6 +495,39 @@ struct ReadEnd { bytes: Vec<u8>, eof: bool, overflow: bool }
 struct WriteEnd { complete: bool }
 
 impl Owner {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn observe_native_failure(&self, first: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) {
+        use crate::installed_runtime::AdmissionFailure;
+        let Some((failure, at)) = first else { return; };
+        let error = match failure { AdmissionFailure::Deadline => BridgeError::timeout(),
+            AdmissionFailure::Unknown => BridgeError::cleanup_unknown(),
+            _ => BridgeError::unavailable("The original installed Mac native custody was refused.") };
+        let mut state = lock(&self.state);
+        if state.terminal { return; }
+        if at >= state.endpoint && state.error.is_none() {
+            let endpoint = state.endpoint; state.fail_at(BridgeError::timeout(), endpoint);
+        }
+        state.fail_at(error, at);
+        if failure == AdmissionFailure::Unknown && !state.unknown {
+            state.unknown = true; state.native_unknown_pending = true;
+        }
+        drop(state);
+        self.stop.send_replace(true); self.changed.notify_waiters();
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn native_cleanup_expired(&self, first: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) -> bool {
+        self.observe_native_failure(first);
+        let mut state = lock(&self.state); let now = Instant::now();
+        if state.terminal { return true; }
+        if now >= state.endpoint && state.error.is_none() {
+            let at = state.endpoint; state.fail_at(BridgeError::timeout(), at);
+        }
+        let expired = now >= state.cleanup_endpoint.unwrap_or(state.endpoint);
+        if expired && !state.unknown { state.unknown = true; state.native_unknown_pending = true; }
+        drop(state);
+        if expired { self.changed.notify_waiters(); }
+        expired
+    }
     fn fail(&self, error: BridgeError) {
         let mut state = lock(&self.state);
         if state.terminal { return; }
@@ -544,7 +599,11 @@ impl Owner {
         if timed_out { state.fail_at(BridgeError::timeout(), now); }
         let endpoint = state.cleanup_endpoint.unwrap_or(state.endpoint);
         let expired = state.cleanup_endpoint.is_some() && now >= endpoint;
-        let newly_unknown = expired && !state.unknown;
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let native_unknown = std::mem::take(&mut state.native_unknown_pending);
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        let native_unknown = false;
+        let newly_unknown = (expired && !state.unknown) || native_unknown;
         drop(state);
         if timed_out { self.stop.send_replace(true); self.changed.notify_waiters(); }
         if newly_unknown { owner_unknown!(self, inner, None, Clock); }
@@ -1338,8 +1397,11 @@ struct PreparedPassiveSpawn<'a> {
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 impl<'a> PreparedPassiveSpawn<'a> {
-    fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>, _inner: &Inner) -> Result<Self, AcquisitionError> {
-        let selected = runtime.prepare_once(end, stop)
+    fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>, _inner: &Inner, _owner: &Owner) -> Result<Self, AcquisitionError> {
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        let selected = runtime.prepare_once(end, stop).map_err(AcquisitionError::preparation)?;
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let selected = runtime.prepare_once_observed(end, stop, &mut |first| _owner.observe_native_failure(first))
             .map_err(AcquisitionError::preparation)?;
         // All native checks and fixed argument/environment allocations precede
         // the serialized final owner claim. No pathname/Command-taking adapter.
@@ -1397,7 +1459,7 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
     })?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
-    let prepared = PreparedPassiveSpawn::prepare(runtime, owner.endpoint(), &stop, inner)?;
+    let prepared = PreparedPassiveSpawn::prepare(runtime, owner.endpoint(), &stop, inner, owner)?;
     #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_passive_tests::before_claim(inner, owner);
     #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
@@ -1486,6 +1548,22 @@ impl InstalledSettlementSlots {
             Self::GitHubRelease(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
         }
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn settle_originals(&self, owner: &Owner) -> CloseOutcome {
+        match self {
+            Self::Passive(native) => {
+                let mut slots = match native.lock() { Ok(slots) => slots,
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
+            },
+            Self::GitHubReadOnly(native) => {
+                let mut slots = match native.lock() { Ok(slots) => slots,
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                slots.settle_originals(&mut |first| owner.native_cleanup_expired(first))
+            },
+        }
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     fn settle_originals(&self) -> CloseOutcome {
         match self {
             Self::Passive(native) => match native.lock() {
@@ -1576,7 +1654,11 @@ fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex
     let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub read-only original custody is unavailable"))?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let selected = runtime.prepare_once_observed(owner.endpoint(), &stop, &mut |first| owner.observe_native_failure(first))
+        .map_err(AcquisitionError::preparation)?;
     let mut command = Command::new(&selected.python);
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
@@ -1699,6 +1781,8 @@ async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let entering = delayed.as_ref().map(|witness| (witness.clone(), owner.clone()));
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let original_owner = owner.clone();
             resources.native_started = true;
             resources.native_settlement = Some(tokio::task::spawn_blocking(move || {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
@@ -1706,7 +1790,10 @@ async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<
                     target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if let Some((witness, owner)) = entering { witness.settlement_entered(&owner); }
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
-                closing.settle_originals()
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { closing.settle_originals(&original_owner) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { closing.settle_originals() }
             }));
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -1832,6 +1919,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let github_fixture = lock(&inner.test.github_fixture).clone();
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let github_tls = lock(&inner.test.github_tls).clone();
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let inspection_owner = owner.clone();
     let (inspect_start, inspect_enter) = oneshot::channel();
     resources.inspection_return = Some(ManagementJoin::Pending);
     resources.inspection = Some(tokio::task::spawn_blocking(move || {
@@ -1844,7 +1933,16 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 if passive_selected(profile) {
                     let native = inspection_native.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    return config.resolve_passive_installed(_method, &mut originals, endpoint, &inspection_stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let armed = originals.arm_acl_once(endpoint, &inspection_stop);
+                        inspection_owner.observe_native_failure(originals.first_failure());
+                        armed.map_err(|_| BridgeError::unavailable("The original Mac ACL inspection could not be armed."))?;
+                    }
+                    let result = config.resolve_passive_installed(_method, &mut originals, endpoint, &inspection_stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.observe_native_failure(originals.first_failure());
+                    return result;
                 }
                 config.resolve(endpoint)?
             },
@@ -1853,7 +1951,16 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 if github_installed_selected(profile) {
                     let native = inspection_github.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    return config.resolve_github_readonly_installed(&mut originals, endpoint, &inspection_stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let armed = originals.arm_acl_once(endpoint, &inspection_stop);
+                        inspection_owner.observe_native_failure(originals.first_failure());
+                        armed.map_err(|_| BridgeError::unavailable("The original Mac ACL inspection could not be armed."))?;
+                    }
+                    let result = config.resolve_github_readonly_installed(&mut originals, endpoint, &inspection_stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.observe_native_failure(originals.first_failure());
+                    return result;
                 }
                 // The same original inspection and endpoint. This private
                 // test-only value exists only after the fixed hosted Case has

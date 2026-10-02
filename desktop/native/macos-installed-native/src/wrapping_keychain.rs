@@ -1,16 +1,16 @@
 //! Unwired explicit-login-Keychain primitive, not an operation owner or permit.
 //!
-//! Call only inside the existing registered OriginalWork/native child, off the
-//! UI/deadline thread, after reserving the adapter frame and key charge. Retain
-//! that original worker and this actual return through STOP, loss and cutoff.
+//! Provider entry is confined to two owner-bound, nonshipping helper mains.
+//! Shared Desktop/Tokio/OriginalWork is NOT process isolation and cannot activate
+//! it. The existing owner retains each helper's actual return through STOP/cutoff.
 //! Security calls are synchronous and have no timeout-as-cancel contract here.
 //!
 //! The first profile admits only the native ordinary user's existing explicit
 //! login.keychain-db. It never discovers a default/search-list store, unlocks,
-//! creates a Keychain, repairs a missing item, retries an add or changes global
-//! interaction policy. Public SDK declarations and CF ownership live in the
-//! sibling Objective-C leaf. Per-query UIFail/file-Keychain behavior remains
-//! unqualified; unsupported flags fail closed, without a fallback.
+//! creates a login Keychain, repairs a missing item or retries an add. The private
+//! helper guard saves/disables/restores its own process-local interaction Boolean
+//! for each operation; every final result requires its actual restoration. This
+//! is not a per-query UIFail guarantee, a thread-local guard or a shipping API.
 //!
 //! Returned immutable CFData is never mutated. Exactly32 checked bytes are
 //! copied into one stable private native cell. Every CF/ACL original and retained
@@ -51,10 +51,10 @@ pub mod qualification;
 #[path = "wrapping_keychain_pair.rs"]
 pub mod private_pair;
 
-#[cfg(all(test, mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native,
+#[cfg(all(mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native,
     feature = "installed-observation", debug_assertions))]
 #[path = "wrapping_keychain_fixture.rs"]
-mod private_fixture;
+pub mod private_fixture;
 
 use std::any::Any;
 use std::cell::Cell;
@@ -63,6 +63,10 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
+use std::time::Instant;
+
+#[path = "wrapping_keychain_transport.rs"]
+pub mod transport;
 
 pub const KEY_BYTES: usize = 32;
 pub const MAX_CF_REFERENCES: usize = 24;
@@ -287,6 +291,40 @@ const _: () = assert!(size_of::<DescriptorObservation>() == 40);
 const _: () = assert!(size_of::<AclObservation>() == 84);
 const _: () = assert!(size_of::<NativeCallObservation>() == 36);
 
+
+/// Finite, nonsecret original process-policy observations. Getter validity is
+/// separate from its byte; zero status is meaningful only after actual return.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InteractionCallObservation {
+    pub entered: u32, pub returned: u32, pub refused: u32, pub exception: u32,
+    pub status: i32, pub value: u32, pub value_valid: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessInteractionObservation {
+    pub version: u32, pub kind: u32, pub role: u32, pub entered: u32, pub scope_admitted: u32,
+    pub original_valid: u32, pub original_value: u32, pub installed: u32, pub restore_due: u32, pub restored: u32,
+    pub failed: u32, pub first_failure: u32, pub finished: u32, pub callback_refused: u32, pub cleanup_refused: u32,
+    pub namespace_entered: u32, pub namespace_returned: u32, pub namespace_completed: u32,
+    pub calls: [InteractionCallObservation; 5],
+}
+const _: () = assert!(size_of::<InteractionCallObservation>() == 28);
+const _: () = assert!(size_of::<ProcessInteractionObservation>() == 212);
+impl ProcessInteractionObservation {
+    fn valid(&self, final_return: bool) -> bool {
+        // SAFETY: pure finite-data validation in the SAME shared scalar header;
+        // no process activation, SDK, clock, provider, reference or filesystem.
+        unsafe { mrk_wrapping_policy_validate(self, u32::from(final_return)) == 1 }
+    }
+    pub fn complete(&self) -> bool {
+        unsafe { mrk_wrapping_policy_complete(self, 0) == 1 }
+    }
+    fn namespace_complete(&self) -> bool {
+        unsafe { mrk_wrapping_policy_complete(self, 1) == 1 }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RawResult {
@@ -299,27 +337,32 @@ struct RawResult {
     descriptors: [DescriptorObservation; MAX_DESCRIPTORS],
     acl: AclObservation,
     native: NativeCallObservation,
+    policy: ProcessInteractionObservation,
 }
-const _: () = assert!(size_of::<RawResult>() == 3840);
+const _: () = assert!(size_of::<RawResult>() == 4052);
 impl RawResult {
     fn empty(operation: Operation, outcome: u32) -> Self {
-        Self { version: 2, operation: operation.raw(), outcome, effect: 0, phase: 1,
+        Self { version: 3, operation: operation.raw(), outcome, effect: 0, phase: 1,
             failure_phase: if outcome == 0 { 0 } else { 1 }, flags: KNOWN | KEY_WIPED,
             account_errno: 0, keychain_status: 0, slot_count: 0, call_count: 0,
             key_bytes: 0, run_returned: 0, references: [ReferenceObservation::default(); MAX_CF_REFERENCES],
             calls: [CallObservation::default(); MAX_SECURITY_CALLS],
             directory_count: 0, descriptor_count: 0, namespace_entered: 0, namespace_returned: 0, namespace_passed: 0,
             descriptors: [DescriptorObservation::default(); MAX_DESCRIPTORS],
-            acl: AclObservation::default(), native: NativeCallObservation::default() }
+            acl: AclObservation::default(), native: NativeCallObservation::default(),
+            policy: ProcessInteractionObservation::default() }
     }
     fn valid(&self, final_return: bool) -> bool {
-        if self.version != 2 || !matches!(self.operation, 1 | 2) || self.outcome > 17
+        if self.version != 3 || !matches!(self.operation, 1 | 2) || self.outcome > 17
             || self.effect > 3 || self.phase == 0 || self.phase > 21 || self.failure_phase > 21
             || self.flags & !FLAG_MASK != 0 || self.flags & (KNOWN | UNKNOWN) == (KNOWN | UNKNOWN)
             || self.slot_count as usize > MAX_CF_REFERENCES || self.call_count as usize > MAX_SECURITY_CALLS
             || !matches!(self.key_bytes, 0 | 32) || self.run_returned > 1
             || (final_return && (self.run_returned != 1 || self.outcome == 0 || self.flags & (KNOWN | UNKNOWN) == 0)) { return false; }
         let known = self.flags & KNOWN != 0;
+        if !self.policy.valid(final_return && self.policy.kind != 0)
+            || (self.run_returned == 1 && (self.policy.kind != 1 || (known && !self.policy.complete())))
+            || (self.flags & KEY_READY != 0 && !self.policy.complete()) { return false; }
         if self.directory_count > MAX_PATH_COMPONENTS || self.descriptor_count as usize > MAX_DESCRIPTORS
             || (self.directory_count == 0 && (self.descriptor_count != 0 || self.namespace_entered != 0))
             || (self.directory_count != 0 && self.descriptor_count != self.directory_count + NAMESPACE_CHECKPOINTS)
@@ -441,12 +484,16 @@ impl Facts {
     pub fn native_run_returned(&self) -> bool { self.ffi_returned }
     pub fn verified_native_run_receipt(&self) -> bool { self.verified && self.raw.run_returned == 1 }
     pub fn callback_panicked(&self) -> bool { self.callback_panicked }
+    pub fn process_interaction(&self) -> Option<&ProcessInteractionObservation> {
+        self.verified.then_some(&self.raw.policy)
+    }
+    pub fn process_interaction_restored(&self) -> bool { self.verified && self.raw.policy.complete() }
     pub fn native_exception(&self) -> bool { self.raw.flags & NATIVE_EXCEPTION != 0 }
     /// This concerns only the adapter's native frame, not provider/global state.
     pub fn adapter_frame_retired(&self) -> bool { self.frame_retired }
     fn accepted(&self, outcome: Outcome) -> bool {
         self.verified && !self.callback_panicked && self.native_run_returned() && self.verified_native_run_receipt()
-            && self.custody() == Custody::Settled && !self.stopped()
+            && self.custody() == Custody::Settled && !self.stopped() && self.process_interaction_restored()
             && self.original_item_verified() && self.namespace_verified() && self.outcome() == outcome
     }
 }
@@ -454,9 +501,8 @@ impl Facts {
 unsafe extern "C" {
     fn mrk_wrapping_frame_bytes() -> usize;
     fn mrk_wrapping_frame_new() -> *mut c_void;
-    fn mrk_wrapping_run(frame: *mut c_void, operation: u32, vault: *const u8, generation: *const u8, key: *const u8,
-        admission: extern "C" fn(*mut c_void, *const RawResult, u32) -> u32,
-        context: *mut c_void, result: *mut RawResult);
+    fn mrk_wrapping_policy_validate(policy: *const ProcessInteractionObservation, final_return: u32) -> u32;
+    fn mrk_wrapping_policy_complete(policy: *const ProcessInteractionObservation, namespace_only: u32) -> u32;
     fn mrk_wrapping_retain_unknown(frame: *mut c_void);
     fn mrk_wrapping_consume(frame: *mut c_void,
         consume: extern "C" fn(*mut c_void, *const u8, usize) -> u32, context: *mut c_void) -> u32;
@@ -545,6 +591,81 @@ extern "C" fn admission_bridge<F: FnMut(Checkpoint, &Facts) -> Admission>(
     }
 }
 
+
+/// Original child cutoff copied before borrowing the forward owner. There is no
+/// duration/new-clock constructor and no transported parent15/90s endpoint here.
+/// This context survives in the actual return, separate from any forward panic.
+pub struct CleanupAdmission {
+    cutoff: Option<Instant>,
+    #[cfg(feature = "vault-helper")]
+    transported: bool,
+    seen: u32,
+    checks: u32,
+    expired: bool,
+    uncertain: bool,
+    panic: Option<Box<dyn Any + Send>>,
+}
+impl CleanupAdmission {
+    pub(super) fn from_original_cutoff(cutoff: Option<Instant>) -> Self {
+        Self { cutoff, #[cfg(feature = "vault-helper")] transported: false,
+            seen: 0, checks: 0, expired: false, uncertain: cutoff.is_none(), panic: None }
+    }
+    #[cfg(feature = "vault-helper")]
+    pub(crate) fn from_helper_control() -> Self {
+        Self { cutoff: None, transported: true, seen: 0, checks: 0,
+            expired: false, uncertain: false, panic: None }
+    }
+    fn admit_current(&mut self, slot: u32) -> Admission {
+        #[cfg(feature = "vault-helper")]
+        if self.transported {
+            if !matches!(slot, 3 | 4) || self.seen & (1 << slot) != 0
+                || slot == 4 && self.seen & (1 << 3) == 0 {
+                self.uncertain = true; return Admission::Unknown;
+            }
+            self.seen |= 1 << slot; self.checks += 1;
+            if self.uncertain || self.panic.is_some() { return Admission::Unknown; }
+            // Independent of the forward closure/panic/Facts. The fixed native
+            // cell owns the first actual failure and earlier STOP contraction.
+            let result = crate::vault_helper::cleanup_admission();
+            match result {
+                Admission::Unknown => self.uncertain = true,
+                Admission::Cutoff => self.expired = true,
+                Admission::Continue => {},
+            }
+            return if self.uncertain { Admission::Unknown }
+                else if self.expired { Admission::Cutoff } else { Admission::Continue };
+        }
+        self.admit_at(slot, Instant::now())
+    }
+    fn admit_at(&mut self, slot: u32, now: Instant) -> Admission {
+        if !matches!(slot, 3 | 4) || self.seen & (1 << slot) != 0
+            || slot == 4 && self.seen & (1 << 3) == 0 {
+            self.uncertain = true; return Admission::Unknown;
+        }
+        self.seen |= 1 << slot; self.checks += 1;
+        if self.uncertain || self.panic.is_some() { return Admission::Unknown; }
+        if self.cutoff.is_none_or(|cutoff| now >= cutoff) { self.expired = true; }
+        if self.expired { Admission::Cutoff } else { Admission::Continue }
+    }
+    fn failed(&self) -> bool { self.expired || self.uncertain || self.panic.is_some() }
+}
+type NativeCleanupAdmission = extern "C" fn(*mut c_void, u32) -> u32;
+extern "C" fn cleanup_admission_bridge(context: *mut c_void, slot: u32) -> u32 {
+    if context.is_null() { return Admission::Unknown.raw(); }
+    // SAFETY: native borrows this fixed context only for its own prearmed slots3/4,
+    // synchronously, and clears it before return. It never accesses forward Facts.
+    let original = unsafe { &mut *context.cast::<CleanupAdmission>() };
+    if original.uncertain || original.panic.is_some() { return Admission::Unknown.raw(); }
+    let returned = catch_unwind(AssertUnwindSafe(|| original.admit_current(slot)));
+    match returned {
+        Ok(admission) => admission.raw(),
+        // Only a failure of this fixed clock/book leg can reach here. Retain its
+        // own payload in the actual return; never inspect/drop forward payloads
+        // or unwind/drop arbitrary Rust data across C.
+        Err(payload) => { original.uncertain = true; original.panic = Some(payload); Admission::Unknown.raw() }
+    }
+}
+
 /// Holds the actual outcome and any uncertain original frame. Keep this result
 /// in OriginalWork through actual worker/coordinator joins. Neither take_value
 /// nor positive adapter cleanup is authority to publish an authenticated vault.
@@ -556,12 +677,14 @@ pub struct NativeResult<T> {
     // Declared after retained: its Rust-only destructor cannot strand a frame
     // by unwinding before the frame's non-retrying retention/drop handling.
     callback_panic: Option<Box<dyn Any + Send>>,
+    cleanup: CleanupAdmission,
 }
 impl<T> NativeResult<T> {
     pub fn facts(&self) -> &Facts { &self.facts }
     pub fn take_value(&mut self) -> Option<T> {
         if self.facts.verified && self.facts.custody() == Custody::Settled && !self.facts.stopped()
-            && self.callback_panic.is_none() {
+            && !self.facts.callback_panicked && self.facts.process_interaction_restored()
+            && self.callback_panic.is_none() && !self.cleanup.failed() {
             let value = self.value.take();
             if value.is_some() { self.value_native_bytes = 0; } // Charge transfers with the value; no refund.
             value
@@ -581,28 +704,16 @@ struct Returned {
     facts: Facts,
     frame: Option<Frame>,
     panic: Option<Box<dyn Any + Send>>,
+    cleanup: CleanupAdmission,
 }
 type NativeAdmission = extern "C" fn(*mut c_void, *const RawResult, u32) -> u32;
-fn run<F: FnMut(Checkpoint, &Facts) -> Admission>(
-    operation: Operation, context: &Context, key: Option<&[u8; KEY_BYTES]>, admission: &mut F,
-) -> Returned {
-    run_using(operation, admission, |frame, callback, bridge, raw| {
-        // SAFETY: exact-size input borrows are retained by this closure through
-        // the same synchronous native call; run_using owns frame/bridge/output.
-        unsafe {
-            mrk_wrapping_run(frame, operation.raw(), context.vault.as_ptr(), context.generation.as_ptr(),
-                key.map_or(std::ptr::null(), |key| key.as_ptr()), callback, bridge, raw);
-        }
-        raw.valid(true) // Production still refuses Pending/malformed final returns.
-    })
-}
 fn run_using<F: FnMut(Checkpoint, &Facts) -> Admission>(
-    operation: Operation, admission: &mut F,
-    invoke: impl FnOnce(*mut c_void, NativeAdmission, *mut c_void, &mut RawResult) -> bool,
+    operation: Operation, admission: &mut F, mut cleanup: CleanupAdmission,
+    invoke: impl FnOnce(*mut c_void, NativeAdmission, *mut c_void, NativeCleanupAdmission, *mut c_void, &mut RawResult) -> bool,
 ) -> Returned {
     let Some(mut frame) = Frame::new() else {
         return Returned { facts: Facts { raw: RawResult::empty(operation, 13), operation, verified: true,
-            ffi_returned: false, callback_panicked: false, frame_retired: false }, frame: None, panic: None };
+            ffi_returned: false, callback_panicked: false, frame_retired: false }, frame: None, panic: None, cleanup };
     };
     let mut raw = RawResult::empty(operation, 0);
     let mut bridge = AdmissionBridge { admission, operation, panic: None, malformed: false };
@@ -610,14 +721,15 @@ fn run_using<F: FnMut(Checkpoint, &Facts) -> Admission>(
     // admission bridge live through the ENTIRE call. The private invoker may
     // select only the compiled native entry; it is not a user callback or owner.
     let returned_shape = invoke(frame.pointer(), admission_bridge::<F>,
-        (&mut bridge as *mut AdmissionBridge<'_, F>).cast(), &mut raw);
+        (&mut bridge as *mut AdmissionBridge<'_, F>).cast(), cleanup_admission_bridge,
+        (&mut cleanup as *mut CleanupAdmission).cast(), &mut raw);
     let verified = returned_shape && raw.operation == operation.raw() && raw.valid(false) && !bridge.malformed;
-    let callback_panicked = bridge.panic.is_some();
+    let callback_panicked = bridge.panic.is_some() || cleanup.panic.is_some();
     let facts = Facts { raw, operation, verified, ffi_returned: true, callback_panicked, frame_retired: false };
     if !verified || callback_panicked || facts.custody() != Custody::Settled {
         frame.retain_unknown();
     }
-    Returned { facts, frame: Some(frame), panic: bridge.panic }
+    Returned { facts, frame: Some(frame), panic: bridge.panic, cleanup }
 }
 fn finish_without_key<T>(mut returned: Returned, value: Option<T>) -> NativeResult<T> {
     let mut value = value;
@@ -627,34 +739,40 @@ fn finish_without_key<T>(mut returned: Returned, value: Option<T>) -> NativeResu
             else { returned.facts.verified = false; value = None; }
         } else { value = None; }
     }
-    NativeResult { facts: returned.facts, value, retained: returned.frame, value_native_bytes: 0, callback_panic: returned.panic }
+    NativeResult { facts: returned.facts, value, retained: returned.frame, value_native_bytes: 0, callback_panic: returned.panic, cleanup: returned.cleanup }
 }
 
-/// One add-only call for the existing initialization owner. The borrowed key
-/// never escapes; a bounded private native backing survives any uncertain CFData
-/// view. Even an unsuccessful/late result may carry Added or MayHaveAdded.
+/// Shipping entry remains unavailable. A shared application worker is not the
+/// process isolation required by the inspected classic-Keychain interaction API.
+/// No provider call, callback, copy of key material or helper activation occurs.
 pub fn add_only<F: FnMut(Checkpoint, &Facts) -> Admission>(
     context: &Context, key: &[u8; KEY_BYTES], admission: &mut F,
 ) -> NativeResult<()> {
-    let returned = run(Operation::AddOnly, context, Some(key), admission);
-    let value = returned.facts.accepted(Outcome::Added).then_some(());
-    finish_without_key(returned, value)
+    let _ = (context, key, admission);
+    unavailable_in_application(Operation::AddOnly)
 }
 
-/// One exact lookup in the explicit original. Missing never calls add_only.
-/// The owner must check its current admission again before consuming the value;
-/// the final native admission does not eliminate a later cutoff race.
+/// Shipping lookup remains unavailable, just like add_only. The candidate type
+/// remains available for existing aliases, not as a shipping activation path.
 pub fn lookup<F: FnMut(Checkpoint, &Facts) -> Admission>(
     context: &Context, admission: &mut F,
 ) -> NativeResult<WrappingKeyCandidate> {
-    finish_lookup(run(Operation::Lookup, context, None, admission))
+    let _ = (context, admission);
+    unavailable_in_application(Operation::Lookup)
+}
+fn unavailable_in_application<T>(operation: Operation) -> NativeResult<T> {
+    finish_without_key(Returned {
+        facts: Facts { raw: RawResult::empty(operation, 10), operation, verified: true,
+            ffi_returned: false, callback_panicked: false, frame_retired: false },
+        frame: None, panic: None, cleanup: CleanupAdmission::from_original_cutoff(None),
+    }, None)
 }
 fn finish_lookup(mut returned: Returned) -> NativeResult<WrappingKeyCandidate> {
     if returned.facts.accepted(Outcome::Candidate) && returned.facts.raw.flags & KEY_READY != 0 {
         if let Some(frame) = returned.frame.take() {
             let value_native_bytes = frame.bytes;
             return NativeResult { facts: returned.facts, value: Some(WrappingKeyCandidate { frame }),
-                retained: None, value_native_bytes, callback_panic: returned.panic };
+                retained: None, value_native_bytes, callback_panic: returned.panic, cleanup: returned.cleanup };
         }
     }
     finish_without_key(returned, None)
@@ -709,4 +827,134 @@ impl WrappingKeyCandidate {
             None => panic!("missing consumed wrapping-key callback"),
         }
     }
+}
+
+#[cfg(test)]
+mod policy_contract_tests {
+    use super::*;
+
+    fn settled_policy() -> ProcessInteractionObservation {
+        let call = |value| InteractionCallObservation { entered: 1, returned: 1, refused: 0, exception: 0,
+            status: 0, value, value_valid: 1 };
+        ProcessInteractionObservation {
+            version: 1, kind: 1, role: 1, entered: 1, scope_admitted: 1,
+            original_valid: 1, original_value: 1, installed: 1, restore_due: 1, restored: 1,
+            finished: 1, calls: [call(1), call(0), call(0), call(1), call(1)],
+            ..ProcessInteractionObservation::default()
+        }
+    }
+
+    #[test]
+    fn policy_failure_preserves_effect_and_blocks_known_candidate() {
+        // Shared native DATA validator, not a second implementation of its rules.
+        let mut policy = settled_policy();
+        assert!(policy.valid(true) && policy.complete());
+        policy.calls[3].status = -1; policy.failed = 1; policy.first_failure = 4;
+        // Matching observation is real data but cannot erase a failed setter.
+        assert!(policy.valid(true) && policy.restored == 1 && !policy.complete());
+        let mut raw = RawResult::empty(Operation::AddOnly, 15);
+        raw.policy = policy; raw.run_returned = 1; raw.phase = 16;
+        raw.flags = UNKNOWN | KEY_WIPED; raw.effect = 1;
+        raw.call_count = 1; raw.calls[0] = CallObservation { phase: 10, entered: 1, returned: 1, status: 0 };
+        assert!(raw.valid(true));
+        let facts = Facts { raw, operation: Operation::AddOnly, verified: true, ffi_returned: true,
+            callback_panicked: false, frame_retired: false };
+        assert_eq!(facts.add_effect(), AddEffect::Added);
+        assert_eq!(facts.custody(), Custody::Unknown);
+        assert!(!facts.process_interaction_restored());
+        raw.flags = KNOWN | KEY_WIPED;
+        assert!(!raw.valid(true)); // Resource flags cannot invent policy finality.
+        raw.policy = settled_policy(); assert!(raw.valid(true));
+        raw.version = 2; assert!(!raw.valid(true)); // Old ABI is not policy evidence.
+        let mut unfinished = settled_policy();
+        unfinished.finished = 0; assert!(!unfinished.complete());
+        unfinished.calls[4].returned = 0; assert!(!unfinished.valid(true));
+    }
+
+    #[test]
+    fn cleanup_uses_original_endpoint_and_spends_only_two_slots() {
+        let cutoff = Instant::now();
+        let before = cutoff.checked_sub(std::time::Duration::from_millis(1)).unwrap();
+        let mut live = CleanupAdmission::from_original_cutoff(Some(cutoff));
+        assert_eq!(live.admit_at(3, before), Admission::Continue);
+        assert_eq!(live.admit_at(4, cutoff), Admission::Cutoff); // Equality is expired.
+        assert!(live.failed());
+        assert_eq!(live.admit_at(4, before), Admission::Unknown); // No retry/clock rewind.
+        let mut order = CleanupAdmission::from_original_cutoff(Some(cutoff));
+        assert_eq!(order.admit_at(4, before), Admission::Unknown);
+        let mut wrong_slot = CleanupAdmission::from_original_cutoff(Some(cutoff));
+        assert_eq!(wrong_slot.admit_at(2, before), Admission::Unknown);
+        let mut missing = CleanupAdmission::from_original_cutoff(None);
+        assert_eq!(cleanup_admission_bridge((&mut missing as *mut CleanupAdmission).cast(), 3), Admission::Unknown.raw());
+    }
+
+    #[test]
+    fn cleanup_bridge_does_not_reenter_or_drop_poisoned_forward_callback() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Payload(Arc<AtomicUsize>);
+        impl Drop for Payload { fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); } }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let held = drops.clone();
+        let mut callback = move |_: Checkpoint, _: &Facts| -> Admission { std::panic::panic_any(Payload(held.clone())) };
+        let mut forward = AdmissionBridge { admission: &mut callback, operation: Operation::Lookup, panic: None, malformed: false };
+        let raw = RawResult::empty(Operation::Lookup, 0);
+        fn forward_call<F: FnMut(Checkpoint, &Facts) -> Admission>(bridge: &mut AdmissionBridge<'_, F>, raw: &RawResult) -> u32 {
+            admission_bridge::<F>((bridge as *mut AdmissionBridge<'_, F>).cast(), raw, 0)
+        }
+        assert_eq!(forward_call(&mut forward, &raw), Admission::Unknown.raw());
+        assert!(forward.panic.is_some()); assert_eq!(drops.load(Ordering::SeqCst), 0);
+        // This deadline belongs to this small DATA-only test, not a native child.
+        let cutoff = Instant::now().checked_add(std::time::Duration::from_secs(10));
+        let mut cleanup = CleanupAdmission::from_original_cutoff(cutoff);
+        let independent = (&mut cleanup as *mut CleanupAdmission).cast();
+        assert_eq!(cleanup_admission_bridge(independent, 3), Admission::Continue.raw());
+        assert_eq!(cleanup_admission_bridge(independent, 4), Admission::Continue.raw());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(forward_call(&mut forward, &raw), Admission::Unknown.raw());
+        drop(forward);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn application_entries_do_not_invoke_provider_or_admission() {
+        let context = Context::new([1; 16], [2; 16]).unwrap();
+        let mut never = |_: Checkpoint, _: &Facts| -> Admission { panic!("application callback must remain unentered") };
+        let mut add = add_only(&context, &[3; KEY_BYTES], &mut never);
+        assert_eq!(add.facts().outcome(), Outcome::Unsupported);
+        assert_eq!(add.facts().add_effect(), AddEffect::NotEntered);
+        assert!(!add.facts().native_run_returned() && add.take_value().is_none());
+        assert_eq!(add.retained_native_frame_bytes(), 0);
+        let mut read = lookup(&context, &mut never);
+        assert_eq!(read.facts().outcome(), Outcome::Unsupported);
+        assert!(!read.facts().native_run_returned() && read.take_value().is_none());
+        assert_eq!(read.retained_native_frame_bytes(), 0);
+    }
+}
+
+// Separate fixed helper graph only. These are not public ordinary-app APIs.
+#[cfg(feature="vault-helper")]
+unsafe extern "C" {
+    fn mrk_wrapping_run(frame:*mut c_void,operation:u32,vault:*const u8,generation:*const u8,key:*const u8,
+        admission:NativeAdmission,context:*mut c_void,cleanup:NativeCleanupAdmission,cleanup_context:*mut c_void,out:*mut RawResult);
+}
+#[cfg(feature="vault-helper")]
+pub(crate) fn helper_add<F:FnMut(Checkpoint,&Facts)->Admission>(context:&Context,key:&[u8;KEY_BYTES],admission:&mut F)->NativeResult<()> {
+    let returned=run_using(Operation::AddOnly,admission,CleanupAdmission::from_helper_control(),
+        |frame,admission,bridge,cleanup,cleanup_bridge,out|{
+            // SAFETY: one registered native frame and both original synchronous
+            //bridges; the fixed helper role is also checked by native main/pid.
+            unsafe{mrk_wrapping_run(frame,1,context.vault.as_ptr(),context.generation.as_ptr(),key.as_ptr(),
+                admission,bridge,cleanup,cleanup_bridge,out);}true
+        });
+    let value=returned.facts.accepted(Outcome::Added).then_some(());
+    finish_without_key(returned,value)
+}
+#[cfg(feature="vault-helper")]
+pub(crate) fn helper_lookup<F:FnMut(Checkpoint,&Facts)->Admission>(context:&Context,admission:&mut F)->NativeResult<WrappingKeyCandidate> {
+    let returned=run_using(Operation::Lookup,admission,CleanupAdmission::from_helper_control(),
+        |frame,admission,bridge,cleanup,cleanup_bridge,out|{
+            unsafe{mrk_wrapping_run(frame,2,context.vault.as_ptr(),context.generation.as_ptr(),std::ptr::null(),
+                admission,bridge,cleanup,cleanup_bridge,out);}true
+        });
+    finish_lookup(returned)
 }

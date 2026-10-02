@@ -2,7 +2,8 @@
 // This finite fixture is not a worker/clock/process owner. The original native
 // test caller owns admission, the one cutoff, all material and every real return.
 // No pathname/password is accepted from an environment, argument or renderer.
-// No item/default/search setter, preference restoration or recursive removal.
+// No item/default/search setter or recursive removal. The common process-local
+// interaction guard restores only its exact observed Boolean.
 #if !defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION) || MRK_WRAPPING_KEYCHAIN_QUALIFICATION != 1
 #error "private fixture requires the checked qualification compilation"
 #endif
@@ -62,11 +63,12 @@ typedef struct {
     MRKWrappingReference references[MRK_Q_REFS];
     MRKQSelection selections[MRK_Q_SELECTIONS];
     MRKWrappingResult namespace;
+    MRKInteractionPolicy policies[MRK_Q_ACTIONS];
 } MRKQResult;
 _Static_assert(sizeof(MRKQCall) == 24, "fixture actual scalar call ABI");
 _Static_assert(sizeof(MRKQAction) == 24, "fixture fixed action ABI");
 _Static_assert(sizeof(MRKQSelection) == 60, "fixture selection observation ABI");
-_Static_assert(sizeof(MRKQResult) == 29384, "fixture scalar result ABI");
+_Static_assert(sizeof(MRKQResult) == 33200, "fixture scalar result ABI v2");
 typedef uint32_t (*MRKQAdmission)(void *, const MRKQResult *, uint32_t);
 typedef struct {
     CFTypeRef value;
@@ -97,7 +99,8 @@ typedef struct {
     void *context;
     uint32_t running, spent_free, root_index, active_acl, active_mode;
     uint32_t link_changed, link_unlinked, created_slot, active_action;
-    uint32_t saved_name_offset, material_issued, binding_issued;
+    uint32_t saved_name_offset, material_issued, binding_issued, namespace_parent_settled;
+    MRKInteractionGuard interaction;
     MRKWrappingQualificationFixture pin;
     uint8_t token[16], key[32], ids[128], password[32];
     uuid_t foreign_user, foreign_group;
@@ -118,15 +121,67 @@ static void mrk_q_unknown(MRKQFixture *f) {
 static void mrk_q_snapshot(MRKQFixture *f) {
     f->result.namespace = f->ns.result;
     f->result.callbacks_cleared = f->admission == NULL && f->context == NULL
-        && f->ns.admission == NULL && f->ns.context == NULL;
+        && f->ns.admission == NULL && f->ns.context == NULL
+        && f->interaction.forward == NULL && f->interaction.owner == NULL
+        && f->interaction.cleanup == NULL && f->interaction.cleanup_context == NULL;
 }
 static int mrk_q_admit(MRKQFixture *f, uint32_t checkpoint) {
     if (f->result.unknown || !f->admission || !f->context) return 0;
     mrk_q_snapshot(f);
     uint32_t reply = f->admission(f->context, &f->result, checkpoint);
     if (reply == MRK_W_CUTOFF) { f->result.stopped = 1; return mrk_q_fail(f); }
-    if (reply != MRK_W_CONTINUE) { mrk_q_unknown(f); return 0; }
+    if (reply != MRK_W_CONTINUE) {
+        if (f->interaction.acquired) mrk_p_forward_refused(f->interaction.policy);
+        mrk_q_unknown(f); return 0;
+    }
     return 1;
+}
+static int mrk_q_policy_forward(void *owner) {
+    return mrk_q_admit((MRKQFixture *)owner, MRK_W_BEFORE_CALL);
+}
+static int mrk_q_policies_settled(const MRKQFixture *f) {
+    for (uint32_t i = 0; i < f->result.action_count; ++i) {
+        const MRKInteractionPolicy *p = &f->result.policies[i];
+        if (!mrk_p_valid(p, 1) || (i == MRK_Q_POST_ADD - 1
+            ? !mrk_p_namespace_complete(p) || !f->namespace_parent_settled
+            : !mrk_p_complete(p))) return 0;
+    }
+    return 1;
+}
+static int mrk_q_namespace_child(MRKQFixture *f, MRKInteractionPolicy *p) {
+    // Check the actual thread before reading the one non-atomic process state.
+    uint32_t role = mrk_w_private_role();
+    mrk_p_init(p, MRK_P_NAMESPACE_CHILD, role);
+    if (!role) { mrk_p_fail(p, MRK_P_SCOPE_FAILURE); return 0; }
+    MRKInteractionGuard *outer = mrk_w_process.active;
+    int original = outer && mrk_w_process_original(outer);
+    const MRKWrappingQualificationFixture *binding = original ? outer->fixture : NULL;
+    int same = binding && f->binding_issued && !memcmp(binding, &f->pin, sizeof(f->pin));
+    if (!mrk_p_namespace_permitted(role, 1, original,
+            original && outer->policy->kind == MRK_P_OPERATION && outer->policy->installed
+                && !outer->policy->failed && !outer->policy->finished,
+            mrk_w_process.add_after_call, same,
+            original && (outer->policy->namespace_entered || outer->namespace_parent_settled),
+            mrk_w_process.poisoned)) {
+        mrk_p_fail(p, MRK_P_SCOPE_FAILURE); return 0;
+    }
+    p->scope_admitted = 1; p->namespace_entered = 1;
+    outer->policy->namespace_entered = 1;
+    outer->namespace_parent_settled = &f->namespace_parent_settled;
+    return 1;
+}
+static void mrk_q_namespace_return(MRKQFixture *f, MRKInteractionPolicy *p, int completed) {
+    if (p->scope_admitted && pthread_main_np() == 1) {
+        MRKInteractionGuard *outer = mrk_w_process.active;
+        p->namespace_returned = 1; p->namespace_completed = completed != 0;
+        if (outer && mrk_w_process_original(outer)
+            && outer->namespace_parent_settled == &f->namespace_parent_settled) {
+            outer->policy->namespace_returned = 1; outer->policy->namespace_completed = completed != 0;
+            if (!completed) mrk_p_fail(outer->policy, MRK_P_CHILD_FAILURE);
+        } else { mrk_p_fail(p, MRK_P_SCOPE_FAILURE); }
+    }
+    if (!completed) mrk_p_fail(p, MRK_P_CHILD_FAILURE);
+    p->finished = 1;
 }
 static uint32_t mrk_q_namespace_admission(void *context, const MRKWrappingResult *raw, uint32_t checkpoint) {
     MRKQFixture *f = context;
@@ -823,17 +878,16 @@ static int mrk_q_retire(MRKQFixture *f) {
     // never turn a stopped/unknown/failed fixture action into finalization.
     if (f->result.failed || f->result.unknown || f->result.stopped
         || (s->result.flags & (MRK_W_STOP | MRK_W_UNKNOWN))) return mrk_q_fail(f);
-    s->result.flags |= MRK_W_KNOWN | MRK_W_KEY_WIPED;
-    s->result.phase = MRK_W_RETURN;
-    f->result.finalized = 1;
+    // Original resource effects are complete, but policy restoration is still
+    // pending. Only the action wrapper may publish namespace KNOWN/finalized.
     return 1;
 }
 size_t mrk_wrapping_fixture_frame_bytes(void) { return sizeof(MRKQFixture); }
-uint32_t mrk_wrapping_fixture_abi(void) { return 0x51460101u; }
+uint32_t mrk_wrapping_fixture_abi(void) { return 0x51460201u; }
 void *mrk_wrapping_fixture_new(void) {
     MRKQFixture *f = calloc(1, sizeof(MRKQFixture));
     if (f) {
-        f->result.version = 1; f->result.bytes = sizeof(f->result);
+        f->result.version = 2; f->result.bytes = sizeof(f->result);
         f->ns.result.version = MRK_W_VERSION; f->ns.result.operation = MRK_W_LOOKUP;
         f->ns.result.flags = MRK_W_KEY_WIPED; f->ns.result.phase = MRK_W_ENTRY;
         f->root_index = f->created_slot = UINT32_MAX;
@@ -842,11 +896,14 @@ void *mrk_wrapping_fixture_new(void) {
     }
     return f;
 }
-void mrk_wrapping_fixture_run(void *frame, uint32_t action, MRKQAdmission admission, void *context, MRKQResult *out) {
+void mrk_wrapping_fixture_run(void *frame, uint32_t action, MRKQAdmission admission, void *context,
+    MRKWrappingCleanupAdmission cleanup, void *cleanup_context, MRKQResult *out) {
     if (!frame || !out) return;
     MRKQFixture *f = frame;
     if (f->running || f->spent_free || f->result.failed || f->result.unknown || f->result.stopped || f->result.finalized
-        || !admission || !context || action != f->result.action_count + 1 || action > MRK_Q_ACTIONS) {
+        || !admission || !context || !cleanup || !cleanup_context
+        || (action > MRK_Q_POST_ADD && !f->namespace_parent_settled)
+        || action != f->result.action_count + 1 || action > MRK_Q_ACTIONS) {
         mrk_q_unknown(f); mrk_q_snapshot(f); *out = f->result; return;
     }
     uint32_t index = f->result.action_count++;
@@ -854,9 +911,16 @@ void mrk_wrapping_fixture_run(void *frame, uint32_t action, MRKQAdmission admiss
     r->kind = action; r->entered = 1; r->first_call = f->result.call_count;
     f->running = 1; f->active_action = action; f->admission = admission; f->context = context;
     f->ns.admission = mrk_q_namespace_admission; f->ns.context = f;
+    MRKInteractionPolicy *policy = &f->result.policies[index];
+    f->interaction.forward = mrk_q_policy_forward; f->interaction.owner = f;
+    f->interaction.cleanup = cleanup; f->interaction.cleanup_context = cleanup_context;
+    f->interaction.acquired = 0; f->interaction.policy = policy;
+    int namespace_child = action == MRK_Q_POST_ADD;
+    int scope = namespace_child ? mrk_q_namespace_child(f, policy)
+        : mrk_w_policy_acquire(&f->interaction, policy, MRK_P_FIXTURE, 0);
     int complete = 0;
     @try {
-        switch (action) {
+        if (scope && (namespace_child || mrk_w_policy_install(&f->interaction))) switch (action) {
             case MRK_Q_ENTROPY: complete = mrk_q_entropy(f); break;
             case MRK_Q_CREATE: complete = mrk_q_create(f); break;
             case MRK_Q_DENY_READ: complete = mrk_q_install_acl(f, 0); break;
@@ -879,17 +943,32 @@ void mrk_wrapping_fixture_run(void *frame, uint32_t action, MRKQAdmission admiss
     } @catch (NSException *exception) {
         (void)exception; f->result.exception = 1; mrk_q_unknown(f);
     }
+    int resource_ok = complete && !f->result.unknown && !f->result.exception
+        && !(f->ns.result.flags & (MRK_W_STOP | MRK_W_UNKNOWN));
+    if (namespace_child) {
+        mrk_q_namespace_return(f, policy, resource_ok);
+        if (!mrk_p_namespace_complete(policy)) mrk_q_unknown(f);
+    } else if (!mrk_w_policy_finish(&f->interaction, resource_ok)) {
+        mrk_q_unknown(f);
+    }
     if (!complete || f->ns.result.flags & (MRK_W_STOP | MRK_W_UNKNOWN)) f->result.failed = 1;
     if (f->ns.result.flags & MRK_W_UNKNOWN) f->result.unknown = 1;
     r->completed = complete && !f->result.failed; r->returned = 1; r->end_call = f->result.call_count;
+    if (action == MRK_Q_RETIRE && r->completed && mrk_q_policies_settled(f)) {
+        f->ns.result.flags |= MRK_W_KNOWN | MRK_W_KEY_WIPED;
+        f->ns.result.phase = MRK_W_RETURN; f->result.finalized = 1;
+    }
     f->running = 0; f->active_action = 0;
     f->admission = NULL; f->context = NULL; f->ns.admission = NULL; f->ns.context = NULL;
+    f->interaction.forward = NULL; f->interaction.owner = NULL;
+    f->interaction.cleanup = NULL; f->interaction.cleanup_context = NULL;
     mrk_q_snapshot(f); *out = f->result;
 }
 uint32_t mrk_wrapping_fixture_material(void *frame, uint8_t *token, uint8_t *key, uint8_t *ids) {
     if (!frame || !token || !key || !ids) return 0;
     MRKQFixture *f = frame;
     if (f->running || f->material_issued || !f->result.material_generated || f->result.failed
+        || !mrk_q_policies_settled(f) || !mrk_w_policy_final_owner(&f->result.policies[0])
         || f->result.action_count != 1 || !f->result.actions[0].completed) return 0;
     f->material_issued = 1;
     memcpy(token, f->token, sizeof(f->token)); memcpy(key, f->key, sizeof(f->key)); memcpy(ids, f->ids, sizeof(f->ids));
@@ -899,6 +978,7 @@ uint32_t mrk_wrapping_fixture_binding(void *frame, MRKWrappingQualificationFixtu
     if (!frame || !out) return 0;
     MRKQFixture *f = frame;
     if (f->running || f->binding_issued || f->result.failed || f->result.create_effect != 1
+        || !mrk_q_policies_settled(f) || !mrk_w_policy_final_owner(&f->result.policies[1])
         || f->result.action_count != 2 || !f->result.actions[1].completed || f->pin.bytes != sizeof(f->pin)) return 0;
     f->binding_issued = 1; *out = f->pin; return 1;
 }
@@ -907,7 +987,8 @@ uint32_t mrk_wrapping_fixture_free(void *frame) {
     MRKQFixture *f = frame;
     if (f->running || f->spent_free || f->result.failed || f->result.unknown || f->result.stopped || !f->result.finalized
         || f->result.action_count != MRK_Q_ACTIONS || !f->result.actions[MRK_Q_ACTIONS - 1].completed
-        || !f->result.callbacks_cleared || !mrk_w_acl_settled(&f->ns)) return 0;
+        || !f->result.callbacks_cleared || !mrk_w_acl_settled(&f->ns)
+        || !mrk_q_policies_settled(f) || !mrk_w_policy_final_owner(&f->result.policies[MRK_Q_ACTIONS - 1])) return 0;
     for (uint32_t i = 0; i < f->result.ref_count; ++i) {
         MRKWrappingReference *r = &f->result.references[i];
         if (r->call_entered != r->call_returned || r->nonnull_returned != r->release_returned
@@ -930,7 +1011,7 @@ uint32_t mrk_wrapping_fixture_free(void *frame) {
 #include <dirent.h>
 #include <stdio.h>
 _Static_assert(RENAME_EXCL == 0x00000004, "Python fixed Darwin exclusive-rename ABI");
-_Static_assert(errSecInteractionNotAllowed == -25308, "Rust fixed UIFail denial OSStatus");
+_Static_assert(errSecInteractionNotAllowed == -25308, "Rust fixed process-noninteraction denial OSStatus");
 #define MRK_QP_FDS 6u
 #define MRK_QP_RESULT_BYTES 1912u
 // I/O aggregate: entered/returned/lastKind/lastReturned/lastResult/lastErrno/

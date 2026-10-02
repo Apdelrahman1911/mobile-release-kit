@@ -770,8 +770,8 @@ async fn native(document: &DocumentBinding, owner: &Arc<OriginalWork>, work: Chi
     }
 }
 #[cfg(feature = "desktop-shell")]
-fn provider_problem(problem: crate::vault_keyring_linux::Problem) -> Reason {
-    use crate::vault_keyring_linux::Problem;
+fn provider_problem(problem: keyring::Problem) -> Reason {
+    use keyring::Problem;
     match problem {
         Problem::Interrupted => Reason::UserCancelled, Problem::Capacity => Reason::Capacity,
         Problem::CleanupUnknown => Reason::CleanupUnknown, Problem::Locked => Reason::VaultKeyringLocked,
@@ -1070,7 +1070,7 @@ mod tests {
         old.child.try_lock().unwrap().receipt = JoinReceipt::Pending;
         assert!(!late_cleanup_install(&state, &slot));
         old.child.try_lock().unwrap().receipt = JoinReceipt::New;
-        *old.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
+        *old.keyring.lock().unwrap() = keyring::LookupBook::constructor_refusal_data();
         assert!(!late_cleanup_install(&state, &slot)); // Native-none still retains charged backing.
         assert!(old.keyring.lock().unwrap().dispose_settled_storage());
         assert!(late_cleanup_install(&state, &slot));
@@ -1413,7 +1413,7 @@ pub(super) fn start_cleanup(document: &DocumentBinding, state: &mut DocumentStat
 }
 #[cfg(feature = "desktop-shell")]
 async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: Job) -> Result<super::Staged, Reason> {
-    use crate::vault_keyring_linux::LookupInput;
+    use keyring::LookupInput;
     match job {
         Job::Open { location, roster } => {
             let generation = roster.generation;

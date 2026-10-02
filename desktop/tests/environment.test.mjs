@@ -1,3 +1,4 @@
+import { installationError, parseInstallationDescription, parseInstallationReveal } from '../src/installation.ts';
 // Passive DTO/controller contracts. No subprocesses, selected files, native
 // runtime, GUI, tool discovery or network; controlled promises are in-memory.
 import assert from 'node:assert/strict';
@@ -222,4 +223,74 @@ test('guided UI and synchronous workspace/bootstrap wiring preserve field help a
   assert.ok(page.includes('EnvironmentDiagnostics state={diagnosticsState}') && !page.includes('Run native doctor'));
   assert.ok(app.includes('workspaceRef.current = next;\n    environmentControllerRef.current?.syncProject();'));
   assert.ok(app.indexOf('environment.beginConnection()') < app.indexOf('const connection = await desktopApi()'));
+});
+
+test('installation description cannot turn layout DATA into verification or maintenance authority', () => {
+  const value = { layout: 'fixed-macos', expectedLocation: '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app',
+    runtimeRelease: 'macos26-arm64-project-draft-01', installMode: 'fresh-only', maintenance: 'unavailable',
+    revealAvailable: true, assurance: 'profile-description-only' };
+  assert.deepEqual(parseInstallationDescription(value), value);
+  assert.notEqual(parseInstallationDescription(value), value);
+  for (const change of [
+    { expectedLocation: '/Applications/Other.app' }, { runtimeRelease: '../other' },
+    { maintenance: 'available' }, { installMode: 'repair' }, { assurance: 'verified' },
+    { installed: true }, { revealAvailable: 'true' },
+  ]) assert.equal(parseInstallationDescription({ ...value, ...change }), null);
+  assert.equal(parseInstallationDescription(undefined), null);
+  let reads = 0;
+  const getter = { ...value, get expectedLocation() { reads += 1; return value.expectedLocation; } };
+  assert.equal(parseInstallationDescription(getter), null);
+  assert.equal(reads, 0);
+  assert.deepEqual(parseInstallationReveal({ state: 'request-sent', finderVisibility: 'unconfirmed' }),
+    { state: 'request-sent', finderVisibility: 'unconfirmed' });
+  for (const invalid of [null, true, { state: 'shown', finderVisibility: 'confirmed' },
+    { state: 'request-sent', finderVisibility: 'unconfirmed', path: '/PRIVATE' }]) {
+    assert.equal(parseInstallationReveal(invalid), null);
+  }
+});
+
+test('Finder bridge has one fixed empty request, no fallback and no fabricated completion', async () => {
+  const calls = [];
+  const api = createNativeApi('native', async (command, input) => {
+    calls.push({ command, input });
+    return { state: 'request-sent', finderVisibility: 'unconfirmed' };
+  });
+  assert.deepEqual(await api.revealInstallation({ path: '/PRIVATE', command: 'open' }),
+    { state: 'request-sent', finderVisibility: 'unconfirmed' });
+  assert.deepEqual(calls, [{ command: 'reveal_installation', input: {} }]);
+  const invalid = createNativeApi('native', async () => ({ state: 'shown', finderVisibility: 'confirmed' }));
+  await assert.rejects(invalid.revealInstallation(), (error) => error.code === 'installation_reveal_unconfirmed');
+  const leaking = createNativeApi('native', async () => { throw { code: 'PRIVATE', message: 'PRIVATE' }; });
+  await assert.rejects(leaking.revealInstallation(), (error) => !JSON.stringify(error).includes('PRIVATE'));
+  const unavailable = createNativeApi('unavailable', async () => { assert.fail('no fallback call'); });
+  await assert.rejects(unavailable.revealInstallation(), (error) => error.code === 'installation_reveal_unavailable');
+  await assert.rejects(previewApi.revealInstallation(), (error) => error.code === 'installation_reveal_unavailable');
+  assert.equal((await previewApi.appInfo()).installation, null);
+  for (const code of ['busy', 'quit_pending', 'cleanup_unknown', 'installation_document_unavailable']) {
+    const safe = installationError({ code, message: 'PRIVATE' });
+    assert.deepEqual(installationError(safe), safe);
+    assert.ok(!JSON.stringify(safe).includes('PRIVATE'));
+  }
+});
+
+test('fixed Finder command is registered at all Tauri gates and explained without a shell path', () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  const shell = read('../src-tauri/src/shell.rs');
+  const build = read('../src-tauri/build.rs');
+  const capability = JSON.parse(read('../src-tauri/capabilities/main.json'));
+  const native = read('../native/macos-installed-native/src/native.m');
+  const component = read('../src/components/InstallationDetails.tsx');
+  assert.equal((build.match(/"reveal_installation"/g) ?? []).length, 1);
+  assert.ok(/generate_handler!\[[\s\S]*\breveal_installation\b/.test(shell));
+  assert.equal(capability.permissions.filter((value) => value === 'allow-reveal-installation').length, 1);
+  assert.equal(capability.local, true);
+  assert.deepEqual(capability.windows, ['main']);
+  assert.ok(shell.includes('crate::installation::reveal_request(request_body(&request)?)'));
+  assert.ok(shell.includes('state.document.reveal_installation()'));
+  assert.ok(native.includes('activateFileViewerSelectingURLs:@[application]'));
+  assert.ok(native.includes('@"/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app"'));
+  for (const text of ['Location policy · not an installation check', 'Fresh installation only.',
+    'Finder visibility is unconfirmed', 'HelpButton content={installationLocationHelp}']) assert.ok(component.includes(text));
+  assert.ok(read('../src/pages/Environment.tsx').includes('<InstallationDetails info={info} api={api}'));
+  assert.ok(read('../src/App.tsx').includes('<Environment info={info} api={api}'));
 });

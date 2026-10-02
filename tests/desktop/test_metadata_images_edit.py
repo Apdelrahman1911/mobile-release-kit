@@ -1,6 +1,6 @@
 """Real image import/rename failure fixtures; not shared-host-safe by default.
 
-Run only in the lead's reviewed Linux filesystem boundary. Every path is under
+Run only in the lead's reviewed Linux or macOS/APFS boundary. Every path is under
 one TemporaryDirectory supplied by the recovery fixture; actual original root
 leases, bounded observations and the production rename/rollback writer are
 used. No native picker, subprocess, signing material, network or Store is used.

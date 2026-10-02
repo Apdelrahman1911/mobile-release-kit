@@ -117,6 +117,7 @@ class AndroidBuildRun:
                                 observed, used_config=used_config, used_version=used_version,
                                 validation=self.request.context["artifactValidation"],
                                 toolchain_profile=self.request.native["toolchain"]["profile"],
+                                toolchain_selection=self.request.native["toolchain"].get("selection"),
                             )
                         except (ProtocolError, ValueError, TypeError, RecursionError) as error:
                             # Bounded DATA projection is not a successful build

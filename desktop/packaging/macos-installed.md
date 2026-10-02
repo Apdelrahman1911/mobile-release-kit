@@ -11,6 +11,66 @@ The five selected regressions below require a complete successful hosted gate.
 Do not push the verification branch or use these commands before separate
 actual-source/command review; integration is not proof that this revision works.
 
+
+## Fixed Mac vault helper integration — source draft, not qualified
+
+The ordinary app still cannot call Add/Lookup directly. The separate
+desktop/helpers/macos-vault-helper Cargo graph builds only the fixed
+Contents/Helpers/mrk-vault-keychain helper, with no observer/fixture role,
+renderer API or general command interface. App compilation rejects accidental
+feature unification. The existing OriginalWork coordinator registers the one
+blocking child before native admission; it owns launch, request GO, three pipes,
+absolute work/cleanup limits, the real child wait, and the actual worker join.
+
+Both reviewed Mac workflow jobs select Rust **1.98.1**, commit
+48a229ceaefd4985c50990b14116b6d856af0985; the native build script checks the
+actual selected compiler. The Apple Instant/CLOCK_UPTIME_RAW source binding
+is specific to that toolchain, not a promise about arbitrary future compilers.
+No shared global Rust toolchain or Windows/Linux profile is changed.
+
+Packaging order is helper build → hardened/empty-entitlements signature →
+strict helper verification → final helper byte digest/size → digest-bound app
+build → helper/app staging → hardened/empty-entitlements app signature → strict
+helper/app verification → exact input roster. Neither signing command uses
+--deep; a changed nested helper fails the input digest check. The helper must
+be arm64/macOS26, use only absolute Apple-system library dependencies and the
+system dyld, and contain no rpath, dyld environment, or legacy loader override.
+The root installer gives the helper the same protected0555/root:wheel leaf
+policy as the app executable; no additional arbitrary executable is admitted.
+
+Reverse caller admission uses protected installed-code originals and the actual
+kernel parent. Strict static signatures must carry the runtime flag and empty
+recognized entitlements. Actual dynamic parent/self code must satisfy the exact
+cdhash requirement, be Valid, and not be Debugged. Parent loss or changed code
+revokes forward work, not independently admitted original-only restoration.
+**Exact cdhash authenticates code identity, not executing-file location**:
+a byte-identical copy remains identity-equivalent. There is no promise of
+copied-path refusal or protection from an already compromised ordinary session.
+
+Initialize preserves reservation → one Add → exact Lookup → joined/settled key
+authentication → durable header publication. Unlock never adds. Early failure
+and STOP contract the original cleanup endpoint; neither delivery latency nor
+a later cleanup callback renews it. Independent restore slots remain usable
+after a poisoned forward callback. Partial framing, failed closes, unknown
+native allocation/finality, forced exit, orphan return, or missed deadlines
+cannot become a key candidate or release a memory charge. A failed child
+registration retains its prearmed book as Unknown, rather than doing unregistered
+native cleanup from the coordinator. Normal before-GO cancellation instead
+runs the same cleanup-capable registered child without granting forward work.
+
+The bounded helper build/signing records are retained with the existing
+source/run/attempt evidence. The separate helper target joins existing
+task-owned output retirement only after its required copies and original work
+are complete. It is not a reason to delete shared caches or another task's work.
+
+**Unexecuted obligations remain unexecuted.** Source/DATA tests are not actual
+installed-caller, Keychain, shared-clock, process/pipe finality, or durability
+qualification. Required native negative/positive controls and final integrated
+review must pass before persistence/availability may be enabled. All existing
+qualification gates remain false. Ad-hoc hardened CI signing is not Developer ID,
+notarization, publisher identity, signed-upgrade continuity, or production
+distribution acceptance.
+
 ## 2026-09-21 supported-directory-API and command corrections
 
 The first normal Mac compile failed because getdirentries64 was undeclared. Its
@@ -167,6 +227,25 @@ The Installer:
 The 120-second Installer admission clock is not an extension of any application
 clock and cannot preempt a blocked kernel syscall. Unknown must remain Unknown;
 process absence or a standard Installer exit alone cannot prove native finality.
+
+## Finding and opening the installed app
+
+The application remains in the fixed protected Library location above. After a
+successful installation, open Finder, choose **Go → Go to Folder**, enter
+`/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`, and open
+the app. This does not require a terminal, copying assets or moving the bundle.
+
+The Environment page describes this fixed location and the current fresh-only
+installation policy. Its **Show in Finder** action accepts no renderer path and
+uses the ordinary user's fixed native Finder request under the original document
+lifecycle gate. “Request sent” does not prove Finder became visible or validate
+the installed bytes, signing, notarization, or release readiness.
+
+This engineering package does not yet repair, update or uninstall an occupied
+installation. Rerunning the same package is not a repair operation. Retain partial
+installation evidence; do not delete protected installation directories to bypass
+a refusal. These presentation changes do not add maintenance, a package wrapper,
+LaunchServices registration, auto-launch, or a privileged application process.
 
 ## Installer entry and bounded diagnostics
 

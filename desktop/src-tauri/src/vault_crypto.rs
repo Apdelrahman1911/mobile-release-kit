@@ -14,7 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 type WrappingKeyCandidate = secret_service::checked_lookup::WrappingKeyCandidate;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-type WrappingKeyCandidate = mrk_macos_installed_native::wrapping_keychain::WrappingKeyCandidate;
+type WrappingKeyCandidate = crate::vault_keyring_macos::WrappingKeyCandidate;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 type WrappingKeyCandidate = mrk_windows_installed_native::vault_dpapi::KeyCandidate;
 

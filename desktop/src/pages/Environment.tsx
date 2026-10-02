@@ -1,4 +1,5 @@
-import type { AppInfo, HelpContent } from '../types.ts';
+import { InstallationDetails } from '../components/InstallationDetails.tsx';
+import type { AppInfo, DesktopApi, HelpContent } from '../types.ts';
 import type { ProjectSession } from '../drafts.ts';
 import type { EnvironmentController, EnvironmentPlatform, EnvironmentOperation, EnvironmentState } from '../environment.ts';
 import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
@@ -30,8 +31,8 @@ const initialHelp: Record<'platform' | 'operation', HelpContent> = {
 };
 const activity = (operation: EnvironmentOperation) => operation === 'build' ? 'Build / archive prerequisites' : 'Artifact-validation prerequisites';
 
-export function Environment({ info, preview, session, state, controller, diagnosticsState, diagnosticsController, onRetry, onSettings, onHelp, loading }: {
-  info: AppInfo | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
+export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, onRetry, onSettings, onHelp, loading }: {
+  info: AppInfo | null; api: DesktopApi | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
   diagnosticsState: EnvironmentDiagnosticsState; diagnosticsController: EnvironmentDiagnosticsController;
   onRetry: () => void; onSettings: () => void; onHelp: (help: HelpContent) => void; loading: boolean;
 }) {
@@ -85,9 +86,10 @@ export function Environment({ info, preview, session, state, controller, diagnos
       <ul className="plain-list">{result.limitations.map((item, index) => <li key={index}><Icon name="shield" size={16} /><span>{item}</span></li>)}</ul>
     </section>}
     <EnvironmentDiagnostics state={diagnosticsState} controller={diagnosticsController} loading={loading} />
+    <InstallationDetails info={info} api={api} preview={preview} loading={loading} onHelp={onHelp} />
     <div className="environment-summary">
       <section className="card runtime-card"><span className="eyebrow">CORE RUNTIME</span><h2>{preview ? 'Browser preview' : runtime?.state === 'available' ? runtime.mode === 'development' ? 'Development runtime' : 'Bundled runtime' : 'Runtime unavailable'}</h2><Badge tone={runtime?.state === 'available' && !preview ? 'info' : 'warning'}>{preview ? 'No native connection' : runtime?.state ?? 'Not loaded'}</Badge><p>{preview ? 'This page is a design preview. No platform or engine capability has been verified.' : runtime?.reason ?? (runtime?.state === 'available' ? 'A runtime is available for the listed static functions. This does not establish native process finality or packaged release readiness.' : 'No runtime availability has been established. Capabilities and environment state remain unassessed.')}</p>{runtime?.mode === 'development' && <p className="warning-text">An explicit developer runtime is not a standalone end-user distribution.</p>}<div className="runtime-versions"><span>Desktop <strong>{info?.appVersion ?? 'Not loaded'}</strong></span><span>Core <strong>{capabilities?.coreVersion ?? 'Not loaded'}</strong></span><span>Platform <strong>{capabilities?.hostPlatform ?? 'Not observed'}</strong></span></div></section>
-      <section className="card platform-note"><div className="soft-icon"><Icon name="environment" size={24} /></div><h2>The right platform for the job</h2><p>The Desktop goal is Linux, macOS and Windows. Native iOS requires macOS; native Android Windows execution has separate unfinished qualification.</p><p>The finished app must bundle its runtime and non-SDK helpers, without manual Python, Rust or CLI setup. This milestone does not deliver installers or run builds.</p></section>
+      <section className="card platform-note"><div className="soft-icon"><Icon name="environment" size={24} /></div><h2>The right platform for the job</h2><p>The Desktop goal is Linux, macOS and Windows. Native iOS requires macOS; native Android Windows execution has separate unfinished qualification.</p><p>The finished app must bundle its runtime and non-SDK helpers, without manual Python, Rust or CLI setup. Installation and build availability depend on the current native profile; the sections above do not certify distribution or release readiness.</p></section>
     </div>
     <section className="card"><SectionHeading title="Implemented passive functions" description="Availability requires both core support and the current desktop runtime profile." /><div className="capability-list">{(capabilities?.methods ?? []).map((capability) => {
       const available = capability.available && runtime?.state === 'available' && !preview;

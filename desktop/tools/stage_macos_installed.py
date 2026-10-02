@@ -36,6 +36,7 @@ RELEASE = "macos26-arm64-project-draft-01"
 INSTALL_ROOT = Path("/Library/Application Support/MobileReleaseKit")
 APP_NAME = "Mobile Release Kit.app"
 APP_BINARY = "Contents/MacOS/mobile-release-kit-desktop"
+VAULT_HELPER = "Contents/Helpers/mrk-vault-keychain"
 PACKAGE_ID = "dev.mobile-release-kit.desktop.installed"
 FIXTURE_PREFIX = "MobileReleaseKit-InstallerFixture-"
 FIXTURE_MARKER = b"MRK_MACOS_INSTALLER_FIXTURE_OCCUPANT\n"
@@ -701,7 +702,7 @@ def current_runtime_command(args):
         return result
 
 
-def macho(body):
+def macho(body, *, system_only=False):
     need(len(body) >= 32, "macho-header")
     magic, cpu, subtype, kind, count, size, flags, reserved = struct.unpack_from("<8I", body)
     need(magic == 0xFEEDFACF and cpu == 0x0100000C and subtype == 0 and kind == 2 and count <= 128
@@ -712,6 +713,26 @@ def macho(body):
         need(offset + 8 <= 32 + size, "macho-command")
         command, length = struct.unpack_from("<II", body, offset)
         need(length >= 8 and length % 8 == 0 and offset + length <= 32 + size, "macho-command-bound")
+        if system_only and command in (0x8000001C, 0x27, 0x6, 0x7, 0xD, 0xF, 0x10, 0x12, 0x13, 0x14, 0x15):
+            need(False, "helper-loader-override-refused")
+        if system_only and command == 0xE:
+            need(length >= 16, "helper-dyld-command")
+            start = struct.unpack_from("<I", body, offset + 8)[0]
+            need(12 <= start < length, "helper-dyld-offset")
+            raw = body[offset + start:offset + length]
+            need(b"\0" in raw, "helper-dyld-terminated")
+            name, padding = raw.split(b"\0", 1)
+            need(name == b"/usr/lib/dyld" and not any(padding), "helper-system-dyld-only")
+        if system_only and command in (0xC, 0x80000018, 0x8000001F, 0x20, 0x80000023):
+            need(length >= 24, "helper-dylib-command")
+            start = struct.unpack_from("<I", body, offset + 8)[0]
+            need(24 <= start < length, "helper-dylib-name-offset")
+            raw = body[offset + start:offset + length]
+            need(b"\0" in raw, "helper-dylib-terminated")
+            name, padding = raw.split(b"\0", 1)
+            need(name.startswith((b"/System/Library/", b"/usr/lib/"))
+                 and all(32 < b < 127 for b in name) and all(part not in (b"", b".", b"..") for part in name.split(b"/")[1:])
+                 and not any(padding), "helper-absolute-apple-system-dependency")
         if command == 0x32:
             need(length >= 24, "macho-build-version")
             platform, version = struct.unpack_from("<II", body, offset + 8)
@@ -844,19 +865,23 @@ def app_command(args):
     need((cargo_messages is None) == (cargo_target is None), "normal-cargo-paired-inputs")
     body = read(args.binary)
     macho(body)
+    helper = read(args.vault_helper, 32 * 1024 * 1024)
+    need(sha(args.expected_vault_helper) and digest(helper) == args.expected_vault_helper,
+         "helper-final-signed-digest")
+    macho(helper, system_only=True)
     normal = (normal_cargo_artifact(read(cargo_messages, 8 * 1024 * 1024), args.binary, cargo_target, body)
               if cargo_messages is not None else None)
     info = read(DESKTOP / "macos-installed-inputs/Info.plist", 16384)
     parsed = plistlib.loads(info)
     need(parsed["CFBundleExecutable"] == "mobile-release-kit-desktop" and parsed["LSMinimumSystemVersion"] == "26.0", "app-info-binding")
-    files = {APP_BINARY: (body, 0o755), "Contents/Info.plist": (info, 0o644),
+    files = {APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555), "Contents/Info.plist": (info, 0o644),
              "Contents/PkgInfo": (b"APPL????", 0o644),
              "Contents/Resources/icon.png": (read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024), 0o644)}
     # Native codesign is a SEPARATE fixed workflow command after this returned
     # copy. It may modify the app only; the runtime is not nested in the app.
     # Root/Contents must remain writable to that original codesign writer.
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
-    result = {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "qualification": "app-copied-not-signed-or-launched"}
+    result = {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper), "qualification": "app-copied-not-signed-or-launched"}
     if normal is not None:
         result["normalCargoArtifact"] = normal
     return result
@@ -877,14 +902,17 @@ def runtime_tree(root, expected, *, current=False):
 def input_command(args):
     runtime = runtime_tree(args.runtime, args.expected_manifest, current=args.current_runtime)
     app = tree(args.app)
-    need(APP_BINARY in app and "Contents/Info.plist" in app and "Contents/_CodeSignature/CodeResources" in app
+    need(APP_BINARY in app and VAULT_HELPER in app and "Contents/Info.plist" in app and "Contents/_CodeSignature/CodeResources" in app
          and app["Contents/Info.plist"][0] == read(DESKTOP / "macos-installed-inputs/Info.plist", 16384), "signed-app-roster")
     macho(app[APP_BINARY][0])
+    macho(app[VAULT_HELPER][0], system_only=True)
+    need(sha(args.expected_vault_helper) and digest(app[VAULT_HELPER][0]) == args.expected_vault_helper,
+         "nested-helper-signature-bytes-changed")
     files = {}
     for prefix, source in (("runtime/", runtime), ("app/", app)):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
-            expected_mode = 0o555 if prefix + name in ("app/" + APP_BINARY, "runtime/python/bin/python3") else 0o444
+            expected_mode = 0o555 if prefix + name in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "runtime/python/bin/python3") else 0o444
             # codesign may have made its newly created CodeResources 0644. The
             # fresh input copy normalizes modes; it never edits that source.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
@@ -1098,10 +1126,10 @@ def observation_inventory(args):
              and safe_path(row["path"]) and row["path"].startswith(("app/Contents/", "runtime/")) and row["path"] not in rows
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
-             and row["executable"] == (row["path"] in ("app/" + APP_BINARY, "runtime/python/bin/python3")), "observation-inventory-row")
+             and row["executable"] == (row["path"] in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "runtime/python/bin/python3")), "observation-inventory-row")
         rows[row["path"]] = row
     need(list(rows) == sorted(rows) and sum(row["size"] for row in rows.values()) <= MAX_BYTES
-         and {"app/" + APP_BINARY, "app/Contents/Info.plist", "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
+         and {"app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
          and rows["runtime/manifest.json"]["sha256"] == args.expected_manifest, "observation-inventory-required")
     directories(rows)
     return rows
@@ -1656,6 +1684,8 @@ def main(argv=None):
             command.add_argument("--output", required=True, type=Path)
     app = commands.add_parser("app")
     app.add_argument("--binary", required=True, type=Path)
+    app.add_argument("--vault-helper", required=True, type=Path)
+    app.add_argument("--expected-vault-helper", required=True)
     app.add_argument("--output", required=True, type=Path)
     app.add_argument("--normal-cargo-messages", type=Path)
     app.add_argument("--normal-cargo-target-dir", type=Path)
@@ -1665,6 +1695,7 @@ def main(argv=None):
     preview.add_argument("--output", required=True, type=Path)
     inputs = commands.add_parser("input")
     inputs.add_argument("--app", required=True, type=Path)
+    inputs.add_argument("--expected-vault-helper", required=True)
     inputs.add_argument("--runtime", required=True, type=Path)
     inputs.add_argument("--expected-manifest", required=True)
     inputs.add_argument("--current-runtime", action="store_true",

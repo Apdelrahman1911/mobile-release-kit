@@ -10,6 +10,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;
+#[path = "../src/installation.rs"] mod installation;
 #[path = "../src/release_version_protocol.rs"] mod release_version_protocol;
 #[path = "../src/candidate_evidence_protocol.rs"] mod candidate_evidence_protocol;
 #[path = "../src/lifecycle_evidence_protocol.rs"] mod lifecycle_evidence_protocol;
@@ -19,9 +20,12 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/offline_preflight_owner.rs"] mod offline_preflight_owner;
 #[path = "../src/android_build_protocol.rs"] mod android_build_protocol;
 #[path = "../src/android_build_owner.rs"] mod android_build_owner;
+#[path = "../src/android_tool_sources.rs"] mod android_tool_sources;
 #[path = "../src/project_recovery_protocol.rs"] mod project_recovery_protocol;
 #[path = "../src/project_recovery_owner.rs"] mod project_recovery_owner;
 #[path = "../src/android_toolchain.rs"] mod android_toolchain;
+#[path = "../src/android_toolchain_catalog.rs"] mod android_toolchain_catalog;
+#[path = "../src/android_toolchain_macos_policy.rs"] mod android_toolchain_macos_policy;
 #[path = "../src/ios_archive_protocol.rs"] mod ios_archive_protocol;
 #[path = "../src/ios_archive_owner.rs"] mod ios_archive_owner;
 #[path = "../src/ios_toolchain.rs"] mod ios_toolchain;
@@ -52,6 +56,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/asset_session.rs"] mod asset_session;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[path = "../src/vault_keyring_linux.rs"] mod vault_keyring_linux;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "../src/vault_keyring_macos.rs"] mod vault_keyring_macos;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "macos", target_arch = "aarch64")))]
 #[path = "../src/vault_format.rs"] mod vault_format;

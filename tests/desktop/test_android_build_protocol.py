@@ -507,3 +507,68 @@ class AndroidBuildProtocolTests(unittest.TestCase):
             stream.response("terminal", complete(self.request))
         with self.assertRaises(wire.ProtocolError):
             wire.AndroidBuildFrames(self.request).response("terminal", complete(self.request))
+
+
+class MacAndroidBuildContractTests(unittest.TestCase):
+    """Predicate DATA only; no native registration/build/qualification."""
+    @staticmethod
+    def selected():
+        return {"instance": "c" * 32, "ownerUid": 501, "catalogGeneration": 1,
+                "recordSha256": "d" * 64, "inventorySha256": "e" * 64, "osProviderSha256": "f" * 64}
+
+    def mac_request(self):
+        data = request_data()
+        selected = self.selected()
+        data["native"]["profile"] = "macos-arm64"
+        data["native"]["toolchain"] = {"schemaVersion": 2, "profile": wire.MAC_TOOLCHAIN_PROFILE,
+            "root": f'{wire.MAC_TOOLCHAIN_PREFIX}/{selected["ownerUid"]}/{selected["instance"]}',
+            "rootIdentity": {"device": "1", "inode": "2", "mode": stat.S_IFDIR | 0o555, "uid": 0, "gid": 0},
+            "inventorySha256": selected["inventorySha256"], "selection": selected}
+        return data
+
+    def mac_complete(self, request):
+        value = complete(request)
+        value["result"] = wire.project_result(value["activity"], artifact(),
+            used_config=request.context["savedConfig"], used_version=request.context["savedVersion"],
+            toolchain_profile=request.native["toolchain"]["profile"],
+            toolchain_selection=request.native["toolchain"]["selection"], validation=request.context["artifactValidation"])
+        return value
+
+    def test_native_profile_root_and_anchor_agree(self):
+        data = self.mac_request()
+        wire.parse_request(encoded(data))
+        for field, replacement in (("root", "/tmp/borrowed"), ("schemaVersion", 1),
+                                   ("inventorySha256", "1" * 64), ("profile", wire.TOOLCHAIN_PROFILE)):
+            changed = copy.deepcopy(data)
+            changed["native"]["toolchain"][field] = replacement
+            with self.subTest(field=field), self.assertRaises(wire.ProtocolError):
+                wire.parse_request(encoded(changed))
+        changed = copy.deepcopy(data)
+        changed["native"]["profile"] = "linux-gnu-x86_64"
+        with self.assertRaises(wire.ProtocolError):
+            wire.parse_request(encoded(changed))
+
+    def test_mac_terminal_requires_the_actual_request_selection_not_just_profile(self):
+        request = wire.parse_request(encoded(self.mac_request()))
+        value = self.mac_complete(request)
+        wire.validate_terminal(value, request)
+        for field, replacement in (("instance", "1" * 32), ("ownerUid", 502), ("catalogGeneration", 2),
+                                   ("recordSha256", "1" * 64), ("inventorySha256", "2" * 64), ("osProviderSha256", "3" * 64)):
+            changed = copy.deepcopy(value)
+            changed["result"]["toolchainSelection"][field] = replacement
+            wire.validate_result(changed["result"])
+            with self.subTest(field=field), self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(changed, request)
+        with self.assertRaises(wire.ProtocolError):
+            wire.validate_terminal(complete(request), request)
+        with self.assertRaises(wire.ProtocolError):
+            wire.validate_terminal(value, wire.parse_request(encoded(request_data())))
+
+    def test_linux_cannot_import_mac_result_fields_or_schema(self):
+        request = wire.parse_request(encoded(request_data()))
+        value = complete(request)["result"]
+        wire.validate_result(value)
+        for patch in ({"toolchainSelection": self.selected()}, {"schemaVersion": 2},
+                      {"toolchainProfile": wire.MAC_TOOLCHAIN_PROFILE}):
+            with self.subTest(patch=patch), self.assertRaises(wire.ProtocolError):
+                wire.validate_result({**value, **patch})

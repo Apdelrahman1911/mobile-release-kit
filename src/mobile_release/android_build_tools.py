@@ -141,9 +141,14 @@ class _Binding:
     instance: str
     identity: tuple[int, int, int, int, int]
     sha256: str
+    profile: str = PROFILE
+    selection: tuple[tuple[str, str | int], ...] = ()
 
 
 def _binding(value: object) -> _Binding:
+    if type(value) is dict and value.get("profile") == "android-registered-macos-arm64-v1":
+        from .android_build_tools_macos import binding
+        return binding(value)
     value = _keys(value, {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256"})
     _need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
           and value["profile"] == PROFILE and _text(value["inventorySha256"], _SHA))
@@ -179,6 +184,9 @@ class _Profile:
     files: tuple[_FileSpec, ...]
     native_files: tuple[_FileSpec, ...]
     directories: tuple[str, ...]
+    java_home: str = "jdk"
+    roles: tuple[tuple[str, str], ...] = tuple(TOOL_ROLES.items())
+    aliases: tuple[tuple[str, str, str], ...] = ()
 
 
 def _direct_file(path: str, directory: str, suffix: str) -> bool:
@@ -347,9 +355,9 @@ def _properties(raw: bytes) -> dict[str, str]:
     return result
 
 
-def _fixed_properties(root: str) -> tuple[tuple[str, str], ...]:
-    return (("org.gradle.java.home", f"{root}/jdk"),
-            ("org.gradle.java.installations.paths", f"{root}/jdk"),
+def _fixed_properties(root: str, java_home: str = "jdk") -> tuple[tuple[str, str], ...]:
+    return (("org.gradle.java.home", f"{root}/{java_home}"),
+            ("org.gradle.java.installations.paths", f"{root}/{java_home}"),
             ("org.gradle.java.installations.fromEnv", ""),
             ("org.gradle.java.installations.auto-detect", "false"),
             ("org.gradle.java.installations.auto-download", "false"),
@@ -382,7 +390,7 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
         else:
             _need(not key.casefold().startswith(("sdk.", "ndk.", "cmake."))
                   and key.casefold() not in {"android.dir", "flutter.sdk", "dart.sdk"})
-    fixed = dict(_fixed_properties(profile.binding.root))
+    fixed = dict(_fixed_properties(profile.binding.root, profile.java_home))
     fixed.update({"org.gradle.daemon": "false", "org.gradle.vfs.watch": "false",
                   "org.gradle.parallel": "false", "org.gradle.workers.max": str(WORKERS)})
     forbidden = {"org.gradle.jvmargs", "gradle.user.home", "org.gradle.user.home", "kotlin.daemon.jvmargs",
@@ -414,13 +422,18 @@ def _jvm_arguments(work: Path, *, bundletool: bool = False) -> tuple[str, ...]:
             f"-Djna.tmpdir={work}")
 
 
-def _identity(observed: os.stat_result, *, directory: bool = False, stable_contents: bool = True) -> tuple[int, ...]:
+def _identity(observed: os.stat_result, *, directory: bool = False, stable_contents: bool = True,
+              mac: bool = False) -> tuple[int, ...]:
     _need((stat.S_ISDIR(observed.st_mode) if directory else stat.S_ISREG(observed.st_mode))
           and observed.st_uid == 0 and not observed.st_mode & 0o7022
           and (directory or observed.st_nlink == 1))
     base = (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid)
+    flags = ()
+    if mac:
+        _need(type(observed.st_flags) is int and 0 <= observed.st_flags <= 2**32 - 1)
+        flags = (observed.st_flags,)
     return base + ((observed.st_nlink, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns)
-                   if stable_contents else ())
+                   if stable_contents else ()) + flags
 
 
 @dataclass(eq=False, slots=True)
@@ -529,6 +542,10 @@ class AndroidValidationTools:
         self._close_claimed = self._close_complete = self._cleanup_mode = self._unknown_seen = False
         self._final_hash_claimed = False
         self._first_error: BaseException | None = None
+        self._mac = None
+        if self.binding.profile == "android-registered-macos-arm64-v1":
+            from .android_build_tools_macos import MacAdmission
+            self._mac = MacAdmission(self)
 
     def _owner(self, *, active: bool = True) -> None:
         from .android_build_operation import AndroidBuildOperation
@@ -613,6 +630,8 @@ class AndroidValidationTools:
                 raise AndroidToolError()
 
     def _protected(self, number: int, *, directory: bool, stable_contents: bool) -> tuple[int, ...]:
+        if self._mac is not None:
+            return self._mac.protected(number, directory=directory, stable_contents=stable_contents)
         self._point()
         before = _identity(os.fstat(number), directory=directory, stable_contents=stable_contents)
         _need(self._device is None or before[0] == self._device)
@@ -622,9 +641,13 @@ class AndroidValidationTools:
         return before
 
     def _new_slot(self) -> _FD:
-        self._charge("tool-descriptor-slots", 1, MAX_DESCRIPTORS)
+        self._charge("tool-descriptor-slots", 1, MAX_DESCRIPTORS if self._mac is None else self._mac.record_limit)
+        if self._mac is not None:
+            _need(self._mac.live_count() < self._mac.live_limit, "input-limit")
         slot = _FD(self.guard)
         self.slots.append(slot)
+        if self._mac is not None:
+            self._mac.live_slots.add(slot)  # Prearm before the original open.
         return slot
 
     def _open_record(self, parent: int, name: str, *, directory: bool, stable_contents: bool = True,
@@ -646,7 +669,7 @@ class AndroidValidationTools:
         current = self._protected(record.slot.number, directory=record.directory, stable_contents=record.stable_contents)
         self._point()
         named = _identity(os.stat(record.name, dir_fd=record.parent, follow_symlinks=False),
-                          directory=record.directory, stable_contents=record.stable_contents)
+                          directory=record.directory, stable_contents=record.stable_contents, mac=self._mac is not None)
         _need(current == record.identity == named)
         if record.spec is not None:
             _need(current[6] == record.spec.size and stat.S_IMODE(current[2]) == record.spec.mode)
@@ -660,7 +683,8 @@ class AndroidValidationTools:
         while remaining:
             amount = min(READ_CHUNK, remaining)
             self._charge("tool-manifest-read-bytes" if manifest else "tool-file-read-bytes", amount,
-                         2 * MAX_MANIFEST_BYTES if manifest else 2 * MAX_TOTAL_BYTES)
+                         (2 * MAX_MANIFEST_BYTES if self._mac is None else self._mac.manifest_budget)
+                         if manifest else 2 * MAX_TOTAL_BYTES)
             block = os.read(record.slot.number, amount)
             _need(type(block) is bytes and 0 < len(block) <= amount)
             digest.update(block)
@@ -671,14 +695,20 @@ class AndroidValidationTools:
         return digest.hexdigest(), b"".join(blocks) if keep else None
 
     def _inventory_names(self, path: str, expected: set[str]) -> None:
-        self._charge("tool-directory-iterators", 1, MAX_DESCRIPTORS)
-        # One original iterator at a time; its extra live descriptor is in the
-        # precharged roster. Closed iterators do not consume permanent slots.
-        _need(all(item.close_state == "CLOSED" for item in self.iterators)
-              and len(self.slots) + (len(self.ancestry.slots) if self.ancestry is not None else 0)
-                  < MAX_DESCRIPTORS, "input-limit")
+        self._charge("tool-directory-iterators", 1, MAX_DESCRIPTORS if self._mac is None else self._mac.record_limit)
+        # One original iterator at a time. Mac streams complete membership with
+        # a separate 64-live-FD budget; it does not inherit Linux's 32K retained
+        # live-FD design or drop the records of consumed originals.
+        if self._mac is None:
+            _need(all(item.close_state == "CLOSED" for item in self.iterators)
+                  and len(self.slots) + (len(self.ancestry.slots) if self.ancestry is not None else 0)
+                      < MAX_DESCRIPTORS, "input-limit")
+        else:
+            _need(self._mac.current_iterator is None and self._mac.live_count() < self._mac.live_limit, "input-limit")
         iterator = _Entries(self)
         self.iterators.append(iterator)
+        if self._mac is not None:
+            self._mac.current_iterator = iterator
         primary = None
         try:
             iterator.acquire(self._directories[path])
@@ -699,6 +729,9 @@ class AndroidValidationTools:
         finally:
             try:
                 iterator.close()
+                if self._mac is not None:
+                    _need(self._mac.current_iterator is iterator and iterator.close_state == "CLOSED", "cleanup-unknown")
+                    self._mac.current_iterator = None
             except BaseException as error:
                 self._remember(error)
                 if primary is None:
@@ -710,6 +743,9 @@ class AndroidValidationTools:
         self._acquire_claimed = True
         try:
             self.operation.checkpoint()
+            if self._mac is not None:
+                self._mac.acquire()
+                return
             self._platform()
             self._charge("tool-descriptor-slots", len(Path(self.binding.root).parts), MAX_DESCRIPTORS)
             self.ancestry = _Ancestry(self)
@@ -780,6 +816,9 @@ class AndroidValidationTools:
             self._raise(error)
 
     def _check_metadata(self) -> None:
+        if self._mac is not None:
+            self._mac.check_metadata()
+            return
         self._point()
         _need(self._credentials is not None and (os.getresuid(), os.getresgid()) == self._credentials)
         _need(self.ancestry is not None and self.profile is not None and self.manifest is not None)
@@ -830,7 +869,7 @@ class AndroidValidationTools:
             _need(self.profile is not None)
             files = {item.path: item for item in self.profile.files}
             _need(all(path in files and files[path].size > 0 and bool(files[path].mode & 0o111)
-                      for path in (JARSIGNER_PATH, KEYTOOL_PATH)))
+                      for path in (f"{self.profile.java_home}/bin/jarsigner", f"{self.profile.java_home}/bin/keytool")))
             self._signature_ready = True
         except BaseException as error:
             self._raise(error)
@@ -851,9 +890,11 @@ class AndroidValidationTools:
         work = self._work(work_path)
         _need(type(task) is str and task == self.task)
         jvm = shlex.join(_jvm_arguments(work))
-        controls = tuple(argument for key, value in _fixed_properties(self.binding.root)
+        _need(self.profile is not None)
+        controls = tuple(argument for key, value in _fixed_properties(self.binding.root, self.profile.java_home)
                          for argument in (f"-D{key}={value}", f"-P{key}={value}"))
-        return (OS_SHELL, f"{self.binding.root}/{TOOL_ROLES['gradle']}", "--no-daemon", "--no-watch-fs",
+        return ("/bin/sh" if self._mac is not None else OS_SHELL,
+                f"{self.binding.root}/{dict(self.profile.roles)['gradle']}", "--no-daemon", "--no-watch-fs",
                 "--no-parallel", "--console=plain", "--stacktrace", f"--max-workers={WORKERS}",
                 "--project-cache-dir", str(work / "project-cache"), "--gradle-user-home", str(work / "gradle-home"),
                 f"-Dorg.gradle.jvmargs={jvm}", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}", *controls, task)
@@ -862,8 +903,12 @@ class AndroidValidationTools:
         work = self._work(work_path)
         _need(type(bound_release) is ReleaseVersion and bound_release is self.release)
         root = self.binding.root
-        return {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "PATH": f"{root}/jdk/bin:{OS_EXECUTABLE_DIRECTORY}",
-                "JAVA_HOME": f"{root}/jdk", "ANDROID_HOME": f"{root}/sdk", "ANDROID_SDK_ROOT": f"{root}/sdk",
+        _need(self.profile is not None)
+        java_home = f"{root}/{self.profile.java_home}"
+        locale = "C" if self._mac is not None else "C.UTF-8"
+        executable_path = "/usr/bin:/bin" if self._mac is not None else OS_EXECUTABLE_DIRECTORY
+        return {"LANG": locale, "LC_ALL": locale, "TZ": "UTC", "PATH": f"{java_home}/bin:{executable_path}",
+                "JAVA_HOME": java_home, "ANDROID_HOME": f"{root}/sdk", "ANDROID_SDK_ROOT": f"{root}/sdk",
                 "HOME": str(work), "TMPDIR": str(work), "XDG_RUNTIME_DIR": str(work),
                 "XDG_CONFIG_HOME": str(work / "xdg-config"), "XDG_CACHE_HOME": str(work / "xdg-cache"),
                 "XDG_DATA_HOME": str(work / "xdg-data"), "XDG_STATE_HOME": str(work / "xdg-state"),
@@ -888,15 +933,18 @@ class AndroidValidationTools:
 
     def bundletool_command(self, snapshot_path: Path) -> tuple[str, ...]:
         work, expected = self._inspection_input(snapshot_path)
-        return (f"{self.binding.root}/{TOOL_ROLES['java']}", *_jvm_arguments(work, bundletool=True), "-jar",
-                f"{self.binding.root}/{TOOL_ROLES['bundletool']}", "dump", "manifest", f"--bundle={expected}", "--module=base")
+        _need(self.profile is not None)
+        roles = dict(self.profile.roles)
+        return (f"{self.binding.root}/{roles['java']}", *_jvm_arguments(work, bundletool=True), "-jar",
+                f"{self.binding.root}/{roles['bundletool']}", "dump", "manifest", f"--bundle={expected}", "--module=base")
 
     def jarsigner_command(self, snapshot_path: Path) -> tuple[str, ...]:
         self._owner()
         _need(self.inputs.check_signer is True and self._signature_claimed and self._signature_ready,
               "toolchain-unavailable")
         work, expected = self._inspection_input(snapshot_path)
-        return (f"{self.binding.root}/{JARSIGNER_PATH}",
+        _need(self.profile is not None)
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/jarsigner",
                 *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
                 "-verify", "-strict", str(expected))
 
@@ -905,7 +953,8 @@ class AndroidValidationTools:
         _need(self.inputs.check_signer is True and self._signature_claimed and self._signature_ready,
               "toolchain-unavailable")
         work, expected = self._inspection_input(snapshot_path)
-        return (f"{self.binding.root}/{KEYTOOL_PATH}",
+        _need(self.profile is not None)
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/keytool",
                 *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
                 "-printcert", "-jarfile", str(expected))
 
@@ -926,12 +975,15 @@ class AndroidValidationTools:
             try:
                 if self._acquired:
                     self._check_metadata()
-                    _need(not self._final_hash_claimed and self.manifest is not None)
-                    self._final_hash_claimed = True
-                    _need(self._read(self.manifest, self.manifest.identity[6], manifest=True)[0] == self.binding.sha256)
-                    for record in self.records:
-                        if record.spec is not None:
-                            _need(self._read(record, record.spec.size)[0] == record.spec.sha256)
+                    if self._mac is not None:
+                        self._mac.final_hash()
+                    else:
+                        _need(not self._final_hash_claimed and self.manifest is not None)
+                        self._final_hash_claimed = True
+                        _need(self._read(self.manifest, self.manifest.identity[6], manifest=True)[0] == self.binding.sha256)
+                        for record in self.records:
+                            if record.spec is not None:
+                                _need(self._read(record, record.spec.size)[0] == record.spec.sha256)
                     self._check_metadata()
             except BaseException as error:
                 first = error

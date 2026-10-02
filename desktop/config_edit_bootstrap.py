@@ -12,7 +12,7 @@ def main() -> int:
             or not sys.flags.isolated or not sys.flags.no_site
             or not sys.dont_write_bytecode or not os.path.isabs(sys.argv[1])
             or sys.version_info < (3, 11) or not (sys.platform.startswith("linux") or sys.platform == "darwin")
-            or (domain == "metadata_images" and sys.platform != "linux")
+            or (domain == "metadata_images" and sys.platform not in {"linux", "darwin"})
             or (domain in {"github_workflows", "metadata_text", "release_version"}
                 and sys.platform not in {"linux", "darwin"})):
         return 78

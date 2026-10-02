@@ -168,6 +168,15 @@ fn main() {
     anchor("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
     anchor("MRK_BUNDLED_PROTOCOL_SHA256");
     anchor("MRK_MACOS_INSTALL_INVENTORY_SHA256");
+    if env::var("TARGET").as_deref() == Ok("aarch64-apple-darwin") {
+        anchor("MRK_MACOS_VAULT_HELPER_SHA256");
+        println!("cargo:rerun-if-env-changed=MRK_MACOS_VAULT_HELPER_BYTES");
+        if let Ok(value) = env::var("MRK_MACOS_VAULT_HELPER_BYTES") {
+            assert!(value.parse::<u64>().is_ok_and(|n| n > 0 && n <= 32 * 1024 * 1024)
+                && value.bytes().all(|b| b.is_ascii_digit()), "invalid fixed helper size");
+            println!("cargo:rustc-env=MRK_MACOS_VAULT_HELPER_BYTES={value}");
+        }
+    }
     println!("cargo:rerun-if-env-changed=MRK_MACOS_INSTALL_SOURCE_COMMIT");
     match env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT") {
         Ok(value) => {
@@ -196,13 +205,15 @@ fn main() {
     #[cfg(feature = "desktop-shell")]
     {
         const COMMANDS: &[&str] = &[
-            "app_info", "choose_project", "choose_project_path", "project_snapshot", "catalog",
+            "app_info", "reveal_installation", "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",
+            "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "select_android_toolchain", "cancel_android_toolchain_catalog",
+            "android_tool_sources_status", "choose_android_tool_source", "cancel_android_tool_source",
             "prepare_project_recovery", "start_project_recovery", "project_recovery_status", "cancel_project_recovery",
             "prepare_ios_archive", "start_ios_archive", "ios_archive_status", "cancel_ios_archive",
             "validate_config", "suggest_config", "preview_config", "propose_github_setup",

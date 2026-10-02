@@ -19,8 +19,10 @@ PROTOCOL = "mrk-android-build/2"
 CONSENT = "saved-android-build-inspect-v2"
 SCOPE = "local-post-build-artifact-observation"
 TOOLCHAIN_PROFILE = "android-local-linux-gnu-x86_64-v1"
-# A closed source contract, NOT a runtime/native qualification flag.
-PROFILES = {"linux-gnu-x86_64": ("linux", "x86_64")}
+MAC_TOOLCHAIN_PROFILE = "android-registered-macos-arm64-v1"
+MAC_TOOLCHAIN_PREFIX = "/Library/Application Support/MobileReleaseKit/android"
+# Closed source contracts, NOT runtime/native qualification flags.
+PROFILES = {"linux-gnu-x86_64": ("linux", "x86_64"), "macos-arm64": ("macos", "arm64")}
 RENDERER_REQUEST_LIMIT, REQUEST_LIMIT, RESPONSE_LIMIT = 8 * 1024, 32 * 1024, 64 * 1024
 INTENT_SECONDS, WORK_SECONDS, FINALITY_SECONDS = 300, 3000, 3010
 MAX_FRAMES, MAX_FINDINGS, MAX_ARTIFACTS = 8, 128, 1
@@ -224,15 +226,34 @@ def _identity(value: object) -> dict:
     return dict(value)
 
 
+def mac_toolchain_selection(value: object) -> dict:
+    """Closed comparison data. Native catalog/custody still owns admission."""
+    value = _keys(value, {"instance", "ownerUid", "catalogGeneration", "recordSha256", "inventorySha256", "osProviderSha256"})
+    require(_text(value["instance"], _TOKEN) and integer(value["ownerUid"], 2**32 - 2, 1)
+            and integer(value["catalogGeneration"], 2**32 - 2, 1)
+            and all(_text(value[key], _SHA) for key in ("recordSha256", "inventorySha256", "osProviderSha256")))
+    return dict(value)
+
+
 def _native(value: object) -> dict:
     value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"})
     require(_enum(value["profile"], PROFILES))
-    toolchain = _keys(value["toolchain"], {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256"})
-    require(type(toolchain["schemaVersion"]) is int and toolchain["schemaVersion"] == 1
-            and toolchain["profile"] == TOOLCHAIN_PROFILE and _text(toolchain["inventorySha256"], _SHA))
+    mac = value["profile"] == "macos-arm64"
+    toolchain = _keys(value["toolchain"], {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256",
+                                         *({"selection"} if mac else set())})
+    require(type(toolchain["schemaVersion"]) is int and toolchain["schemaVersion"] == (2 if mac else 1)
+            and toolchain["profile"] == (MAC_TOOLCHAIN_PROFILE if mac else TOOLCHAIN_PROFILE)
+            and _text(toolchain["inventorySha256"], _SHA))
+    original = _identity(toolchain["rootIdentity"])
+    root = _path(toolchain["root"])
+    if mac:
+        selected = mac_toolchain_selection(toolchain["selection"])
+        require(selected["inventorySha256"] == toolchain["inventorySha256"]
+                and root == f'{MAC_TOOLCHAIN_PREFIX}/{selected["ownerUid"]}/{selected["instance"]}'
+                and original["uid"] == original["gid"] == 0 and stat.S_IMODE(original["mode"]) == 0o555)
     return {"profile": value["profile"], "projectRoot": _path(value["projectRoot"]),
             "rootIdentity": _identity(value["rootIdentity"]), "cwd": _path(value["cwd"]),
-            "toolchain": {**toolchain, "root": _path(toolchain["root"]), "rootIdentity": _identity(toolchain["rootIdentity"])}}
+            "toolchain": {**toolchain, "root": root, "rootIdentity": original}}
 
 
 @dataclass(frozen=True)
@@ -411,7 +432,8 @@ def _inspection_commands(rows: list[dict], validation: dict) -> int:
 
 
 def project_result(activity: object, artifact: object, *, used_config: object,
-                   used_version: object, toolchain_profile: str, validation: object) -> dict:
+                   used_version: object, toolchain_profile: str, validation: object,
+                   toolchain_selection: object = None) -> dict:
     observed = _activity(activity)
     validation = artifact_validation(validation)
     require(observed["stage"] == "disposing-work")
@@ -421,17 +443,28 @@ def project_result(activity: object, artifact: object, *, used_config: object,
               "findings": observed["findings"], "summary": observed["summary"],
               "artifacts": [_artifact(artifact)], "assurances": _assurances(observed["findings"], validation),
               "limitations": _limitations(validation)}
+    if toolchain_profile == MAC_TOOLCHAIN_PROFILE:
+        result["schemaVersion"] = 2
+        result["toolchainSelection"] = mac_toolchain_selection(toolchain_selection)
+    else:
+        require(toolchain_selection is None)
     validate_result(result)
     return result
 
 
 def validate_result(value: object) -> None:
     _structure(value)
+    require(type(value) is dict)
+    mac = value.get("toolchainProfile") == MAC_TOOLCHAIN_PROFILE
     value = _keys(value, {"schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile",
-                          "command", "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation"})
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == SCOPE
-            and value["toolchainProfile"] == TOOLCHAIN_PROFILE and type(value["limitations"]) is list
+                          "command", "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation",
+                          *({"toolchainSelection"} if mac else set())})
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == (2 if mac else 1) and value["scope"] == SCOPE
+            and value["toolchainProfile"] == (MAC_TOOLCHAIN_PROFILE if mac else TOOLCHAIN_PROFILE)
+            and type(value["limitations"]) is list
             and value["limitations"] == _limitations(artifact_validation(value["artifactValidation"])))
+    if mac:
+        mac_toolchain_selection(value["toolchainSelection"])
     content(value["usedConfig"])
     saved_version(value["usedVersion"])
     _selection(value["selection"])
@@ -495,6 +528,7 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
         require(result["usedConfig"] == request.context["savedConfig"] and result["usedVersion"] == request.context["savedVersion"]
                 and result["artifactValidation"] == validation
                 and result["toolchainProfile"] == request.native["toolchain"]["profile"]
+                and result.get("toolchainSelection") == request.native["toolchain"].get("selection")
                 and all(result[key] == activity[key] for key in ("selection", "command", "findings", "summary")))
         require(life["commands"] == _inspection_commands(result["findings"], validation))
     else:

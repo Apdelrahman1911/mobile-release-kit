@@ -8,6 +8,7 @@ compile_error!("normal desktop-shell builds require custom-protocol for the embe
 pub mod error;
 pub mod protocol;
 mod environment;
+mod installation;
 mod release_version_protocol;
 mod candidate_evidence_protocol;
 mod lifecycle_evidence_protocol;
@@ -23,6 +24,9 @@ mod ios_archive_protocol;
 mod ios_archive_owner;
 mod ios_toolchain;
 mod android_toolchain;
+mod android_toolchain_catalog;
+mod android_tool_sources;
+mod android_toolchain_macos_policy;
 mod saved_command_owner;
 pub mod runtime;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -66,6 +70,10 @@ mod asset_source;
 mod asset_session;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod vault_keyring_linux;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod vault_keyring_macos;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const _: () = assert!(!mrk_macos_installed_native::VAULT_HELPER_BUILD, "the app must not unify the separate vault-helper Cargo role");
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 mod vault_format;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]

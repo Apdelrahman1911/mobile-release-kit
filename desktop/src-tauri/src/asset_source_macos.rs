@@ -1,5 +1,5 @@
 //! Original read-only Darwin source custody for project selection and private
-//! session assets and project-relative field selection. Never a runtime,
+//! session assets, public listing images and project-relative field selection. Never a runtime,
 //! snapshot/Save, signing or continuing write capability.
 //! The SAME SourceBook lives outside its blocking worker until every original
 //! acquisition/native call/one-use close and that worker's actual join settle.
@@ -48,6 +48,20 @@ struct PhysicalAnchors { private: usize, var: DirectoryIdentity, tmp: DirectoryI
 pub(crate) struct SourceBook {
     slots: Vec<Descriptor>, probes: Vec<LeafProbe>, aliases: Vec<OriginAlias>, anchors: Option<PhysicalAnchors>, begun: bool, terminal: bool,
 }
+// Finite first-party control bound for the image lane, separate from the raw
+// image bytes. Count maximum descriptor/name/alias rosters, both borrowed path
+// projections, original ancestries, destination-preservation spellings, fixed
+// row/string wrappers and the size+1 EOF bytes. No provider-internal RSS claim.
+pub(crate) const PUBLIC_IMAGES_SOURCE_CONTROL_BYTES: usize =
+    DESCRIPTOR_LIMIT * (std::mem::size_of::<Descriptor>() + 255)
+    + 32 * (std::mem::size_of::<LeafProbe>() + 255 + std::mem::size_of::<OriginAlias>() + 16)
+    + (PUBLIC_IMAGE_FILES + 1) * (COMPONENT_LIMIT + 1) * std::mem::size_of::<&[u8]>()
+    + (2 * PUBLIC_IMAGE_FILES + 1) * PATH_LIMIT
+    + 2 * (COMPONENT_LIMIT + 1) * std::mem::size_of::<usize>()
+    + PUBLIC_IMAGE_FILES * ((COMPONENT_LIMIT + 1) * std::mem::size_of::<DirectoryIdentity>()
+        + PATH_LIMIT + std::mem::size_of::<CapturedPublicImage>()
+        + std::mem::size_of::<(usize, FileIdentity, Vec<DirectoryIdentity>, Option<OriginAlias>)>() + 512)
+    + std::mem::size_of::<SourceBook>() + 4096;
 impl SourceBook {
     pub(crate) fn new() -> Self { Self { slots: Vec::new(), probes: Vec::new(), aliases: Vec::new(), anchors: None, begun: false, terminal: false } }
     pub(crate) fn not_started(&self) -> bool { !self.begun && self.slots.is_empty() && self.probes.is_empty() && self.aliases.is_empty() && self.anchors.is_none() }
@@ -71,6 +85,9 @@ impl SourceBook {
         self.slots.try_reserve_exact(capacity).map_err(|_| Reason::Capacity)?;
         self.probes.try_reserve_exact(probes).map_err(|_| Reason::Capacity)?;
         self.aliases.try_reserve_exact(aliases).map_err(|_| Reason::Capacity)?;
+        if self.slots.capacity() > DESCRIPTOR_LIMIT || self.probes.capacity() > 32 || self.aliases.capacity() > 32 {
+            return Err(Reason::Capacity);
+        }
         self.begun = true; Ok(())
     }
     fn reserve(&mut self, parent: Option<usize>, name: &[u8]) -> Result<usize, Reason> {
@@ -155,6 +172,10 @@ impl SourceBook {
         self.anchors = Some(PhysicalAnchors { private, var, tmp }); Ok(())
     }
     fn child(&mut self, parent: usize, name: &[u8], file: bool, stop: &mut dyn FnMut() -> bool) -> Result<usize, Reason> {
+        self.child_policy(parent, name, file, LeafPolicy::Private, stop)
+    }
+    fn child_policy(&mut self, parent: usize, name: &[u8], file: bool, policy: LeafPolicy,
+        stop: &mut dyn FnMut() -> bool) -> Result<usize, Reason> {
         checkpoint(stop)?;
         let index = self.reserve(Some(parent), name)?;
         let before = stat::fstatat(self.fd(parent)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW)
@@ -163,7 +184,7 @@ impl SourceBook {
         let expected = identity(&before, file)?;
         let role = match expected {
             Identity::Directory(id) => self.physical_role(parent, id, stop)?,
-            Identity::File(id) => { if !private_file(id.common.mode) { return Err(Reason::SourceRefused); } PhysicalRole::Other },
+            Identity::File(id) => { if !policy.permits(id) { return Err(Reason::SourceRefused); } PhysicalRole::Other },
         };
         self.slots[index].state = OriginalState::Acquiring;
         let flags = if file { OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK } else { directory_flags() };
@@ -182,6 +203,7 @@ impl SourceBook {
     }
     fn chain(&mut self, components: &[&[u8]], aliases: bool, stop: &mut dyn FnMut() -> bool) -> Result<(Vec<usize>, Option<OriginAlias>), Reason> {
         let mut indices = Vec::new(); indices.try_reserve_exact(components.len() + 2).map_err(|_| Reason::Capacity)?;
+        if indices.capacity() > COMPONENT_LIMIT + 1 { return Err(Reason::Capacity); }
         indices.push(0); let mut parent = 0; let mut skip = 0;
         let mut alias = None;
         if aliases && !components.is_empty() {
@@ -277,11 +299,14 @@ impl SourceBook {
         Ok(())
     }
     fn close_all(&mut self) -> bool {
+        self.close_all_observing(&mut |_| {})
+    }
+    fn close_all_observing(&mut self, failed: &mut dyn FnMut(Reason)) -> bool {
         // Continue independent original closes; never retry EINTR or reconstruct
         // a numeric descriptor, and never equate Drop with known settlement.
         let mut known = true;
         for slot in self.slots.iter_mut().rev() {
-            if !slot.acl.iter().all(|call| call.settled()) { known = false; }
+            if !slot.acl.iter().all(|call| call.settled()) { known = false; failed(Reason::CleanupUnknown); }
             match slot.state {
                 OriginalState::Reserved => { slot.state = OriginalState::NoHandle; }
                 OriginalState::NoHandle | OriginalState::Closed => {}
@@ -290,12 +315,12 @@ impl SourceBook {
                     match slot.fd.take() {
                         Some(fd) => match unistd::close(fd) {
                             Ok(()) => { slot.state = OriginalState::Closed; }
-                            Err(_) => { slot.state = OriginalState::Unknown; known = false; }
+                            Err(_) => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
                         },
-                        None => { slot.state = OriginalState::Unknown; known = false; }
+                        None => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
                     }
                 }
-                OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; }
+                OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; failed(Reason::CleanupUnknown); }
             }
         }
         self.terminal = true; known && self.settled()
@@ -306,10 +331,25 @@ impl SourceBook {
         if !self.close_all() { return Err(Reason::CleanupUnknown); }
         checkpoint(stop)?; result
     }
+    fn finish_public_images<T>(&mut self, result: Result<T, Reason>, stop: &mut dyn FnMut() -> bool,
+        failed: &mut dyn FnMut(Reason)) -> Result<T, Reason> {
+        let result = result.and_then(|value| { self.terminal_check(stop)?; Ok(value) });
+        // The original image failure hook does not take source/document/GUI
+        // locks. Latch the first failure before any original consuming close.
+        if let Err(reason) = &result { failed(*reason); }
+        if !self.close_all_observing(failed) { return Err(Reason::CleanupUnknown); }
+        match result {
+            Err(reason) => Err(reason),
+            Ok(value) => match checkpoint(stop) {
+                Ok(()) => Ok(value), Err(reason) => { failed(reason); Err(reason) },
+            },
+        }
+    }
 }
 
 fn copy_bytes(bytes: &[u8]) -> Result<Vec<u8>, Reason> {
     let mut out = Vec::new(); out.try_reserve_exact(bytes.len()).map_err(|_| Reason::Capacity)?;
+    if out.capacity() > bytes.len() { return Err(Reason::Capacity); }
     out.extend_from_slice(bytes); Ok(out)
 }
 fn checkpoint(stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> { if stop() { Err(Reason::UserCancelled) } else { Ok(()) } }
@@ -358,6 +398,7 @@ fn parts(path: &Path) -> Result<Vec<&[u8]>, Reason> {
     if bytes.is_empty() || bytes.len() > PATH_LIMIT || bytes[0] != b'/' || bytes.contains(&0)
         || path.to_str().is_none() { return Err(Reason::SourceRefused); }
     let mut components = Vec::new(); components.try_reserve_exact(COMPONENT_LIMIT - 1).map_err(|_| Reason::Capacity)?;
+    if components.capacity() > COMPONENT_LIMIT - 1 { return Err(Reason::Capacity); }
     if bytes == b"/" { return Ok(components); }
     for name in bytes[1..].split(|byte| *byte == b'/') {
         if name.is_empty() || name == b"." || name == b".." || name.len() > 255 || components.len() >= COMPONENT_LIMIT - 1 { return Err(Reason::SourceRefused); }
@@ -432,6 +473,100 @@ pub(crate) fn capture(book: &mut SourceBook, path: PathBuf, roots: &[RegisteredR
         Ok(CapturedSource { bytes, origin: Arc::new(OriginWitness { path: path.clone(), ancestry, leaf: file, alias }) })
     })();
     book.finish(result, stop)
+}
+
+pub(crate) fn capture_public_images(book: &mut SourceBook, paths: Vec<PathBuf>, root: &RegisteredRoot, byte_limit: usize,
+    stop: &mut dyn FnMut() -> bool, failed: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> {
+    use sha2::{Digest, Sha256};
+    if !(1..=PUBLIC_IMAGE_FILES).contains(&paths.len()) || paths.capacity() > PUBLIC_IMAGE_FILES
+        || paths.iter().any(|path| path.capacity() > PATH_LIMIT)
+        || !(1..=PUBLIC_IMAGE_BATCH_BYTES).contains(&byte_limit) { return Err(Reason::MaterialLimit); }
+    let expected_root = root.identity.posix()?;
+    let root_parts = parts(&root.path)?;
+    let mut spellings = Vec::new(); spellings.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+    let mut names = Vec::new(); names.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+    if spellings.capacity() > PUBLIC_IMAGE_FILES || names.capacity() > PUBLIC_IMAGE_FILES { return Err(Reason::Capacity); }
+    for (ordinal, path) in paths.iter().enumerate() {
+        let spelling = parts(path)?;
+        let name = spelling.last().ok_or(Reason::SourceRefused)?;
+        let display_name = public_image_display_name(name, ordinal)?;
+        if display_name.capacity() > 255 { return Err(Reason::Capacity); }
+        names.push(display_name);
+        spellings.push(spelling);
+    }
+    // One root and one held canonical /private anchor, then every original
+    // registered/selected ancestry and leaf, including each possible alias step.
+    let capacity = roster_limit(std::iter::once(root_parts.len()).chain(spellings.iter().map(|parts| {
+        let parents = &parts[..parts.len() - 1]; parents.len() + source_extra(parents)
+    })), paths.len() + 1)?;
+    book.begin(capacity, 0, paths.len())?;
+    let result = (|| {
+        book.root(stop)?;
+        book.anchor_private(stop)?;
+        // Registered project roots retain the existing no-alias policy. Only
+        // selected public input paths may use the already bounded system aliases.
+        let (root_chain, _) = book.chain(&root_parts, false, stop)?;
+        let root_id = book.directory(*root_chain.last().ok_or(Reason::SourceRefused)?)?;
+        if root_id != expected_root { return Err(Reason::SourceChanged); }
+        let root_depth = root_chain.len() - 1;
+        let mut originals = Vec::new(); originals.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+        let mut protected_sources = Vec::new(); protected_sources.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+        if originals.capacity() > PUBLIC_IMAGE_FILES || protected_sources.capacity() > PUBLIC_IMAGE_FILES { return Err(Reason::Capacity); }
+        let mut total = 0;
+        for (path, spelling) in paths.iter().zip(&spellings) {
+            let (name, parents) = spelling.split_last().ok_or(Reason::SourceRefused)?;
+            let (chain, alias) = book.chain(parents, true, stop)?;
+            let mut ancestry = Vec::new(); ancestry.try_reserve_exact(chain.len()).map_err(|_| Reason::Capacity)?;
+            if ancestry.capacity() > COMPONENT_LIMIT + 1 { return Err(Reason::Capacity); }
+            for index in &chain { ancestry.push(book.directory(*index)?); }
+            let parent = *chain.last().ok_or(Reason::SourceRefused)?;
+            let leaf = book.child_policy(parent, name, true, LeafPolicy::PublicImage, stop)?;
+            let file = match book.slots[leaf].identity { Some(Identity::File(id)) => id, _ => return Err(Reason::SourceRefused) };
+            if originals.iter().any(|(_, previous, _, _): &(usize, FileIdentity, Vec<DirectoryIdentity>, Option<OriginAlias>)|
+                previous.common.same_object(file.common)) { return Err(Reason::SourceRefused); }
+            let (_, next) = public_image_size(total, file.size)?; total = next;
+            if total > byte_limit { return Err(Reason::MaterialLimit); }
+            // Public mode is NOT permission to bypass the actual same-FD ACL
+            // observation or its original native allocation/free outcomes.
+            book.private_acl(leaf, 0, stop)?;
+            if let Some(relative) = public_protected_source(path, root, root_depth, &ancestry, root_id)? {
+                if relative.capacity() > PATH_LIMIT { return Err(Reason::Capacity); }
+                protected_sources.push(relative);
+            }
+            originals.push((leaf, file, ancestry, alias));
+        }
+        let mut images = Vec::new(); images.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+        if images.capacity() > PUBLIC_IMAGE_FILES { return Err(Reason::Capacity); }
+        // All sizes and original objects are admitted before any payload buffer.
+        // At most24MiB and ten explicit EOF sentinel bytes can be retained here.
+        for ((path, display_name), (leaf, file, ancestry, alias)) in paths.iter().zip(names).zip(originals) {
+            let original_path = path.to_path_buf();
+            if original_path.capacity() > PATH_LIMIT { return Err(Reason::Capacity); }
+            let (size, _) = public_image_size(0, file.size)?;
+            let capacity = size.checked_add(1).ok_or(Reason::MaterialLimit)?;
+            let mut bytes = Vec::new(); bytes.try_reserve_exact(capacity).map_err(|_| Reason::Capacity)?;
+            if bytes.capacity() > capacity { return Err(Reason::Capacity); }
+            bytes.resize(capacity, 0);
+            let mut used = 0usize; let mut hash = Sha256::new();
+            loop {
+                checkpoint(stop)?;
+                let end = capacity.min(used.saturating_add(1024 * 1024));
+                let read = unistd::read(book.fd(leaf)?, &mut bytes[used..end]).map_err(|_| Reason::SourceRefused)?;
+                checkpoint(stop)?;
+                if read == 0 { if used != size { return Err(Reason::SourceChanged); } break; }
+                let next = used.checked_add(read).ok_or(Reason::SourceChanged)?;
+                if next > size { return Err(Reason::SourceChanged); }
+                hash.update(&bytes[used..next]); used = next;
+            }
+            bytes.truncate(size);
+            let item_id = public_image_token(stop)?;
+            if images.iter().any(|image: &CapturedPublicImage| image.item_id == item_id) { return Err(Reason::SourceRefused); }
+            images.push(CapturedPublicImage { item_id, display_name, bytes, sha256: format!("{:x}", hash.finalize()),
+                origin: OriginWitness { path: original_path, ancestry, leaf: file, alias } });
+        }
+        Ok(CapturedPublicImageBatch { images, protected_sources })
+    })();
+    book.finish_public_images(result, stop, failed)
 }
 
 pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>],
@@ -589,6 +724,16 @@ pub(crate) fn probe_project_path(book: &mut SourceBook, root: &RegisteredRoot, p
 }
 
 #[cfg(test)]
+pub(crate) fn assert_installed_macos_images_source_contract() {
+    // Existing harness=false entry calls these actual inert definitions. No
+    // native file, descriptor, ACL temporary or successful capture is invented.
+    tests::public_images_keep_private_leaf_policy_and_full_roster_bounds();
+    tests::image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown();
+    tests::only_local_ownership_aware_apfs_is_admitted();
+    tests::root_aliases_are_exact_and_physical_protection_is_not_path_text();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -653,7 +798,7 @@ mod tests {
         assert!(parts(Path::new(&format!("/{}", vec!["a"; COMPONENT_LIMIT].join("/")))).is_err());
     }
     #[test]
-    fn only_local_ownership_aware_apfs_is_admitted() {
+    pub(super) fn only_local_ownership_aware_apfs_is_admitted() {
         assert!(admitted_filesystem("apfs", MntFlags::MNT_LOCAL));
         assert!(admitted_filesystem("apfs", MntFlags::MNT_LOCAL | MntFlags::MNT_RDONLY));
         for name in ["hfs", "nfs", "smbfs", "webdav", "autofs", "APFS", ""] { assert!(!admitted_filesystem(name, MntFlags::MNT_LOCAL)); }
@@ -691,7 +836,7 @@ mod tests {
         }
     }
     #[test]
-    fn root_aliases_are_exact_and_physical_protection_is_not_path_text() {
+    pub(super) fn root_aliases_are_exact_and_physical_protection_is_not_path_text() {
         let root = DirectoryIdentity { dev: 1, ino: 2, mode: 0o40755, uid: 0, gid: 0 };
         assert!(PhysicalRole::Root.protected(root) && PhysicalRole::Private.protected(root) && PhysicalRole::Var.protected(root));
         assert!(!PhysicalRole::Private.protected(DirectoryIdentity { uid: 501, ..root }));
@@ -746,5 +891,66 @@ mod tests {
         // capture/identity/cleanup qualification on a synthetic fixture.
         let result = probe_project(&mut book, "/inert/project".into(), &[], &mut || true);
         assert!(matches!(result, Err(Reason::UserCancelled))); assert!(book.settled());
+    }
+    #[test]
+    pub(super) fn public_images_keep_private_leaf_policy_and_full_roster_bounds() {
+        let common = DirectoryIdentity { dev: 1, ino: 2, mode: 0o100644, uid: 501, gid: 20 };
+        let file = FileIdentity { common, nlink: 1, size: 10, mtime: (1, 2), ctime: (3, 4) };
+        for mode in [0o100444, 0o100644, 0o100664] {
+            let image = FileIdentity { common: DirectoryIdentity { mode, ..common }, ..file };
+            assert!(LeafPolicy::PublicImage.permits(image));
+            assert!(!LeafPolicy::Private.permits(image));
+        }
+        assert!(LeafPolicy::Private.permits(FileIdentity { common: DirectoryIdentity { mode: 0o100600, ..common }, ..file }));
+        for nlink in [0, 2, u64::MAX] { assert!(!LeafPolicy::PublicImage.permits(FileIdentity { nlink, ..file })); }
+        for bits in [0o1000, 0o2000, 0o4000] {
+            assert!(!LeafPolicy::PublicImage.permits(FileIdentity { common: DirectoryIdentity { mode: common.mode | bits, ..common }, ..file }));
+        }
+        assert!(PUBLIC_IMAGES_SOURCE_CONTROL_BYTES <= 512 * 1024);
+        let project = DirectoryIdentity { mode: 0o40700, ..common };
+        let root = RegisteredRoot { path: "/private/tmp/project".into(), identity: ProjectIdentity::Posix(project) };
+        let directory = DirectoryIdentity { dev: 1, ino: 1, mode: 0o40755, uid: 0, gid: 0 };
+        let ancestry = [directory, DirectoryIdentity { ino: 3, ..directory }, DirectoryIdentity { ino: 4, ..directory }, project];
+        assert_eq!(public_protected_source(Path::new("/private/tmp/project/assets/source.png"), &root, 3, &ancestry, project),
+            Ok(Some("assets/source.png".into())));
+        assert_eq!(public_protected_source(Path::new("/tmp/project/assets/source.png"), &root, 3, &ancestry, project),
+            Err(Reason::SourceRefused)); // physical alias cannot omit source preservation
+        assert_eq!(public_protected_source(Path::new("/private/tmp/project/assets/source.png"), &root, 3, &ancestry[..3], project),
+            Err(Reason::SourceRefused)); // lexical prefix cannot invent physical containment
+        let mut overallocated = Vec::with_capacity(PUBLIC_IMAGE_FILES + 1); overallocated.push(PathBuf::from("/inert/a.png"));
+        for paths in [Vec::new(), vec![PathBuf::from("/inert/a.png"); PUBLIC_IMAGE_FILES + 1], overallocated,
+            vec![PathBuf::from("/inert/../a.png")], vec![PathBuf::from("/inert/signing.p12")]] {
+            let mut book = SourceBook::new();
+            assert!(capture_public_images(&mut book, paths, &root, PUBLIC_IMAGE_BATCH_BYTES,
+                &mut || panic!("up-front refusal must not enter native acquisition"), &mut |_| {}).is_err());
+            assert!(book.not_started() && !book.settled());
+        }
+    }
+    #[test]
+    pub(super) fn image_failure_is_reported_before_independent_cleanup_and_unknown_stays_unknown() {
+        for native_unknown in [false, true] {
+            let mut book = SourceBook::new(); book.begin(3, 0, 0).unwrap();
+            let first = book.reserve(None, b"first").unwrap();
+            let middle = book.reserve(None, b"middle").unwrap();
+            let last = book.reserve(None, b"last").unwrap();
+            // State DATA only. Neither branch owns a descriptor or invokes a
+            // native close, but both run the real failure/settlement ordering.
+            if native_unknown {
+                book.slots[middle].state = OriginalState::NoHandle;
+                book.slots[middle].acl[0] = CallState::Entered;
+            } else { book.slots[middle].state = OriginalState::Acquiring; }
+            let mut failures = Vec::new();
+            assert_eq!(book.finish_public_images::<()>(Err(Reason::SourceChanged), &mut || true,
+                &mut |reason| failures.push(reason)), Err(Reason::CleanupUnknown));
+            assert_eq!(failures, vec![Reason::SourceChanged, Reason::CleanupUnknown]);
+            assert!(matches!(book.slots[first].state, OriginalState::NoHandle));
+            assert!(matches!(book.slots[last].state, OriginalState::NoHandle));
+            assert!(!book.settled() && book.terminal);
+        }
+        let mut book = SourceBook::new(); book.begin(1, 0, 0).unwrap(); book.reserve(None, b"never-opened").unwrap();
+        let mut failures = Vec::new();
+        assert_eq!(book.finish_public_images::<()>(Err(Reason::SourceChanged), &mut || true,
+            &mut |reason| failures.push(reason)), Err(Reason::SourceChanged));
+        assert_eq!(failures, vec![Reason::SourceChanged]); assert!(book.settled());
     }
 }

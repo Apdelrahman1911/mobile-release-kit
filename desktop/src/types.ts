@@ -1,3 +1,4 @@
+import type { InstallationDescription, InstallationRevealResult } from './installation.ts';
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
@@ -324,6 +325,8 @@ export interface AppInfo {
   projectSelection?: { available: boolean; reason: string | null };
   // A separate installed-project profile, never the compatibility folder picker.
   projectPathSelection?: { available: boolean; reason: string | null };
+  // Optional profile description, not an installation or signing assessment.
+  installation?: InstallationDescription | null;
 }
 
 export type BridgeMode = 'native' | 'preview' | 'unavailable';
@@ -388,6 +391,7 @@ export interface PrepareConfigEditRequest {
 export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
+  revealInstallation(): Promise<InstallationRevealResult>;
   chooseProject(): Promise<ProjectReference | null>;
   chooseProjectPath(request: ProjectPathRequest): Promise<ProjectPathSelection | null>;
   snapshot(projectId: string): Promise<ProjectSnapshot>;

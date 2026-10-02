@@ -8,11 +8,23 @@ import sys
 import time
 
 
+def _supported_host() -> bool:
+    if sys.platform == "linux":
+        return True  # Existing Linux gate; the native owner admits its exact ABI.
+    if sys.platform != "darwin":
+        return False
+    # Current Mac runtime/tool policy is native ARM64 only, never Rosetta fallback.
+    try:
+        return os.uname().machine == "arm64"
+    except OSError:
+        return False
+
+
 def main() -> int:
-    started = time.monotonic()  # Before core imports; never reset by a stage.
+    started = time.monotonic()  # Before host checks/core imports; never reset by a stage.
     if (len(sys.argv) != 2 or not sys.flags.isolated or not sys.flags.no_site
             or not sys.dont_write_bytecode or sys.version_info < (3, 11)
-            or sys.platform != "linux" or not os.path.isabs(sys.argv[1])
+            or not _supported_host() or not os.path.isabs(sys.argv[1])
             or not os.path.isabs(__file__)):
         return 78
     sys.path.insert(0, sys.argv[1])  # Sole native-qualified fixed core directory/ZIP.

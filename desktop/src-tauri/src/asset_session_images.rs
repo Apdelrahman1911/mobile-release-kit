@@ -7,10 +7,22 @@ use crate::{edit_protocol::{Capability as EditCapability, EditAvailability, Edit
         Selection, SelectionPhase as ImagePhase, SelectionReason as ImageReason, SelectionSettlement as ImageSettlement}};
 use std::path::PathBuf;
 
-// Path/name/source-book/GUI and both bounded metadata projections, plus ten
-// size+1 EOF bytes, fit inside this conservative in-session control reservation.
-// Native dialog/provider-internal selection storage is not a process-RSS claim.
-const CONTROL_RESERVE: usize = 1024 * 1024;
+// Partition the SAME1MiB control charge; the Mac result buffers do not increase
+// payload credit. The native/Rust batch and moved PathBufs fit128KiB, original
+// source/path/name/ancestry rosters512KiB, two bounded metadata projections
+//256KiB, with128KiB for shared GUI/scalar/EOF controls. Provider-internal
+// selection storage/allocator/renderer/whole-process RSS is not this contract.
+const NATIVE_IMAGE_CONTROL_RESERVE: usize = 128 * 1024;
+const SOURCE_IMAGE_CONTROL_RESERVE: usize = 512 * 1024;
+const PROJECTION_CONTROL_RESERVE: usize = 256 * 1024;
+const GUI_CONTROL_RESERVE: usize = 128 * 1024;
+const CONTROL_RESERVE: usize = NATIVE_IMAGE_CONTROL_RESERVE + SOURCE_IMAGE_CONTROL_RESERVE
+    + PROJECTION_CONTROL_RESERVE + GUI_CONTROL_RESERVE;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const _: () = {
+    assert!(mrk_macos_installed_native::PUBLIC_IMAGE_CONTROL_BYTES <= NATIVE_IMAGE_CONTROL_RESERVE);
+    assert!(asset_source::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES <= SOURCE_IMAGE_CONTROL_RESERVE);
+};
 // Separate from image controls: two bounded 64-record GitHub journals and
 // their current reviews/run, connection material, evidence and settled quit
 // controls may coexist with an image selection. Each typed journal has a
@@ -21,6 +33,20 @@ const CONTROL_RESERVE: usize = 1024 * 1024;
 // a claim about GUI/provider, allocator, renderer or whole-process RSS.
 const DOCUMENT_CONTROL_RESERVE: usize = 3 * 1024 * 1024;
 const SELECTION_STATUS_LIMIT: usize = 32 * 1024;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+impl DocumentBinding {
+    pub(crate) fn assert_installed_macos_images_control_contract() {
+        // Associated DATA check: no DocumentBinding/OriginalWork or permission
+        // is constructed. Also called explicitly by the harness=false entry.
+        assert_eq!(CONTROL_RESERVE, 1024 * 1024);
+        assert_eq!(wire::MAX_FILES, mrk_macos_installed_native::PUBLIC_IMAGE_COUNT);
+        assert_eq!(asset_source::PATH_LIMIT + 1, mrk_macos_installed_native::PUBLIC_IMAGE_PATH_BYTES);
+        assert!(mrk_macos_installed_native::PUBLIC_IMAGE_CONTROL_BYTES <= NATIVE_IMAGE_CONTROL_RESERVE);
+        assert!(asset_source::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES <= SOURCE_IMAGE_CONTROL_RESERVE);
+        assert!(2 * SELECTION_STATUS_LIMIT * 4 <= PROJECTION_CONTROL_RESERVE);
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Failure { reason: Reason, at: Instant, unknown: bool }
@@ -379,7 +405,7 @@ impl DocumentBinding {
         let unavailable = |reason| EditCapability { available: false, reason };
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() { return unavailable(EditAvailability::CleanupUnknown); }
         if state.stopping || self.inner.bridge.supervisor.stopping() { return unavailable(EditAvailability::Shutdown); }
-        if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return unavailable(EditAvailability::UnsupportedPlatform); }
+        if !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))) { return unavailable(EditAvailability::UnsupportedPlatform); }
         if !edit.available { return edit; }
         if !state.lifetime.original_bound() || state.lost_observed || !self.inner.bridge.metadata_images_selection_available() {
             return unavailable(EditAvailability::RuntimeUnqualified);
@@ -573,6 +599,12 @@ mod tests {
     // open, native dialog, RNG, thread or fabricated ORIGINAL join is used.
     // Native success/cancel/import remains a separate qualification obligation.
     use super::*;
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn macos_native_image_buffers_share_the_existing_quota_not_extra_payload_credit() {
+        DocumentBinding::assert_installed_macos_images_control_contract();
+    }
 
     fn model() -> (DocumentState, Arc<Binding>, Arc<OriginalWork>) {
         let mut state = super::super::tests::empty_state();

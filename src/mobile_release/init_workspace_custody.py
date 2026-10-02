@@ -416,10 +416,10 @@ class InitRootLease:
             raise _failure("custody_unknown", error, unknown=True) from None
         if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
             raise _failure("unsupported_platform")
-        # Mac workflow/text/version edits use this same registered original
-        # lease, not Configuration authority. Image admission stays closed.
+        # Mac typed edits, including public images, use the same registered
+        # original lease. A different edit domain never supplies its authority.
         if (self._profile is TypedEditProfile.METADATA_IMAGES
-                and not sys.platform.startswith("linux")):
+                and not (sys.platform.startswith("linux") or sys.platform == "darwin")):
             raise _failure("unsupported_platform")
         try:
             value = str(self.root)

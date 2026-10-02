@@ -37,6 +37,43 @@ impl AndroidBuildOwner {
     pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::AndroidSnapshot> {
         self.saved.installed_android_snapshot()
     }
+
+    pub(crate) fn sources_status(&self, gate: Availability) -> Result<crate::android_tool_sources::Status, BridgeError> {
+        self.saved.android_sources_status(gate)
+    }
+    pub(crate) fn admit_source(&self, document: &std::sync::Arc<()>, input: &crate::android_tool_sources::Choose,
+        registration: u32, project: RegisteredRoot, owner: std::sync::Arc<crate::asset_session::OriginalWork>, gate: Availability) -> Result<(), BridgeError> {
+        self.saved.admit_android_source_pick(document, input, registration, project, owner, gate)
+    }
+    pub(crate) fn source_stop(&self, owner: &std::sync::Arc<crate::asset_session::OriginalWork>) -> Option<(crate::asset_commands::Reason, Instant)> {
+        self.saved.android_source_stop(owner)
+    }
+    pub(crate) fn publish_source(&self, owner: &std::sync::Arc<crate::asset_session::OriginalWork>, proof: crate::asset_source::ProjectProbe) -> Result<(), BridgeError> {
+        self.saved.publish_android_source(owner, proof)
+    }
+    pub(crate) fn observe_source(&self, owner: &std::sync::Arc<crate::asset_session::OriginalWork>, phase: crate::asset_session::Phase,
+        reason: crate::asset_commands::Reason, unknown: bool) {
+        self.saved.observe_android_source(owner, phase, reason, unknown);
+    }
+    pub(crate) fn cancel_source(&self, input: crate::android_tool_sources::Cancel, gate: Availability) -> Result<crate::android_tool_sources::Status, BridgeError> {
+        self.saved.cancel_android_source(input, gate)
+    }
+
+    pub(crate) fn catalog_status(&self,gate:Availability) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        self.saved.android_catalog_status(gate)
+    }
+    pub(crate) fn refresh_catalog(&self,document:&std::sync::Arc<()>,admitted:Instant,gate:Availability)
+        -> Result<crate::saved_command_owner::AndroidCatalogAdmitted,BridgeError> {
+        self.saved.refresh_android_catalog(document,admitted,gate)
+    }
+    pub(crate) fn select_catalog(&self,input:crate::android_toolchain_catalog::Select,gate:Availability)
+        -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        self.saved.select_android_catalog(input,gate)
+    }
+    pub(crate) fn cancel_catalog(&self,input:crate::android_toolchain_catalog::Cancel,gate:Availability)
+        -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        self.saved.cancel_android_catalog(input,gate)
+    }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }

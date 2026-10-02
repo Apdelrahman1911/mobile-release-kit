@@ -13,7 +13,7 @@ fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
@@ -21,10 +21,11 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending); let (frames, receiver) = mpsc::channel(2);
     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
+    let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
     let session = Arc::new(Session { domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
-        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None,
-        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
+        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, native_failure: Mutex::new(None),
+        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
         startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
@@ -49,7 +50,7 @@ fn offline_context(owner: &Session) -> &wire::Context {
 pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {
     let owner = owner();
     let selected = cfg!(feature = "custom-protocol") && owner.original_for_test().inner.runtime.offline_preflight_installed_profile_available();
-    assert_eq!(owner.original_for_test().inner.qualified(), selected);
+    assert_eq!(owner.original_for_test().inner.qualified(None), selected);
     assert_eq!(owner.original_for_test().inner.lock().revision, 0);
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     assert!(owner.original_for_test().inner.observation.lock().unwrap().is_none());
@@ -466,7 +467,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             let android = crate::android_build_owner::AndroidBuildOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-android-runtime")), None);
             let android_inner = &android.original_for_test().inner;
             *android_inner.fixture.lock().map_err(|_| "fixture_android_permit_slot")? = Some(Arc::downgrade(&permit));
-            require(!permit.permits(android_inner) && !android_inner.qualified()
+            require(!permit.permits(android_inner) && !android_inner.qualified(None)
                 && !permit.claimed.load(Ordering::SeqCst)
                 && permit.admitted.lock().map_err(|_| "fixture_admission_slot")?.is_none()
                 && android_inner.lock().prepared.is_none() && android_inner.lock().active.is_none(), "fixture_offline_permit_is_not_android")?;

@@ -614,7 +614,11 @@ impl PanelSample {
                 mrk_macos_installed_native::PanelKind::Quit => "quit", mrk_macos_installed_native::PanelKind::File => "file",
                 mrk_macos_installed_native::PanelKind::VersionSource => "version-source", mrk_macos_installed_native::PanelKind::IosProject => "ios-project",
                 mrk_macos_installed_native::PanelKind::IosWorkspace => "ios-workspace", mrk_macos_installed_native::PanelKind::MetadataRoot => "metadata-root",
-                mrk_macos_installed_native::PanelKind::EvidenceFolder => "evidence-folder" },
+                mrk_macos_installed_native::PanelKind::EvidenceFolder => "evidence-folder",
+                mrk_macos_installed_native::PanelKind::PublicImages => "public-images",
+                mrk_macos_installed_native::PanelKind::AndroidJdk => "android-jdk",
+                mrk_macos_installed_native::PanelKind::AndroidSdk => "android-sdk",
+                mrk_macos_installed_native::PanelKind::AndroidGradle => "android-gradle" },
             parent_present: native.parent_present, panel_present: native.panel_present,
             parent_references_panel: native.parent_references_panel,
             panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible,
@@ -1109,7 +1113,9 @@ impl Observation {
                 | mrk_macos_installed_native::PanelKind::IosProject | mrk_macos_installed_native::PanelKind::IosWorkspace
                 | mrk_macos_installed_native::PanelKind::MetadataRoot => self.case.field_index(id).is_some_and(|i|
                     project_fields::accepts(i) && project_fields::kind(i) == Some(kind)),
-            mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder => false,
+            mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder
+                | mrk_macos_installed_native::PanelKind::PublicImages | mrk_macos_installed_native::PanelKind::AndroidJdk
+                | mrk_macos_installed_native::PanelKind::AndroidSdk | mrk_macos_installed_native::PanelKind::AndroidGradle => false,
         }
     }
     pub(super) fn open_identity_target(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> Option<&Path> {
@@ -1120,7 +1126,9 @@ impl Observation {
             mrk_macos_installed_native::PanelKind::VersionSource
                 | mrk_macos_installed_native::PanelKind::IosProject | mrk_macos_installed_native::PanelKind::IosWorkspace
                 | mrk_macos_installed_native::PanelKind::MetadataRoot => self.field_paths.get(usize::from(self.case.field_index(id)?)).map(PathBuf::as_path),
-            mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder => None,
+            mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder
+                | mrk_macos_installed_native::PanelKind::PublicImages | mrk_macos_installed_native::PanelKind::AndroidJdk
+                | mrk_macos_installed_native::PanelKind::AndroidSdk | mrk_macos_installed_native::PanelKind::AndroidGradle => None,
         }
     }
     pub(super) fn completion_returned(&self, id: u32, returned: mrk_macos_installed_native::CompletionReturn) {
@@ -3521,7 +3529,27 @@ fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
     if !project_chooser_data_checks() { return false; }
     crate::asset_session::assert_project_selection_gate_contract();
+    // harness=false does not discover private #[test] functions. These exact
+    // inert DATA bodies are shared with their ordinary libtest wrappers.
+    // Exercise the positive normal-Mac description; no Finder/native call.
+    if !crate::installation::NORMAL_MAC_PROFILE { return false; }
+    crate::installation::assert_installation_description_contract();
+    crate::installation::assert_installation_reveal_request_contract();
+    crate::asset_session::assert_installation_reveal_document_gate_contract();
+    crate::android_build_protocol::assert_macos_toolchain_data_contract();
+    crate::android_toolchain_catalog::assert_catalog_data_contract();
+    crate::android_toolchain_macos_policy::assert_macos_toolchain_policy_data_contract();
+    if !crate::installed_runtime::installed_android_data_check()
+        || !crate::installed_runtime::common_acl_data_check()
+        || !crate::supervisor::common_acl_owner_data_check() { return false; }
     crate::runtime::assert_installed_session_selection_contract();
+    if !crate::runtime::installed_macos_offline_profile_data_check()
+        || !crate::installed_runtime::installed_offline_slots_data_check()
+        || !crate::saved_command_owner::installed_offline_owner_data_check() { return false; }
+    if !crate::runtime::installed_macos_doctor_recovery_profile_data_check()
+        || !crate::installed_runtime::installed_doctor_recovery_slots_data_check()
+        || !crate::environment_diagnostics_owner::installed_environment_owner_data_check()
+        || !crate::saved_command_owner::installed_project_recovery_owner_data_check() { return false; }
     // This target has harness=false; run these inert contracts explicitly.
     // They prove routing/refusal DATA only, not native Apply or worker finality.
     crate::runtime::assert_installed_workflow_profile_contract();
@@ -3529,12 +3557,17 @@ fn observer_data_checks() -> bool {
     crate::edit_owner::assert_installed_workflow_owner_contract();
     crate::edit_owner::assert_installed_metadata_owner_contract();
     crate::edit_owner::assert_installed_version_owner_contract();
+    crate::edit_owner::assert_installed_images_owner_contract();
+    crate::asset_source::assert_installed_macos_images_source_contract();
+    crate::asset_session::DocumentBinding::assert_installed_macos_images_control_contract();
     crate::runtime::macos_github_readonly_profile_contract();
     crate::supervisor::macos_github_readonly_original_contract();
     crate::asset_session::assert_installed_evidence_gate_contract();
     crate::bridge::assert_native_capability_intersection_contract();
     if !crate::runtime::installed_macos_evidence_profile_data_check()
-        || !super::owned_macos::evidence_folder_routing_data_check() { return false; }
+        || !super::owned_macos::evidence_folder_routing_data_check()
+        || !crate::runtime::installed_macos_images_profile_data_check()
+        || !super::owned_macos::public_images_routing_data_check() { return false; }
     // Compiled profile DATA only: this inert path is never resolved or opened.
     // The real builder must still establish every installed/native original.
     let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));

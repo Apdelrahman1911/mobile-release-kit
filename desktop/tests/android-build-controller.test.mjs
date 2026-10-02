@@ -60,15 +60,32 @@ function completed(op, selection = { module: ':app', variant: 'release', applica
   return { ...terminal(op, 'complete', 'none'), stage: 'disposing-work', activity: { stage: 'disposing-work', selection, command, findings, summary },
     disposition: { work: 'removed', artifacts: 'retained-local-result' }, result };
 }
-function harness(t, { initial = status(), listenGate = null, completeVersion = true } = {}) {
-  let state = workspace(), registry = clone(initial), clock = 10, other = null, versionOverride;
-  const calls = [], reads = [], subscriptions = [], versionCalls = [], order = [];
+const TOOL_A = { instance: '1'.repeat(32), ownerUid: 501, catalogGeneration: 1,
+  recordSha256: '2'.repeat(64), inventorySha256: '3'.repeat(64), osProviderSha256: '4'.repeat(64) };
+const TOOL_B = { ...TOOL_A, instance: '5'.repeat(32), recordSha256: '6'.repeat(64) };
+const toolEntry = (selection) => ({ selection: clone(selection), versions: { jdkVendor: 'Example', jdkVersion: '17.0.12',
+  gradleVersion: '8.10', agpVersion: '8.7', sdkPlatform: 'android-35', sdkBuildToolsVersion: '35.0.0' } });
+const catalogStatus = (patch = {}) => ({ schemaVersion: 1, statusRevision: 0, catalogGeneration: 0, operationId: null,
+  availability: 'unsupported-platform', phase: 'idle', reason: 'not-inspected', entries: [], selected: null, ...patch });
+const readyCatalog = (patch = {}) => catalogStatus({ statusRevision: 1, catalogGeneration: 1, operationId: '7'.repeat(32),
+  availability: 'available', phase: 'ready', reason: 'none', entries: [toolEntry(TOOL_A), toolEntry(TOOL_B)], ...patch });
+function harness(t, { initial = status(), initialCatalog = catalogStatus(), listenGate = null, completeVersion = true } = {}) {
+  let state = workspace(), registry = clone(initial), catalogRegistry = clone(initialCatalog), clock = 10, other = null, versionOverride;
+  const calls = [], reads = [], subscriptions = [], versionCalls = [], order = [], catalogCalls = [], catalogSubscriptions = [];
   const selected = () => state.selectedId ? state.projects[state.selectedId] : null;
   const version = new ReleaseVersionController(selected);
   version.setConnection({ mode: 'native', observeReleaseVersion: (projectId) => {
     const call = { projectId, ...deferred() }; versionCalls.push(call); return call.promise;
   } }, info); version.syncProject();
   const api = { mode: 'native',
+    subscribeAndroidToolchainCatalog: async (callback) => {
+      const row = { callback, closed: false }; catalogSubscriptions.push(row);
+      return () => { row.closed = true; };
+    },
+    androidToolchainCatalogStatus: async () => clone(catalogRegistry),
+    refreshAndroidToolchainCatalog: () => { const call = { kind: 'catalog-refresh', ...deferred() }; catalogCalls.push(call); return call.promise; },
+    selectAndroidToolchain: (input) => { const call = { kind: 'catalog-select', input: clone(input), ...deferred() }; catalogCalls.push(call); return call.promise; },
+    cancelAndroidToolchainCatalog: (input) => { const call = { kind: 'catalog-cancel', input: clone(input), ...deferred() }; catalogCalls.push(call); return call.promise; },
     subscribeAndroidBuild: async (callback) => {
       order.push('subscribe'); const row = { callback, closed: false }; subscriptions.push(row);
       if (listenGate) await listenGate.promise;
@@ -92,7 +109,9 @@ function harness(t, { initial = status(), listenGate = null, completeVersion = t
   const connected = controller.connect(api);
   const ready = connected.then(async () => { if (completeVersion) await readVersion(); });
   t.after(() => { unsubscribeVersion(); controller.dispose(); version.dispose(); });
-  return { api, controller, version, calls, reads, subscriptions, versionCalls, order, ready, readVersion,
+  return { api, controller, version, calls, reads, subscriptions, versionCalls, order, ready, readVersion, catalogCalls, catalogSubscriptions,
+    emitCatalog(value) { catalogRegistry = clone(value); catalogSubscriptions.at(-1)?.callback(clone(value)); },
+    replyCatalog(call, value) { catalogRegistry = clone(value); call.resolve(clone(value)); },
     get state() { return controller.getSnapshot(); }, get workspace() { return state; }, get project() { return selected(); },
     get versionState() { return version.getSnapshot(); },
     overrideVersion(value) { versionOverride = value; controller.syncReleaseVersion(); },
@@ -452,4 +471,55 @@ test('prerequisite guidance distinguishes an unqualified gate from a missing SDK
   assert.match(androidBuildHelp.format, /Gradle readiness or authorize a build/);
   for (const state of ['Missing', 'unselected', 'unsupported', 'not inspected', 'unqualified']) assert.ok(androidBuildHelp.failure.includes(state));
   assert.match(androidBuildHelp.failure, /closed native gate does not mean your SDK is missing/);
+});
+
+test('Mac tool selection is explicit DATA and changing it retires the saved build review', async (t) => {
+  const h = harness(t, { initialCatalog: readyCatalog() }); await h.ready;
+  assert.match(h.controller.prepareReason(), /Choose a registered/);
+  await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  const choosing = h.controller.selectToolchain(TOOL_A.instance, TOOL_A.recordSha256);
+  const selected = h.catalogCalls.at(-1);
+  assert.equal(selected.kind, 'catalog-select');
+  assert.deepEqual(selected.input, { schemaVersion: 1, catalogGeneration: 1, instance: TOOL_A.instance, recordSha256: TOOL_A.recordSha256 });
+  h.replyCatalog(selected, readyCatalog({ statusRevision: 2, selected: TOOL_A })); await choosing;
+  const op = await reviewed(h);
+  assert.deepEqual(h.state.consent.binding.toolchainSelection, TOOL_A);
+  h.emitCatalog(readyCatalog({ statusRevision: 3, selected: TOOL_B }));
+  assert.equal(h.state.consent, null);
+  assert.equal(h.calls.at(-1).kind, 'cancel');
+  assert.deepEqual(h.calls.at(-1).input, { operationId: op.operationId, ownerGeneration: op.ownerGeneration });
+  h.reply(h.calls.at(-1), status(4, terminal(op))); await flush();
+  assert.equal(h.state.pending, null);
+});
+
+test('lost catalog reply and Unknown retain the original observer, cancel target and application exclusion', async (t) => {
+  const h = harness(t, { initialCatalog: catalogStatus({ availability: 'available' }) }); await h.ready;
+  const refreshing = h.controller.refreshCatalog(), call = h.catalogCalls.at(-1);
+  assert.equal(h.state.catalogUnconfirmed, true);
+  const identity = { catalogGeneration: 1, operationId: '7'.repeat(32) };
+  h.emitCatalog(catalogStatus({ statusRevision: 1, ...identity, availability: 'busy', phase: 'reading', reason: 'none' }));
+  assert.equal(h.state.catalogUnconfirmed, false); assert.ok(androidBuildOwnerReason(h.state));
+  h.emitCatalog(catalogStatus({ statusRevision: 2, ...identity, availability: 'cleanup-unknown', phase: 'unknown', reason: 'cleanup-unknown' }));
+  assert.ok(h.state.nativeBlocked);
+  h.controller.beginConnection();
+  assert.equal(h.catalogSubscriptions[0].closed, false);
+  assert.equal(h.subscriptions[0].closed, false);
+  const cancelling = h.catalogCalls.at(-1);
+  assert.equal(cancelling.kind, 'catalog-cancel'); assert.deepEqual(cancelling.input, { schemaVersion: 1, ...identity });
+  call.reject({ code: 'lost_reply' }); await refreshing;
+  h.replyCatalog(cancelling, catalogStatus({ statusRevision: 2, ...identity, availability: 'cleanup-unknown', phase: 'unknown', reason: 'cleanup-unknown' }));
+  await flush(); assert.ok(h.controller.catalogActionReason()); assert.ok(h.state.nativeBlocked);
+});
+
+test('a Mac result from another tool selection cannot become the reviewed build result', async (t) => {
+  const h = harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }) }), op = await reviewed(h);
+  const started = start(h, op);
+  h.reply(started.call, status(2, { ...op, phase: 'starting', intentUsable: false }));
+  await started.done;
+  const result = completed(op);
+  result.result.schemaVersion = 2; result.result.toolchainProfile = 'android-registered-macos-arm64-v1';
+  result.result.toolchainSelection = clone(TOOL_B);
+  h.emit(status(3, result));
+  assert.equal(h.state.integrityFailed, true);
+  assert.equal(h.state.status.operation.result, null);
 });

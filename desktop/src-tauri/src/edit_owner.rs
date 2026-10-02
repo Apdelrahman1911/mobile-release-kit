@@ -15,7 +15,7 @@ use {std::process::Stdio, tokio::process::Command};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots, GitHubWorkflowRuntimeSlots,
     MetadataTextRuntimeSlots, ReleaseVersionRuntimeSlots};
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::MetadataImagesRuntimeSlots;
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
@@ -101,7 +101,7 @@ enum InstalledEditSlots {
     MetadataText(MetadataTextRuntimeSlots),
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     ReleaseVersion(ReleaseVersionRuntimeSlots),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     MetadataImages(MetadataImagesRuntimeSlots),
 }
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -117,7 +117,7 @@ impl InstalledEditSlots {
             EditDomain::MetadataText => Some(Self::MetadataText(MetadataTextRuntimeSlots::new())),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             EditDomain::ReleaseVersion => Some(Self::ReleaseVersion(ReleaseVersionRuntimeSlots::new())),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             EditDomain::MetadataImages => Some(Self::MetadataImages(MetadataImagesRuntimeSlots::new())),
             _ => None,
         }
@@ -129,24 +129,80 @@ impl InstalledEditSlots {
         Self::MetadataText(_) => EditDomain::MetadataText,
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Self::ReleaseVersion(_) => EditDomain::ReleaseVersion,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Self::MetadataImages(_) => EditDomain::MetadataImages,
     } }
     fn require_domain(&self, domain: EditDomain) -> Result<(), BridgeError> {
         if self.domain() == domain { Ok(()) } else { Err(edit_unknown()) }
     }
     fn inspect_once(&mut self, domain: EditDomain, runtime: &RuntimeConfig,
-        end: Instant, stop: &watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        end: Instant, stop: &watch::Receiver<bool>,
+        _publish: &mut dyn FnMut(Option<(crate::installed_runtime::AdmissionFailure, Instant)>)) -> Result<VerifiedRuntime, BridgeError> {
         self.require_domain(domain)?;
         match self {
-            Self::Configuration(slots) => runtime.resolve_configuration_installed(slots, end, stop),
-            Self::GitHubWorkflows(slots) => runtime.resolve_github_workflow_installed(slots, end, stop),
+            Self::Configuration(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let armed = slots.arm_acl_once(end, stop);
+                    _publish(slots.first_failure());
+                    armed.map_err(|_| edit_unknown())?;
+                }
+                let result = runtime.resolve_configuration_installed(slots, end, stop);
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                _publish(slots.first_failure());
+                result
+            },
+            Self::GitHubWorkflows(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let armed = slots.arm_acl_once(end, stop);
+                    _publish(slots.first_failure());
+                    armed.map_err(|_| edit_unknown())?;
+                }
+                let result = runtime.resolve_github_workflow_installed(slots, end, stop);
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                _publish(slots.first_failure());
+                result
+            },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-            Self::MetadataText(slots) => runtime.resolve_metadata_text_installed(slots, end, stop),
+            Self::MetadataText(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let armed = slots.arm_acl_once(end, stop);
+                    _publish(slots.first_failure());
+                    armed.map_err(|_| edit_unknown())?;
+                }
+                let result = runtime.resolve_metadata_text_installed(slots, end, stop);
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                _publish(slots.first_failure());
+                result
+            },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-            Self::ReleaseVersion(slots) => runtime.resolve_release_version_installed(slots, end, stop),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            Self::MetadataImages(slots) => runtime.resolve_metadata_images_installed(slots, end, stop),
+            Self::ReleaseVersion(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let armed = slots.arm_acl_once(end, stop);
+                    _publish(slots.first_failure());
+                    armed.map_err(|_| edit_unknown())?;
+                }
+                let result = runtime.resolve_release_version_installed(slots, end, stop);
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                _publish(slots.first_failure());
+                result
+            },
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            Self::MetadataImages(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let armed = slots.arm_acl_once(end, stop);
+                    _publish(slots.first_failure());
+                    armed.map_err(|_| edit_unknown())?;
+                }
+                let result = runtime.resolve_metadata_images_installed(slots, end, stop);
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                _publish(slots.first_failure());
+                result
+            },
         }
     }
     fn transfer_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
@@ -158,27 +214,53 @@ impl InstalledEditSlots {
             Self::MetadataText(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::ReleaseVersion(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::MetadataImages(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
         }
     }
-    fn prepare_once(&mut self, domain: EditDomain, end: Instant, stop: &watch::Receiver<bool>)
+    fn prepare_once(&mut self, domain: EditDomain, end: Instant, stop: &watch::Receiver<bool>,
+        _publish: &mut dyn FnMut(Option<(crate::installed_runtime::AdmissionFailure, Instant)>))
         -> Result<&VerifiedRuntime, InstalledPrepareFailure> {
         self.require_domain(domain).map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
         match self {
-            Self::Configuration(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
-                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
-            Self::GitHubWorkflows(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
-                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+            Self::Configuration(slots) => {
+                let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
+            },
+            Self::GitHubWorkflows(slots) => {
+                let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
+            },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-            Self::MetadataText(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
-                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+            Self::MetadataText(slots) => {
+                let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
+            },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-            Self::ReleaseVersion(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
-                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            Self::MetadataImages(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
-                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+            Self::ReleaseVersion(slots) => {
+                let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
+            },
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            Self::MetadataImages(slots) => {
+                let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
+            },
         }
     }
     fn claim_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
@@ -190,7 +272,7 @@ impl InstalledEditSlots {
             Self::MetadataText(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::ReleaseVersion(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::MetadataImages(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
         }
     }
@@ -202,7 +284,7 @@ impl InstalledEditSlots {
             Self::MetadataText(slots) => slots.no_child_effect(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::ReleaseVersion(slots) => slots.no_child_effect(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::MetadataImages(slots) => slots.no_child_effect(),
         }
     }
@@ -213,20 +295,46 @@ impl InstalledEditSlots {
         Self::MetadataText(slots) => slots.mark_interrupted(),
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Self::ReleaseVersion(slots) => slots.mark_interrupted(),
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Self::MetadataImages(slots) => slots.mark_interrupted(),
     } }
-    fn settle_originals(&mut self, domain: EditDomain) -> CloseOutcome {
+    fn settle_originals(&mut self, domain: EditDomain,
+        _expired: &mut dyn FnMut(Option<(crate::installed_runtime::AdmissionFailure, Instant)>) -> bool) -> CloseOutcome {
         if self.domain() != domain { self.mark_interrupted(); return CloseOutcome::Unknown; }
         match self {
-            Self::Configuration(slots) => slots.settle_originals(),
-            Self::GitHubWorkflows(slots) => slots.settle_originals(),
+            Self::Configuration(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(_expired) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
+            },
+            Self::GitHubWorkflows(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(_expired) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
+            },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-            Self::MetadataText(slots) => slots.settle_originals(),
+            Self::MetadataText(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(_expired) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
+            },
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-            Self::ReleaseVersion(slots) => slots.settle_originals(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            Self::MetadataImages(slots) => slots.settle_originals(),
+            Self::ReleaseVersion(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(_expired) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
+            },
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            Self::MetadataImages(slots) => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(_expired) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
+            },
         }
     }
     fn settled(&self, domain: EditDomain) -> bool {
@@ -237,7 +345,7 @@ impl InstalledEditSlots {
             Self::MetadataText(slots) => slots.settled(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::ReleaseVersion(slots) => slots.settled(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::MetadataImages(slots) => slots.settled(),
         }
     }
@@ -254,7 +362,7 @@ fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: b
         EditDomain::GitHubWorkflows => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
         EditDomain::MetadataText => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
         EditDomain::ReleaseVersion => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
-        EditDomain::MetadataImages => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
+        EditDomain::MetadataImages => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
     } { EditAvailability::UnsupportedPlatform }
     else if !domain_qualified || !document_live { EditAvailability::RuntimeUnqualified }
     else { EditAvailability::Available }
@@ -491,6 +599,8 @@ struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Ch
 impl Default for Startup { fn default() -> Self { Self { attempted: false, returned: false, failed: false, child: None } } }
 struct Session {
     domain: EditDomain, registration: Option<WorkflowRegistration>,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture_workflow: Option<Arc<WorkflowFixturePermit>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -520,6 +630,32 @@ struct Session {
     error: Arc<AsyncMutex<Pipe<ChildStderr>>>, driver: AsyncMutex<Option<JoinHandle<()>>>,
     watchdog: AsyncMutex<Option<JoinHandle<()>>>, manager: AsyncMutex<Option<JoinHandle<()>>>,
     observer: AsyncMutex<Option<JoinHandle<()>>>,
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Session {
+    fn observe_native_failure(&self, first: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) {
+        use crate::installed_runtime::AdmissionFailure;
+        let Some((failure, at)) = first else { return; };
+        let reason = match failure { AdmissionFailure::Deadline => Reason::ActiveTimeout,
+            AdmissionFailure::Unknown => Reason::CleanupUnknown, _ => Reason::RuntimeUnavailable };
+        match self.native_failure.lock() {
+            Ok(mut first) => { if first.is_none_or(|(_, prior)| at < prior) { *first = Some((reason, at)); } },
+            Err(_) => { self.resource_unknown.store(true, Ordering::SeqCst); },
+        }
+        if failure == AdmissionFailure::Unknown { self.resource_unknown.store(true, Ordering::SeqCst); }
+        self.stop.send_replace(true); self.wake.notify_waiters();
+    }
+    fn native_cleanup_expired(&self, original_end: Instant,
+        first: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) -> bool {
+        self.observe_native_failure(first);
+        let end = match self.native_failure.lock() {
+            Ok(first) => first.as_ref().map_or(original_end, |(_, at)| original_end.min(*at + FINALIZATION)),
+            Err(_) => { self.resource_unknown.store(true, Ordering::SeqCst); return true; },
+        };
+        let expired = Instant::now() >= end;
+        if expired { self.resource_unknown.store(true, Ordering::SeqCst); self.wake.notify_waiters(); }
+        expired
+    }
 }
 #[derive(Default)]
 struct Resources {
@@ -1023,8 +1159,9 @@ impl Inner {
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
             target_os = "macos", target_arch = "aarch64"))]
         installed_macos_observation::retire(&a.session);
-        if a.cleanup_start.is_none() { a.cleanup_start = Some(at); }
-        if a.projection.native_reason == Reason::None && reason != Reason::None { a.projection.native_reason = reason; }
+        let earlier = a.cleanup_start.is_none_or(|first| at < first);
+        if earlier { a.cleanup_start = Some(at); }
+        if (earlier || a.projection.native_reason == Reason::None) && reason != Reason::None { a.projection.native_reason = reason; }
         if !a.unknown { a.projection.phase = Phase::Finalizing; }
         a.phase_end = None;
         a.session.stop.send_replace(true); // Writer EOF is the sole cooperative STOP.
@@ -1056,7 +1193,8 @@ impl Inner {
         self.bump(&mut r);
     }
     fn deadline(&self, id: &str) -> Option<Instant> {
-        let r = self.lock();
+        let mut r = self.lock();
+        self.expire_locked(&mut r, id, Instant::now());
         let a = r.active.as_ref().filter(|a| a.session.id == id)?;
         if a.cleanup_start.is_some() { return None; }
         phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted)
@@ -1078,10 +1216,25 @@ impl Inner {
         }.clear(now)
     }
     fn expire_locked(&self, r: &mut Registry, id: &str, now: Instant) {
+        // Evaluate the original phase endpoint before a new native F can clear
+        // phase_end. Both events use their actual time; neither extends cleanup.
         let expired = r.active.as_ref().filter(|a| a.session.id == id && a.cleanup_start.is_none()).and_then(|a| {
             expired_phase(a.review_end, a.phase_end, a.projection.apply_submitted, now)
         });
         if let Some((end, reason)) = expired { self.trigger_locked(r, id, reason, end); }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let first = r.active.as_ref().filter(|a| a.session.id == id).and_then(|a| {
+                let first = match a.session.native_failure.lock() {
+                    Ok(first) => *first,
+                    Err(_) => { a.session.resource_unknown.store(true, Ordering::SeqCst); None },
+                };
+                first.filter(|(_, at)| a.cleanup_start.is_none_or(|prior| *at < prior)
+                    || a.projection.native_reason == Reason::None)
+            });
+            // The mailbox is persistent DATA, not a repeating state transition.
+            if let Some((reason, at)) = first { self.trigger_locked(r, id, reason, at); }
+        }
     }
     fn expire(&self, id: &str, now: Instant) {
         let mut r = self.lock();
@@ -1387,6 +1540,8 @@ impl EditOwner {
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
         let session = Arc::new(Session { domain, registration, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture_workflow,
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2271,7 +2426,10 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
         };
         let bootstrap_argument = installed_bootstrap_argument(slots.domain());
         let stop = owner.stop.subscribe();
-        let selected = match slots.prepare_once(owner.domain, end, &stop) {
+        let selected = match slots.prepare_once(owner.domain, end, &stop, &mut |_first| {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            owner.observe_native_failure(_first);
+        }) {
             Ok(selected) => selected,
             Err(InstalledPrepareFailure::CapabilityUnknown) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
             Err(InstalledPrepareFailure::Unavailable) => { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; },
@@ -2469,6 +2627,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let domain = owner.domain;
     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
     let schedule = owner.fixture_schedule.clone();
+    let inspection_owner = owner.clone();
     let (release, enter) = oneshot::channel();
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
@@ -2476,7 +2635,12 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let result = if let Some(native) = installed {
             match native.lock() {
-                Ok(mut originals) => originals.inspect_once(domain, &runtime, endpoint, &stop),
+                Ok(mut originals) => originals.inspect_once(domain, &runtime, endpoint, &stop, &mut |_first| {
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.observe_native_failure(_first);
+                    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                    let _ = &inspection_owner;
+                }),
                 Err(_) => Err(edit_unknown()),
             }
         } else { runtime.resolve_edit(endpoint) };
@@ -2604,15 +2768,31 @@ async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, ow
                 // an unreturned borrower/consumer or create a replacement cleanup.
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
             }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let cleanup_end = {
+                let mut r = inner.lock(); inner.expire_locked(&mut r, &owner.id, Instant::now());
+                let original = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, owner));
+                let Some(end) = original.and_then(|a| a.cleanup_start.map(|start| start + FINALIZATION)) else {
+                    drop(r); owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+                };
+                end
+            };
+            let closing_owner = owner.clone();
             let closing = native.clone();
             let domain = owner.domain;
             let (release, enter) = oneshot::channel();
             book.installed_settlement_started = true;
             book.installed_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                let mut expired = |_first| {
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    { closing_owner.native_cleanup_expired(cleanup_end, _first) }
+                    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                    { let _ = &closing_owner; false }
+                };
                 match closing.lock() {
-                    Ok(mut slots) => slots.settle_originals(domain),
-                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals(domain) },
+                    Ok(mut slots) => slots.settle_originals(domain, &mut expired),
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals(domain, &mut expired) },
                 }
             }));
             let _ = release.send(()); // Original consuming close worker registered before ANY close.
@@ -3055,6 +3235,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         return;
     }
     let mut r = inner.lock();
+    inner.expire_locked(&mut r, &owner.id, Instant::now());
     let Some(a) = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, &owner)) else { guard.completed = true; return; };
     let expired = a.cleanup_start.is_some_and(|start| Instant::now() >= start + FINALIZATION);
     if expired && !a.unknown { drop(r); inner.unknown(&owner.id); r = inner.lock(); }
@@ -3110,6 +3291,11 @@ mod hosted_tests;
 // must invoke this contract rather than count merely compiled #[test] bodies.
 #[cfg(test)]
 pub(crate) fn assert_installed_configuration_owner_contract() {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        assert!(crate::installed_runtime::common_acl_data_check());
+        assert!(crate::supervisor::common_acl_owner_data_check());
+    }
     installed_configuration_data_tests::contract();
 }
 
@@ -3121,6 +3307,12 @@ pub(crate) fn assert_installed_workflow_owner_contract() {
 #[cfg(test)]
 pub(crate) fn assert_installed_metadata_owner_contract() {
     installed_configuration_data_tests::metadata_contract();
+}
+
+#[cfg(test)]
+pub(crate) fn assert_installed_images_owner_contract() {
+    installed_configuration_data_tests::images_contract();
+    workflow_domain_tests::image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains();
 }
 
 #[cfg(test)]
@@ -3175,10 +3367,18 @@ mod installed_configuration_data_tests {
         version_adapter_cannot_borrow_or_close_another_domain();
     }
 
+    pub(super) fn images_contract() {
+        saved_text_version_capability_requires_supported_platform_profile_and_document();
+        registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration();
+        installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        images_adapter_cannot_borrow_or_close_another_domain();
+    }
+
     #[test]
     fn saved_text_version_capability_requires_supported_platform_profile_and_document() {
         let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")));
-        let domains = [EditDomain::MetadataText, EditDomain::ReleaseVersion];
+        let domains = [EditDomain::MetadataText, EditDomain::ReleaseVersion, EditDomain::MetadataImages];
         for domain in domains {
             assert_eq!(capability_reason(domain, None, false, false, true, true),
                 if supported { EditAvailability::Available } else { EditAvailability::UnsupportedPlatform });
@@ -3199,6 +3399,8 @@ mod installed_configuration_data_tests {
         }
         assert!(!NATIVE_EDIT_QUALIFIED && !NATIVE_WORKFLOW_EDIT_QUALIFIED && !NATIVE_METADATA_IMAGES_EDIT_QUALIFIED);
     }
+    #[test]
+    fn installed_images_owner_contract_is_inert() { assert_installed_images_owner_contract(); }
     #[test]
     fn installed_version_owner_contract_is_inert() { assert_installed_version_owner_contract(); }
     #[test]
@@ -3254,20 +3456,20 @@ mod installed_configuration_data_tests {
         if let Some(mut original) = original {
             assert_eq!(original.domain(), EditDomain::GitHubWorkflows);
             assert!(original.no_child_effect(EditDomain::GitHubWorkflows));
-            assert_eq!(original.settle_originals(EditDomain::GitHubWorkflows), CloseOutcome::Settled);
+            assert_eq!(original.settle_originals(EditDomain::GitHubWorkflows, &mut |_| false), CloseOutcome::Settled);
             assert!(original.settled(EditDomain::GitHubWorkflows)); // EMPTY original only.
         }
         for wrong in [EditDomain::Configuration, EditDomain::MetadataText, EditDomain::ReleaseVersion, EditDomain::MetadataImages] {
             let mut slots = InstalledEditSlots::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new());
             assert_eq!(slots.domain(), EditDomain::GitHubWorkflows);
-            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
-            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
             assert!(slots.no_child_effect(EditDomain::GitHubWorkflows)); // Only the original EMPTY slots.
-            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(wrong, &mut |_| false), CloseOutcome::Unknown);
             assert!(!slots.settled(wrong) && !slots.settled(EditDomain::GitHubWorkflows));
-            assert_eq!(slots.settle_originals(EditDomain::GitHubWorkflows), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(EditDomain::GitHubWorkflows, &mut |_| false), CloseOutcome::Unknown);
             assert!(!slots.settled(EditDomain::GitHubWorkflows)); // Wrong-domain closer tainted the original.
         }
         for mut peer in [
@@ -3281,21 +3483,21 @@ mod installed_configuration_data_tests {
         ] {
             let original = peer.domain();
             let wrong = EditDomain::GitHubWorkflows;
-            assert!(peer.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(peer.inspect_once(wrong, &runtime, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(peer.transfer_once(wrong).is_err() && peer.claim_once(wrong).is_err());
-            assert!(peer.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(peer.prepare_once(wrong, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(!peer.no_child_effect(wrong) && !peer.settled(wrong));
             assert!(peer.no_child_effect(original));
-            assert_eq!(peer.settle_originals(wrong), CloseOutcome::Unknown);
-            assert_eq!(peer.settle_originals(original), CloseOutcome::Unknown);
+            assert_eq!(peer.settle_originals(wrong, &mut |_| false), CloseOutcome::Unknown);
+            assert_eq!(peer.settle_originals(original, &mut |_| false), CloseOutcome::Unknown);
             assert!(!peer.settled(original));
         }
         let mut interrupted = InstalledEditSlots::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new());
         interrupted.mark_interrupted();
         assert!(interrupted.transfer_once(EditDomain::GitHubWorkflows).is_err());
-        assert!(interrupted.prepare_once(EditDomain::GitHubWorkflows, Instant::now(), &stop).is_err());
+        assert!(interrupted.prepare_once(EditDomain::GitHubWorkflows, Instant::now(), &stop, &mut |_| {}).is_err());
         assert!(interrupted.claim_once(EditDomain::GitHubWorkflows).is_err());
-        assert_eq!(interrupted.settle_originals(EditDomain::GitHubWorkflows), CloseOutcome::Unknown);
+        assert_eq!(interrupted.settle_originals(EditDomain::GitHubWorkflows, &mut |_| false), CloseOutcome::Unknown);
         assert!(!interrupted.settled(EditDomain::GitHubWorkflows));
     }
 
@@ -3314,19 +3516,19 @@ mod installed_configuration_data_tests {
         for wrong in [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::ReleaseVersion, EditDomain::MetadataImages] {
             let mut slots = InstalledEditSlots::MetadataText(MetadataTextRuntimeSlots::new());
             assert_eq!(slots.domain(), EditDomain::MetadataText);
-            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
-            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
             assert!(slots.no_child_effect(EditDomain::MetadataText)); // Only the original EMPTY slots.
-            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(wrong, &mut |_| false), CloseOutcome::Unknown);
             assert!(!slots.settled(wrong) && !slots.settled(EditDomain::MetadataText));
         }
         let mut config = InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new());
-        assert!(config.inspect_once(EditDomain::MetadataText, &runtime, Instant::now(), &stop).is_err());
+        assert!(config.inspect_once(EditDomain::MetadataText, &runtime, Instant::now(), &stop, &mut |_| {}).is_err());
         assert!(config.transfer_once(EditDomain::MetadataText).is_err() && config.claim_once(EditDomain::MetadataText).is_err());
-        assert!(config.prepare_once(EditDomain::MetadataText, Instant::now(), &stop).is_err());
-        assert_eq!(config.settle_originals(EditDomain::MetadataText), CloseOutcome::Unknown);
+        assert!(config.prepare_once(EditDomain::MetadataText, Instant::now(), &stop, &mut |_| {}).is_err());
+        assert_eq!(config.settle_originals(EditDomain::MetadataText, &mut |_| false), CloseOutcome::Unknown);
         assert!(!config.settled(EditDomain::Configuration));
     }
 
@@ -3337,12 +3539,12 @@ mod installed_configuration_data_tests {
         for wrong in [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText, EditDomain::MetadataImages] {
             let mut slots = InstalledEditSlots::ReleaseVersion(ReleaseVersionRuntimeSlots::new());
             assert_eq!(slots.domain(), EditDomain::ReleaseVersion);
-            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
-            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
             assert!(slots.no_child_effect(EditDomain::ReleaseVersion)); // Only the original EMPTY slots.
-            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(wrong, &mut |_| false), CloseOutcome::Unknown);
             assert!(!slots.settled(wrong) && !slots.settled(EditDomain::ReleaseVersion));
         }
         for mut slots in [
@@ -3351,12 +3553,44 @@ mod installed_configuration_data_tests {
             InstalledEditSlots::MetadataText(MetadataTextRuntimeSlots::new()),
         ] {
             let original = slots.domain();
-            assert!(slots.inspect_once(EditDomain::ReleaseVersion, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.inspect_once(EditDomain::ReleaseVersion, &runtime, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(slots.transfer_once(EditDomain::ReleaseVersion).is_err() && slots.claim_once(EditDomain::ReleaseVersion).is_err());
-            assert!(slots.prepare_once(EditDomain::ReleaseVersion, Instant::now(), &stop).is_err());
+            assert!(slots.prepare_once(EditDomain::ReleaseVersion, Instant::now(), &stop, &mut |_| {}).is_err());
             assert!(!slots.no_child_effect(EditDomain::ReleaseVersion) && !slots.settled(EditDomain::ReleaseVersion));
             assert!(slots.no_child_effect(original));
-            assert_eq!(slots.settle_originals(EditDomain::ReleaseVersion), CloseOutcome::Unknown);
+            assert_eq!(slots.settle_originals(EditDomain::ReleaseVersion, &mut |_| false), CloseOutcome::Unknown);
+            assert!(!slots.settled(original));
+        }
+    }
+
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    fn images_adapter_cannot_borrow_or_close_another_domain() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-images-domain-must-not-be-opened"));
+        let (_sender, stop) = watch::channel(false);
+        for wrong in [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText, EditDomain::ReleaseVersion] {
+            let mut slots = InstalledEditSlots::MetadataImages(MetadataImagesRuntimeSlots::new());
+            assert_eq!(slots.domain(), EditDomain::MetadataImages);
+            assert!(slots.inspect_once(wrong, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.transfer_once(wrong).is_err() && slots.claim_once(wrong).is_err());
+            assert!(slots.prepare_once(wrong, Instant::now(), &stop).is_err());
+            assert!(!slots.no_child_effect(wrong) && !slots.settled(wrong));
+            assert!(slots.no_child_effect(EditDomain::MetadataImages)); // Only the original EMPTY slots.
+            assert_eq!(slots.settle_originals(wrong), CloseOutcome::Unknown);
+            assert!(!slots.settled(wrong) && !slots.settled(EditDomain::MetadataImages));
+        }
+        for mut slots in [
+            InstalledEditSlots::Configuration(ConfigurationRuntimeSlots::new()),
+            InstalledEditSlots::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new()),
+            InstalledEditSlots::MetadataText(MetadataTextRuntimeSlots::new()),
+            InstalledEditSlots::ReleaseVersion(ReleaseVersionRuntimeSlots::new()),
+        ] {
+            let original = slots.domain();
+            assert!(slots.inspect_once(EditDomain::MetadataImages, &runtime, Instant::now(), &stop).is_err());
+            assert!(slots.transfer_once(EditDomain::MetadataImages).is_err() && slots.claim_once(EditDomain::MetadataImages).is_err());
+            assert!(slots.prepare_once(EditDomain::MetadataImages, Instant::now(), &stop).is_err());
+            assert!(!slots.no_child_effect(EditDomain::MetadataImages) && !slots.settled(EditDomain::MetadataImages));
+            assert!(slots.no_child_effect(original));
+            assert_eq!(slots.settle_originals(EditDomain::MetadataImages), CloseOutcome::Unknown);
             assert!(!slots.settled(original));
         }
     }
@@ -3814,7 +4048,7 @@ mod workflow_domain_tests {
         }
     }
     #[test]
-    fn image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains() {
+    pub(super) fn image_private_frame_limits_and_closed_profile_do_not_expand_other_edit_domains() {
         assert!(!NATIVE_METADATA_IMAGES_EDIT_QUALIFIED);
         for fixture in [false,true] { assert!(!qualified(EditDomain::MetadataImages,fixture)); }
         for sent in 0..3 {
@@ -3824,10 +4058,12 @@ mod workflow_domain_tests {
             }
         }
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-image-domain-only"));
-        assert!(!runtime.metadata_images_edit_profile_available());
-        assert!(!installed_edit_selected(EditDomain::MetadataImages,&runtime));
+        let selected = runtime.metadata_images_edit_profile_available();
+        assert_eq!(installed_edit_selected(EditDomain::MetadataImages,&runtime), selected);
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        assert!(InstalledEditSlots::new(EditDomain::MetadataImages,&runtime).is_none());
+        assert!(!selected); // Linux's independent image source binding stays closed.
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        assert_eq!(InstalledEditSlots::new(EditDomain::MetadataImages,&runtime).is_some(), selected);
         assert_eq!(installed_bootstrap_argument(EditDomain::MetadataImages),Some("metadata_images"));
         assert!(request_bytes(EditDomain::MetadataImages,SESSION,0,"open",json!({"root":"/inert/project"})).is_err());
     }

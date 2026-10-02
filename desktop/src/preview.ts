@@ -1,6 +1,8 @@
+import { installationError } from './installation.ts';
 import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
+import { androidCatalogError } from './androidToolchainCatalogProtocol.ts';
 import { iosArchiveError } from './iosArchiveProtocol.ts';
 import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
@@ -86,6 +88,7 @@ const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextErr
 const recoveryUnavailable = (): Promise<never> => Promise.reject(projectRecoveryError({ code: 'project_recovery_unavailable' }));
 const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
 const androidUnavailable = (): Promise<never> => Promise.reject(androidBuildError({ code: 'android_build_unavailable' }));
+const androidCatalogUnavailable = (): Promise<never> => Promise.reject(androidCatalogError({ code: 'android_catalog_unavailable' }));
 const iosUnavailable = (): Promise<never> => Promise.reject(iosArchiveError({ code: 'ios_archive_unavailable' }));
 const diagnosticsUnavailable = (): Promise<never> => Promise.reject(environmentDiagnosticsError({ code: 'environment_diagnostics_unavailable' }));
 
@@ -133,8 +136,10 @@ export const previewApi: DesktopApi = {
     appName: 'Mobile Release Kit', appVersion: 'Example only',
     runtime: { state: 'unavailable', mode: 'unavailable', reason: 'Browser preview has no native runtime or core validation.' },
     capabilities: null,
+    installation: null,
     projectPathSelection: { available: false, reason: 'Browser preview has no native project-path picker.' },
   }),
+  revealInstallation: async () => { throw installationError({ code: 'installation_reveal_unavailable' }); },
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
   // No invented relative path or successful native selection in design mode.
   chooseProjectPath: async () => { throw projectPathError({ code: 'project_path_unavailable' }); },
@@ -175,6 +180,11 @@ export const previewApi: DesktopApi = {
   projectRecoveryStatus: recoveryUnavailable,
   cancelProjectRecovery: recoveryUnavailable,
   subscribeProjectRecovery: recoveryUnavailable,
+  androidToolchainCatalogStatus: androidCatalogUnavailable,
+  refreshAndroidToolchainCatalog: androidCatalogUnavailable,
+  selectAndroidToolchain: androidCatalogUnavailable,
+  cancelAndroidToolchainCatalog: androidCatalogUnavailable,
+  subscribeAndroidToolchainCatalog: androidCatalogUnavailable,
   prepareAndroidBuild: androidUnavailable,
   startAndroidBuild: androidUnavailable,
   androidBuildStatus: androidUnavailable,

@@ -1,3 +1,4 @@
+import { installationError, parseInstallationReveal } from './installation.ts';
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
 import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
@@ -35,6 +36,11 @@ import type { OfflinePreflightStatus } from './offlinePreflightTypes.ts';
 import { ANDROID_BUILD_EVENT, encodeAndroidBuildRequest, androidBuildError, parseAndroidBuildStatus } from './androidBuildProtocol.ts';
 import type { AndroidBuildCommand } from './androidBuildProtocol.ts';
 import type { AndroidBuildStatus } from './androidBuildTypes.ts';
+import { ANDROID_CATALOG_EVENT, androidCatalogError, encodeAndroidCatalogRequest, parseAndroidToolchainCatalogStatus } from './androidToolchainCatalogProtocol.ts';
+import type { AndroidCatalogCommand } from './androidToolchainCatalogProtocol.ts';
+import type { AndroidToolchainCatalogStatus } from './androidToolchainCatalogTypes.ts';
+import { ANDROID_TOOL_SOURCES_EVENT, androidToolSourcesError, encodeAndroidToolSourcesRequest, parseAndroidToolSourcesStatus } from './androidToolSources.ts';
+import type { AndroidToolSourcesCommand, AndroidToolSourcesStatus } from './androidToolSources.ts';
 import { IOS_ARCHIVE_EVENT, encodeIOSArchiveRequest, iosArchiveError, parseIOSArchiveStatus } from './iosArchiveProtocol.ts';
 import type { IOSArchiveCommand } from './iosArchiveProtocol.ts';
 import type { IOSArchiveStatus } from './iosArchiveTypes.ts';
@@ -44,7 +50,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -107,6 +113,26 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'android_build_protocol' };
       return status;
     } catch (error) { throw androidBuildError(error); }
+  };
+  const androidCatalogCall = async (command: AndroidCatalogCommand, value: unknown): Promise<AndroidToolchainCatalogStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'android_catalog_unavailable' };
+      const body = encodeAndroidCatalogRequest(command, value);
+      if (!body) throw { code: 'android_catalog_invalid' };
+      const status = parseAndroidToolchainCatalogStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'android_catalog_unconfirmed' };
+      return status;
+    } catch (error) { throw androidCatalogError(error); }
+  };
+  const androidSourcesCall = async (command: AndroidToolSourcesCommand, value: unknown): Promise<AndroidToolSourcesStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'android_sources_unavailable' };
+      const body = encodeAndroidToolSourcesRequest(command, value);
+      if (!body) throw { code: 'android_sources_invalid' };
+      const status = parseAndroidToolSourcesStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'android_sources_unconfirmed' };
+      return status;
+    } catch (error) { throw androidToolSourcesError(error); }
   };
   const iosCall = async (command: IOSArchiveCommand, value: unknown): Promise<IOSArchiveStatus> => {
     try {
@@ -222,6 +248,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
   return {
     mode,
     appInfo: () => call<AppInfo>('app_info'),
+    revealInstallation: async () => {
+      try {
+        if (mode !== 'native') throw { code: 'installation_reveal_unavailable' };
+        // No caller arguments, generic opener, path override or retry.
+        const result = parseInstallationReveal(await invoke<unknown>('reveal_installation', {}));
+        if (!result) throw { code: 'installation_reveal_unconfirmed' };
+        return result;
+      } catch (error) { throw installationError(error); }
+    },
     chooseProject: () => call<ProjectReference | null>('choose_project'),
     chooseProjectPath: async (input) => {
       try {
@@ -286,6 +321,25 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'project_recovery_unavailable' };
         return await listen(PROJECT_RECOVERY_EVENT, (value) => onStatus(parseProjectRecoveryStatus(value)));
       } catch (error) { throw projectRecoveryError(error); }
+    },
+    androidToolSourcesStatus: () => androidSourcesCall('android_tool_sources_status', { schemaVersion: 1 }),
+    chooseAndroidToolSource: (request) => androidSourcesCall('choose_android_tool_source', request),
+    cancelAndroidToolSource: (request) => androidSourcesCall('cancel_android_tool_source', request),
+    subscribeAndroidToolSources: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'android_sources_unavailable' };
+        return await listen(ANDROID_TOOL_SOURCES_EVENT, (value) => onStatus(parseAndroidToolSourcesStatus(value)));
+      } catch (error) { throw androidToolSourcesError(error); }
+    },
+    androidToolchainCatalogStatus: () => androidCatalogCall('android_toolchain_catalog_status', { schemaVersion: 1 }),
+    refreshAndroidToolchainCatalog: () => androidCatalogCall('refresh_android_toolchain_catalog', { schemaVersion: 1 }),
+    selectAndroidToolchain: (request) => androidCatalogCall('select_android_toolchain', request),
+    cancelAndroidToolchainCatalog: (request) => androidCatalogCall('cancel_android_toolchain_catalog', request),
+    subscribeAndroidToolchainCatalog: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'android_catalog_unavailable' };
+        return await listen(ANDROID_CATALOG_EVENT, (value) => onStatus(parseAndroidToolchainCatalogStatus(value)));
+      } catch (error) { throw androidCatalogError(error); }
     },
     prepareAndroidBuild: (request) => androidCall('prepare_android_build', request),
     startAndroidBuild: (request) => androidCall('start_android_build', request),

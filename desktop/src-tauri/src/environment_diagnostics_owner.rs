@@ -8,12 +8,14 @@ use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStdin, ChildStdout, ChildStderr},
     sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch}, task::JoinHandle};
 #[cfg(any(all(unix, debug_assertions, feature = "development-runtime"),
-    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use {std::process::Stdio, tokio::process::Command};
 use crate::{environment_diagnostics_protocol::{self as wire, Availability, Capability, Context, Finality, Frame,
     Outcome, Phase, Profile, Projection, Reason, Start, Status}, error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, EnvironmentDiagnosticsRuntimeSlots};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::installed_runtime::AdmissionFailure;
 
 // Evidence limits, not ordinary selection switches. The original owner/live
 // document and fixed compiled runtime select the normal route below; neither
@@ -65,6 +67,10 @@ struct Session {
     // Immutable admission route, never new-work permission. Losing the live
     // document must not erase this original's runtime settlement obligation.
     installed_expected: bool,
+    // Native callbacks publish DATA here, never through Registry while holding
+    // the original Book. Only this Session's own absolute clocks apply.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    native_failure: Mutex<Option<(Reason, Instant)>>,
     registration: u32, project: PathBuf, draft: Mutex<Option<Value>>, request: AsyncMutex<Option<Vec<u8>>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
     output_bytes: AtomicUsize, resource_unknown: AtomicBool,
@@ -82,6 +88,44 @@ struct Session {
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     fixture: Option<Arc<hosted_tests::Permit>>,
 }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Session {
+    fn publish_native_failure(&self, first: Option<(AdmissionFailure, Instant)>) {
+        let Some((failure, at)) = first else { return; };
+        let reason = match failure {
+            AdmissionFailure::Deadline => Reason::TimedOut,
+            AdmissionFailure::Unknown => Reason::CleanupUnknown,
+            _ => Reason::RuntimeUnavailable,
+        };
+        let mut unknown = failure == AdmissionFailure::Unknown;
+        let changed = match self.native_failure.lock() {
+            Ok(mut first) => {
+                if first.is_none_or(|(_, before)| at < before) { *first = Some((reason, at)); true } else { false }
+            },
+            Err(_) => { unknown = true; false },
+        };
+        let became_unknown = unknown && !self.resource_unknown.swap(true, Ordering::SeqCst);
+        let first_signal = self.stop.send_if_modified(|stopped| {
+            if *stopped { false } else { *stopped = true; true }
+        });
+        if changed || became_unknown || first_signal { self.wake.notify_waiters(); }
+    }
+    fn native_cleanup_decision(now: Instant, finality: Instant, publication_poisoned: bool) -> (bool, bool) {
+        let expired = now >= finality;
+        (expired, publication_poisoned || expired)
+    }
+    fn native_cleanup_due(&self, now: Instant) -> bool {
+        // Check build tools has admission+10s total, NOT Saved F+10 or a
+        // Supervisor endpoint. Poison latches Unknown, not early close denial.
+        let (expired, unknown) = Self::native_cleanup_decision(now, self.clocks.finality, self.native_failure.is_poisoned());
+        if unknown && !self.resource_unknown.swap(true, Ordering::SeqCst) { self.wake.notify_waiters(); }
+        expired
+    }
+    fn native_cleanup_expired(&self, first: Option<(AdmissionFailure, Instant)>) -> bool {
+        self.publish_native_failure(first);
+        self.native_cleanup_due(Instant::now())
+    }
+}
 #[derive(Default)]
 struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Child> }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,11 +140,11 @@ struct Resources {
     inspection_started: bool, inspection_error: Option<tokio::task::JoinError>,
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, acquisition_failed: bool,
     acquisition_started: bool, acquisition_error: Option<tokio::task::JoinError>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     installed: Option<Arc<Mutex<EnvironmentDiagnosticsRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     installed_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     installed_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
     installed_started: bool, installed_joined: bool, installed_failed: bool,
     child: Option<Child>, waited: Option<ExitStatus>, wait_failed: bool,
@@ -219,12 +263,14 @@ impl EnvironmentDiagnosticsOwner {
             phase: Phase::Starting, outcome: None, finality: Finality::Pending, reason: Reason::None, result: None };
         let installed_expected = self.inner.installed_selected();
         let owner = Arc::new(Session { id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks, installed_expected,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            native_failure: Mutex::new(None),
             registration, project, draft: Mutex::new(Some(input.draft)), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(),
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
             resources: AsyncMutex::new(Resources { frames: Some(receiver),
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 installed: installed_expected.then(|| Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new()))),
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
@@ -446,8 +492,12 @@ impl Inner {
         // infer a hidden child failure time or append another cleanup budget.
         let at = at.min(owner.clocks.work).max(owner.clocks.admitted);
         let mut changed = false;
-        if active.first_stop.is_none() { active.first_stop = Some(at); changed = true; }
-        if active.projection.reason == Reason::None && reason != Reason::None { active.projection.reason = reason; changed = true; }
+        let earlier = active.first_stop.is_none()
+            || cfg!(all(target_os = "macos", target_arch = "aarch64")) && active.first_stop.is_some_and(|first| at < first);
+        if earlier { active.first_stop = Some(at); changed = true; }
+        if (active.projection.reason == Reason::None || cfg!(all(target_os = "macos", target_arch = "aarch64")) && earlier) && reason != Reason::None {
+            active.projection.reason = reason; changed = true;
+        }
         if !active.unknown && active.projection.phase != Phase::Stopping { active.projection.phase = Phase::Stopping; changed = true; }
         if active.projection.reason != Reason::None { set_failure_outcome(&mut active.projection); }
         // endpoint() may revisit a retained Unknown indefinitely. Re-broadcasting
@@ -470,12 +520,23 @@ impl Inner {
         }
     }
     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if !original_session(r, owner) { return; }
         let Some(a) = r.active.as_ref().filter(|a| a.owner.id == owner.id) else { return; };
         let work_due = now >= owner.clocks.work && !a.work_expired;
         let finality_due = now >= owner.clocks.finality && !a.unknown;
         if work_due {
             if let Some(a) = r.active.as_mut() { a.work_expired = true; }
             self.stop_locked(r, owner, Reason::TimedOut, owner.clocks.work);
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            // Preserve a real earlier F even if its publication is observed
+            // after W. A later native return cannot displace the W timeout.
+            let first = match owner.native_failure.lock() {
+                Ok(first) => *first, Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); None },
+            };
+            if let Some((reason, at)) = first { self.stop_locked(r, owner, reason, at); }
         }
         if finality_due || self.poisoned.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { self.unknown_locked(r, owner); }
     }
@@ -676,7 +737,7 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn installed_worker_lost(book: &Resources) {
     // Only after the actual original Ready JoinError; a deadline is not return.
     if let Some(native) = &book.installed {
@@ -688,7 +749,7 @@ fn original_worker_returned(started: bool, joined: bool, failed: bool, handle: b
     else if failed { !joined && handle && error }
     else { joined && !handle && !error }
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn installed_consumers_returned(book: &Resources, startup: &Startup, no_child_effect: bool) -> bool {
     if !original_worker_returned(book.inspection_started, book.inspection_joined, book.inspection_failed,
             book.inspection.is_some(), book.inspection_error.is_some())
@@ -715,7 +776,7 @@ fn installed_closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_
         a.accepted && a.terminal && a.projection.result.as_ref().is_some_and(|t| t.lifetime.settled())))
 }
 fn installed_final(book: &Resources, owner: &Session) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if !owner.installed_expected {
             return book.installed.is_none() && !book.installed_started && !book.installed_joined && !book.installed_failed
@@ -725,16 +786,16 @@ fn installed_final(book: &Resources, owner: &Session) -> bool {
             && matches!(book.installed_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
             && book.installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { !owner.installed_expected && !book.installed_started && !book.installed_joined && !book.installed_failed }
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
     inner.installed_selected() && final_clock_clear(inner, r, owner, now)
         && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
         && Profile::current() == Some(owner.profile)
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn transfer_installed(book: &Resources, inner: &Inner, owner: &Session) -> Result<(), BridgeError> {
     if !book.inspection_started || !book.inspection_joined || book.inspection_failed || book.inspection.is_some()
         || book.inspection_error.is_some() || book.acquisition_started || book.acquisition_joined || book.acquisition_failed
@@ -745,19 +806,36 @@ fn transfer_installed(book: &Resources, inner: &Inner, owner: &Session) -> Resul
     if !installed_claim_clear(inner, &r, owner, now) { return Err(unavailable()); }
     slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn acquire_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<EnvironmentDiagnosticsRuntimeSlots>>) {
     if !inner.installed_selected() { inner.stop(owner, Reason::RuntimeUnavailable); return; }
     let mut slots = match native.lock() { Ok(slots) => slots, Err(_) => { inner.unknown(owner); return; } };
     let capability = match slots.capability() { Ok(capability) => capability, Err(_) => { inner.unknown(owner); return; } };
     let stop = owner.stop.subscribe();
-    let selected = match capability.prepare_once(owner.clocks.work, &stop) {
-        Ok(selected) => selected, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let prepared = capability.prepare_once_observed(owner.clocks.work, &stop, &mut |first| owner.publish_native_failure(first));
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let prepared = capability.prepare_once(owner.clocks.work, &stop);
+    let selected = match prepared {
+        Ok(selected) => selected,
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        Err(failure) => {
+            // Keep an earlier native F, or publish this real Err before Registry.
+            owner.publish_native_failure(Some((failure, Instant::now())));
+            inner.stop(owner, Reason::RuntimeUnavailable); return;
+        },
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
     };
     let mut command = Command::new(&selected.python);
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if crate::runtime::macos_installed_environment(&mut command).is_err() {
+        owner.publish_native_failure(Some((AdmissionFailure::Native, Instant::now())));
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
     let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
     let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
     if !installed_claim_clear(inner, &r, owner, now) { return; }
@@ -773,9 +851,9 @@ fn acquire_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<Environm
     }
 }
 async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = (book, inner, owner); }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         let Some(native) = book.installed.clone() else {
             if owner.installed_expected { inner.unknown(owner); }
@@ -805,16 +883,20 @@ async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<
             }); // Observer failure cannot prevent the original physical closes.
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let hold_end = owner.clocks.finality;
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let original_owner = owner.clone();
             let (release, enter) = oneshot::channel();
             book.installed_started = true;
             book.installed_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if let Some(control) = hold { let _ = control.hold_settlement(hold_end); }
-                match native.lock() {
-                    Ok(mut slots) => slots.settle_originals(),
-                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
-                }
+                let mut slots = match native.lock() { Ok(slots) => slots,
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(&mut |first| original_owner.native_cleanup_expired(first)) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
             }));
             let _ = release.send(()); // The same original closer is registered before its first close.
         }
@@ -877,23 +959,40 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
     let runtime = inner.runtime.clone(); let end = owner.clocks.work;
     let stop = owner.stop.subscribe();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let installed = book.installed.clone();
-    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))))]
     let inspection_owner = owner.clone();
     let (inspect_start, inspect_enter) = oneshot::channel();
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         inspect_enter.blocking_recv().map_err(|_| unavailable())?;
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let result = if let Some(native) = installed {
             match native.lock() {
-                Ok(mut slots) => runtime.resolve_environment_diagnostics_installed(&mut slots, end, &stop),
-                Err(_) => Err(BridgeError::cleanup_unknown()),
+                Ok(mut slots) => {
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let armed = slots.arm_acl_once(end, &stop);
+                        inspection_owner.publish_native_failure(slots.first_failure()
+                            .or_else(|| armed.as_ref().err().map(|failure| (*failure, Instant::now()))));
+                        armed.map_err(|_| unavailable())?;
+                    }
+                    let result = runtime.resolve_environment_diagnostics_installed(&mut slots, end, &stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.publish_native_failure(slots.first_failure()
+                        .or_else(|| result.as_ref().err().map(|_| (AdmissionFailure::Native, Instant::now()))));
+                    result
+                },
+                Err(_) => {
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.publish_native_failure(Some((AdmissionFailure::Unknown, Instant::now())));
+                    Err(BridgeError::cleanup_unknown())
+                },
             }
         } else { runtime.resolve_environment_diagnostics(end) };
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let result = { let _ = stop; runtime.resolve_environment_diagnostics(end) };
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -907,7 +1006,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         } },
         Err(error) => {
             book.inspection_failed = true; book.inspection_error = Some(error);
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             installed_worker_lost(&book);
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return;
         },
@@ -935,9 +1034,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     };
     match bytes { Ok(bytes) => *owner.request.lock().await = Some(bytes), Err(_) => { inner.stop(owner, Reason::ProtocolError); return; } }
     let acquisition_owner = owner.clone(); let acquisition_inner = inner.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let installed = book.installed.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if installed.is_some() && transfer_installed(&book, inner, owner).is_err() {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
@@ -945,7 +1044,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
         if acquire_enter.blocking_recv().is_ok() {
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             if let Some(native) = installed {
                 drop(runtime); // Selection DATA is never launch authority.
                 acquire_installed(&acquisition_inner, &acquisition_owner, &native); return;
@@ -1004,7 +1103,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); }, // Late runtime DATA never launches.
             Err(error) => {
                 book.inspection_failed = true; book.inspection_error = Some(error);
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner);
             },
@@ -1015,7 +1114,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
             Err(error) => {
                 book.acquisition_failed = true; book.acquisition_error = Some(error);
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner);
             },
@@ -1169,11 +1268,152 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     guard.complete = true; settled
 }
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn installed_environment_owner_data_check() -> bool {
+    tests::installed_macos_owner_data_check()
+}
+
 #[cfg(test)]
 mod tests {
     // State/clock DATA and actual finite in-memory task joins only. No runtime
     // inspection, files, native processes, tool permission or close evidence.
     use super::*;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(super) fn installed_macos_owner_data_check() -> bool {
+        // Only original-owner, empty-resource and clock DATA. No Ticket,
+        // Prepare/Start, entropy, task, runtime inspection or native receipt.
+        if NATIVE_QUALIFIED || RUNTIME_QUALIFIED || WORK != Duration::from_secs(6) || FINALITY != Duration::from_secs(10) {
+            return false;
+        }
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mrk-environment-owner-not-opened"));
+        let selected = runtime.environment_diagnostics_installed_profile_available();
+        let first = EnvironmentDiagnosticsOwner::new(runtime.clone());
+        let second = EnvironmentDiagnosticsOwner::new(runtime.clone());
+        let document = Arc::new(()); let foreign = Arc::new(());
+        if first.normal_selected(&document) { return false; }
+        first.bind_original_document(&document); first.clone().bind_original_document(&foreign);
+        second.bind_original_document(&document);
+        if !first.original_document_matches(&document) || first.original_document_matches(&foreign)
+            || second.original_document_matches(&document) || first.normal_selected(&document) != selected { return false; }
+        {
+            let _r = first.inner.lock();
+            if first.inner.installed_selected() != selected { return false; }
+        }
+        drop(document);
+        first.bind_original_document(&foreign);
+        let replacement = EnvironmentDiagnosticsOwner::new(runtime);
+        replacement.bind_original_document(&foreign);
+        if first.inner.installed_selected() || first.original_document_matches(&foreign)
+            || replacement.original_document_matches(&foreign) { return false; }
+
+        let (application, original) = inert_active_at(Instant::now() - Duration::from_secs(5));
+        let (_, foreign) = inert_active(); let t = original.clocks.admitted;
+        let early = t + Duration::from_secs(1); let late = t + Duration::from_secs(5);
+        {
+            let mut r = application.inner.lock();
+            if !final_clock_clear(&application.inner, &r, &original, t)
+                || final_clock_clear(&application.inner, &r, &foreign, t)
+                || installed_closure_ready(&r, &foreign, false, true)
+                || installed_closure_ready(&r, &original, true, true) { return false; }
+            application.inner.stop_locked(&mut r, &original, Reason::Cancelled, late);
+            // Publication is callable while Registry is held precisely because
+            // it does not acquire Registry or any native Book itself.
+            original.publish_native_failure(Some((AdmissionFailure::Ownership, early)));
+            if r.active.as_ref().unwrap().first_stop != Some(late) { return false; }
+            application.inner.advance_locked(&mut r, &original, late);
+            if r.active.as_ref().unwrap().first_stop != Some(early)
+                || r.active.as_ref().unwrap().projection.reason != Reason::RuntimeUnavailable { return false; }
+            original.publish_native_failure(Some((AdmissionFailure::Deadline, late)));
+            application.inner.advance_locked(&mut r, &original, late);
+            let revision = r.revision;
+            application.inner.advance_locked(&mut r, &original, late);
+            if r.revision != revision || r.active.as_ref().unwrap().first_stop != Some(early)
+                || *original.native_failure.lock().unwrap() != Some((Reason::RuntimeUnavailable, early))
+                || original.clocks.work != t + WORK || original.clocks.finality != t + FINALITY
+                || original.native_cleanup_due(t + WORK + Duration::from_secs(1))
+                || !final_clock_clear(&application.inner, &r, &original, original.clocks.finality - Duration::from_nanos(1)) {
+                return false;
+            }
+            if !original.native_cleanup_due(original.clocks.finality) { return false; }
+            application.inner.advance_locked(&mut r, &original, original.clocks.finality);
+            if !r.active.as_ref().unwrap().unknown || !r.disabled
+                || final_clock_clear(&application.inner, &r, &original, original.clocks.finality) { return false; }
+        }
+        // Exercise the actual publisher before Registry projection. None is
+        // the real Err route without a Book first-F witness; an earlier witness
+        // must survive the fallback. Holding Registry proves no reacquisition.
+        for callback_failure in [None, Some(AdmissionFailure::Ownership)] {
+            for returned in [AdmissionFailure::Native, AdmissionFailure::Identity] {
+                let (application, original) = inert_active_at(Instant::now() - Duration::from_secs(5));
+                let t = original.clocks.admitted; let observed = t + Duration::from_secs(2);
+                let prior = callback_failure.map(|failure| (failure, t + Duration::from_secs(1)));
+                let expected = prior.map_or(observed, |(_, at)| at); let projection_at = t + Duration::from_secs(5);
+                let mut r = application.inner.lock();
+                original.publish_native_failure(prior);
+                if *original.native_failure.lock().unwrap() != prior.map(|(_, at)| (Reason::RuntimeUnavailable, at))
+                    || *original.stop.borrow() != prior.is_some() || r.active.as_ref().unwrap().first_stop.is_some() { return false; }
+                original.publish_native_failure(Some((returned, observed)));
+                if *original.native_failure.lock().unwrap() != Some((Reason::RuntimeUnavailable, expected))
+                    || !*original.stop.borrow() || r.active.as_ref().unwrap().first_stop.is_some()
+                    || original.clocks.work != t + WORK || original.clocks.finality != t + FINALITY { return false; }
+                application.inner.stop_locked(&mut r, &original, Reason::RuntimeUnavailable, projection_at);
+                application.inner.advance_locked(&mut r, &original, projection_at);
+                if r.active.as_ref().unwrap().first_stop != Some(expected)
+                    || r.active.as_ref().unwrap().projection.reason != Reason::RuntimeUnavailable
+                    || original.native_cleanup_due(original.clocks.finality - Duration::from_nanos(1))
+                    || !final_clock_clear(&application.inner, &r, &original, projection_at) { return false; }
+            }
+        }
+        // Inert poison/H decision DATA, not a panicking task, poisoned native
+        // owner, close receipt or global panic-hook change in the observer.
+        let (_, original) = inert_active(); let h = original.clocks.finality;
+        for poisoned in [false, true] {
+            for (now, due) in [(h - Duration::from_nanos(1), false), (h, true), (h + Duration::from_nanos(1), true)] {
+                if Session::native_cleanup_decision(now, h, poisoned) != (due, poisoned || due) { return false; }
+            }
+        }
+        for observed in [Duration::from_secs(1), Duration::from_secs(7)] {
+            let (application, original) = inert_active_at(Instant::now() - Duration::from_secs(8)); let t = original.clocks.admitted;
+            original.publish_native_failure(Some((AdmissionFailure::Native, t + observed)));
+            let mut r = application.inner.lock();
+            application.inner.advance_locked(&mut r, &original, t + Duration::from_secs(8));
+            let active = r.active.as_ref().unwrap();
+            if active.first_stop != Some((t + observed).min(original.clocks.work))
+                || active.projection.reason != if observed < WORK { Reason::RuntimeUnavailable } else { Reason::TimedOut }
+                || original.clocks.finality != t + FINALITY { return false; }
+        }
+        let (application, original) = inert_active(); let t = original.clocks.admitted;
+        original.publish_native_failure(Some((AdmissionFailure::Unknown, t)));
+        if !original.resource_unknown.load(Ordering::SeqCst) || original.native_cleanup_due(t + Duration::from_secs(1)) {
+            return false; // Unknown retains finality, but independent closes still have the original H.
+        }
+        {
+            let mut r = application.inner.lock(); application.inner.advance_locked(&mut r, &original, t);
+            if !r.active.as_ref().unwrap().unknown || final_clock_clear(&application.inner, &r, &original, t) { return false; }
+        }
+        let (_, expired) = inert_active_at(Instant::now() - FINALITY - Duration::from_secs(1));
+        if !expired.native_cleanup_expired(None) { return false; }
+        let (_, expected) = inert_active_for_route(Instant::now(), true);
+        let (_, unselected) = inert_active();
+        let mut resources = Resources::default();
+        if installed_final(&resources, &expected) || !installed_final(&resources, &unselected) { return false; }
+        resources.installed = Some(Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new())));
+        if installed_final(&resources, &expected) || installed_final(&resources, &unselected) { return false; }
+        resources.inspection_started = true;
+        if installed_consumers_returned(&resources, &Startup::default(), true) { return false; }
+        let complete = [(false, false, false, false, false), (true, true, false, false, false),
+            (true, false, true, true, true)];
+        for bits in 0u8..32 {
+            let state = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0);
+            if original_worker_returned(state.0, state.1, state.2, state.3, state.4) != complete.contains(&state) { return false; }
+        }
+        true
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn installed_macos_environment_uses_its_own_original_clocks_and_refusals() {
+        assert!(installed_macos_owner_data_check());
+    }
     fn projection() -> Projection { Projection { run_id: "a".repeat(32), owner_generation: "b".repeat(32),
         context: Context { project_id: "project-1".into(), draft_revision: 0, baseline_generation: 0,
             platform: wire::Platform::Android, operation: wire::Operation::Build }, phase: Phase::Starting,
@@ -1190,6 +1430,8 @@ mod tests {
         let (frames, receiver) = mpsc::channel(2);
         let session = Arc::new(Session { id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
             profile: Profile::LinuxX64, clocks: Clocks::new(admitted), installed_expected, registration: 1, project: PathBuf::from("/unopened-project"),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            native_failure: Mutex::new(None),
             draft: Mutex::new(None), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), output_bytes: AtomicUsize::new(0),
             resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
             watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),

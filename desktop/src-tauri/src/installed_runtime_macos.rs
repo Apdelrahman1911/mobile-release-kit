@@ -3,13 +3,21 @@
 //! Protected one-shot installation and original writer finality are separate
 //! prerequisites. Hashes or retained descriptors never make writable data safe.
 #![forbid(unsafe_code)]
-use std::{collections::{BTreeMap, BTreeSet}, os::{fd::{AsFd, OwnedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, time::Instant};
+use std::{cell::{Cell, RefCell}, collections::{BTreeMap, BTreeSet}, os::{fd::{AsFd, OwnedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, time::Instant};
 use nix::{fcntl::{self, AtFlags, OFlag}, mount::MntFlags, sys::{stat::{self, FileStat, Mode, SFlag}, statfs}, unistd};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use mrk_macos_installed_native as native;
+use native::vault_filesystem::{Expected, Failure as SnapshotFailure, Policy, SnapshotBook};
 use crate::{error::BridgeError, protocol::{strict_json, PROTOCOL}, runtime::{self, VerifiedRuntime}};
+
+#[path = "android_toolchain_macos.rs"]
+mod android_tools;
+pub(crate) use android_tools::{AndroidToolchainSlots, AndroidCatalogSlots};
+#[path = "android_runtime_macos.rs"]
+mod android_runtime;
+pub(crate) use android_runtime::{AndroidBuildRuntimeSlots, AndroidBuildInstalledRuntime};
 
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,13 +29,34 @@ pub(crate) enum CloseOutcome { Settled, Unknown }
 enum State { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Identity { dev: i32, ino: u64, mode: u16, uid: u32, gid: u32, links: u16, size: i64,
-    mtime: i64, mtime_ns: i64, ctime: i64, ctime_ns: i64 }
+    mtime: i64, mtime_ns: i64, ctime: i64, ctime_ns: i64, flags: u32 }
 impl Identity {
     fn of(s: &FileStat) -> Self { Self { dev: s.st_dev, ino: s.st_ino, mode: s.st_mode, uid: s.st_uid, gid: s.st_gid,
-        links: s.st_nlink, size: s.st_size, mtime: s.st_mtime, mtime_ns: s.st_mtime_nsec, ctime: s.st_ctime, ctime_ns: s.st_ctime_nsec } }
+        links: s.st_nlink, size: s.st_size, mtime: s.st_mtime, mtime_ns: s.st_mtime_nsec, ctime: s.st_ctime, ctime_ns: s.st_ctime_nsec, flags: s.st_flags } }
+    fn acl_expected(self) -> Result<Expected> {
+        Ok(Expected { device: u64::try_from(self.dev).map_err(|_| AdmissionFailure::Identity)?, inode: self.ino,
+            mode: u32::from(self.mode), owner: self.uid, group: self.gid, flags: self.flags })
+    }
 }
-struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity> }
-struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool }
+struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
+struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+    android_acl: Option<std::sync::Mutex<android_runtime::Audit>>,
+    // Constructors are DATA only. Entered survives a lost frame allocation.
+    acl_entered: bool, acl: Option<RefCell<SnapshotBook>>,
+    acl_invalid: Cell<bool>, acl_first: Cell<Option<(AdmissionFailure, Instant)>> }
+fn map_acl_failure(failure: SnapshotFailure) -> AdmissionFailure { match failure {
+    SnapshotFailure::Refused => AdmissionFailure::Ownership, SnapshotFailure::Native => AdmissionFailure::Native,
+    SnapshotFailure::Bounds => AdmissionFailure::Bounds, SnapshotFailure::Stopped => AdmissionFailure::Stopped,
+    SnapshotFailure::Unknown => AdmissionFailure::Unknown,
+} }
+fn earliest_failure(a: Option<(AdmissionFailure, Instant)>, b: Option<(AdmissionFailure, Instant)>)
+    -> Option<(AdmissionFailure, Instant)> {
+    match (a, b) { (Some(a), Some(b)) => Some(if a.1 <= b.1 { a } else { b }), (a, b) => a.or(b) }
+}
+fn selection_heap_bytes(selected: &VerifiedRuntime) -> Option<usize> {
+    selected.python.capacity().checked_add(selected.bootstrap.capacity())?
+        .checked_add(selected.core.capacity())?.checked_add(selected.cwd.capacity())
+}
 fn native_error<T>(_: T) -> AdmissionFailure { AdmissionFailure::Native }
 fn checkpoint(end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
     if *stop.borrow() || stop.has_changed().is_err() { return Err(AdmissionFailure::Stopped); }
@@ -42,20 +71,119 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
     Ok(Identity::of(s))
 }
 impl Book {
-    fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false } }
+    fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
+        android_acl: None, acl_entered: false, acl: None, acl_invalid: Cell::new(false), acl_first: Cell::new(None) } }
+    fn note_acl(&self, failure: AdmissionFailure, at: Instant) {
+        self.acl_first.set(earliest_failure(self.acl_first.get(), Some((failure, at))));
+    }
+    fn invalid_acl(&self) -> AdmissionFailure {
+        self.acl_invalid.set(true); self.note_acl(AdmissionFailure::Unknown, Instant::now()); AdmissionFailure::Unknown
+    }
+    fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> {
+        let native = match (self.acl_entered, &self.acl) {
+            (false, None) => None,
+            (true, Some(acl)) if self.android_acl.is_none() => match acl.try_borrow() {
+                Ok(acl) => acl.first_failure().map(|(failure, at)| (map_acl_failure(failure), at)),
+                Err(_) => { self.invalid_acl(); None },
+            },
+            _ => { self.invalid_acl(); None },
+        };
+        earliest_failure(self.acl_first.get(), native)
+    }
+    fn pristine(&self) -> bool { !self.started && !self.inspected && !self.prepared && !self.closed && !self.unknown
+        && self.records.is_empty() && !self.acl_invalid.get() && self.acl_first.get().is_none() }
+    fn never_started(&self) -> bool {
+        self.pristine() && !self.acl_entered && self.acl.is_none() && self.android_acl.is_none()
+    }
+    fn inspection_ready(&self) -> bool {
+        self.pristine() && if self.android_acl.is_some() {
+            !self.acl_entered && self.acl.is_none() // Android's own arm/inspection is the only authority.
+        } else {
+            self.acl_entered && self.acl.as_ref().is_some_and(|acl| acl.try_borrow().is_ok_and(|acl|
+                acl.not_started() && acl.quiescent() && acl.retained_frame_bytes() > 0))
+        }
+    }
+    fn admission_custody_ready(&self) -> bool {
+        if self.closed || self.unknown || self.acl_invalid.get() || self.acl_first.get().is_some() { return false; }
+        match (self.android_acl.is_some(), self.acl_entered, &self.acl) {
+            (true, false, None) => true, // Android retains its own sealed admission checks.
+            (false, true, Some(cell)) => match cell.try_borrow() {
+                Ok(acl) => acl.first_failure().is_none() && acl.quiescent() && !acl.settled()
+                    && acl.retained_frame_bytes() > 0,
+                Err(_) => { self.invalid_acl(); false },
+            },
+            _ => false,
+        }
+    }
+    fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if !self.never_started() { return Err(AdmissionFailure::AlreadyUsed); }
+        checkpoint(end, stop)?;
+        // Only the already-registered original inspector may enter here, AFTER
+        // its original entry barrier. No coordinator/Registry native allocation.
+        self.acl_entered = true;
+        self.acl = Some(RefCell::new(SnapshotBook::new()));
+        let acl = self.acl.as_ref().ok_or_else(|| self.invalid_acl())?.try_borrow().map_err(|_| self.invalid_acl())?;
+        // new() returns an empty frame on allocation failure; retain that real
+        // result before noting Bounds at its original return.
+        let result = if acl.retained_frame_bytes() == 0 { Err(AdmissionFailure::Bounds) }
+            else if !acl.not_started() || !acl.quiescent() { Err(AdmissionFailure::Unknown) } else { Ok(()) };
+        drop(acl);
+        if let Err(failure) = result { self.note_acl(failure, Instant::now()); return Err(failure); }
+        checkpoint(end, stop)
+    }
+    fn common_settled(&self) -> bool {
+        if self.acl_invalid.get() { return false; }
+        match (self.android_acl.is_some(), self.acl_entered, &self.acl) {
+            (true, false, None) => true, // Android finality is checked separately below.
+            (false, false, None) => !self.started && self.records.is_empty(),
+            (false, true, Some(acl)) => match acl.try_borrow() {
+                Ok(acl) => acl.settled() && acl.quiescent(), Err(_) => { self.invalid_acl(); false },
+            },
+            _ => false,
+        }
+    }
+    // Heap-only owned charge. The containing slot counts Book's inline layout
+    // exactly once; frame bytes cannot bound live filesec/ACL/qualifier storage.
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.unknown || self.acl_invalid.get() || self.android_acl.is_some() { return None; }
+        let frame = match (self.acl_entered, &self.acl) {
+            (false, None) if !self.started && self.records.is_empty() => 0,
+            (true, Some(acl)) => {
+                let acl = acl.try_borrow().map_err(|_| self.invalid_acl()).ok()?;
+                if !acl.quiescent() || (acl.retained_frame_bytes() == 0 && !acl.settled()) { return None; }
+                acl.retained_frame_bytes()
+            },
+            _ => return None,
+        };
+        let mut bytes = self.records.capacity().checked_mul(std::mem::size_of::<Record>())?.checked_add(frame)?;
+        for record in &self.records { bytes = bytes.checked_add(record.name.capacity())?; }
+        Some(bytes)
+    }
     fn fd(&self, index: usize) -> Result<&OwnedFd> { self.records.get(index).and_then(|r| r.fd.as_ref()).ok_or(AdmissionFailure::Unknown) }
     fn reserve(&mut self, parent: Option<usize>, name: &str) -> Result<usize> {
         if self.records.len() >= 8256 || self.records.iter().filter(|r| r.fd.is_some()).count() >= 48 { return Err(AdmissionFailure::Bounds); }
-        let i = self.records.len(); self.records.push(Record { state: State::Reserved, fd: None, parent, name: name.into(), identity: None }); Ok(i)
+        let i = self.records.len(); self.records.push(Record { state: State::Reserved, fd: None, parent, name: name.into(), identity: None, android_flags: None }); Ok(i)
     }
-    fn filesystem(&self, index: usize) -> Result<()> {
+    fn filesystem(&self, index: usize, identity: Identity, stopped: &mut dyn FnMut() -> bool) -> Result<()> {
         let fd = self.fd(index)?;
         let fs = statfs::fstatfs(fd).map_err(native_error)?;
         if fs.filesystem_type_name() != "apfs" || !fs.flags().contains(MntFlags::MNT_LOCAL)
             || fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP) {
             return Err(AdmissionFailure::Ownership);
         }
-        native::empty_acl(fd.as_fd()).map_err(native_error)
+        if let Some(audit)=&self.android_acl {
+            if self.acl_entered || self.acl.is_some() { return Err(self.invalid_acl()); }
+            let record=&self.records[index];
+            return audit.lock().map_err(|_|AdmissionFailure::Unknown)?.observe(fd.as_fd(),
+                identity,record.android_flags.ok_or(AdmissionFailure::Identity)?);
+        }
+        if !self.acl_entered || self.acl_invalid.get() { return Err(self.invalid_acl()); }
+        let expected = identity.acl_expected()?;
+        let cell = self.acl.as_ref().ok_or_else(|| self.invalid_acl())?;
+        let mut acl = cell.try_borrow_mut().map_err(|_| self.invalid_acl())?;
+        let result = acl.observe(fd.as_fd(), expected, Policy::Empty, stopped).map_err(map_acl_failure);
+        if let Some((failure, at)) = acl.first_failure() { self.note_acl(map_acl_failure(failure), at); }
+        result
     }
     fn open(&mut self, parent: Option<usize>, name: &str, directory: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         checkpoint(end, stop)?;
@@ -65,6 +193,9 @@ impl Book {
         } else { stat::lstat(Path::new("/")) }.map_err(native_error)?;
         checkpoint(end, stop)?;
         let identity = metadata(&before, directory)?;
+        if self.android_acl.is_some() {
+            self.records[index].identity=Some(identity);self.records[index].android_flags=Some(before.st_flags);
+        }
         self.records[index].state = State::Acquiring;
         let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC
             | if directory { OFlag::O_DIRECTORY } else { OFlag::empty() };
@@ -75,10 +206,10 @@ impl Book {
             Err(_) => { self.records[index].state = State::NoHandle; return Err(AdmissionFailure::Native); }
         }
         checkpoint(end, stop)?;
-        self.filesystem(index)?;
         let after = stat::fstat(self.fd(index)?).map_err(native_error)?;
         if metadata(&after, directory)? != identity { return Err(AdmissionFailure::Identity); }
         self.records[index].identity = Some(identity);
+        self.filesystem(index, identity, &mut || checkpoint(end, stop).is_err())?;
         self.check_name(index, end, stop)?; Ok(index)
     }
     fn check_name(&self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
@@ -88,8 +219,9 @@ impl Book {
         let named = if let Some(parent) = record.parent {
             stat::fstatat(self.fd(parent)?, record.name.as_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
         } else { stat::lstat(Path::new("/")) }.map_err(native_error)?;
-        if Identity::of(&actual) != identity || Identity::of(&named) != identity { return Err(AdmissionFailure::Identity); }
-        self.filesystem(index)?; checkpoint(end, stop)
+        if Identity::of(&actual) != identity || Identity::of(&named) != identity
+            || record.android_flags.is_some_and(|flags|actual.st_flags!=flags || named.st_flags!=flags) { return Err(AdmissionFailure::Identity); }
+        self.filesystem(index, identity, &mut || checkpoint(end, stop).is_err())?; checkpoint(end, stop)
     }
     fn chain(&mut self, path: &Path, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         let bytes = path.as_os_str().as_bytes();
@@ -176,13 +308,17 @@ impl Book {
                 // because verified root ownership/ACL ancestry forbids mutation.
                 let absolute = selection.cwd.join(&path);
                 let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute));
-                if !retain && !self.close(index) { return Err(AdmissionFailure::Unknown); }
+                if !retain {
+                    checkpoint(end, stop)?;
+                    if !self.close(index) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); return Err(AdmissionFailure::Unknown); }
+                    checkpoint(end, stop)?; // A late real consuming return never renews work.
+                }
             }
         }
         self.check_name(parent, end, stop)
     }
     fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        if self.started { return Err(AdmissionFailure::AlreadyUsed); }
+        if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         self.records.try_reserve_exact(8256).map_err(native_error)?; self.started = true;
         checkpoint(end, stop)?; native::real_user().map_err(native_error)?; checkpoint(end, stop)?;
         // A user-writable drag-copy or checkout app cannot select this runtime.
@@ -230,20 +366,46 @@ impl Book {
         checkpoint(end, stop)?; self.inspected = true; Ok(())
     }
     fn prepare(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        if !self.inspected || self.prepared || self.closed || self.unknown { return Err(AdmissionFailure::AlreadyUsed); }
+        if !self.inspected || self.prepared || !self.admission_custody_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         checkpoint(end, stop)?; native::real_user().map_err(native_error)?;
         for (index, record) in self.records.iter().enumerate() {
             if record.state == State::Owned { self.check_name(index, end, stop)?; }
         }
         checkpoint(end, stop)?; self.prepared = true; Ok(())
     }
-    fn settle(&mut self) -> CloseOutcome {
-        if self.closed { return CloseOutcome::Unknown; }
-        for index in (0..self.records.len()).rev() { self.close(index); }
+    fn settle(&mut self, expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool) -> CloseOutcome {
+        let first = self.first_failure();
+        let denied = expired(first); // Also publish around native poisoned/early returns.
+        if self.closed || self.android_acl.is_some() { return CloseOutcome::Unknown; }
+        match (self.acl_entered, &self.acl) {
+            (true, Some(cell)) => match cell.try_borrow_mut() {
+                Ok(mut acl) => {
+                    if !denied {
+                        let _ = acl.release(&mut |native| expired(earliest_failure(first,
+                            native.map(|(failure, at)| (map_acl_failure(failure), at)))));
+                    }
+                    if let Some((failure, at)) = acl.first_failure() { self.note_acl(map_acl_failure(failure), at); }
+                },
+                Err(_) => { self.invalid_acl(); },
+            },
+            (false, None) if !self.started && self.records.is_empty() => {},
+            _ => { self.invalid_acl(); },
+        }
+        let _ = expired(self.first_failure());
+        // A native failure never suppresses a separately permitted original FD
+        // consume. Expiry retains positive records; there is no retry/Drop path.
+        for index in (0..self.records.len()).rev() {
+            if self.records[index].state == State::Owned {
+                if expired(self.first_failure()) { continue; }
+                if !self.close(index) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); }
+                let _ = expired(self.first_failure()); // Record a late real return, never renew its owner.
+            } else { self.close(index); }
+        }
         self.closed = true; if self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
     }
-    fn settled(&self) -> bool { self.closed && !self.unknown && self.records.iter().all(|r|
-        r.fd.is_none() && matches!(r.state, State::NoHandle | State::Closed)) }
+    fn settled(&self) -> bool { self.closed && !self.unknown && self.common_settled() && self.records.iter().all(|r|
+        r.fd.is_none() && matches!(r.state, State::NoHandle | State::Closed))
+        && self.android_acl.as_ref().is_none_or(|audit|audit.try_lock().is_ok_and(|audit|audit.settled())) }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -261,11 +423,16 @@ macro_rules! slots {
         pub(crate) struct $capability { original: Book, selection: VerifiedRuntime, claimed: bool, no_effect: bool }
         impl $capability {
             pub(crate) fn prepare_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<&VerifiedRuntime> {
-                if self.claimed { return Err(AdmissionFailure::AlreadyUsed); }
-                self.original.prepare(end, stop)?; Ok(&self.selection)
+                self.prepare_once_observed(end, stop, &mut |_| {})
+            }
+            pub(crate) fn prepare_once_observed(&mut self, end: Instant, stop: &watch::Receiver<bool>,
+                publish: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)) -> Result<&VerifiedRuntime> {
+                let result = if self.claimed { Err(AdmissionFailure::AlreadyUsed) } else { self.original.prepare(end, stop) };
+                publish(self.original.first_failure()); // Original native return, before any later owner borrow/join.
+                result?; Ok(&self.selection)
             }
             pub(crate) fn claim_once(&mut self) -> Result<()> {
-                if self.claimed || !self.original.prepared || self.original.unknown || self.original.closed { return Err(AdmissionFailure::AlreadyUsed); }
+                if self.claimed || !self.original.prepared || !self.original.admission_custody_ready() { return Err(AdmissionFailure::AlreadyUsed); }
                 self.claimed = true; Ok(())
             }
             pub(crate) fn record_closed_spawn_gate(&mut self) { self.no_effect = true; }
@@ -273,9 +440,32 @@ macro_rules! slots {
         impl $slots {
             pub(crate) fn new() -> Self { Self { inspection: Some(Book::new()), acquisition: None, selection: None, settlement: false } }
             pub(crate) fn never_started(&self) -> bool { !self.settlement && self.selection.is_none() && self.acquisition.is_none()
-                && self.inspection.as_ref().is_some_and(|b| !b.started && b.records.is_empty() && !b.unknown) }
+                && self.inspection.as_ref().is_some_and(Book::never_started) }
+            pub(crate) fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+                if !self.never_started() { return Err(AdmissionFailure::AlreadyUsed); }
+                self.inspection.as_mut().ok_or(AdmissionFailure::Unknown)?.arm_acl_once(end, stop)
+            }
+            pub(crate) fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> {
+                match (&self.inspection, &self.acquisition) {
+                    (Some(b), None) => b.first_failure(), (None, Some(c)) => c.original.first_failure(),
+                    _ => Some((AdmissionFailure::Unknown, Instant::now())),
+                }
+            }
+            pub(crate) fn retained_bytes(&self) -> Option<usize> {
+                let mut bytes = std::mem::size_of::<Self>();
+                match (&self.inspection, &self.acquisition) {
+                    (Some(b), None) => { bytes = bytes.checked_add(b.retained_heap_bytes()?)?; },
+                    (None, Some(c)) if self.selection.is_none() => {
+                        bytes = bytes.checked_add(c.original.retained_heap_bytes()?)?.checked_add(selection_heap_bytes(&c.selection)?)?;
+                    },
+                    _ => return None,
+                }
+                if let Some(selected) = &self.selection { bytes = bytes.checked_add(selection_heap_bytes(selected)?)?; }
+                Some(bytes)
+            }
             pub(crate) fn inspect_once(&mut self, profile: $profile, end: Instant, stop: &watch::Receiver<bool>) -> std::result::Result<VerifiedRuntime, BridgeError> {
-                if !self.never_started() { return Err(BridgeError::cleanup_unknown()); }
+                if self.settlement || self.selection.is_some() || self.acquisition.is_some()
+                    || !self.inspection.as_ref().is_some_and(Book::inspection_ready) { return Err(BridgeError::cleanup_unknown()); }
                 self.selection = Some(profile.selection()?);
                 let selection = self.selection.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
                 let book = self.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
@@ -284,7 +474,7 @@ macro_rules! slots {
             }
             pub(crate) fn transfer_once(&mut self) -> Result<()> {
                 if self.settlement || self.acquisition.is_some() || self.selection.is_none()
-                    || !self.inspection.as_ref().is_some_and(|b| b.inspected && !b.unknown && !b.closed) { return Err(AdmissionFailure::AlreadyUsed); }
+                    || !self.inspection.as_ref().is_some_and(|b| b.inspected && b.admission_custody_ready()) { return Err(AdmissionFailure::AlreadyUsed); }
                 let selection = self.selection.take().ok_or(AdmissionFailure::Unknown)?;
                 let original = match self.inspection.take() { Some(b) => b, None => { self.selection = Some(selection); return Err(AdmissionFailure::Unknown); } };
                 self.acquisition = Some($capability { original, selection, claimed: false, no_effect: false }); Ok(())
@@ -298,10 +488,10 @@ macro_rules! slots {
                 if let Some(b) = &mut self.inspection { b.unknown = true; }
                 if let Some(c) = &mut self.acquisition { c.original.unknown = true; }
             }
-            pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+            pub(crate) fn settle_originals(&mut self, expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool) -> CloseOutcome {
                 if self.settlement { return CloseOutcome::Unknown; } self.settlement = true;
                 match (&mut self.inspection, &mut self.acquisition) {
-                    (Some(b), None) => b.settle(), (None, Some(c)) => c.original.settle(), _ => CloseOutcome::Unknown }
+                    (Some(b), None) => b.settle(expired), (None, Some(c)) => c.original.settle(expired), _ => CloseOutcome::Unknown }
             }
             pub(crate) fn settled(&self) -> bool { self.settlement && match (&self.inspection, &self.acquisition) {
                 (Some(b), None) => b.settled(), (None, Some(c)) => c.original.settled(), _ => false } }
@@ -313,8 +503,109 @@ slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitH
 slots!(ConfigurationRuntimeSlots, ConfigurationInstalledRuntime, runtime::ConfigurationInstalledProfile);
 slots!(GitHubWorkflowRuntimeSlots, GitHubWorkflowInstalledRuntime, runtime::GitHubWorkflowInstalledProfile);
 slots!(MetadataTextRuntimeSlots, MetadataTextInstalledRuntime, runtime::MetadataTextInstalledProfile);
+slots!(MetadataImagesRuntimeSlots, MetadataImagesInstalledRuntime, runtime::MetadataImagesInstalledProfile);
 slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
+
+// This existing installed-shell DATA route never constructs a SnapshotBook or
+// touches a descriptor. It tests missing/empty custody, not native free evidence.
+#[cfg(test)]
+pub(crate) fn common_acl_data_check() -> bool {
+    macro_rules! empty_slots {
+        ($($slot:ty),+ $(,)?) => { $({
+            let mut slots = <$slot>::new();
+            if !slots.never_started() || slots.retained_bytes() != Some(std::mem::size_of::<$slot>()) { return false; }
+            if slots.settle_originals(&mut |_| false) != CloseOutcome::Settled || !slots.settled()
+                || slots.never_started() || slots.settle_originals(&mut |_| false) != CloseOutcome::Unknown { return false; }
+        })+ };
+    }
+    empty_slots!(PassiveRuntimeSlots, ConfigurationRuntimeSlots, IOSArchiveRuntimeSlots);
+    let mut missing = Book::new();
+    missing.acl_entered = true; // An entered-but-unreturned original is not empty.
+    missing.records.push(Record { state: State::Closed, fd: None, parent: None, name: String::new(),
+        identity: None, android_flags: None });
+    if missing.never_started() || missing.admission_custody_ready() || missing.retained_heap_bytes().is_some()
+        || missing.common_settled() || missing.settle(&mut |_| false) != CloseOutcome::Unknown || missing.settled() {
+        return false;
+    }
+    let now = Instant::now();
+    let early = now.checked_sub(std::time::Duration::from_millis(1)).unwrap_or(now);
+    let failed = Book::new();
+    failed.note_acl(AdmissionFailure::Ownership, early);
+    failed.note_acl(AdmissionFailure::Native, now);
+    failed.invalid_acl(); // Unknown cannot be cleared by a prior known refusal.
+    if failed.first_failure() != Some((AdmissionFailure::Ownership, early)) || !failed.acl_invalid.get()
+        || failed.retained_heap_bytes().is_some() || failed.common_settled() { return false; }
+    let original = Identity { dev: 7, ino: 11, mode: 0o100444, uid: 0, gid: 0, links: 1, size: 0,
+        mtime: 1, mtime_ns: 2, ctime: 3, ctime_ns: 4, flags: 0x1234 };
+    let Ok(expected) = original.acl_expected() else { return false; };
+    if (expected.device, expected.inode, expected.mode, expected.owner, expected.group, expected.flags)
+        != (7, 11, 0o100444, 0, 0, 0x1234) { return false; }
+    let mut negative = original; negative.dev = -1;
+    negative.acl_expected().is_err()
+}
+slots!(OfflinePreflightRuntimeSlots, OfflinePreflightInstalledRuntime, runtime::OfflinePreflightInstalledProfile);
+slots!(EnvironmentDiagnosticsRuntimeSlots, EnvironmentDiagnosticsInstalledRuntime, runtime::EnvironmentDiagnosticsInstalledProfile);
+slots!(ProjectRecoveryRuntimeSlots, ProjectRecoveryInstalledRuntime, runtime::ProjectRecoveryInstalledProfile);
+
+#[cfg(test)]
+pub(crate) fn installed_doctor_recovery_slots_data_check() -> bool {
+    // The actual COMMON Book is shared, not repaired or replaced here. Only
+    // empty/missing/entered DATA: no SnapshotBook allocation or native return.
+    use std::any::TypeId;
+    if TypeId::of::<EnvironmentDiagnosticsRuntimeSlots>() == TypeId::of::<ProjectRecoveryRuntimeSlots>()
+        || TypeId::of::<ProjectRecoveryRuntimeSlots>() == TypeId::of::<OfflinePreflightRuntimeSlots>()
+        || TypeId::of::<EnvironmentDiagnosticsRuntimeSlots>() == TypeId::of::<AndroidBuildRuntimeSlots>() { return false; }
+    macro_rules! inert_original {
+        ($slot:ty) => {{
+            let mut empty = <$slot>::new();
+            if !empty.never_started() || !empty.no_child_effect() || empty.settled()
+                || empty.first_failure().is_some() || empty.capability().is_ok() || empty.transfer_once().is_ok()
+                || empty.retained_bytes() != Some(std::mem::size_of::<$slot>()) { return false; }
+            if empty.settle_originals(&mut |_| false) != CloseOutcome::Settled || !empty.settled()
+                || empty.never_started() || empty.capability().is_ok()
+                || empty.settle_originals(&mut |_| false) != CloseOutcome::Unknown { return false; }
+            let mut missing = <$slot>::new();
+            missing.inspection = None;
+            if missing.never_started() || missing.no_child_effect() || missing.capability().is_ok()
+                || missing.first_failure().is_none() || missing.retained_bytes().is_some()
+                || missing.settle_originals(&mut |_| false) != CloseOutcome::Unknown || missing.settled() { return false; }
+            let mut entered = <$slot>::new();
+            entered.inspection.as_mut().unwrap().acl_entered = true;
+            if entered.never_started() || entered.retained_bytes().is_some() || entered.transfer_once().is_ok()
+                || entered.settle_originals(&mut |_| false) != CloseOutcome::Unknown || entered.settled() { return false; }
+            let mut interrupted = <$slot>::new();
+            interrupted.mark_interrupted();
+            if interrupted.never_started() || interrupted.retained_bytes().is_some()
+                || interrupted.settle_originals(&mut |_| false) != CloseOutcome::Unknown || interrupted.settled() { return false; }
+        }};
+    }
+    inert_original!(EnvironmentDiagnosticsRuntimeSlots);
+    inert_original!(ProjectRecoveryRuntimeSlots);
+    true
+}
+#[cfg(test)]
+#[test]
+fn installed_doctor_recovery_original_slots_are_inert_and_uncertainty_is_absorbing() {
+    assert!(installed_doctor_recovery_slots_data_check());
+}
+
+#[cfg(test)]
+pub(crate) fn installed_offline_slots_data_check() -> bool {
+    // Empty memory-only slots: never call inspect, prepare, claim or settlement.
+    // This is not native cleanup evidence; the shared Book's ACL finality is separate.
+    let mut slots = OfflinePreflightRuntimeSlots::new();
+    if !slots.never_started() || slots.settled() || slots.capability().is_ok()
+        || slots.transfer_once().is_ok() { return false; }
+    slots.mark_interrupted();
+    !slots.never_started() && !slots.settled() && slots.capability().is_err()
+        && slots.transfer_once().is_err()
+}
+#[cfg(test)]
+#[test]
+fn installed_offline_slots_refuse_without_original_inspection() {
+    assert!(installed_offline_slots_data_check());
+}
 
 // The iOS owner lends its original, first-failure-shortened cleanup endpoint.
 // STOP is expected during final settlement, not permission to renew a clock.
@@ -326,7 +617,7 @@ fn ios_audit_point(end: Instant, original: &watch::Receiver<Instant>) -> Result<
 }
 impl Book {
     fn ios_check_after_use(&self, end: Instant, original: &watch::Receiver<Instant>) -> Result<()> {
-        if !self.inspected || self.closed || self.unknown { return Err(AdmissionFailure::Unknown); }
+        if !self.inspected || !self.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         for (index, record) in self.records.iter().enumerate() {
             ios_audit_point(end, original)?;
             if record.state != State::Owned { continue; }
@@ -338,7 +629,7 @@ impl Book {
             } else { stat::lstat(Path::new("/")) }.map_err(native_error)?;
             if Identity::of(&actual) != expected || Identity::of(&named) != expected { return Err(AdmissionFailure::Identity); }
             ios_audit_point(end, original)?;
-            self.filesystem(index)?;
+            self.filesystem(index, expected, &mut || ios_audit_point(end, original).is_err())?;
             ios_audit_point(end, original)?;
         }
         Ok(())
@@ -367,6 +658,17 @@ impl IOSXcodeSlots {
         Self { original: Book::new(), alias: None, developer: None, executable: None, sdk: None,
             developer_path: None, sdk_path: None, signing: None, recovery_security: None, audit, prepared: false }
     }
+    pub(crate) fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.original.arm_acl_once(end, stop)
+    }
+    pub(crate) fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> { self.original.first_failure() }
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>().checked_add(self.original.retained_heap_bytes()?)?;
+        if let Some(alias) = &self.alias { bytes = bytes.checked_add(alias.target.capacity())?; }
+        if let Some(path) = &self.developer_path { bytes = bytes.checked_add(path.capacity())?; }
+        if let Some(path) = &self.sdk_path { bytes = bytes.checked_add(path.capacity())?; }
+        Some(bytes)
+    }
     pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.inspect_selected(end, stop, false)
     }
@@ -374,7 +676,7 @@ impl IOSXcodeSlots {
         self.inspect_selected(end, stop, true)
     }
     pub(crate) fn inspect_recovery_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        if self.original.started { return Err(AdmissionFailure::AlreadyUsed); }
+        if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         self.original.records.try_reserve_exact(8).map_err(native_error)?;
         self.original.started = true;
         checkpoint(end, stop)?;
@@ -389,7 +691,7 @@ impl IOSXcodeSlots {
     }
     fn inspect_selected(&mut self, end: Instant, stop: &watch::Receiver<bool>, signed: bool) -> Result<()> {
         use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, selection_alias_owner, sibling_target};
-        if self.original.started { return Err(AdmissionFailure::AlreadyUsed); }
+        if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         self.original.records.try_reserve_exact(32).map_err(native_error)?;
         self.original.started = true;
         checkpoint(end, stop)?;
@@ -454,7 +756,7 @@ impl IOSXcodeSlots {
         checkpoint(end, stop)
     }
     pub(crate) fn check_before_spawn(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        if !self.original.inspected || self.original.closed || self.original.unknown || self.prepared { return Err(AdmissionFailure::AlreadyUsed); }
+        if !self.original.inspected || !self.original.admission_custody_ready() || self.prepared { return Err(AdmissionFailure::AlreadyUsed); }
         self.check_current(end, stop)?;
         self.prepared = true;
         Ok(())
@@ -466,7 +768,7 @@ impl IOSXcodeSlots {
     }
     pub(crate) fn binding_data(&self) -> Result<crate::ios_archive_protocol::ToolchainBinding> {
         use crate::ios_archive_protocol::{RootIdentity, ToolchainBinding};
-        if !self.original.inspected || self.original.closed || self.original.unknown { return Err(AdmissionFailure::Unknown); }
+        if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         let identity = |index: Option<usize>| -> Result<Identity> {
             self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)
         };
@@ -491,13 +793,13 @@ impl IOSXcodeSlots {
             mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? })
     }
     pub(crate) fn signing_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
-        if !self.original.inspected || self.original.closed || self.original.unknown { return Err(AdmissionFailure::Unknown); }
+        if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         let [security, codesign, openssl] = self.signing.ok_or(AdmissionFailure::Inventory)?;
         crate::ios_archive_protocol::SigningToolBindings::new_data(self.tool_data(Some(security))?,
             self.tool_data(Some(codesign))?, self.tool_data(Some(openssl))?).map_err(|_| AdmissionFailure::Inventory)
     }
     pub(crate) fn recovery_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
-        if !self.original.inspected || self.original.closed || self.original.unknown
+        if !self.original.inspected || !self.original.admission_custody_ready()
             || self.signing.is_some() || self.developer.is_some() || self.sdk.is_some() || self.executable.is_some() {
             return Err(AdmissionFailure::Inventory);
         }
@@ -518,6 +820,85 @@ impl IOSXcodeSlots {
         Ok(())
     }
     pub(crate) fn mark_interrupted(&mut self) { self.original.unknown = true; }
-    pub(crate) fn settle_originals(&mut self) -> CloseOutcome { self.original.settle() }
+    pub(crate) fn settle_originals(&mut self, expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool) -> CloseOutcome {
+        self.original.settle(expired)
+    }
     pub(crate) fn settled(&self) -> bool { self.original.settled() }
+}
+
+// Test-only DATA calls over the existing nested Android owners.
+// Constructors remain inert; no original native frame or descriptor is minted.
+#[cfg(test)]
+pub(crate) fn installed_android_data_check() -> bool {
+    android_runtime::assert_inert_arm_data_contract();
+    android_tools::assert_inert_arm_data_contract();
+    android_runtime::fd_cleanup_data_check()
+}
+#[cfg(test)]
+mod installed_android_data_tests {
+    #[test]
+    fn original_android_data_contracts() {
+        assert!(super::installed_android_data_check());
+    }
+}
+
+
+// The fixed vault helper has separate code/input authority from Python passive/
+//edit profiles. Reuse the protected-original/claim pattern and Slice A custody,
+//not the runtime selector or a caller-provided executable/roster.
+pub(crate) struct VaultHelperSlots{
+    original:native::vault_helper_filesystem::CodeOriginals,inspected:bool,claimed:bool,postchecked:bool,
+    first:Option<(AdmissionFailure,Instant)>,
+}
+impl VaultHelperSlots{
+    pub(crate) fn new()->Self{Self{original:native::vault_helper_filesystem::CodeOriginals::new(),
+        inspected:false,claimed:false,postchecked:false,first:None}}
+    fn fail(&mut self,problem:AdmissionFailure)->AdmissionFailure{
+        if self.first.is_none(){self.first=Some((problem,Instant::now()));}problem
+    }
+    pub(crate) fn first_failure(&self)->Option<(AdmissionFailure,Instant)>{
+        match(self.first,self.original.first_failure()){
+            (Some(a),Some((_,at))) if at<a.1=>Some((AdmissionFailure::Native,at)),
+            (None,Some((_,at)))=>Some((AdmissionFailure::Native,at)),(a,_)=>a,
+        }
+    }
+    pub(crate) fn inspect_once(&mut self,stop:&mut dyn FnMut()->bool)->Result<()>{
+        if self.inspected || self.claimed || self.first.is_some(){return Err(self.fail(AdmissionFailure::AlreadyUsed));}
+        let result=(||{
+            let expected=option_env!("MRK_MACOS_VAULT_HELPER_SHA256").ok_or(AdmissionFailure::Inventory)?;
+            let size=option_env!("MRK_MACOS_VAULT_HELPER_BYTES").and_then(|s|s.parse::<u64>().ok()).ok_or(AdmissionFailure::Inventory)?;
+            if !sha(expected) || size==0 || size>32*1024*1024{return Err(AdmissionFailure::Inventory);}
+            self.original.acquire(stop).map_err(|_|AdmissionFailure::Ownership)?;
+            if self.original.helper_bytes()!=Some(size){return Err(AdmissionFailure::Inventory);}
+            let mut hash=Sha256::new();let mut count=0u64;let mut block=[0u8;4096];
+            loop{
+                if stop(){return Err(AdmissionFailure::Stopped);}
+                let n=unistd::read(self.original.helper_fd().map_err(|_|AdmissionFailure::Unknown)?,&mut block).map_err(native_error)?;
+                if n==0{break;}
+                count=count.checked_add(n as u64).ok_or(AdmissionFailure::Bounds)?;
+                if count>size{return Err(AdmissionFailure::Inventory);}hash.update(&block[..n]);
+            }
+            if count!=size || format!("{:x}",hash.finalize())!=expected{return Err(AdmissionFailure::Inventory);}
+            self.original.recheck(stop).map_err(|_|AdmissionFailure::Identity)?;Ok(())
+        })();
+        if let Err(p)=result{self.fail(p);}else{self.inspected=true;}result
+    }
+    pub(crate) fn claim_once(&mut self)->Result<()>{
+        if !self.inspected || self.claimed || self.first_failure().is_some(){return Err(self.fail(AdmissionFailure::AlreadyUsed));}
+        self.claimed=true;Ok(())
+    }
+    pub(crate) fn check_after_use(&mut self,stop:&mut dyn FnMut()->bool)->Result<()>{
+        if !self.claimed || self.postchecked{return Err(self.fail(AdmissionFailure::AlreadyUsed));}
+        let result=self.original.recheck(stop).map_err(|_|AdmissionFailure::Identity);
+        if let Err(p)=result{self.fail(p);}else{self.postchecked=true;}result
+    }
+    pub(crate) fn settle_originals(&mut self,expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->bool{
+        let first=self.first;
+        self.original.release(&mut |failure|{
+            let combined=match(first,failure){(Some(a),Some((_,at))) if at<a.1=>Some((AdmissionFailure::Native,at)),
+                (None,Some((_,at)))=>Some((AdmissionFailure::Native,at)),(a,_)=>a};expired(combined)
+        })
+    }
+    pub(crate) fn settled(&self)->bool{self.original.settled()}
+    pub(crate) fn retained_bytes(&self)->Option<usize>{self.original.retained_bytes()?.checked_add(std::mem::size_of::<Self>())}
 }

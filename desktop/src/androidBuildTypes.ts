@@ -1,3 +1,5 @@
+import type { AndroidToolchainCatalogApi } from './androidToolchainCatalogTypes.ts';
+import type { AndroidToolSourcesApi } from './androidToolSources.ts';
 // Closed renderer comparison/projection DATA only. These types confer no
 // consent, file custody, tool selection, execution, cleanup or native finality.
 export interface AndroidBuildSavedConfig { bytes: number; sha256: string }
@@ -50,12 +52,21 @@ export interface AndroidBuildAssurances {
   signer: 'matches-saved-upload-certificate' | 'failed' | 'not-checked' | 'not-inspected'; toolkitSigning: 'not-requested';
   storeOperation: 'not-requested'; sourceBinding: 'not-established'; releaseReadiness: 'not-assessed';
 }
-export interface AndroidBuildResult extends AndroidBuildInspection {
-  schemaVersion: 1; scope: 'local-post-build-artifact-observation'; usedConfig: AndroidBuildSavedConfig;
-  usedVersion: AndroidBuildSavedVersion; artifactValidation: AndroidBuildArtifactValidation; selection: AndroidBuildSelection; toolchainProfile: 'android-local-linux-gnu-x86_64-v1';
+// Returned selection labels are comparison data, never file paths or permits.
+export interface AndroidMacToolchainSelection {
+  instance: string; ownerUid: number; catalogGeneration: number;
+  recordSha256: string; inventorySha256: string; osProviderSha256: string;
+}
+interface AndroidBuildResultCommon extends AndroidBuildInspection {
+  scope: 'local-post-build-artifact-observation'; usedConfig: AndroidBuildSavedConfig;
+  usedVersion: AndroidBuildSavedVersion; artifactValidation: AndroidBuildArtifactValidation; selection: AndroidBuildSelection;
   command: { outcome: 'exited'; exitCode: 0 }; artifacts: AndroidBuildArtifact[]; assurances: AndroidBuildAssurances;
   limitations: AndroidBuildLimitation[];
 }
+export type AndroidBuildResult = AndroidBuildResultCommon & (
+  { schemaVersion: 1; toolchainProfile: 'android-local-linux-gnu-x86_64-v1'; toolchainSelection?: never } |
+  { schemaVersion: 2; toolchainProfile: 'android-registered-macos-arm64-v1'; toolchainSelection: AndroidMacToolchainSelection }
+);
 export interface AndroidBuildDisposition {
   work: 'not-created' | 'removed' | 'retained-work' | 'unknown';
   artifacts: 'not-created' | 'removed' | 'retained-local-result' | 'retained-incomplete' | 'unknown';
@@ -74,7 +85,7 @@ export interface AndroidBuildStatus {
 }
 // Interface declarations only; no renderer bridge, native command registration,
 // preview implementation, Start handler or capability is enabled by this file.
-export interface AndroidBuildApi {
+export interface AndroidBuildApi extends AndroidToolchainCatalogApi, AndroidToolSourcesApi {
   prepareAndroidBuild(request: PrepareAndroidBuild): Promise<AndroidBuildStatus>;
   startAndroidBuild(request: StartAndroidBuild): Promise<AndroidBuildStatus>;
   androidBuildStatus(): Promise<AndroidBuildStatus>;

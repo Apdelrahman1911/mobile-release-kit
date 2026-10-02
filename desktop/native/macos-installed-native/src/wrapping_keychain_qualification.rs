@@ -1,6 +1,6 @@
 //! Fixed, nonshipping qualification dispatcher, NOT a worker, owner or permit.
 //!
-//! Run only inside the existing OriginalWork/native-child ownership path with
+//! Run only inside one of the two fixed owner-bound helper processes with
 //! its original cutoff and precharged frame. This leaf starts no clock/thread,
 //! provisions nothing, changes no fixture, and performs no teardown or retry.
 //! The independent execution packet must bind this exact14-call roster, the
@@ -26,7 +26,7 @@
 //! fixture retirement from Drop, this dispatcher, a timeout or process exit.
 
 use super::{
-    Admission, AddEffect, Checkpoint, Context, Custody, Facts, NativeAdmission, NativeResult,
+    Admission, AddEffect, Checkpoint, CleanupAdmission, Context, Custody, Facts, NativeAdmission, NativeCleanupAdmission, NativeResult,
     Operation, Outcome, RawResult, Returned, WrappingKeyCandidate, KEY_BYTES,
     Frame, KNOWN, KEY_WIPED, USER_ADMITTED, finish_lookup, finish_without_key, run_using,
 };
@@ -144,7 +144,8 @@ unsafe extern "C" {
     fn mrk_wrapping_qualification_abi() -> u32;
     fn mrk_wrapping_qualification_run(frame: *mut c_void, mode: u32, fixture: *const FixtureInput,
         operation: u32, vault: *const u8, generation: *const u8, key: *const u8,
-        admission: NativeAdmission, bridge: *mut c_void, raw: *mut RawResult, observation: *mut Observation);
+        admission: NativeAdmission, bridge: *mut c_void, cleanup: NativeCleanupAdmission,
+        cleanup_context: *mut c_void, raw: *mut RawResult, observation: *mut Observation);
 }
 
 /// Scalar, nonsecret extra observations. A true root match is just an observed
@@ -294,7 +295,7 @@ impl Harness {
             }
         }
         // SAFETY: a linked constant ABI marker only; no allocation/provider call.
-        if unsafe { mrk_wrapping_qualification_abi() } != 0x514b0101 { return Err(Refused::NativeAbiMismatch); }
+        if unsafe { mrk_wrapping_qualification_abi() } != 0x514b0201 { return Err(Refused::NativeAbiMismatch); }
         Ok(Self { token, contexts, fixture: None, next: 0, pending: None, terminal: Case::StopAfterAdd, halted: false, _not_sync: PhantomData })
     }
     /// # Safety
@@ -340,7 +341,7 @@ impl Harness {
     /// actions have distinct reviewed admissions/real returns retained by that
     /// owner. This method injects none of them and does not authorize them.
     pub unsafe fn run_next<F: FnMut(Checkpoint, &Facts) -> Admission>(
-        &mut self, case: Case, key: Option<&[u8; KEY_BYTES]>, admission: &mut F,
+        &mut self, case: Case, key: Option<&[u8; KEY_BYTES]>, admission: &mut F, cleanup: CleanupAdmission,
     ) -> Result<CaseReturn, Refused> {
         if self.halted { return Err(Refused::Halted); }
         if self.pending.is_some() { return Err(Refused::PendingOriginal); }
@@ -356,22 +357,22 @@ impl Harness {
         let fixture = if case.mode() == FIXTURE {
             self.fixture.as_ref().map_or(std::ptr::null(), |pin| pin as *const FixtureInput)
         } else { std::ptr::null() };
-        let returned: Returned = run_using(operation, admission, |frame, callback, bridge, raw| {
+        let returned: Returned = run_using(operation, admission, cleanup, |frame, callback, bridge, cleanup_callback, cleanup_context, raw| {
             // SAFETY: one exact-sized frame/input/bridge/output; the binding and
             // borrows remain live through the ENTIRE synchronous common entry.
             unsafe {
                 mrk_wrapping_qualification_run(frame, case.mode(), fixture, operation.raw(),
                     context.vault.as_ptr(), context.generation.as_ptr(), key.map_or(std::ptr::null(), |key| key.as_ptr()),
-                    callback, bridge, raw, &mut observation);
+                    callback, bridge, cleanup_callback, cleanup_context, raw, &mut observation);
             }
-            observation.valid(raw, case.mode())
+            observation.valid(raw, case.mode()) && raw.policy.role == 1
         });
         let mut selection = SelectionFacts { raw: observation, verified: returned.facts.verified && returned.facts.ffi_returned };
         let original = match case {
             Case::Selector | Case::HelperShapes => {
                 let complete = returned.facts.verified && returned.facts.ffi_returned
                     && returned.facts.custody() == Custody::Settled && !returned.facts.stopped()
-                    && !returned.facts.callback_panicked()
+                    && !returned.facts.callback_panicked() && returned.facts.process_interaction_restored()
                     && if case == Case::Selector {
                         observation.selector_boundary_returned == 1 && returned.facts.outcome() == Outcome::Pending
                     } else {
@@ -405,7 +406,8 @@ impl Harness {
         if self.halted { return Err(Refused::Halted); }
         if !actual.facts().native_run_returned() || !actual.facts().verified_native_run_receipt()
             || actual.facts().custody() != Custody::Settled || actual.facts().stopped()
-            || actual.facts().callback_panicked() || actual.consumption_panic.is_some()
+            || actual.facts().callback_panicked() || !actual.facts().process_interaction_restored()
+            || actual.consumption_panic.is_some()
             || actual.retained_native_frame_bytes() != 0
             || !(actual.facts().adapter_frame_retired()
                 || actual.comparison.is_some_and(|r| r.consume_returned_and_frame_retired)) {
@@ -436,7 +438,7 @@ impl PeerLookup {
         if token == [0; 16] || pin.device > u32::MAX as u64 || pin.inode == 0 || pin.uid == 0 || pin.mode != 0o040700 {
             return Err(Refused::InvalidBinding);
         }
-        if unsafe { mrk_wrapping_qualification_abi() } != 0x514b0101 { return Err(Refused::NativeAbiMismatch); }
+        if unsafe { mrk_wrapping_qualification_abi() } != 0x514b0201 { return Err(Refused::NativeAbiMismatch); }
         Ok(Self { token, context, fixture: FixtureInput { version: 1, bytes: size_of::<FixtureInput>() as u32,
             root_device: pin.device, root_inode: pin.inode, root_mode: pin.mode, root_uid: pin.uid,
             root_gid: pin.gid, reserved: 0, token }, case, spent: false, _not_sync: PhantomData })
@@ -451,15 +453,16 @@ impl PeerLookup {
     /// # Safety
     /// The fixed original caller precharges the full adapter frame and retains
     /// the actual return through its own original cutoff, cleanup and finality.
-    pub(super) unsafe fn run<F: FnMut(Checkpoint, &Facts) -> Admission>(&mut self, admission: &mut F) -> Result<CaseReturn, Refused> {
+    pub(super) unsafe fn run<F: FnMut(Checkpoint, &Facts) -> Admission>(&mut self, admission: &mut F, cleanup: CleanupAdmission) -> Result<CaseReturn, Refused> {
         if self.spent { return Err(Refused::WrongCaseOrInput); }
         self.spent = true; // One original attempt, even if its native receipt fails.
         let mut observation = Observation::default();
-        let returned = run_using(Operation::Lookup, admission, |frame, callback, bridge, raw| {
+        let returned = run_using(Operation::Lookup, admission, cleanup, |frame, callback, bridge, cleanup_callback, cleanup_context, raw| {
             unsafe { mrk_wrapping_qualification_run(frame, FIXTURE, &self.fixture, Operation::Lookup.raw(),
                 self.context.vault.as_ptr(), self.context.generation.as_ptr(), std::ptr::null(),
-                callback, bridge, raw, &mut observation); }
+                callback, bridge, cleanup_callback, cleanup_context, raw, &mut observation); }
             observation.valid(raw, FIXTURE)
+                && raw.policy.role == if self.case == Case::CreatorControlLookup { 1 } else { 2 }
         });
         let mut selection = SelectionFacts { raw: observation, verified: returned.facts.verified && returned.facts.ffi_returned };
         let original = if self.case == Case::CreatorControlLookup { Original::Lookup(finish_lookup(returned)) }

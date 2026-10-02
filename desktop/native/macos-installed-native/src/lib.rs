@@ -6,12 +6,24 @@ compile_error!("installed observation controls require debug assertions in an ex
 // Unwired wrapping-key primitive; no availability or execution authority.
 pub mod wrapping_keychain;
 pub mod vault_filesystem;
+pub mod vault_helper_wire;
+pub mod vault_helper_filesystem;
+pub const VAULT_HELPER_BUILD: bool = cfg!(feature = "vault-helper");
+#[cfg(any(
+    all(feature = "vault-helper", not(mrk_wrapping_vault_helper_native)),
+    all(mrk_wrapping_vault_helper_native, not(feature = "vault-helper")),
+    all(feature = "vault-helper", any(feature = "installed-observation", mrk_wrapping_keychain_qualification))
+))]
+compile_error!("vault helper requires its isolated matching native Cargo role");
+#[cfg(feature = "vault-helper")]
+pub mod vault_helper;
 use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
     os::{fd::{AsRawFd, BorrowedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, ptr::NonNull, rc::Rc};
 
 unsafe extern "C" {
     fn mrk_platform() -> c_int;
     fn mrk_user(uid: *mut u32) -> c_int;
+    fn mrk_reveal_installation() -> c_int;
     fn mrk_acl_empty(fd: c_int, phase: *mut c_int, call_result: *mut c_int, native_errno: *mut c_int,
         free_result: *mut c_int, free_errno: *mut c_int) -> c_int;
     fn mrk_no_xattrs(fd: c_int) -> c_int;
@@ -19,15 +31,18 @@ unsafe extern "C" {
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
     fn mrk_publish(from: c_int, source: *const c_char, to: c_int, destination: *const c_char) -> c_int;
     fn mrk_panel_reserve() -> *mut c_void;
+    fn mrk_panel_reserve_images() -> *mut c_void;
     fn mrk_panel_start(panel: *mut c_void, kind: c_int) -> c_int;
     fn mrk_panel_start_project_field(panel: *mut c_void, kind: c_int, initial: *const u8, bytes: usize) -> c_int;
     fn mrk_panel_poll(panel: *mut c_void, result: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
+    fn mrk_panel_poll_images(panel: *mut c_void, result: *mut c_int, selection: *mut c_int,
+        count: *mut usize, paths: *mut u8, capacity: usize) -> c_int;
     fn mrk_panel_close(panel: *mut c_void) -> c_int;
     fn mrk_panel_release(panel: *mut c_void) -> c_int;
     fn mrk_main_thread() -> c_int;
     #[cfg(test)]
     fn mrk_decode_directory_entries(block: *const u8, bytes: usize, count: c_int, out: *mut u8, capacity: usize, used: *mut usize) -> c_int;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "installed-observation"))]
     fn mrk_panel_response(kind: c_int, code: i64, programmatic: c_int) -> c_int;
 }
 fn result(code: c_int) -> io::Result<()> { if code == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(code)) } }
@@ -39,6 +54,13 @@ pub fn real_user() -> io::Result<u32> {
     let mut uid = 0;
     // SAFETY: fixed writable result cell; the shim validates the actual kernel/user.
     result(unsafe { mrk_user(&mut uid) })?; Ok(uid)
+}
+/// Issue one fixed-location Finder request. The caller retains its original
+/// document gate through this synchronous call; there is no callback or worker.
+/// Success does not establish Finder visibility or installation integrity.
+pub fn reveal_installation() -> io::Result<()> {
+    // SAFETY: no pointers or caller-selected path; native checks ordinary user.
+    result(unsafe { mrk_reveal_installation() })
 }
 /// Finite diagnostics from the same original ACL observation, not another query.
 /// The actual errno (including0) stays separate from the returned fallback code.
@@ -108,11 +130,12 @@ pub fn publish_directory(from: BorrowedFd<'_>, source: &str, to: BorrowedFd<'_>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder }
+pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle }
 impl PanelKind {
     fn code(self) -> c_int { match self {
         Self::Project => 1, Self::Quit => 2, Self::File => 3, Self::VersionSource => 4,
         Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7, Self::EvidenceFolder => 8,
+        Self::PublicImages => 9, Self::AndroidJdk => 10, Self::AndroidSdk => 11, Self::AndroidGradle => 12,
     } }
     fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
 }
@@ -133,6 +156,71 @@ fn panel_response(code: c_int) -> io::Result<PanelResponse> {
         _ => Err(io::ErrorKind::InvalidData.into()) }
 }
 pub enum PanelState { Showing, Responded { response: PanelResponse, path: Option<PathBuf> }, Closed }
+
+pub const PUBLIC_IMAGE_COUNT: usize = 10;
+pub const PUBLIC_IMAGE_PATH_BYTES: usize = 4097; // includes the native NUL sentinel
+const PUBLIC_IMAGE_RESULT_BYTES: usize = PUBLIC_IMAGE_COUNT * PUBLIC_IMAGE_PATH_BYTES;
+// Same-time first-party holdings: native batch, Rust poll batch, original
+// single-result cell, ten bounded PathBuf allocations and their Vec headers.
+// The scalar margin is not permission for a second batch or a pathname clone.
+pub const PUBLIC_IMAGE_CONTROL_BYTES: usize = 2 * PUBLIC_IMAGE_RESULT_BYTES + PUBLIC_IMAGE_PATH_BYTES
+    + PUBLIC_IMAGE_COUNT * (PUBLIC_IMAGE_PATH_BYTES - 1 + std::mem::size_of::<PathBuf>())
+    + std::mem::size_of::<Vec<PathBuf>>() + 512;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicImageRefusal { Count, Path, Capacity }
+pub enum PublicImageSelection { Unselected, Paths(Vec<PathBuf>), Refused(PublicImageRefusal) }
+pub enum ImagesPanelState { Showing, Responded { response: PanelResponse, selection: PublicImageSelection }, Closed }
+
+fn public_image_selection(response: PanelResponse, selection: c_int, count: usize,
+    bytes: &[u8; PUBLIC_IMAGE_RESULT_BYTES]) -> io::Result<PublicImageSelection> {
+    // Native refuses the WHOLE batch and clears it, rather than exporting a
+    // good prefix. Closed scalar combinations catch ABI corruption separately
+    // from a known bad user choice; only the latter permits ordinary cleanup.
+    if selection != 1 {
+        if count != 0 || bytes.iter().any(|byte| *byte != 0) { return Err(io::ErrorKind::InvalidData.into()); }
+        return match (response, selection) {
+            (PanelResponse::Decline | PanelResponse::Other, 0) => Ok(PublicImageSelection::Unselected),
+            (PanelResponse::Accept, 2) => Ok(PublicImageSelection::Refused(PublicImageRefusal::Count)),
+            (PanelResponse::Accept, 3) => Ok(PublicImageSelection::Refused(PublicImageRefusal::Path)),
+            _ => Err(io::ErrorKind::InvalidData.into()),
+        };
+    }
+    if response != PanelResponse::Accept || !(1..=PUBLIC_IMAGE_COUNT).contains(&count)
+        || bytes[count * PUBLIC_IMAGE_PATH_BYTES..].iter().any(|byte| *byte != 0) {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut lengths = [0usize; PUBLIC_IMAGE_COUNT];
+    let mut invalid_encoding = false;
+    // Validate every member BEFORE allocating/copying any PathBuf. Non-UTF-8
+    // selected files are a known input refusal, not a fabricated native Cancel.
+    for (index, chunk) in bytes.chunks_exact(PUBLIC_IMAGE_PATH_BYTES).take(count).enumerate() {
+        let Some(end) = chunk.iter().position(|byte| *byte == 0) else { return Err(io::ErrorKind::InvalidData.into()); };
+        if end == 0 || chunk[0] != b'/' || chunk[end..].iter().any(|byte| *byte != 0) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        invalid_encoding |= std::str::from_utf8(&chunk[..end]).is_err();
+        lengths[index] = end;
+    }
+    if invalid_encoding { return Ok(PublicImageSelection::Refused(PublicImageRefusal::Path)); }
+    let mut paths = Vec::new();
+    if paths.try_reserve_exact(count).is_err() || paths.capacity() > PUBLIC_IMAGE_COUNT {
+        return Ok(PublicImageSelection::Refused(PublicImageRefusal::Capacity));
+    }
+    for (index, &length) in lengths[..count].iter().enumerate() {
+        let start = index * PUBLIC_IMAGE_PATH_BYTES;
+        let text = std::str::from_utf8(&bytes[start..start + length]).map_err(|_| io::ErrorKind::InvalidData)?;
+        let mut path = PathBuf::new();
+        if path.try_reserve_exact(length).is_err() || path.capacity() > PUBLIC_IMAGE_PATH_BYTES - 1 {
+            return Ok(PublicImageSelection::Refused(PublicImageRefusal::Capacity));
+        }
+        path.push(text);
+        if path.capacity() > PUBLIC_IMAGE_PATH_BYTES - 1 {
+            return Ok(PublicImageSelection::Refused(PublicImageRefusal::Capacity));
+        }
+        paths.push(path);
+    }
+    Ok(PublicImageSelection::Paths(paths))
+}
 /// Main-thread-only original. Drop deliberately does not stand in for native
 /// close/release finality: an unresolved object is retained, never retried.
 pub struct Panel {
@@ -148,9 +236,16 @@ pub struct Panel {
 }
 pub fn main_thread() -> bool { unsafe { mrk_main_thread() == 1 } }
 impl Panel {
-    pub fn reserve() -> io::Result<Self> {
-        // SAFETY: native code enforces the main thread before allocating.
-        let original = NonNull::new(unsafe { mrk_panel_reserve() }).ok_or(io::ErrorKind::Other)?;
+    pub fn reserve() -> io::Result<Self> { Self::reserve_original(false) }
+    /// Purpose9-only storage on the same retained native original. Singleton
+    /// reservations cannot start or poll it, including before presentation.
+    pub fn reserve_public_images() -> io::Result<Self> { Self::reserve_original(true) }
+    fn reserve_original(images: bool) -> io::Result<Self> {
+        // SAFETY: both native constructors enforce the main thread; each
+        // returns one original with the SAME existing close/release lifecycle.
+        let original = NonNull::new(unsafe {
+            if images { mrk_panel_reserve_images() } else { mrk_panel_reserve() }
+        }).ok_or(io::ErrorKind::Other)?;
         Ok(Self { original, unknown: false, _main: PhantomData,
             #[cfg(feature = "installed-observation")]
             observation_identity_armed: false,
@@ -231,6 +326,28 @@ impl Panel {
             2 => Ok(PanelState::Closed),
             _ => { self.unknown = true; Err(io::ErrorKind::Other.into()) },
         }
+    }
+    pub fn poll_public_images(&mut self) -> io::Result<ImagesPanelState> {
+        self.usable()?;
+        let mut response = 0; let mut selection = 0; let mut count = 0;
+        let mut paths = [0u8; PUBLIC_IMAGE_RESULT_BYTES];
+        // SAFETY: exact bounded batch and scalar cells on this same main-thread
+        // original. C rejects singleton reservations even before start; no
+        // singleton cell is consumed. An unstarted IMAGE reservation can only
+        // show/close, never select.
+        let state = unsafe { mrk_panel_poll_images(self.original.as_ptr(), &mut response, &mut selection,
+            &mut count, paths.as_mut_ptr(), paths.len()) };
+        let returned = match state {
+            0 => Ok(ImagesPanelState::Showing),
+            1 => panel_response(response).and_then(|response| {
+                public_image_selection(response, selection, count, &paths)
+                    .map(|selection| ImagesPanelState::Responded { response, selection })
+            }),
+            2 => Ok(ImagesPanelState::Closed),
+            _ => Err(io::ErrorKind::Other.into()),
+        };
+        if returned.is_err() { self.unknown = true; }
+        returned
     }
     pub fn close_once(&mut self) -> io::Result<()> {
         self.usable()?;
@@ -461,7 +578,7 @@ mod observation {
             |p| p.close_attempted = true, |p| p.dismissed = true, |p| p.closed = true,
         ];
         for change in invalid { let mut sample = fresh(); change(&mut sample); if sample.version_source_name_ready() { return false; } }
-        for kind in [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot, PanelKind::EvidenceFolder] {
+        for kind in [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot, PanelKind::EvidenceFolder, PanelKind::PublicImages] {
             let mut sample = fresh(); sample.kind = kind; if sample.version_source_name_ready() { return false; }
         }
         let sample = fresh().version_source_parent_ready.unwrap();
@@ -525,7 +642,7 @@ mod observation {
                 }
             }
         }
-        for kind in [PanelKind::Project, PanelKind::File, PanelKind::Quit, PanelKind::EvidenceFolder] {
+        for kind in [PanelKind::Project, PanelKind::File, PanelKind::Quit, PanelKind::EvidenceFolder, PanelKind::PublicImages] {
             if project_field_initial(kind, Path::new("/Users/owner/project")).is_ok()
                 || project_field_preparation(0, 511 | 4096, 0).succeeded(kind, false) { return false; }
         }
@@ -2148,14 +2265,14 @@ mod observation {
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
         action_diagnostics_data_check() && identity_data_check() && semantic_data_check() && original_window_data_check()
-            && project_field_data_check() && evidence_folder_abi_data_check()
+            && project_field_data_check() && evidence_folder_abi_data_check() && public_images_abi_data_check()
             && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x2200c, 0x4200c, 0x6201c, 0x7ffff, 0x9f00f, 0x15f00f, 0x17f01f]
                 .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x1ffff, 0x20000,
                 0x22008, 0x22004, 0x6001c, 0x6200c, 0x2201c, 0x4201c, 0x80000, 0x100000, 0x1df00f, 0x15f01f, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
             && [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::VersionSource,
-                PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot, PanelKind::EvidenceFolder].into_iter().all(|kind| {
+                PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot, PanelKind::EvidenceFolder, PanelKind::PublicImages].into_iter().all(|kind| {
                 observation_directory_readiness(kind, 0) == Some("not-ready")
                     && observation_directory_readiness(kind, 0x2200c)
                         == (!matches!(kind, PanelKind::Quit)).then_some("directory-not-matched")
@@ -2284,7 +2401,8 @@ mod observation {
             let parsed = (|| {
                 let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit, 3 => PanelKind::File,
                     4 => PanelKind::VersionSource, 5 => PanelKind::IosProject, 6 => PanelKind::IosWorkspace, 7 => PanelKind::MetadataRoot,
-                    8 => PanelKind::EvidenceFolder,
+                    8 => PanelKind::EvidenceFolder, 9 => PanelKind::PublicImages,
+                    10 => PanelKind::AndroidJdk, 11 => PanelKind::AndroidSdk, 12 => PanelKind::AndroidGradle,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
                 let directory_readiness = observation_directory_readiness(kind, flags).ok_or(io::ErrorKind::InvalidData)?;
                 if !observation_name_sample_valid(kind, flags, name_sample) { return Err(io::ErrorKind::InvalidData.into()); }
@@ -2337,6 +2455,63 @@ mod observation {
             }
         }
     }
+}
+
+#[cfg(any(test, feature = "installed-observation"))]
+fn public_images_abi_data_check() -> bool {
+    // Pure fixed DATA; the only FFI below is the same handle-free response
+    // classifier used by completion. No Panel, NSApp, URL or callback exists.
+    if PanelKind::PublicImages.code() != 9 || PanelKind::PublicImages.project_field()
+        || PUBLIC_IMAGE_CONTROL_BYTES > 128 * 1024
+        || project_field_initial(PanelKind::PublicImages, Path::new("/inert/project")).is_ok() { return false; }
+    for (code, expected) in [(1, PanelResponse::Accept), (0, PanelResponse::Decline),
+        (-1000, PanelResponse::Other), (1000, PanelResponse::Other), (i64::MAX, PanelResponse::Other)] {
+        // SAFETY: primitive values only, no native object or action.
+        if panel_response(unsafe { mrk_panel_response(9, code, 0) }).ok() != Some(expected)
+            || panel_response(unsafe { mrk_panel_response(9, code, 1) }).ok() != Some(PanelResponse::Other) { return false; }
+    }
+    let mut bytes = [0u8; PUBLIC_IMAGE_RESULT_BYTES];
+    for response in [PanelResponse::Decline, PanelResponse::Other] {
+        if !matches!(public_image_selection(response, 0, 0, &bytes), Ok(PublicImageSelection::Unselected)) { return false; }
+    }
+    for (status, reason) in [(2, PublicImageRefusal::Count), (3, PublicImageRefusal::Path)] {
+        if !matches!(public_image_selection(PanelResponse::Accept, status, 0, &bytes),
+            Ok(PublicImageSelection::Refused(actual)) if actual == reason) { return false; }
+    }
+    for (response, status, count) in [(PanelResponse::Accept, 0, 0), (PanelResponse::Accept, 4, 0),
+        (PanelResponse::Accept, 1, 0), (PanelResponse::Accept, 1, 11),
+        (PanelResponse::Accept, 2, 1), (PanelResponse::Decline, 1, 1)] {
+        if public_image_selection(response, status, count, &bytes).is_ok() { return false; }
+    }
+    for count in [1, 2, PUBLIC_IMAGE_COUNT] {
+        bytes.fill(0);
+        for index in 0..count {
+            let path = b"/inert/image.png";
+            let start = index * PUBLIC_IMAGE_PATH_BYTES;
+            bytes[start..start + path.len()].copy_from_slice(path);
+        }
+        match public_image_selection(PanelResponse::Accept, 1, count, &bytes) {
+            Ok(PublicImageSelection::Paths(paths)) if paths.len() == count && paths.capacity() <= PUBLIC_IMAGE_COUNT
+                && paths.iter().all(|path| path == Path::new("/inert/image.png") && path.capacity() <= 4096) => {},
+            _ => return false,
+        }
+        // A bad final member must refuse the complete batch, not publish the
+        // previous good members. UTF-8 input refusal does not poison native custody.
+        bytes[(count - 1) * PUBLIC_IMAGE_PATH_BYTES + 1] = 0xff;
+        if !matches!(public_image_selection(PanelResponse::Accept, 1, count, &bytes),
+            Ok(PublicImageSelection::Refused(PublicImageRefusal::Path))) { return false; }
+    }
+    bytes.fill(0); bytes[..4096].fill(b'a'); bytes[0] = b'/';
+    if !matches!(public_image_selection(PanelResponse::Accept, 1, 1, &bytes),
+        Ok(PublicImageSelection::Paths(paths)) if paths[0].as_os_str().as_bytes().len() == 4096) { return false; }
+    bytes[4096] = b'a'; // no sentinel, not a truncated successful path
+    if public_image_selection(PanelResponse::Accept, 1, 1, &bytes).is_ok() { return false; }
+    bytes.fill(0); bytes[0] = b'/'; bytes[PUBLIC_IMAGE_PATH_BYTES] = b'x';
+    if public_image_selection(PanelResponse::Accept, 1, 1, &bytes).is_ok() { return false; }
+    bytes[PUBLIC_IMAGE_PATH_BYTES] = 0; bytes[0] = b'r';
+    if public_image_selection(PanelResponse::Accept, 1, 1, &bytes).is_ok() { return false; }
+    // Refusal cells cannot smuggle a successful prefix or claim another shape.
+    !public_image_selection(PanelResponse::Accept, 3, 0, &bytes).is_ok()
 }
 
 #[cfg(any(test, feature = "installed-observation"))]
@@ -2437,6 +2612,10 @@ mod tests {
         assert!(evidence_folder_abi_data_check());
     }
     #[test]
+    fn public_image_result_is_bounded_complete_and_distinct_from_cancel() {
+        assert!(public_images_abi_data_check());
+    }
+    #[test]
     fn only_explicit_user_appkit_responses_can_be_accept_or_decline() {
         // Calls the SAME pure C classifier used by the real completion. These
         // definitions construct no NSWindow, fake callback or native permit.
@@ -2450,7 +2629,8 @@ mod tests {
             (8, 1, PanelResponse::Accept), (8, 0, PanelResponse::Decline),
             (8, -1000, PanelResponse::Other), (8, -1001, PanelResponse::Other),
             (8, 1000, PanelResponse::Other), (8, 1001, PanelResponse::Other),
-            (8, i64::MIN, PanelResponse::Other), (9, 1, PanelResponse::Other),
+            (8, i64::MIN, PanelResponse::Other), (10, 1, PanelResponse::Other),
+            (9, 1, PanelResponse::Accept), (9, 0, PanelResponse::Decline),
             (4, -1000, PanelResponse::Other), (7, 1001, PanelResponse::Other),
             (3, -1000, PanelResponse::Other), (3, 1001, PanelResponse::Other),
             (2, 1001, PanelResponse::Accept), (2, 1000, PanelResponse::Decline),

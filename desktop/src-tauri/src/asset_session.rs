@@ -27,10 +27,17 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 #[path = "asset_session_vault.rs"]
 mod vault;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::vault_keyring_linux as keyring;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::vault_keyring_macos as keyring;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "asset_session_keyring_macos.rs"]
+mod keyring_macos;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 pub(crate) use vault::KeyringInitializationAdmission;
 
 // A borrowed original session record is not a serialized credential or a new
@@ -111,16 +118,19 @@ impl ProjectPathBinding {
         self.generation == generation && self.root == *root
     }
 }
+struct AndroidSourceBinding {
+    project_id: String, generation: u32, root: asset_source::RegisteredRoot, role: crate::android_tool_sources::Role,
+}
 enum MaterialOrigin {
     Selected(asset_source::CapturedSource),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     Stored(vault::StoredMaterial),
 }
 struct Material { origin: MaterialOrigin, observation: FileObservation }
 impl Material {
     fn bytes(&self) -> &[u8] { match &self.origin {
         MaterialOrigin::Selected(source) => &source.bytes,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         MaterialOrigin::Stored(source) => source.bytes.bytes(),
     } }
     fn retained_bytes(&self) -> Option<usize> { match &self.origin {
@@ -130,12 +140,12 @@ impl Material {
             #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
             { Some(source.bytes.capacity()) }
         },
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         MaterialOrigin::Stored(source) => source.bytes.retained_bytes().ok()?.checked_add(std::mem::size_of::<vault::StoredRef>()),
     } }
     fn selected_origin(&self) -> Option<&Arc<OriginWitness>> { match &self.origin {
         MaterialOrigin::Selected(source) => Some(&source.origin),
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         MaterialOrigin::Stored(_) => None,
     } }
 }
@@ -159,13 +169,14 @@ impl SafeAssessment { fn permits(&self) -> bool { self.0.permits_session_preview
 pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing, Preview, Mutating, Stopping, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseImages, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
+enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseImages, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
     OpenVault, PrepareInitialize, Initialize, Unlock }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
+    fn android_source(self) -> bool { self == Self::ChooseAndroidSource }
     fn images(self) -> bool { self == Self::ChooseImages }
-    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.images() || self.evidence() }
+    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.android_source() || self.images() || self.evidence() }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -260,7 +271,7 @@ struct Retirement {
     payload: Option<Arc<Payload>>, context: Option<Arc<NativeContext>>, slot_context: Option<Arc<NativeContext>>,
     assessment: Option<SafeAssessment>, records: Vec<Record>, assignments: Vec<Assignment>,
     image_batch: Option<asset_source::CapturedPublicImageBatch>, image_paths: Option<Vec<std::path::PathBuf>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault: vault::Retired,
 }
 
@@ -271,11 +282,11 @@ pub(crate) struct OriginalWork {
     pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
     source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
     retirement: Mutex<Retirement>, retired: AtomicBool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    keyring: Mutex<crate::vault_keyring_linux::LookupBook>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    keyring: Mutex<keyring::LookupBook>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     large_work_started: AtomicBool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault: Mutex<vault::Work>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
@@ -290,11 +301,11 @@ impl OriginalWork {
             wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            keyring: Mutex::new(crate::vault_keyring_linux::LookupBook::new()),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            keyring: Mutex::new(keyring::LookupBook::new()),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             large_work_started: AtomicBool::new(false),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: Mutex::new(vault::Work::default()),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_capture: Mutex::new(None),
@@ -309,6 +320,14 @@ impl OriginalWork {
                     target_os = "macos", target_arch = "aarch64"))]
                 installed_native_response_witness: Mutex::new(None),
             }) })
+    }
+    pub(crate) fn request_android_source_stop(&self) { self.stop(); }
+    pub(crate) fn android_source_selected_settled(&self) -> bool { self.project_path_settled(true) }
+    pub(crate) fn android_source_cancel_settled(&self) -> bool { self.project_path_settled(false) }
+    pub(crate) fn android_source_refusal_settled(&self) -> bool {
+        self.resources_settled()
+            && self.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
     }
     pub(crate) fn stopped(&self) -> bool { self.stop.load(Ordering::SeqCst) }
     fn stop(&self) { self.stop.store(true, Ordering::SeqCst); self.wake.notify_one(); self.gui.wake.notify_one(); }
@@ -343,32 +362,32 @@ impl OriginalWork {
         let coordinator = self.coordinator.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let child = self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let source = self.source.try_lock().is_ok_and(|book| book.not_started() || book.settled());
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let keyring = self.keyring.try_lock().is_ok_and(|book| book.resources_settled());
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let keyring = true;
         coordinator && child && source && self.gui.settled() && keyring
     }
     fn original_resources_settled(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if !self.vault.try_lock().is_ok_and(|work| work.settled()) { return false; }
         self.control_resources_settled()
     }
     fn resources_settled(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let allocations = self.keyring.try_lock().is_ok_and(|book| book.allocations_released());
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let allocations = true;
         self.original_resources_settled() && self.retired.load(Ordering::SeqCst) && allocations
             && self.gui.selected_images.try_lock().is_ok_and(|paths| paths.is_none())
     }
     fn lookup_allocations_allowed(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { true }
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     fn dispose_keyring_storage(&self) -> bool {
         let Ok(retirement) = self.retirement.try_lock() else { return false; };
         if !self.retired.load(Ordering::SeqCst) || !lookup_memory::retirement_empty(&retirement)
@@ -564,8 +583,9 @@ struct Slot {
     staged: Option<Staged>, error: Option<CommandError>, project: Option<Project>, discard: bool,
     kind: Option<Kind>, result_record: Option<RecordKey>, retired_payload: Option<Arc<Payload>>,
     evidence: Option<EvidenceBinding>, project_path: Option<Arc<ProjectPathBinding>>, path_result: Option<commands::ProjectPathResult>,
+    android_source: Option<Arc<AndroidSourceBinding>>,
     images: Option<Arc<images::Binding>>, image_batch: Option<asset_source::CapturedPublicImageBatch>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault: vault::SlotData,
 }
 impl Slot {
@@ -594,11 +614,11 @@ struct DocumentState {
     github: ConnectionState,
     evidence: EvidenceRegistry,
     images: images::Registry,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault: Option<vault::Session>,
 }
 fn project_path_pending(state: &DocumentState) -> bool {
-    state.slot.as_ref().is_some_and(|slot| slot.operation.project_path()
+    state.slot.as_ref().is_some_and(|slot| (slot.operation.project_path() || slot.operation.android_source())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled()))
 }
 fn credential_lock_gate(state: &DocumentState) -> Result<(), AssetError> {
@@ -801,16 +821,16 @@ fn accepted_quit_cleanup_end(state: &DocumentState) -> Option<Instant> {
     } else { None }
 }
 fn session_data_empty(state: &DocumentState) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if state.vault.is_some() { return false; }
     state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
         && state.slot.as_ref().is_none_or(|slot| slot.candidate.is_none() && slot.staged.is_none() && slot.context.is_none()
             && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none() && slot.image_batch.is_none() && slot_private_data_empty(slot))
 }
 fn slot_private_data_empty(_slot: &Slot) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { _slot.vault.loaded.is_none() }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { true }
 }
 fn assets_can_exit_locked(state: &DocumentState) -> bool {
@@ -977,10 +997,10 @@ fn keyring_poll_gate(state: &DocumentState, owner: &Arc<OriginalWork>, book: &cr
     keyring_slot_gate(state, owner, book.current_step(), now)
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn keyring_problem_stop(state: &mut DocumentState, owner: &Arc<OriginalWork>,
-    problem: Option<(crate::vault_keyring_linux::Problem, Instant)>) -> bool {
-    use crate::vault_keyring_linux::Problem;
+    problem: Option<(keyring::Problem, Instant)>) -> bool {
+    use keyring::Problem;
     if let (Some((problem, at)), Some(slot)) = (problem,
         state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner))) {
         let reason = match problem {
@@ -1001,8 +1021,8 @@ fn keyring_problem_stop(state: &mut DocumentState, owner: &Arc<OriginalWork>,
     false
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-fn keyring_constrain_cleanup(state: &DocumentState, owner: &Arc<OriginalWork>, book: &mut crate::vault_keyring_linux::LookupBook) {
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+fn keyring_constrain_cleanup(state: &DocumentState, owner: &Arc<OriginalWork>, book: &mut keyring::LookupBook) {
     if let Some(end) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner)).and_then(|slot| slot.cleanup_end) {
         // Slot::stop is the sole writer: first_cleanup_end always adds CLEANUP
         // to the first stop/due timestamp. Never derive this from observer-now.
@@ -1224,21 +1244,32 @@ impl DocumentBinding {
 }
 
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 mod lookup_memory {
     use super::*;
-    use crate::vault_keyring_linux::Problem;
+    use keyring::Problem;
 
     const WORKING_BYTES: usize = 96 * 1024 * 1024;
     const IDENTITIES: usize = 128;
     const ARC_CELLS: usize = 2 * std::mem::size_of::<usize>();
 
-    const FIXED_CONTROL_BYTES: usize = crate::vault_keyring_linux::LOOKUP_CONTROL_BYTES
+    const FIXED_CONTROL_BYTES: usize = keyring::LOOKUP_CONTROL_BYTES
         + std::mem::size_of::<OriginalWork>() + std::mem::size_of::<GuiCall>() + std::mem::size_of::<Slot>()
         + std::mem::size_of::<Mutex<SourceBook>>() + 16 * std::mem::size_of::<usize>();
     // SDK futures <=32KiB and other SDK cells <=16KiB leave THIS app share
     // <=16KiB, not another control allowance on top of the fixed 64KiB row.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const _: () = assert!(FIXED_CONTROL_BYTES <= 16 * 1024);
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    const _: () = assert!(FIXED_CONTROL_BYTES <= 128 * 1024);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    const WIRE_BYTES: usize = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    const CRYPTO_BYTES: usize = secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    const WIRE_BYTES: usize = keyring::LOOKUP_WIRE_BYTES;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    const CRYPTO_BYTES: usize = crate::vault_crypto::CONTROL_BYTES;
 
     // Constructible only by this document's locked census. It is not Clone,
     // configurable wire credit, a global allocator or a process-RSS promise.
@@ -1246,10 +1277,10 @@ mod lookup_memory {
     impl Admission {
         fn checked(live: usize, scratch: usize) -> Result<Self, Problem> {
             let total = live.checked_add(scratch)
-                .and_then(|bytes| bytes.checked_add(zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES))
+                .and_then(|bytes| bytes.checked_add(WIRE_BYTES))
                 // Explicit additional crypto row, not spent wire headroom.
                 // The total working/resident limits remain unchanged.
-                .and_then(|bytes| bytes.checked_add(secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES))
+                .and_then(|bytes| bytes.checked_add(CRYPTO_BYTES))
                 .ok_or(Problem::Capacity)?;
             if total > WORKING_BYTES { return Err(Problem::Capacity); }
             Ok(Self { _private: () })
@@ -1487,7 +1518,7 @@ mod lookup_memory {
         census.document(state)?; census.slot(slot)?; Ok(census.bytes)
     }
     pub(super) fn enter(state: &DocumentState, owner: &Arc<OriginalWork>,
-        input: crate::vault_keyring_linux::LookupInput, end: Instant) -> Result<(), Problem> {
+        input: keyring::LookupInput, end: Instant) -> Result<(), Problem> {
         let coordinator = owner.coordinator.try_lock().map_err(|_| Problem::CleanupUnknown)?;
         let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
         let source = owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
@@ -1508,7 +1539,7 @@ mod lookup_memory {
         drop((book, retirement, source, child, coordinator)); result
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
     mod tests {
         // Fixed-census DATA only. Synthetic bookkeeping below is never a native
         // source/SDK/coordinator receipt, allocation measurement or provider test.
@@ -1631,7 +1662,7 @@ mod lookup_memory {
         }
     }
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 pub(crate) use lookup_memory::Admission as KeyringMemoryAdmission;
 
 fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
@@ -1652,6 +1683,17 @@ fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     }
     Ok(())
 }
+fn installation_reveal_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
+    passive_document_gate(state)?;
+    if !state.lifetime.original_bound() || state.lost_observed {
+        return Err(BridgeError::new("installation_document_unavailable", "The original application document is unavailable."));
+    }
+    if state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+        || state.github.native_work_pending() {
+        return Err(BridgeError::new("busy", "Finish the original native operation first."));
+    }
+    Ok(())
+}
 fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl FnOnce() -> Result<(), AssetError>) -> Result<(), AssetError> {
     // Shared native lifecycle/state checks only. The caller retains the real
     // document mutex; each route must still apply its own qualification gate.
@@ -1660,7 +1702,7 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
     owner_gate()?;
     if state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
-    if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.images())
+    if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.images())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
     lookup_allocation_gate(state)
@@ -1794,7 +1836,7 @@ impl DocumentBinding {
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }) }) };
@@ -1934,6 +1976,31 @@ impl DocumentBinding {
         if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
         false
     }
+    pub(crate) fn installation_reveal_available(&self) -> bool {
+        // Profile DATA only; the command rechecks the actual original document.
+        crate::installation::reveal_profile_available(self.inner.bridge.installed_project_selection_available())
+    }
+    pub(crate) fn reveal_installation(&self) -> Result<crate::installation::RevealRequestSent, BridgeError> {
+        // This SAME original mutex is held through the synchronous AppKit call.
+        // No await, queued callback, spawned task or new operation owner can
+        // outlive admission or race a quit/loss transition after the check.
+        let state = self.lock();
+        installation_reveal_document_gate(&state)?;
+        if self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        if self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() {
+            return Err(BridgeError::shutdown());
+        }
+        if !self.installation_reveal_available() { return Err(crate::installation::unavailable()); }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            mrk_macos_installed_native::reveal_installation().map_err(|_| crate::installation::unconfirmed())?;
+            Ok(crate::installation::request_sent())
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        { Err(crate::installation::unavailable()) }
+    }
     pub(crate) fn project_selection_available(&self) -> bool {
         // Profile/display DATA, never live lifecycle permission. Windows uses
         // the same retained original project route as its profile admission;
@@ -1969,7 +2036,7 @@ impl DocumentBinding {
     }
     fn bump(&self, state: &mut DocumentState) {
         images::observe_failure(state);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::observe_stop(state, Instant::now());
         if state.exhausted { return; }
         if state.unknown { state.github.unknown(); state.evidence.revoke(true); }
@@ -1987,7 +2054,7 @@ impl DocumentBinding {
         state.github.exhaust();
         state.evidence.revision = u64::MAX; state.evidence.revoke(true);
         state.lifetime.invalidate(); invalidate_all(state);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::revoke_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
         images::refresh(state);
@@ -2129,6 +2196,49 @@ impl DocumentBinding {
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
             || self.inner.bridge.preflight.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.ios_archive.busy()) { return Availability::Busy; }
         Availability::Available
+    }
+
+    pub(crate) fn android_tool_sources_status(&self) -> Result<crate::android_tool_sources::Status, BridgeError> {
+        self.reconcile();
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if !self.inner.bridge.android_build.registration_matches(self.inner.bridge.registry_generation()) {
+            self.inner.bridge.android_build.context_changed();
+        }
+        self.observe_android_source_slot(&state);
+        self.inner.bridge.android_build.sources_status(self.android_build_gate(&state))
+    }
+    pub(crate) fn cancel_android_tool_source(&self, input: crate::android_tool_sources::Cancel) -> Result<crate::android_tool_sources::Status, BridgeError> {
+        let mut state = self.lock();
+        let status = self.inner.bridge.android_build.cancel_source(input, self.android_build_gate(&state))?;
+        // Consume the actual first cancellation timestamp under the same
+        // Document gate now, rather than granting a new interval on next poll.
+        self.expire(&mut state, Instant::now());
+        Ok(status)
+    }
+    fn observe_android_source_slot(&self, state: &DocumentState) {
+        if let Some(slot) = state.slot.as_ref().filter(|slot| slot.operation.android_source()) {
+            self.inner.bridge.android_build.observe_source(&slot.owner, slot.phase, slot.reason, state.unknown);
+        }
+    }
+
+    pub(crate) fn android_toolchain_catalog_status(&self) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let state=self.lock();
+        self.inner.bridge.android_build.catalog_status(self.android_build_gate(&state))
+    }
+    pub(crate) fn refresh_android_toolchain_catalog(&self) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let admitted_at=Instant::now(); // Original T, before Document/Registry admission or a native reader.
+        let state=self.lock();
+        let admitted=self.inner.bridge.android_build.refresh_catalog(&self.inner.session_identity,admitted_at,self.android_build_gate(&state))?;
+        // No native read/ACL call begins while the original document is locked.
+        drop(state);admitted.release()
+    }
+    pub(crate) fn select_android_toolchain(&self,input:crate::android_toolchain_catalog::Select) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let state=self.lock();
+        self.inner.bridge.android_build.select_catalog(input,self.android_build_gate(&state))
+    }
+    pub(crate) fn cancel_android_toolchain_catalog(&self,input:crate::android_toolchain_catalog::Cancel) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let state=self.lock();
+        self.inner.bridge.android_build.cancel_catalog(input,self.android_build_gate(&state))
     }
     pub(crate) fn android_build_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.android_build.subscribe() }
     pub(crate) fn android_build_relay_lost(&self) {
@@ -2362,8 +2472,8 @@ impl DocumentBinding {
                     source: SourceState::NotRun, settlement: Settlement::Pending, context: None, target: None,
                     review_end: None, cleanup_end: None, candidate: None, selection: None, assessment: None,
                     preview: None, assessment_context_revision: None, staged: None, error: None, project: None,
-                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, images: None, image_batch: None,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None,
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: vault::SlotData::default() });
             },
             ("existing-work", false) if state.slot.as_ref().is_some_and(|slot|
@@ -2909,6 +3019,11 @@ impl DocumentBinding {
         // capability DATA, not a fabricated asset cleanup result, and does
         // not block original discard/retirement/quit behind new admission.
         let mut changed = images::observe_failure(state) | observe_session_owner_reason(state, owner_reason);
+        if let Some(slot) = state.slot.as_mut().filter(|slot| slot.operation.android_source()) {
+            if let Some((reason, at)) = self.inner.bridge.android_build.source_stop(&slot.owner) {
+                let before = slot.cleanup_end; slot.stop(reason, at); changed |= before != slot.cleanup_end;
+            }
+        }
         if let Some(slot) = state.slot.as_mut() {
             if slot.cleanup_end.is_none() && slot.phase != Phase::Idle {
                 let work = slot.owner.endpoint();
@@ -2942,7 +3057,7 @@ impl DocumentBinding {
                 if slot.cleanup_end.is_none() && slot.phase != Phase::Idle { slot.stop(Reason::CleanupUnknown, now); changed = true; }
             }
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { changed |= vault::observe_stop(state, now); }
         self.github_observe_locked(state, now);
         if changed { self.bump(state); }
@@ -3000,7 +3115,7 @@ impl DocumentBinding {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, false)?;
         idle(&state)?;
         if state.session { return Ok(self.snapshot(&state)); }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if state.vault.is_some() { return Err(AssetError::new(Reason::Busy)); }
         let remaining_records = RECORD_LIMIT.saturating_sub(state.records.len());
         let remaining_assignments = 8usize.saturating_sub(state.assignments.len());
@@ -3009,9 +3124,9 @@ impl DocumentBinding {
         // Keep a closed encrypted operation's actual receipt until explicit
         // new-mode admission. It is not a session operation and must not be
         // relabelled. Only already-settled DATA is removed off this real gate.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let old = if state.slot.as_ref().is_some_and(vault::operation_attached) { state.slot.take() } else { None };
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let old: Option<Slot> = None;
         state.session = true; state.retiring = old.is_some(); self.bump(&mut state);
         if old.is_some() {
@@ -3037,7 +3152,7 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
         self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::context_gate(&state, registry_generation)?;
         let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); };
         // Bounded, already-admitted Value serialization, not source parsing or
@@ -3059,10 +3174,10 @@ impl DocumentBinding {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
         if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
         if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
-        let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.images()).ok_or_else(AssetError::invalid)?;
+        let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.images()).ok_or_else(AssetError::invalid)?;
         if !preserve_storage_operation(slot) { slot.operation = Operation::Discard; }
         slot.stop(Reason::UserCancelled, Instant::now());
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::observe_stop(&mut state, Instant::now());
         self.bump(&mut state);
         drop(state); Ok(self.status())
@@ -3076,10 +3191,10 @@ impl DocumentBinding {
         // owner's resources settled or turn vault lock into GitHub Disconnect.
         self.inner.bridge.preflight.context_changed(); self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
         invalidate_all(&mut state); state.lock_pending = true;
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::revoke_all(&mut state);
         if let Some(slot) = state.slot.as_mut() {
-            if !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.images() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
+            if !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.images() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
             slot.stop(Reason::UserCancelled, Instant::now());
         }
         self.bump(&mut state); drop(state); Ok(self.status())
@@ -3090,27 +3205,27 @@ fn idle(state: &DocumentState) -> Result<(), AssetError> {
     if state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled()) { return Err(AssetError::new(Reason::Busy)); } Ok(())
 }
 fn encrypted_mode(_state: &DocumentState) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { vault::mode(_state) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { false }
 }
 fn encrypted_authority_visible(_state: &DocumentState) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { vault::authority_visible(_state) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { true }
 }
 fn preserve_storage_operation(_slot: &Slot) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { vault::preserve_operation(_slot) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { false }
 }
 fn vault_retirement_data(_value: &Retirement) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { !_value.vault.empty() }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { false }
 }
 fn assignment_available(state: &DocumentState, assignment: &Assignment) -> bool {
@@ -3132,48 +3247,48 @@ fn record_assessed(state: &DocumentState, key: &RecordKey) -> bool {
 }
 fn session_writable(state: &DocumentState) -> bool {
     if state.session { return true; }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { vault::writable(state) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { false }
 }
 fn asset_mode(state: &DocumentState) -> &'static str { if encrypted_mode(state) { "encrypted" } else if state.session { "session" } else { "closed" } }
 fn persistence_status(_state: &DocumentState) -> Option<PersistenceStatus> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { vault::projection(_state) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { None }
 }
 fn storage_status(_slot: &Slot) -> Option<StorageStatus> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { vault::outcome(_slot) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { None }
 }
 fn encrypted_summaries(_state: &DocumentState) -> Vec<RecordStatus> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     { vault::summaries(_state) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { Vec::new() }
 }
 fn has_record(state: &DocumentState, key: &RecordKey, kind: Kind) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if encrypted_mode(state) { return vault::has_record(state, key, kind); }
     state.records.iter().any(|record| record.key == *key && record.payload.kind == kind)
 }
 fn record_pending(state: &DocumentState, key: &RecordKey) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if encrypted_mode(state) { return vault::pending(state, key); }
     state.records.iter().any(|record| record.key == *key && record.mutation_pending)
 }
 fn record_usable(state: &DocumentState, slot: &Slot, key: &RecordKey, kind: Kind) -> bool {
     if session_slot_kind_gate(state, slot, kind).is_err() { return false; }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if encrypted_mode(state) { return vault::usable(state, slot, key, kind); }
     state.records.iter().any(|record| record.key == *key && record.payload.kind == kind && !record.mutation_pending && record.payload.usable_source())
 }
 fn slot_payload<'a>(state: &'a DocumentState, slot: &'a Slot) -> Option<&'a Arc<Payload>> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if let Some(payload) = &slot.vault.loaded { return Some(payload); }
     slot.candidate.as_ref().map(|candidate| &candidate.payload).or_else(||
         slot.target.as_ref().and_then(|target| state.records.iter().find(|record| &record.key == target).map(|record| &record.payload)))
@@ -3187,9 +3302,9 @@ fn invalidate_all(state: &mut DocumentState) {
     if let Some(slot) = state.slot.as_mut() { slot.selection = None; slot.preview = None; }
 }
 fn retire_context_authority(state: &mut DocumentState, at: Instant) -> Option<Arc<NativeContext>> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let completed_receipt = vault::completed_context_receipt(state);
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     let completed_receipt = false;
     invalidate_all(state);
     let slot = state.slot.as_mut()?;
@@ -3204,7 +3319,7 @@ fn retire_context_authority(state: &mut DocumentState, at: Instant) -> Option<Ar
     None
 }
 fn revoke_record(state: &mut DocumentState, key: &RecordKey) {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault::revoke(state, key);
     for assignment in &mut state.assignments { if assignment.record_id == key.id && assignment.record_revision == key.revision { assignment.availability = AssignmentAvailability::Unavailable; } }
     if let Some(record) = state.records.iter_mut().find(|record| record.key == *key) { record.mutation_pending = true; }
@@ -3212,7 +3327,7 @@ fn revoke_record(state: &mut DocumentState, key: &RecordKey) {
 }
 fn own_record(reference: commands::RecordRef<'_>) -> Result<RecordKey, AssetError> { Ok(RecordKey { id: Token(commands::copy_text(reference.record_id)?), revision: reference.expected_revision }) }
 fn target(state: &DocumentState, reference: Option<commands::RecordRef<'_>>, kind: Kind) -> Result<Option<RecordKey>, AssetError> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if vault::mode(state) { return vault::target(state, reference, kind); }
     let Some(reference) = reference else { if state.records.len() >= RECORD_LIMIT { return Err(AssetError::new(Reason::Capacity)); } return Ok(None); };
     let key = own_record(reference)?;
@@ -3224,26 +3339,31 @@ enum ChildJob {
     Probe { path: std::path::PathBuf, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { path: std::path::PathBuf, binding: Arc<ProjectPathBinding> },
     Images { paths: Vec<std::path::PathBuf>, binding: Arc<images::Binding> },
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     Vault(vault::Child),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     KeyringProvider { step: crate::vault_keyring_linux::ProviderStep },
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    KeyringHelper(DocumentBinding),
 }
 enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
     Images(asset_source::CapturedPublicImageBatch),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     Vault(vault::ChildResult),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     KeyringProvider { step: crate::vault_keyring_linux::ProviderStep, result: Result<(), crate::vault_keyring_linux::Problem> },
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    KeyringHelper(Result<(), keyring::Problem>),
 }
 enum Staged {
     Selected { payload: Arc<Payload>, tokens: TokenBatch }, Prepared { result: Result<SafeAssessment, CommandError>, tokens: TokenBatch },
     Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
     ProjectPath { proof: asset_source::ProjectPathProbe, binding: Arc<ProjectPathBinding> },
+    AndroidSource { proof: asset_source::ProjectProbe, binding: Arc<AndroidSourceBinding> },
     Images { batch: asset_source::CapturedPublicImageBatch, binding: Arc<images::Binding> },
     EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch, purpose: EvidencePurpose }, EvidenceObserved(EvidenceResult),
     Committed { bind: Option<Token> }, Bound(Assignment), Refused(Reason),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     Vault(vault::Staged),
 }
 #[cfg(feature = "desktop-shell")]
@@ -3251,10 +3371,12 @@ enum Job {
     Choose { app: tauri::AppHandle, kind: Kind, roster: ProjectRoster },
     Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { app: tauri::AppHandle, binding: Arc<ProjectPathBinding> },
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    AndroidSource { app: tauri::AppHandle, binding: Arc<AndroidSourceBinding> },
     Images { app: tauri::AppHandle, binding: Arc<images::Binding> },
     ChooseEvidenceFolder { app: tauri::AppHandle, purpose: EvidencePurpose }, InspectEvidence { root: asset_source::RegisteredRoot, purpose: EvidencePurpose },
     Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     Vault(vault::Job),
 }
 
@@ -3263,7 +3385,7 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
     let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6, ChildJob::Images { .. } => 7 };
     let mut book = owner.child.lock().await;
     let mut failed_cleanup = false;
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if book.handle.is_none() && book.receipt == JoinReceipt::Failed && matches!(&job, ChildJob::Vault(vault::Child::Release)) {
         failed_cleanup = vault::retain_failed_child_for_release(owner);
     }
@@ -3277,6 +3399,10 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
         // A joined Captured ChildEnd may still be a caller-local large holding.
         // This closed slice refuses later lookup in that same owner rather than
         // presume that Returned means the result was published/disposed.
+        owner.large_work_started.store(true, Ordering::SeqCst);
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if !matches!(&job, ChildJob::Tokens | ChildJob::KeyringHelper(_)) && !matches!(&job, ChildJob::Vault(job) if !job.large()) {
         owner.large_work_started.store(true, Ordering::SeqCst);
     }
     book.receipt = JoinReceipt::Pending;
@@ -3299,6 +3425,8 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
     let mut stop = || owner.interrupted();
     if stop() && !cleanup_child(&job) { return ChildEnd::Refused(Reason::UserCancelled); }
     match job {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        ChildJob::KeyringHelper(document) => ChildEnd::KeyringHelper(keyring_macos::execute(&document, owner)),
         ChildJob::Tokens => match random_tokens(&mut stop) { Ok(tokens) => ChildEnd::Tokens(tokens), Err(reason) => ChildEnd::Refused(reason) },
         ChildJob::Capture { path, roots, kind } => {
             let captured = match owner.source.lock() { Ok(mut book) => asset_source::capture(&mut book, path, &roots, kind, &mut stop), Err(_) => Err(Reason::CleanupUnknown) };
@@ -3315,9 +3443,9 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
         }
         ChildJob::Probe { path, origins, vault } => match owner.source.lock() {
             Ok(mut book) => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 let result = asset_source::probe_project_excluding_vault(&mut book, path, &origins, vault.as_ref(), &mut stop);
-                #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
                 let result = if vault.is_some() { Err(Reason::UnsupportedPlatform) } else { asset_source::probe_project(&mut book, path, &origins, &mut stop) };
                 match result { Ok(probe) => ChildEnd::Probed(probe), Err(reason) => ChildEnd::Refused(reason) }
             },
@@ -3340,7 +3468,7 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
                 Err(reason) => { images::source_failure(owner, reason); ChildEnd::Refused(reason) },
             }
         },
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         ChildJob::Vault(job) => match vault::execute(owner, job) { Ok(result) => ChildEnd::Vault(result), Err(reason) => ChildEnd::Refused(reason) },
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         ChildJob::KeyringProvider { step } => {
@@ -3361,17 +3489,23 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
     }
 }
 fn cleanup_child(_job: &ChildJob) -> bool {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    { return matches!(_job, ChildJob::KeyringHelper(_)) || matches!(_job, ChildJob::Vault(job) if job.cleanup()); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     { matches!(_job, ChildJob::Vault(job) if job.cleanup()) || matches!(_job, ChildJob::KeyringProvider { step: crate::vault_keyring_linux::ProviderStep::Release }) }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { false }
 }
 fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if matches!(_job, ChildJob::Vault(vault::Child::Release)) { return vault::release_child_admitted(_owner); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let ChildJob::KeyringProvider { step } = _job {
         return _owner.keyring.try_lock().is_ok_and(|book| book.provider_step_ready(*step));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if matches!(_job, ChildJob::KeyringHelper(_)) {
+        return _owner.keyring.try_lock().is_ok_and(|book| book.dispatch_ready());
     }
     _owner.lookup_allocations_allowed()
 }
@@ -3397,7 +3531,7 @@ fn prepare_copy_start(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> R
     // Sticky, conservative boundary: this slice refuses lookup after ANY R1
     // request/Value or non-Token child work started in this owner, even after a later phase change.
     // Its memory is not the native parser's 6MiB arena and is not in the census.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     owner.large_work_started.store(true, Ordering::SeqCst);
     let changed = slot.phase != Phase::Assessing; slot.phase = Phase::Assessing; Ok(changed)
 }
@@ -3426,8 +3560,8 @@ impl Slot {
         Self { owner, operation, phase: Phase::Admitting, reason: Reason::None, source: SourceState::NotRun, settlement: Settlement::Pending,
             context, target, review_end, cleanup_end: None, candidate: None, selection: None, assessment: None, preview: None,
             assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None,
-            evidence: None, project_path: None, path_result: None, images: None, image_batch: None,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None,
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: vault::SlotData::default() }
     }
 }
@@ -3451,7 +3585,7 @@ impl DocumentBinding {
             else { state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)) && state.lifetime.original_bound() && !state.stopping && !state.unknown };
         // Remember the actual native decline before stop_quit changes STOP.
         // A programmatic post-STOP close or rejected late OK is never Cancel.
-        let path_choice = !quit && state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.images()));
+        let path_choice = !quit && state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.android_source() || slot.operation.images()));
         // Preserve the existing Project/File/Evidence receipt semantics. This
         // new purpose separately records genuine native Cancel, never Other or
         // a programmatic/late post-STOP close, for its null-only cancellation.
@@ -3478,7 +3612,7 @@ impl DocumentBinding {
             if read_one_path {
                 slot.phase = Phase::Capturing;
                 slot.source = if slot.operation == Operation::ChooseFile || slot.operation.images() { SourceState::Pending } else { SourceState::NotRun };
-                if !slot.operation.project_path() && slot.review_end.is_none() { slot.review_end = Some(now + REVIEW); }
+                if !slot.operation.project_path() && !slot.operation.android_source() && slot.review_end.is_none() { slot.review_end = Some(now + REVIEW); }
             } else { slot.stop(Reason::UserCancelled, now); }
         }
         drop(facts); self.bump(&mut state); owner.gui.changed(); Some(read_one_path)
@@ -3559,9 +3693,9 @@ impl DocumentBinding {
                 let records = std::mem::take(&mut state.records);
                 let assignments = std::mem::take(&mut state.assignments);
                 let context = state.context.take();
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 let vault = vault::take_empty_session(&mut state);
-                #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
                 let vault: Option<()> = None;
                 let changed = state.session || state.lock_pending || context.is_some() || !records.is_empty() || !assignments.is_empty() || vault.is_some();
                 state.retiring = true; drop(state); drop((records, assignments, context, vault));
@@ -3646,6 +3780,17 @@ impl DocumentBinding {
             }
         }
 
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if let Some(ChildEnd::KeyringHelper(result)) = &orphan_result {
+            let at = if let Ok(mut book) = slot.owner.keyring.try_lock() {
+                book.interrupt(); book.child_joined(*result);
+                book.problem_at().unwrap_or_else(Instant::now)
+            } else { Instant::now() };
+            slot.stop(Reason::CleanupUnknown, at); slot.phase = Phase::Unknown;
+            slot.settlement = Settlement::Unknown; state.unknown = true;
+            first_unknown_origin!(state, UnknownOrigin::CoordinatorJoin, Some(&slot.owner));
+            self.bump(&mut state);
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(ChildEnd::KeyringProvider { step, result }) = &orphan_result {
             // This is the actual joined child of the retained original slot,
@@ -3662,7 +3807,7 @@ impl DocumentBinding {
             self.bump(&mut state);
         }
 
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if slot.owner.control_resources_settled() && slot.owner.retired.load(Ordering::SeqCst)
             && slot.owner.keyring.try_lock().is_ok_and(|book| book.memory_held()) {
             // A settled SDK/book still owns its charged backing. Register this
@@ -3705,16 +3850,16 @@ impl DocumentBinding {
                 }
             }
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let cleanup_data_ready = vault::retirement_ready(&state, &slot);
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let cleanup_data_ready = false;
         if (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready) {
             let retire_context = slot.cleanup_end.is_some() || slot.candidate.is_some() || state.lock_pending || state.stopping || state.unknown || !state.lifetime.original_bound();
             let mut retirement = Retirement { candidate: slot.candidate.take(), staged: slot.staged.take(),
                 payload: slot.retired_payload.take(), image_batch: slot.image_batch.take(),
                 slot_context: if retire_context { slot.context.take() } else { None }, ..Retirement::default() };
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             { retirement.vault = vault::take_retirement(&mut state, &mut slot); }
             // Keep the sanitized explanation for the terminal idle receipt, but
             // release all native candidate leases before known settlement.
@@ -3748,7 +3893,7 @@ impl DocumentBinding {
                         if !retirement.records.is_empty() { state.records = retirement.records; }
                         if !retirement.assignments.is_empty() { state.assignments = retirement.assignments; }
                         if retirement.context.is_some() { state.context = retirement.context; }
-                        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                         vault::restore_retirement(&mut state, &mut slot, retirement.vault);
                         first_unknown_origin!(state, UnknownOrigin::RetirementRetain, Some(&slot.owner));
                         state.unknown = true; slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
@@ -3757,9 +3902,10 @@ impl DocumentBinding {
                 }
             }
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::observe_detached_stop(&mut state, &slot, Instant::now());
         state.slot = Some(slot);
+        self.observe_android_source_slot(&state);
         settle_evidence_status(&mut state);
         if complete_empty_session_lock(&mut state) { self.bump(&mut state); }
         if state.unknown { invalidate_all(&mut state); }
@@ -3794,6 +3940,7 @@ impl DocumentBinding {
                 state.session = false; state.lock_pending = false;
             }
             settle_evidence_status(&mut state);
+            self.observe_android_source_slot(&state);
             self.bump(&mut state);
         }
         #[cfg(all(feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3818,8 +3965,22 @@ impl DocumentBinding {
         }
         match staged {
             Staged::Images { batch, binding } => images::publish(self, state, slot, batch, binding),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Staged::Vault(result) => vault::publish(self, state, slot, result),
+            Staged::AndroidSource { proof, binding } => {
+                if !slot.operation.android_source() || !slot.android_source.as_ref().is_some_and(|original| Arc::ptr_eq(original, &binding))
+                    || !slot.owner.android_source_selected_settled() {
+                    slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; return;
+                }
+                let registered = self.registry_result(state, self.inner.bridge.native_project(&binding.project_id), Some(&slot.owner));
+                if !registered.is_ok_and(|(generation, root)| generation == binding.generation && root == binding.root) {
+                    slot.stop(Reason::ContextStale, Instant::now()); return;
+                }
+                if self.inner.bridge.android_build.publish_source(&slot.owner, proof).is_err() {
+                    slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; return;
+                }
+                slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            }
             Staged::ProjectPath { proof, binding } => {
                 if !slot.operation.project_path() || !slot.project_path.as_ref().is_some_and(|original| Arc::ptr_eq(original, &binding)) {
                     slot.stop(Reason::ContextStale, Instant::now()); return;
@@ -3916,7 +4077,7 @@ impl DocumentBinding {
             Staged::Project { proof, generation } => match self.inner.bridge.publish_checked_project(proof, generation) {
                 Ok(project) => {
                     invalidate_all(state);
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                     match self.inner.bridge.native_generation() {
                         Ok(actual) => vault::registered_generation(state, actual),
                         Err(error) => {
@@ -3985,9 +4146,9 @@ fn tokens_distinct(tokens: &TokenBatch) -> bool {
 
 fn preview_subject_valid(state: &DocumentState, slot: &Slot, preview: &Preview) -> bool {
     let PreviewSubject::Record { kind, change, record_id, record_revision } = &preview.subject else {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { return vault::initialize_preview_valid(state, slot, preview); }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { return false; }
     };
     if !kind.enabled() || slot.kind != Some(*kind) { return false; }
@@ -4032,9 +4193,9 @@ impl DocumentBinding {
         // Every caller also has its real reciprocal admission check. Keep the
         // path original nonreplaceable here even if a future caller omits one;
         // an absent path slot in its invoke waiter then implies known settlement.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let retired_cleanup = matches!(&job, Job::Vault(vault::Job::Release)) && vault::late_cleanup_install(state, &slot);
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let retired_cleanup = false;
         // An already-late-settled unrelated path remains Unknown. Only the
         // revoked vault lease's finite Release may retain/retire that old slot;
@@ -4044,7 +4205,7 @@ impl DocumentBinding {
         // Public images share lifecycle custody, not a private credential
         // session/lease. Their raw allowance already charges retained vault
         // DATA without attaching or consuming the vault's use authority.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if !slot.operation.images() { vault::attach_asset_slot(state, &mut slot)?; }
         settle_evidence_status(state);
         let owner = slot.owner.clone();
@@ -4092,7 +4253,7 @@ impl DocumentBinding {
         let target = target(&state, args.replacement, args.kind)?;
         let mut roster = self.registry_result(&mut state, self.inner.bridge.native_roster(), None)?;
         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if let Some(vault) = vault::physical_root(&state) { roster.roots.push(vault); }
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
@@ -4108,7 +4269,7 @@ impl DocumentBinding {
         let context = self.current_context(&mut state, args.context_revision)?;
         let durable = encrypted_mode(&state);
         if args.label.is_some() != (durable && !matches!(args.source, commands::Source::Record(_))) { return Err(AssetError::invalid()); }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if durable {
             if let commands::Source::Record(reference) = &args.source {
                 let key = own_record(commands::RecordRef { record_id: reference.record_id, expected_revision: reference.expected_revision })?;
@@ -4149,7 +4310,7 @@ impl DocumentBinding {
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
         let mut slot = Slot::new(owner, Operation::Prepare, Some(context.clone()), target.clone(), review_end);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { slot.vault.label = args.label.flatten().map(commands::copy_text).transpose()?; }
         slot.kind = Some(payload.kind); slot.source = if payload.material.is_some() { SourceState::Captured } else { SourceState::NotRun };
         let is_mutation = candidate.is_some(); slot.candidate = candidate;
@@ -4162,7 +4323,7 @@ impl DocumentBinding {
     }
 
     pub(crate) fn prepare_delete(&self, reference: commands::RecordRef<'_>) -> Result<AssetStatus, AssetError> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if encrypted_mode(&self.lock()) { return self.prepare_vault_delete(reference); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?; idle(&state)?;
         let key = own_record(reference)?;
@@ -4214,19 +4375,19 @@ async fn run_job(document: DocumentBinding, owner: Arc<OriginalWork>, job: Job) 
             _ = tokio::time::sleep(Duration::from_millis(25)) => document.tick(),
         }
     };
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault::after_job(&document, &owner, &staged).await;
     document.stage(&owner, staged);
 }
 
 #[cfg(feature = "desktop-shell")]
 async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: Job) -> Staged {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if matches!(&job, Job::Vault(vault::Job::Release)) { return vault::run(document, owner, vault::Job::Release).await; }
     if owner.interrupted() { owner.gui.not_created(Reason::UserCancelled); return Staged::Refused(Reason::UserCancelled); }
     match job {
         Job::Images { app, binding } => images::run(document, owner, app, binding).await,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Job::Vault(job) => vault::run(document, owner, job).await,
         Job::Retire { bind } => Staged::Committed { bind },
         Job::Bind(assignment) => Staged::Bound(assignment),
@@ -4295,6 +4456,21 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             match child(owner, ChildJob::Probe { path, origins, vault }).await {
                 Ok(ChildEnd::Probed(proof)) => Staged::Project { proof, generation },
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        Job::AndroidSource { app, binding } => {
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::AndroidToolSource(binding.role), None).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            // Reuse the original bounded parent-relative directory probe and
+            // its SourceBook cleanup, NOT project-relative-path validation or
+            // project registration. No payload is read or supplier code run.
+            match child(owner, ChildJob::Probe { path, origins: Vec::new(), vault: None }).await {
+                Ok(ChildEnd::Probed(proof)) => Staged::AndroidSource { proof, binding },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason),
+                _ => Staged::Refused(Reason::CleanupUnknown),
             }
         }
         Job::ProjectPath { app, binding } => {
@@ -4427,7 +4603,7 @@ impl DocumentBinding {
     }
 
     pub(crate) fn commit(&self, token: &str) -> Result<AssetStatus, AssetError> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if encrypted_mode(&self.lock()) { return self.commit_vault(token); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let preview = self.consume_preview(&mut state, token, false)?;
@@ -4504,7 +4680,7 @@ impl DocumentBinding {
     }
 
     pub(crate) fn bind(&self, token: &str) -> Result<AssetStatus, AssetError> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if encrypted_mode(&self.lock()) { return self.bind_vault(token); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let preview = self.consume_preview(&mut state, token, true)?;
@@ -4548,9 +4724,9 @@ impl DocumentBinding {
         // not only success, revokes old use; cancel/refusal never restores it.
         invalidate_all(&mut state);
         state.github.retire(GitHubReason::TargetChanged);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let vault = vault::physical_root(&state);
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let vault = None;
         let start = self.install(&mut state, slot, Job::Project { app, generation, origins, vault })?;
         drop(state); let _ = start.send(()); Ok(id)
@@ -4594,6 +4770,51 @@ impl DocumentBinding {
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+
+    pub(crate) fn choose_android_tool_source(&self, app: tauri::AppHandle, input: crate::android_tool_sources::Choose)
+        -> Result<crate::android_tool_sources::Status, BridgeError> {
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        { let _ = (app, input); return Err(crate::android_tool_sources::unavailable()); }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            self.reconcile();
+            let mut state = self.lock(); self.expire(&mut state, Instant::now());
+            let gate = self.android_build_gate(&state);
+            // Ordinary installed main-window/picker profile only. Test controls,
+            // rfd compatibility, credential qualification and catalog selection
+            // do not independently authorize this source purpose.
+            if gate != crate::android_build_protocol::Availability::Available
+                || !self.inner.bridge.installed_project_path_selection_available() {
+                return Err(crate::android_tool_sources::unavailable());
+            }
+            idle(&state).map_err(|_| crate::android_tool_sources::unavailable())?;
+            let before = self.inner.bridge.android_build.sources_status(gate)?;
+            if before.availability != crate::android_build_protocol::Availability::Available
+                || before.source_generation != input.source_generation { return Err(crate::android_tool_sources::invalid()); }
+            let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&input.project_id), None)
+                .map_err(|_| crate::android_tool_sources::unavailable())?;
+            let id = self.next_operation(&mut state).map_err(|_| BridgeError::cleanup_unknown())?;
+            if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(BridgeError::cleanup_unknown()); }
+            let binding = Arc::new(AndroidSourceBinding { project_id: input.project_id.clone(), generation, root: root.clone(), role: input.role });
+            let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+            let mut slot = Slot::new(owner.clone(), Operation::ChooseAndroidSource, None, None, None);
+            slot.android_source = Some(binding.clone());
+            let start = self.install(&mut state, slot, Job::AndroidSource { app, binding })
+                .map_err(|_| BridgeError::cleanup_unknown())?;
+            // Actual asset coordinator/GUI/source/child roster already exists,
+            // with GO still closed. Save that SAME original in Android Registry.
+            if let Err(error) = self.inner.bridge.android_build.admit_source(&self.inner.session_identity, &input, generation, root, owner, gate) {
+                drop(state); drop(start); return Err(error);
+            }
+            let status = match self.inner.bridge.android_build.sources_status(self.android_build_gate(&state)) {
+                Ok(status) => status, Err(error) => { drop(state); drop(start); return Err(error); }
+            };
+            drop(state);
+            if start.send(()).is_err() { return Err(BridgeError::cleanup_unknown()); }
+            Ok(status)
         }
     }
 
@@ -6029,7 +6250,7 @@ pub(crate) fn assert_project_path_document_contracts() {
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
@@ -6162,7 +6383,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
@@ -6259,7 +6480,7 @@ mod tests {
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
@@ -7276,4 +7497,37 @@ mod tests {
         assert!(owner.keyring.lock().unwrap().memory_held());
         assert!(!owner.dispose_keyring_storage());
     }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_installation_reveal_document_gate_contract() {
+    let ready = || {
+        let mut state = tests::empty_state();
+        state.lifetime.crash_hook_installed();
+        state.lifetime.started(true);
+        state.lifetime.finished(true);
+        state
+    };
+    assert!(installation_reveal_document_gate(&tests::empty_state()).is_err());
+    assert!(installation_reveal_document_gate(&ready()).is_ok());
+    for change in [
+        (|state: &mut DocumentState| { state.unknown = true; }) as fn(&mut DocumentState),
+        |state| { state.exhausted = true; },
+        |state| { state.stopping = true; },
+        |state| { state.quit_pending = true; },
+        |state| { state.retiring = true; },
+        |state| { state.lock_pending = true; },
+        |state| { state.compatibility_picker_pending = true; },
+        |state| { state.lost_observed = true; },
+        |state| { state.lifetime.invalidate(); },
+    ] {
+        let mut state = ready(); change(&mut state);
+        assert!(installation_reveal_document_gate(&state).is_err());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn installation_reveal_requires_original_document_and_blocks_pending_lifecycle() {
+    assert_installation_reveal_document_gate_contract();
 }

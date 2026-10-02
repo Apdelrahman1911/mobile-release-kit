@@ -8,6 +8,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shlex
 import stat
 import struct
 import sys
@@ -22,6 +23,21 @@ if sys.platform in ("darwin", "linux"):
     spec = importlib.util.spec_from_file_location("macos_installed_staging_data", path)
     TOOL = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(TOOL)
+
+
+def workflow_step(workflow, name):
+    """Select one reviewed named step, without consuming unrelated later steps."""
+    marker = "      - name: " + name + "\n"
+    if workflow.count(marker) != 1:
+        raise AssertionError("expected exactly one workflow step: " + name)
+    return workflow.split(marker, 1)[1].split("      - name: ", 1)[0]
+
+
+def normal_app_steps(workflow):
+    return tuple(workflow_step(workflow, name) for name in (
+        "Build only the normal ARM64 bundled-asset shell",
+        "Assemble and ad-hoc sign the app only (never --deep or the runtime)",
+        "Bind this completed signed app and current-source runtime into fresh Installer DATA"))
 
 
 def odc(name, mode, body=b"", *, uid=0, gid=0, links=1):
@@ -488,7 +504,7 @@ class MacInstalledData(unittest.TestCase):
         root = Path(__file__).absolute().parents[2]
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
         marker = "      - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive"
-        gate = workflow.split(marker, 1)[1].split("      - name: Download only the exact accepted M archive", 1)[0]
+        gate = workflow_step(workflow, "Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive")
         self.assertLess(workflow.index(marker), workflow.index("      - name: Build only the normal ARM64 bundled-asset shell"))
         self.assertIn("desktop/native/macos-installed-native/src/native.m desktop/native/macos-installed-native/tests/acl_probe.m", gate)
         self.assertIn('/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$MRK_MACOS_WORK/acl-probe"', gate)
@@ -1178,8 +1194,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
             current.assert_called_once()
             for current_profile, flags in ((False, []), (True, ["--current-runtime"])):
                 TOOL.main(["input", "--app", "/app", "--runtime", "/runtime", "--expected-manifest", "d" * 64,
-                           "--output", "/input", *flags])
+                           "--expected-vault-helper", "f" * 64, "--output", "/input", *flags])
                 self.assertIs(inputs.call_args.args[0].current_runtime, current_profile)
+                self.assertEqual(inputs.call_args.args[0].expected_vault_helper, "f" * 64)
         for current_profile in (False, True):
             args = SimpleNamespace(runtime=Path("/inert-runtime"), expected_manifest="e" * 64,
                                    current_runtime=current_profile)
@@ -1190,9 +1207,17 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
     def test_aqua_uses_reviewed_current_source_data_before_compilation(self):
         workflow = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        stage = workflow.index("desktop/tools/stage_macos_installed.py current-runtime")
-        self.assertLess(stage, workflow.index("npm ci --ignore-scripts"))
-        self.assertLess(stage, workflow.index("cargo test --locked"))
+        runtime_name = "Reuse accepted Mac supplier and prepare only the current source payload"
+        build_name = "Compile the fixed debug actual-main observer and normal embedded frontend once"
+        runtime = workflow_step(workflow, runtime_name)
+        build = workflow_step(workflow, build_name)
+        self.assertEqual(runtime.count("desktop/tools/stage_macos_installed.py current-runtime"), 1)
+        self.assertLess(workflow.index("      - name: " + runtime_name + "\n"),
+                        workflow.index("      - name: " + build_name + "\n"))
+        self.assertIn("npm ci --ignore-scripts", build)
+        self.assertIn("npm run build", build)
+        self.assertIn("cargo test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation", build)
+        self.assertIn("--test installed-shell-observation --no-run --message-format=json", build)
         self.assertIn('--work "$MRK_MACOS_WORK/current-runtime-preparation"', workflow)
         self.assertIn('--expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256"', workflow)
         self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', workflow)
@@ -1203,21 +1228,40 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertIn('"$' + variable + '" == ' + literal, workflow)
         self.assertIn('actions/artifacts/10639324707/zip', workflow)
         self.assertIn('"reusedSupplierOnly": True', workflow)
-        self.assertIn('"first-save", "noop-stale", "picker-loss", "save-loss"', workflow)
+        # This workflow now selects explicit current scopes; it does not run or
+        # qualify the historical four merely by staging the current payload.
+        binding = workflow_step(workflow, "Record exact source and actual tool bindings only after route admission")
+        self.assertIn('"scopes": selected_scopes, "caseNames": case_names', binding)
+        self.assertIn('"unselectedScopes": [scope for scope in native_scopes if scope not in selected_scopes]', binding)
+        self.assertIn('"actualAquaSaveGate": "not-yet-executed"', binding)
+        for scope, name in (
+                ("project-fields", "One project-field Aqua journey through the reviewed original invocation owner"),
+                ("android-inputs", "One Android-input Aqua journey through the reviewed original invocation owner"),
+                ("ios-current-synthetic", "Nine serial current-iOS Aqua cases through the reviewed original invocation owner")):
+            journey = workflow_step(workflow, name)
+            self.assertEqual(journey.count("desktop/tools/macos_aqua_qualification.py --scope " + scope + " "), 1)
+            self.assertIn("env.MRK_MACOS_AQUA_SCOPE == '" + scope + "'", journey)
+            self.assertIn("[[ $status == 0 ]]", journey)
+        aqua_owner = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_aqua_qualification.py").read_text(encoding="utf-8")
+        self.assertIn('CASES = ("first-save", "noop-stale", "picker-loss", "save-loss")', aqua_owner)
+        self.assertIn('return IOS_CASES if scope == "ios-unsigned-archive" else CASES', aqua_owner)
 
     def test_ordinary_workflow_binds_reviewed_current_payload_before_normal_release(self):
         root = Path(__file__).absolute().parents[2]
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
-        anchors = {
-            "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": "bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37",
-            "MRK_BUNDLED_RUNTIME_SOURCE_SHA256": "f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371",
-            "MRK_BUNDLED_PROTOCOL_SHA256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
-        }
-        for variable, expected in anchors.items():
-            self.assertEqual(TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{64})$", workflow, TOOL.re.M),
-                             [expected], variable)
+        anchors = {}
+        for variable in ("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "MRK_BUNDLED_RUNTIME_SOURCE_SHA256",
+                         "MRK_BUNDLED_PROTOCOL_SHA256"):
+            configured = TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{64})$", workflow, TOOL.re.M)
+            self.assertEqual(len(configured), 1, variable)
+            anchors[variable] = configured[0]
             self.assertIn('"$' + variable + '" =~ ^[0-9a-f]{64}$', workflow)
-            self.assertIn('"$' + variable + '" == ' + expected, workflow)
+            self.assertIn('"$' + variable + '" == ' + configured[0], workflow)
+        # Read the actual bounded source DATA used by the stager, not a copy of
+        # its historical pin. No core import, supplier extraction or execution.
+        self.assertEqual(anchors["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"], TOOL.current_source()[2])
+        # The manifest pin still needs independent runtime-regeneration evidence.
+        # Its format, guards and CLI binding here do not establish its authority.
         self.assertEqual(TOOL.CURRENT_PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
         self.assertNotEqual(TOOL.PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
         for field, variable in (("runtimeManifestSha256", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
@@ -1229,10 +1273,15 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertEqual(workflow.count('actions/artifacts/10639324707/zip'), 1)
         command = "desktop/tools/stage_macos_installed.py current-runtime"
         self.assertEqual(workflow.count(command), 1)
-        stage = workflow.index(command)
-        self.assertLess(stage, workflow.index("npm ci --ignore-scripts"))
-        self.assertLess(stage, workflow.index("cargo build --locked --release"))
-        block = workflow.split("      - name: Reuse accepted Mac supplier and prepare only the current ordinary payload\n", 1)[1].split("      - name: ", 1)[0]
+        runtime_name = "Reuse accepted Mac supplier and prepare only the current ordinary payload"
+        build_name = "Build only the normal ARM64 bundled-asset shell"
+        block = workflow_step(workflow, runtime_name)
+        build = workflow_step(workflow, build_name)
+        self.assertEqual(block.count(command), 1)
+        self.assertLess(workflow.index("      - name: " + runtime_name + "\n"),
+                        workflow.index("      - name: " + build_name + "\n"))
+        self.assertIn("npm ci --ignore-scripts", build)
+        self.assertIn("cargo build --locked --release --no-default-features --features desktop-shell,custom-protocol", build)
         for fragment in ("timeout-minutes: 3", "set -o noclobber", "umask 077",
                          '--archive "$MRK_MACOS_WORK/accepted-native-evidence.zip"',
                          '--work "$MRK_MACOS_WORK/current-runtime-preparation"',
@@ -1254,10 +1303,25 @@ class MacCurrentRuntimeData(unittest.TestCase):
         root = Path(__file__).absolute().parents[2]
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
         normal = "cargo build --locked --release --no-default-features --features desktop-shell,custom-protocol"
+        build, assembly, inputs = normal_app_steps(workflow)
         self.assertEqual(workflow.count(normal), 1)
-        self.assertIn('--binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop"', workflow)
-        for forbidden in ("macos-installed-observation", "development-runtime", "macos_aqua_qualification.py", "--scope "):
-            self.assertNotIn(forbidden, workflow)
+        self.assertEqual(build.count(normal + " \\\n"), 1)
+        self.assertIn('--binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop"', assembly)
+        self.assertIn('--normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', assembly)
+        self.assertIn('--app "$MRK_MACOS_WORK/app/Mobile Release Kit.app"', inputs)
+        # The preview's separate debug DATA contract is not the shipped binary.
+        data = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
+        self.assertEqual(workflow.count("macos-installed-observation"), data.count("macos-installed-observation"))
+        self.assertEqual(data.count("macos-installed-observation"), 1)
+        self.assertIn('"--features", "desktop-shell,custom-protocol,macos-installed-observation"', data)
+        self.assertIn('"--test", "installed-shell-observation", "--no-run", "--message-format=json"', data)
+        self.assertIn('argv = [str(artifact), "data-contracts"]', data)
+        self.assertIn('artifact.parent != root / "cargo-target/aarch64-apple-darwin/debug/deps"', data)
+        for block in (build, assembly, inputs):
+            for forbidden in ("macos-installed-observation", "installed_shell_observation", "development-runtime"):
+                self.assertFalse(forbidden in block, "normal shipping step: " + forbidden)
+        for forbidden in ("development-runtime", "macos_aqua_qualification.py", "--scope "):
+            self.assertFalse(forbidden in workflow, forbidden)
         self.assertIn("refs/heads/verify/desktop-macos-installed", workflow)
         self.assertIn("$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF", workflow)
         self.assertIn('"fixedFixtureCases": 7', workflow)
@@ -1321,16 +1385,20 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertFalse(result["instrumented"])
         self.assertEqual(result["qualification"], "ordinary-bin-data-not-launched")
         info = TOOL.plistlib.dumps({"CFBundleExecutable": binary.name, "LSMinimumSystemVersion": "26.0"})
-        values = {binary: body, Path("/synthetic-mrk-preview/cargo.jsonl"): messages,
+        values = {binary: body, Path("/synthetic-mrk-preview/helper"): body,
+                  Path("/synthetic-mrk-preview/cargo.jsonl"): messages,
                   TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
                   TOOL.DESKTOP / "src-tauri/icons/icon.png": b"synthetic-icon"}
         args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
-            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=target)
+            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=target,
+            vault_helper=Path("/synthetic-mrk-preview/helper"), expected_vault_helper=TOOL.digest(body))
         with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
                 mock.patch.object(TOOL, "write_tree") as output:
             staged = TOOL.app_command(args)
         self.assertEqual(staged["normalCargoArtifact"], result)
         self.assertEqual(output.call_args.args[1][TOOL.APP_BINARY], (body, 0o755))
+        self.assertEqual(output.call_args.args[1][TOOL.VAULT_HELPER], (body, 0o555))
+        self.assertEqual(staged["vaultHelperSha256"], TOOL.digest(body))
 
     def test_test_targets_feature_drift_and_foreign_artifacts_never_stage(self):
         target, binary, original, body = normal_cargo_fixture()
@@ -1373,7 +1441,8 @@ class MacNormalPreviewData(unittest.TestCase):
     def test_optional_gate_is_paired_and_failure_precedes_any_app_write(self):
         target, binary, item, body = normal_cargo_fixture()
         args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
-            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=None)
+            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=None,
+            vault_helper=Path("/synthetic-mrk-preview/helper"), expected_vault_helper=TOOL.digest(body))
         with mock.patch.object(TOOL, "read", return_value=body), mock.patch.object(TOOL, "write_tree") as output:
             with self.assertRaises(TOOL.Refused):
                 TOOL.app_command(args)
@@ -1381,11 +1450,108 @@ class MacNormalPreviewData(unittest.TestCase):
         args.normal_cargo_target_dir = target
         item["profile"]["test"] = True
         messages = cargo_lines(item, {"reason": "build-finished", "success": True})
-        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: body if path == binary else messages), \
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: body if path in (binary, args.vault_helper) else messages), \
                 mock.patch.object(TOOL, "write_tree") as output:
             with self.assertRaises(TOOL.Refused):
                 TOOL.app_command(args)
             output.assert_not_called()
+
+
+    def test_helper_loader_paths_are_closed_to_apple_systems_without_environment_or_rpath(self):
+        # Bounded Mach-O DATA. This neither signs code nor substitutes for a
+        # native dyld/installed-caller/Keychain admission result.
+        build = struct.pack("<6I", 0x32, 24, 1, 26 << 16, 26 << 16, 0)
+        def named(command, name, *, dylib=True):
+            prefix = 24 if dylib else 12
+            data = name + b"\0"
+            length = (prefix + len(data) + 7) // 8 * 8
+            header = struct.pack("<III", command, length, prefix)
+            return header + b"\0" * (prefix - len(header)) + data + b"\0" * (length - prefix - len(data))
+        def image(*commands):
+            commands = (build, *commands)
+            return struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, len(commands),
+                               sum(map(len, commands)), 0, 0) + b"".join(commands)
+        good = named(0xC, b"/usr/lib/libSystem.B.dylib")
+        TOOL.macho(image(good, named(0xE, b"/usr/lib/dyld", dylib=False)), system_only=True)
+        refused = [named(0xC, b"@rpath/foreign.dylib"),
+                   named(0xC, b"/Users/shared/foreign.dylib"),
+                   named(0xC, b"/usr/lib/../foreign.dylib"),
+                   named(0x8000001C, b"/usr/lib", dylib=False),
+                   named(0x27, b"DYLD_LIBRARY_PATH=/tmp", dylib=False),
+                   named(0xE, b"/tmp/dyld", dylib=False)]
+        for command in refused:
+            with self.subTest(command=command[:12]), self.assertRaises(TOOL.Refused):
+                TOOL.macho(image(command), system_only=True)
+
+    def test_changed_signed_helper_fails_before_any_app_write(self):
+        target, binary, item, body = normal_cargo_fixture()
+        args = SimpleNamespace(binary=binary, vault_helper=Path("/inert/helper"),
+            expected_vault_helper="f" * 64, output=Path("/inert/output"))
+        with mock.patch.object(TOOL, "read", return_value=body), mock.patch.object(TOOL, "write_tree") as output:
+            with self.assertRaisesRegex(TOOL.Refused, "helper-final-signed-digest"):
+                TOOL.app_command(args)
+            output.assert_not_called()
+
+    def test_installer_input_requires_the_same_helper_and_rejects_other_executables(self):
+        _, _, _, body = normal_cargo_fixture()
+        info = b"inert-info-data"
+        args = SimpleNamespace(runtime=Path("/inert/runtime"), expected_manifest="c" * 64,
+            current_runtime=True, app=Path("/inert/app"), expected_vault_helper=TOOL.digest(body),
+            output=Path("/inert/output"))
+        app = {TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
+               "Contents/Info.plist": (info, 0o644), "Contents/_CodeSignature/CodeResources": (b"signature-data", 0o644)}
+        runtime = {"python/bin/python3": (b"interpreter-data", 0o755)}
+        with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime),
+              mock.patch.object(TOOL, "tree", return_value=app) as tree,
+              mock.patch.object(TOOL, "read", return_value=info),
+              mock.patch.object(TOOL, "write_tree") as output):
+            TOOL.input_command(args)
+            files = output.call_args.args[1]
+            self.assertEqual(files["app/" + TOOL.VAULT_HELPER], (body, 0o555))
+            for mutation, reason in (
+                ({name: value for name, value in app.items() if name != TOOL.VAULT_HELPER}, "signed-app-roster"),
+                ({**app, TOOL.VAULT_HELPER: (body + b"changed", 0o555)}, "nested-helper-signature-bytes-changed"),
+                ({**app, "Contents/Helpers/foreign": (body, 0o555)}, "input-executable-scope"),
+            ):
+                output.reset_mock(); tree.return_value = mutation
+                with self.subTest(reason=reason), self.assertRaisesRegex(TOOL.Refused, reason):
+                    TOOL.input_command(args)
+                output.assert_not_called()
+
+    def test_helper_is_separate_signed_before_digest_bound_app_and_not_a_qualification(self):
+        root = Path(__file__).absolute().parents[2]
+        helper = (root / "desktop/helpers/macos-vault-helper/Cargo.toml").read_text()
+        self.assertIn("[workspace]", helper)
+        self.assertIn('features = ["vault-helper"]', helper)
+        self.assertNotIn("tauri", helper.split("[dependencies]", 1)[1].lower())
+        native = (root / "desktop/native/macos-installed-native/build.rs").read_text()
+        self.assertIn("release: 1.98.1", native)
+        self.assertIn("commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985", native)
+        library = (root / "desktop/src-tauri/src/lib.rs").read_text()
+        self.assertIn("!mrk_macos_installed_native::VAULT_HELPER_BUILD", library)
+        for name in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
+            workflow = (root / ".github/workflows" / name).read_text()
+            build = workflow.index("--manifest-path desktop/helpers/macos-vault-helper/Cargo.toml")
+            helper_sign = workflow.index('--timestamp=none "$helper"', build)
+            digest = workflow.index('output.write("MRK_MACOS_VAULT_HELPER_SHA256=', helper_sign)
+            stage = workflow.index("stage_macos_installed.py app", digest)
+            app_sign = workflow.index('--timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"', stage)
+            self.assertLess(build, helper_sign); self.assertLess(helper_sign, digest)
+            self.assertLess(digest, stage); self.assertLess(stage, app_sign)
+            self.assertIn('RUSTUP_TOOLCHAIN: "1.98.1"', workflow)
+            self.assertEqual(workflow.count("--options runtime"), 2)
+            self.assertEqual(workflow.count("--entitlements desktop/packaging/macos-empty-entitlements.plist"), 2)
+            self.assertEqual(workflow.count('--expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256"'), 2)
+            # Prohibition text may mention --deep. Inspect only the real shell
+            #signing commands, folding their continued arguments without execution.
+            commands = workflow.replace('\\\n', " ").splitlines()
+            signing = [shlex.split(line, comments=True) for line in commands
+                       if line.lstrip().startswith("/usr/bin/codesign ") and "--sign " in line]
+            self.assertTrue(signing)
+            for command in signing:
+                self.assertNotIn("--deep", command)
+        self.assertIn("DURABLE_QUALIFIED: bool = false",
+                      (root / "desktop/src-tauri/src/asset_session_vault.rs").read_text())
 
     def preview_fixture(self):
         work = Path("/synthetic-mrk-preview")
@@ -1491,13 +1657,29 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertIn("/preview/README.md", publish)
         self.assertIn("/preview/PREVIEW.json", publish)
         self.assertNotIn("**", publish)
+        # Observer DATA is independently compiled, never the preview app input.
+        for block in normal_app_steps(workflow):
+            self.assertNotIn("macos-installed-observation", block)
         for forbidden in ("continue-on-error:", "normal_app_launch_probe", "forceTerminate", "/usr/bin/open ",
-                          "macos-installed-observation", "workflow_dispatch:"):
-            self.assertNotIn(forbidden, workflow)
-        guide = (root / "desktop/packaging/macos-preview.md").read_text()
-        for required in ("Automatic window-open and normal-Quit verification are unexecuted",
+                          "workflow_dispatch:"):
+            self.assertFalse(forbidden in workflow, forbidden)
+        normal_test_name = "Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally"
+        normal_test = workflow_step(workflow, normal_test_name)
+        normal_result = workflow_step(workflow, "Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim")
+        self.assertLess(workflow.index("stage_macos_installed.py preview"),
+                        workflow.index("      - name: " + normal_test_name + "\n"))
+        self.assertIn("-only-testing:MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit", normal_test)
+        self.assertIn('"cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state"', normal_result)
+        self.assertIn('"fullUIQualified": False, "distributionQualified": False, "productReady": False', normal_result)
+        guide = " ".join((root / "desktop/packaging/macos-preview.md").read_text().split())
+        for required in ("package-export receipt is intentionally a **build/Installer/readback snapshot**",
+                         "automatic-open and normal-Quit fields remain unexecuted at that stage",
+                         "same hosted job subsequently runs one external XCTest scenario",
+                         "normal-ui/result.json", "A missing, failed or skipped check is not a pass",
+                         "does not prove POSIX exit status or every worker's finality",
                          "Gatekeeper", "Do not disable", "NOT READY / undelivered",
-                         "project-relative field pickers", "No Store mutation"):
+                         "project-relative field-picker journeys", "No Store mutation",
+                         "project-field Aqua observer failure is preserved and unresolved"):
             self.assertIn(required, guide)
 
 

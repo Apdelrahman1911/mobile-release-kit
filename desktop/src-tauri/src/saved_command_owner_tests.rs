@@ -35,14 +35,15 @@ fn active_with_context(application: SavedCommandOwner, context: Context) -> (Sav
     let (frames, receiver) = mpsc::channel(2);
     let clocks = Clocks::for_context(&p.context, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
+    let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
     let profile = match domain { SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
         SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64),
         SavedCommandDomain::ProjectRecovery => Profile::ProjectRecovery(recovery_wire::Profile::LinuxX64),
         SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64) };
     let owner = Arc::new(Session { domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
-        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None,
-        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
+        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, native_failure: Mutex::new(None),
+        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
         startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
@@ -84,8 +85,8 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
             SavedCommandDomain::IOSArchive => bridge.ios_archive.original_for_test(),
         };
         original.inner.lock().prepared = Some(Prepared { projection: projection(domain),
-            expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None });
-        assert_eq!(original.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+            expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
+        assert_eq!(original.inner.qualified(None), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && original.inner.runtime.offline_preflight_installed_profile_available());
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::Busy);
         assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::Busy);
@@ -129,7 +130,7 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
         };
         let (application, owner) = active_in(original.clone());
         assert!(Arc::ptr_eq(&application.inner, &original.inner));
-        assert_eq!(application.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+        assert_eq!(application.inner.qualified(None), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && application.inner.runtime.offline_preflight_installed_profile_available());
         // Real mutex contention keeps reconciliation observation-only while
         // exercising Active. There is NO synthetic JoinHandle/return receipt.
@@ -265,7 +266,7 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
     assert!(owner.prepare_offline(offline, 1, project(), wire::Availability::Available).is_err());
     assert_eq!(owner.inner.lock().revision, revision);
     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
-    assert!(!owner.inner.qualified());
+    assert!(!owner.inner.qualified(None));
     let wrong_consent = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT});
     assert!(android_wire::start(&wrong_consent).is_err());
     let old_consent = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":"saved-android-build-inspect-v1"});
@@ -277,7 +278,7 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
         let mut prepared = projection(SavedCommandDomain::AndroidBuild);
         prepared.context = Context::AndroidBuild(context.clone());
         owner.inner.lock().prepared = Some(Prepared { projection: prepared,
-            expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None });
+            expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
         assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
         assert!(owner.inner.lock().prepared.is_some());
         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
@@ -296,7 +297,8 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
 #[test]
 fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runtime() {
     let owner = application(SavedCommandDomain::ProjectRecovery);
-    assert!(!owner.inner.qualified());
+    assert_eq!(owner.inner.qualified(None), cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && owner.inner.recovery_installed_selected());
     assert_eq!(owner.inner.recovery_installed_selected(), cfg!(feature = "custom-protocol")
         && owner.inner.runtime.project_recovery_installed_profile_available());
     let foreign = wire::prepare(&json!({"projectId":"inert-project","draftRevision":2,"baselineGeneration":3,
@@ -307,10 +309,10 @@ fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runt
     assert!(owner.prepare_recovery(request, 1, project(), recovery_wire::Availability::Available).is_err());
     { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
     owner.inner.lock().prepared = Some(Prepared { projection: projection(SavedCommandDomain::ProjectRecovery),
-        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None });
+        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
     let input = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":recovery_wire::CONSENT});
-    // The unqualified runtime refuses this comparison-only intent before any
-    // acquisition. A supplied Available DTO is not a native qualification.
+    // An unqualified runtime or this plain test's absent executor refuses the
+    // comparison-only intent before acquisition. Available is not custody.
     let status = owner.start_recovery(recovery_wire::start(&input).unwrap(), Instant::now(), Some((1, project())),
         recovery_wire::Availability::Available).unwrap().release();
     let operation = status.operation.unwrap();
@@ -429,7 +431,7 @@ fn recovery_start_consumes_observation_and_refuses_a_different_arc_or_lost_conte
         let mut p = projection(SavedCommandDomain::IOSArchive); p.context = recovery_action();
         { let mut r = app.inner.lock(); r.recovery = Some(observed);
             r.prepared = Some(Prepared { projection:p, expires:Instant::now()+INTENT, registration:1,
-                project:project(), recovery_stamp:None, material:None, recovery:Some(prepared) }); }
+                project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection:None }); }
         let admitted = app.start(Start { operation_id:"a".repeat(32), owner_generation:"b".repeat(32) },
             Instant::now(), Some((1, project())), Availability::Available).unwrap();
         assert!(admitted.release.is_none());
@@ -459,25 +461,25 @@ fn android_normal_selection_requires_first_owner_and_original_live_document_with
     let second = SavedCommandOwner::android_build(runtime.clone(), toolchain.clone());
     let document = Arc::new(()); let replacement = Arc::new(());
     assert!(!ANDROID_NATIVE_QUALIFIED && !ANDROID_RUNTIME_QUALIFIED && !ANDROID_TOOLCHAIN_QUALIFIED);
-    assert!(!first.inner.qualified()); // Even complete compile DATA needs its real binding.
+    assert!(!first.inner.qualified(None)); // Even complete compile DATA needs its real binding.
     second.bind_original_android_document(&replacement);
     first.bind_original_android_document(&document);
     first.bind_original_android_document(&replacement);
     assert!(first.android_original_document_matches(&document));
     assert!(!first.android_original_document_matches(&replacement));
-    assert_eq!(first.inner.qualified(), selected);
+    assert_eq!(first.inner.qualified(None), selected);
     assert_eq!(first.android_normal_selected(&document), selected);
     assert_eq!(first.clone().android_normal_selected(&document), selected);
     assert!(!first.android_normal_selected(&replacement));
-    assert!(!second.android_original_document_matches(&replacement) && !second.inner.qualified());
+    assert!(!second.android_original_document_matches(&replacement) && !second.inner.qualified(None));
     { let r = first.inner.lock(); assert!(r.active.is_none() && r.prepared.is_none() && r.last.is_none()); }
     drop(document);
     first.bind_original_android_document(&replacement);
-    assert!(!first.inner.qualified() && !first.android_original_document_matches(&replacement));
+    assert!(!first.inner.qualified(None) && !first.android_original_document_matches(&replacement));
     drop(first);
     let later = SavedCommandOwner::android_build(runtime, toolchain);
     later.bind_original_android_document(&replacement);
-    assert!(!later.inner.android_original_owner && !later.inner.qualified());
+    assert!(!later.inner.android_original_owner && !later.inner.qualified(None));
     peer.bind_original_android_document(&replacement);
     assert!(!peer.android_original_document_matches(&replacement));
 }
@@ -543,7 +545,7 @@ fn android_unselected_stale_and_stopped_intents_refuse_before_any_native_book() 
         { let mut r = owner.inner.lock();
             assert!(r.active.is_none() && r.prepared.is_none());
             r.prepared = Some(Prepared { projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
-                registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None }); }
+                registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None }); }
         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
         let registration = if scenario == "stale-registration" { 2 } else { 1 };
         let status = owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((registration, project())),
@@ -740,8 +742,14 @@ async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
 async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_never_renews() {
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
         let (application, owner) = active(domain);
-        assert_eq!(application.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
-            && application.inner.runtime.offline_preflight_installed_profile_available());
+        let selected = match domain {
+            SavedCommandDomain::OfflinePreflight => application.inner.offline_installed_selected(),
+            SavedCommandDomain::AndroidBuild => false, // No original document/catalog selection was bound.
+            SavedCommandDomain::ProjectRecovery => cfg!(all(target_os = "macos", target_arch = "aarch64"))
+                && application.inner.recovery_installed_selected(),
+            SavedCommandDomain::IOSArchive => application.inner.ios_unsigned_installed_selected(),
+        };
+        assert_eq!(application.inner.qualified(None), selected);
         let cutoff = owner.native_audit_cutoff.subscribe();
         assert_eq!(*cutoff.borrow(), owner.clocks.work);
         {
@@ -959,14 +967,14 @@ async fn accepted_only_eof_is_not_a_settled_decoder_in_any_domain() {
 #[test]
 fn ios_consent_is_domain_local_one_use_and_cannot_qualify_runtime_custody() {
     let owner = application(SavedCommandDomain::IOSArchive);
-    assert!(!owner.inner.qualified());
+    assert_eq!(owner.inner.qualified(None), owner.inner.ios_unsigned_installed_selected());
     let mut android = serde_json::to_value(android_wire::tests::context()).unwrap();
     android.as_object_mut().unwrap().remove("platform"); android.as_object_mut().unwrap().remove("operation");
     assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());
     assert_eq!(owner.inner.lock().revision, 0);
     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
     owner.inner.lock().prepared = Some(Prepared { projection: projection(SavedCommandDomain::IOSArchive),
-        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None });
+        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
     let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":ios_wire::CONSENT});
     let status = owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).unwrap().release();
     let projection = status.operation.unwrap();
@@ -1015,4 +1023,25 @@ fn ios_late_core_terminal_never_undoes_first_failure_or_extends_original_endpoin
         assert_eq!(active.unknown,due == IOS_HARD); assert!(active.projection.public().result.is_none());
         assert!(registry.last.is_none());
     }
+}
+
+#[test]
+fn earlier_actual_native_failure_shortens_original_cutoff_even_when_observed_after_cancel() {
+    // Invented timestamp DATA only. No runtime, tool, process or native join.
+    let (application, owner) = active(SavedCommandDomain::AndroidBuild);
+    let earlier=owner.clocks.admitted+Duration::from_secs(1);
+    let later=owner.clocks.admitted+Duration::from_secs(5);
+    let cutoff=owner.native_audit_cutoff.subscribe();
+    let mut registry=application.inner.lock();
+    application.inner.stop_locked(&mut registry,&owner,Reason::Cancelled,later);
+    assert_eq!(*cutoff.borrow(),later+SETTLEMENT);
+    *owner.native_failure.lock().unwrap()=Some((Reason::ToolchainMismatch,earlier));
+    application.inner.advance_locked(&mut registry,&owner,later);
+    assert_eq!(registry.active.as_ref().unwrap().first_stop,Some(earlier));
+    assert_eq!(*cutoff.borrow(),earlier+SETTLEMENT);
+    application.inner.stop_locked(&mut registry,&owner,Reason::Shutdown,later+Duration::from_secs(2));
+    assert_eq!(*cutoff.borrow(),earlier+SETTLEMENT);
+    application.inner.advance_locked(&mut registry,&owner,earlier+SETTLEMENT);
+    assert!(registry.active.as_ref().unwrap().unknown);
+    assert!(!final_clock_clear(&registry,&owner,earlier+SETTLEMENT));
 }

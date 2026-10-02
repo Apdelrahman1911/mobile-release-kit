@@ -515,3 +515,27 @@ test('availability text does not turn a closed gate into missing-SDK diagnosis o
   assert.match(androidBuildAvailabilityText['unsupported-platform'], /no fallback runner/);
   assert.match(androidBuildAvailabilityText.available, /Saved-input review and explicit consent/);
 });
+
+
+test('Mac results have a closed selected-tool extension while Linux stays exact', () => {
+  const selected = { instance: 'c'.repeat(32), ownerUid: 501, catalogGeneration: 1,
+    recordSha256: 'd'.repeat(64), inventorySha256: 'e'.repeat(64), osProviderSha256: 'f'.repeat(64) };
+  const mac = { ...report(), schemaVersion: 2, toolchainProfile: 'android-registered-macos-arm64-v1', toolchainSelection: selected };
+  assert.ok(parseAndroidBuildResult(mac));
+  assert.ok(parseAndroidBuildStatus(status(completed(mac))));
+  for (const field of Object.keys(selected)) {
+    const changed = clone(mac); delete changed.toolchainSelection[field];
+    assert.equal(parseAndroidBuildResult(changed), null, field);
+  }
+  for (const patch of [{ schemaVersion: 1 }, { toolchainSelection: null }, { toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE },
+    { toolchainSelection: { ...selected, ownerUid: 0 } }, { toolchainSelection: { ...selected, catalogGeneration: 0xffff_ffff } },
+    { toolchainSelection: { ...selected, qualified: true } }]) {
+    assert.equal(parseAndroidBuildResult({ ...mac, ...patch }), null);
+  }
+  assert.equal(parseAndroidBuildResult({ ...report(), toolchainSelection: selected }), null);
+  assert.equal(parseAndroidBuildResult({ ...report(), schemaVersion: 2 }), null);
+  // Renderer cannot supply the native selection through either existing entry point.
+  assert.equal(encodeAndroidBuildRequest('prepare_android_build', { ...request(), toolchainSelection: selected }), null);
+  assert.equal(encodeAndroidBuildRequest('start_android_build', { operationId: OP, ownerGeneration: OWNER,
+    consentVersion: ANDROID_BUILD_CONSENT, toolchainSelection: selected }), null);
+});

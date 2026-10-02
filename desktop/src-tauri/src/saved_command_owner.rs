@@ -15,9 +15,17 @@ use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, an
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile, asset_session::IOSSigningMaterial};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::{android_toolchain::AndroidToolchainCustody,
-    installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody, OfflinePreflightRuntimeSlots, ProjectRecoveryRuntimeSlots}};
+    installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody}};
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+use crate::installed_runtime::{OfflinePreflightRuntimeSlots, ProjectRecoveryRuntimeSlots};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntimeSlots}, ios_toolchain::IOSXcodeSlots};
+
+#[path = "saved_command_android_catalog.rs"]
+mod android_catalog;
+#[path = "saved_command_android_sources.rs"]
+mod android_sources;
+pub(crate) type AndroidCatalogAdmitted = android_catalog::Admitted;
 
 // Qualification is domain-local. No environment/GitHub/offline permit, parsed
 // tool binding, hash, mode or host profile can qualify Android build custody.
@@ -561,10 +569,11 @@ struct Inner {
 struct Registry {
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
     capability: Availability, prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
-    recovery: Option<Arc<IOSRecoveryObservation>>,
+    recovery: Option<Arc<IOSRecoveryObservation>>, android_catalog: android_catalog::Catalog, android_sources: android_sources::Sources,
 }
 struct Prepared { projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
-    material: Option<Arc<IOSSigningMaterial>>, recovery: Option<Arc<IOSRecoveryObservation>> }
+    material: Option<Arc<IOSSigningMaterial>>, recovery: Option<Arc<IOSRecoveryObservation>>,
+    android_selection: Option<Arc<android_catalog::Selection>> }
 struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
 struct Active {
     owner: Arc<Session>, projection: RunProjection, first_stop: Option<Instant>, work_expired: bool,
@@ -680,8 +689,10 @@ struct Session {
     registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>, request: AsyncMutex<Option<Vec<u8>>>,
     material: Mutex<Option<Arc<IOSSigningMaterial>>>, material_retired: AtomicBool,
     recovery: Option<Arc<IOSRecoveryObservation>>,
+    android_selection: Option<Arc<android_catalog::Selection>>,
+    native_failure: Mutex<Option<(Reason,Instant)>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
-    native_audit_cutoff: watch::Sender<Instant>,
+    native_audit_cutoff: watch::Sender<Instant>, native_cleanup_cutoff: watch::Sender<Instant>,
     output_bytes: AtomicUsize, resource_unknown: AtomicBool,
     driver_done: AtomicBool, driver_joined: AtomicBool, driver_failed: AtomicBool,
     watchdog_joined: AtomicBool, watchdog_failed: AtomicBool, manager_failed: AtomicBool,
@@ -696,6 +707,40 @@ struct Session {
     fixture: Option<Arc<offline_tests::hosted::Permit>>,
 }
 impl Session {
+    // Bounded DATA publication only: no Registry/Document acquisition while
+    // original native books are borrowed. Preserve the actual native timestamp.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn observe_android_failure(&self, failure: AdmissionFailure, at: Instant) { self.observe_native_failure(failure, at); }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn observe_native_failure(&self, failure: AdmissionFailure, at: Instant) {
+        let reason = match failure { AdmissionFailure::Deadline => Reason::TimedOut,
+            AdmissionFailure::Unknown => Reason::CleanupUnknown,
+            _ if self.domain == SavedCommandDomain::AndroidBuild => Reason::ToolchainUnavailable,
+            _ => Reason::RuntimeUnavailable };
+        let first = match self.native_failure.lock() {
+            Ok(mut first) => {
+                if first.is_none_or(|(_, before)| at < before) { *first = Some((reason, at)); }
+                first.as_ref().map(|(_, at)| (*at).max(self.clocks.admitted).min(self.clocks.work))
+            },
+            Err(_) => { self.resource_unknown.store(true, Ordering::SeqCst); Some(self.clocks.admitted) },
+        };
+        if failure == AdmissionFailure::Unknown { self.resource_unknown.store(true, Ordering::SeqCst); }
+        let audit = self.clocks.audit_end(first); let cleanup = self.clocks.cleanup_end(first);
+        self.native_audit_cutoff.send_if_modified(|current| if audit < *current { *current = audit; true } else { false });
+        self.native_cleanup_cutoff.send_if_modified(|current| if cleanup < *current { *current = cleanup; true } else { false });
+        self.stop.send_replace(true); self.wake.notify_waiters();
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn publish_native_failure(&self, first: Option<(AdmissionFailure, Instant)>) {
+        if let Some((failure, at)) = first { self.observe_native_failure(failure, at); }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn native_cleanup_expired(&self, first: Option<(AdmissionFailure, Instant)>) -> bool {
+        self.publish_native_failure(first);
+        let expired = self.native_failure.is_poisoned() || Instant::now() >= *self.native_cleanup_cutoff.borrow();
+        if expired { self.resource_unknown.store(true, Ordering::SeqCst); self.wake.notify_waiters(); }
+        expired
+    }
     fn recovery_matches(&self) -> bool {
         match (&self.context, &self.recovery) {
             (Context::IOSArchive(context), Some(original)) if context.recovery() =>
@@ -722,22 +767,22 @@ struct Resources {
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, acquisition_failed: bool,
     acquisition_started: bool, acquisition_error: Option<tokio::task::JoinError>,
     offline_selected: bool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     offline_installed: Option<Arc<Mutex<OfflinePreflightRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     offline_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     offline_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
     offline_started: bool, offline_joined: bool, offline_failed: bool,
     recovery_selected: bool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     recovery_installed: Option<Arc<Mutex<ProjectRecoveryRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     recovery_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     recovery_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
     recovery_started: bool, recovery_joined: bool, recovery_failed: bool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     native: Option<Arc<Mutex<AndroidNativeBooks>>>,
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     ios_native: Option<Arc<Mutex<IOSNativeBooks>>>,
@@ -821,6 +866,121 @@ impl AndroidNativeBooks {
     fn settled(&self) -> bool { self.phase == NativePhase::Settled && self.runtime.settled() && self.tools.settled() }
 }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct AndroidNativeBooks {
+    runtime: crate::installed_runtime::AndroidBuildRuntimeSlots,
+    tools: crate::installed_runtime::AndroidToolchainSlots,
+    selection: Option<VerifiedRuntime>, phase: NativePhase,
+    failure: Option<(AdmissionFailure,Instant)>, settlement_started: bool,
+    audit: watch::Receiver<Instant>, cleanup: watch::Receiver<Instant>,
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl AndroidNativeBooks {
+    fn new(selected: android_wire::MacToolchainSelection, audit: watch::Receiver<Instant>, cleanup: watch::Receiver<Instant>) -> Self {
+        Self {runtime:crate::installed_runtime::AndroidBuildRuntimeSlots::new(audit.clone()),
+            tools:crate::installed_runtime::AndroidToolchainSlots::new(selected,audit.clone()),
+            selection:None,phase:NativePhase::New,failure:None,settlement_started:false,audit,cleanup}
+    }
+    fn first_failure(&self) -> Option<(AdmissionFailure,Instant)> {
+        [self.failure,self.runtime.first_failure(),self.tools.first_failure()]
+            .into_iter().flatten().min_by_key(|(_,at)|*at)
+    }
+    fn fail(&mut self,failure:AdmissionFailure) {
+        let observed=self.first_failure().unwrap_or((failure,Instant::now()));
+        if self.failure.is_none_or(|(_,at)|observed.1<at){self.failure=Some(observed);}
+        self.phase=NativePhase::Refused;
+    }
+    fn publish(&self,publish:&mut dyn FnMut(AdmissionFailure,Instant)) {
+        if let Some((failure,at))=self.first_failure(){publish(failure,at);}
+    }
+    fn retained_bytes(&self) -> Option<usize> {
+        self.runtime.retained_bytes()?.checked_add(self.tools.retained_bytes()?)
+    }
+    fn inspect_once(&mut self,runtime:&RuntimeConfig,end:Instant,stop:&watch::Receiver<bool>,
+        publish:&mut dyn FnMut(AdmissionFailure,Instant)) -> Result<VerifiedRuntime,BridgeError> {
+        if self.phase!=NativePhase::New {return Err(BridgeError::cleanup_unknown());}
+        self.phase=NativePhase::Inspecting;
+        let selected=match runtime.resolve_android_build_installed(&mut self.runtime,end,stop) {
+            Ok(selected)=>selected,
+            Err(error)=>{self.fail(AdmissionFailure::Inventory);self.publish(publish);return Err(error);},
+        };
+        self.selection=Some(VerifiedRuntime{python:selected.python.clone(),bootstrap:selected.bootstrap.clone(),
+            core:selected.core.clone(),cwd:selected.cwd.clone()});
+        if let Err(failure)=self.tools.inspect_once(end,stop) {
+            self.fail(failure);self.publish(publish);return Err(SavedCommandDomain::AndroidBuild.unavailable());
+        }
+        self.phase=NativePhase::Ready;Ok(selected)
+    }
+    fn selected_binding(&self,expected:&VerifiedRuntime) -> Result<(),AdmissionFailure> {
+        if self.phase!=NativePhase::Ready || self.first_failure().is_some() || self.settlement_started{return Err(AdmissionFailure::AlreadyUsed);}
+        let selected=self.selection.as_ref().ok_or(AdmissionFailure::Unknown)?;
+        if (&selected.python,&selected.bootstrap,&selected.core,&selected.cwd)
+            !=(&expected.python,&expected.bootstrap,&expected.core,&expected.cwd){return Err(AdmissionFailure::Identity);}
+        Ok(())
+    }
+    fn request_binding(&self,expected:&VerifiedRuntime) -> Result<android_wire::ToolchainBinding,AdmissionFailure> {
+        self.selected_binding(expected)?;self.tools.binding_data()
+    }
+    fn check_before_spawn(&mut self,selected:&VerifiedRuntime,end:Instant,stop:&watch::Receiver<bool>,
+        publish:&mut dyn FnMut(AdmissionFailure,Instant)) -> Result<(),AdmissionFailure> {
+        let result=(||{
+            self.selected_binding(selected)?;
+            self.runtime.transfer_once()?;
+            let original=self.runtime.capability()?.prepare_once(end,stop)?;
+            if (&original.python,&original.bootstrap,&original.core,&original.cwd)
+                !=(&selected.python,&selected.bootstrap,&selected.core,&selected.cwd){return Err(AdmissionFailure::Identity);}
+            self.tools.check_before_spawn(end,stop)
+        })();
+        if let Err(failure)=result{self.fail(failure);self.publish(publish);}
+        result
+    }
+    fn claim_once(&mut self) -> Result<(),AdmissionFailure> {
+        if self.phase!=NativePhase::Ready || self.first_failure().is_some() || self.settlement_started{return Err(AdmissionFailure::AlreadyUsed);}
+        self.runtime.capability()?.claim_once()?;
+        self.phase=NativePhase::Claimed;Ok(())
+    }
+    fn interrupted(&mut self) {
+        self.fail(AdmissionFailure::Unknown);self.phase=NativePhase::Unknown;
+        self.runtime.mark_interrupted();self.tools.mark_interrupted();
+    }
+    fn settle(&mut self,used:bool,end:Instant,publish:&mut dyn FnMut(AdmissionFailure,Instant)) -> NativeSettlement {
+        if self.settlement_started || self.phase==NativePhase::Claimed && !used {
+            publish(AdmissionFailure::Unknown,Instant::now());
+            return NativeSettlement{originals_closed:false,integrity:false};
+        }
+        self.settlement_started=true;self.phase=NativePhase::Settling;
+        self.publish(publish);
+        let mut integrity=!used || self.first_failure().is_none();
+        if used {
+            // Publish each first failure before the other independent original
+            // audit begins. Do not delay F until a later array expression ends.
+            if let Err(failure)=self.runtime.android_check_after_use(end,&self.audit) {
+                self.fail(failure);self.publish(publish);integrity=false;
+            }
+            if let Err(failure)=self.tools.check_after_use(end) {
+                self.fail(failure);self.publish(publish);integrity=false;
+            }
+        }
+        // Integrity reads above remain audit-bounded. Frees/FD consumes use
+        // only the separately delivered ORIGINAL cleanup projection.
+        let cleanup_end=*self.cleanup.borrow();
+        let tools=self.tools.settle_originals(cleanup_end,&self.cleanup,publish);
+        let runtime=self.runtime.settle_originals(cleanup_end,&self.cleanup,publish);
+        self.publish(publish);
+        let originals_closed=tools==CloseOutcome::Settled && runtime==CloseOutcome::Settled
+            && self.tools.settled() && self.runtime.settled() && self.retained_bytes()==Some(0);
+        self.phase=if originals_closed{NativePhase::Settled}else{NativePhase::Unknown};
+        NativeSettlement{originals_closed,integrity}
+    }
+    fn settled(&self) -> bool {
+        self.phase==NativePhase::Settled && self.runtime.settled() && self.tools.settled() && self.retained_bytes()==Some(0)
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+enum MacNativeBook {
+    Android(Arc<Mutex<AndroidNativeBooks>>),
+    IOS(Arc<Mutex<IOSNativeBooks>>),
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 struct IOSNativeBooks {
     runtime: IOSArchiveRuntimeSlots, tools: IOSXcodeSlots, selection: Option<VerifiedRuntime>,
     phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool, audit: watch::Receiver<Instant>, signed: bool, recovery: bool,
@@ -834,10 +994,33 @@ impl IOSNativeBooks {
         Self { runtime: IOSArchiveRuntimeSlots::new(), tools: IOSXcodeSlots::new(audit.clone()), selection: None,
             phase: NativePhase::New, failure: None, settlement_started: false, audit, signed, recovery }
     }
-    fn inspect_once(&mut self, runtime: &RuntimeConfig, end: Instant, stop: &watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+    fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> {
+        match (self.runtime.first_failure(), self.tools.first_failure()) {
+            (Some(a), Some(b)) => Some(if a.1 <= b.1 { a } else { b }), (a, b) => a.or(b),
+        }
+    }
+    fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)) -> Result<(), BridgeError> {
+        if self.phase != NativePhase::New { return Err(BridgeError::cleanup_unknown()); }
+        let runtime = self.runtime.arm_acl_once(end, stop); publish(self.runtime.first_failure());
+        if let Err(failure) = runtime {
+            self.failure.get_or_insert(failure); self.phase = NativePhase::Refused;
+            return Err(SavedCommandDomain::IOSArchive.unavailable());
+        }
+        let tools = self.tools.arm_acl_once(end, stop); publish(self.tools.first_failure());
+        if let Err(failure) = tools {
+            self.failure.get_or_insert(failure); self.phase = NativePhase::Refused;
+            return Err(SavedCommandDomain::IOSArchive.unavailable());
+        }
+        Ok(())
+    }
+    fn inspect_once(&mut self, runtime: &RuntimeConfig, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)) -> Result<VerifiedRuntime, BridgeError> {
         if self.phase != NativePhase::New { return Err(BridgeError::cleanup_unknown()); }
         self.phase = NativePhase::Inspecting;
-        let selected = match runtime.resolve_ios_archive_installed(&mut self.runtime, end, stop) {
+        let inspected = runtime.resolve_ios_archive_installed(&mut self.runtime, end, stop);
+        publish(self.runtime.first_failure().or_else(|| inspected.as_ref().err().map(|_| (AdmissionFailure::Inventory, Instant::now()))));
+        let selected = match inspected {
             Ok(selected) => selected,
             Err(error) => { self.phase = NativePhase::Refused; self.failure.get_or_insert(AdmissionFailure::Inventory); return Err(error); },
         };
@@ -846,6 +1029,7 @@ impl IOSNativeBooks {
         let tools = if self.signed && self.recovery { Err(AdmissionFailure::Inventory) }
             else if self.recovery { self.tools.inspect_recovery_once(end, stop) }
             else if self.signed { self.tools.inspect_signed_once(end, stop) } else { self.tools.inspect_once(end, stop) };
+        publish(self.tools.first_failure().or_else(|| tools.as_ref().err().map(|failure| (*failure, Instant::now()))));
         if let Err(failure) = tools {
             self.phase = NativePhase::Refused; self.failure.get_or_insert(failure);
             return Err(SavedCommandDomain::IOSArchive.unavailable());
@@ -875,14 +1059,17 @@ impl IOSNativeBooks {
         if !self.recovery || self.signed { return Err(AdmissionFailure::Inventory); }
         self.tools.recovery_binding_data()
     }
-    fn check_before_spawn(&mut self, selected: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<(), AdmissionFailure> {
+    fn check_before_spawn(&mut self, selected: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)) -> Result<(), AdmissionFailure> {
         self.selected_binding(selected)?;
         let result = (|| {
             self.runtime.transfer_once()?;
-            let original = self.runtime.capability()?.prepare_once(end, stop)?;
+            let original = self.runtime.capability()?.prepare_once_observed(end, stop, publish)?;
             if (&original.python, &original.bootstrap, &original.core, &original.cwd)
                 != (&selected.python, &selected.bootstrap, &selected.core, &selected.cwd) { return Err(AdmissionFailure::Identity); }
-            self.tools.check_before_spawn(end, stop)
+            let result = self.tools.check_before_spawn(end, stop);
+            publish(self.tools.first_failure().or_else(|| result.as_ref().err().map(|failure| (*failure, Instant::now()))));
+            result
         })();
         if let Err(failure) = result { self.failure.get_or_insert(failure); self.phase = NativePhase::Refused; }
         result
@@ -897,20 +1084,27 @@ impl IOSNativeBooks {
         self.phase = NativePhase::Unknown; self.failure.get_or_insert(AdmissionFailure::Unknown);
         self.runtime.mark_interrupted(); self.tools.mark_interrupted();
     }
-    fn settle(&mut self, used: bool, end: Instant) -> NativeSettlement {
+    fn settle(&mut self, used: bool, end: Instant,
+        expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool) -> NativeSettlement {
+        let _ = expired(self.first_failure());
         if self.settlement_started || self.phase == NativePhase::Claimed && !used {
             return NativeSettlement { originals_closed: false, integrity: false };
         }
         self.settlement_started = true; self.phase = NativePhase::Settling;
         let mut integrity = !used || self.failure.is_none();
         if used {
-            // Both original retained books get their own final audit, then all
-            // independent consuming closes even if the first audit refuses.
-            for result in [self.runtime.ios_check_after_use(end, &self.audit), self.tools.check_after_use(end)] {
-                if let Err(failure) = result { self.failure.get_or_insert(failure); integrity = false; }
-            }
+            // Publish the first audit's actual F BEFORE entering its sibling.
+            // Audits retain audit_end; native frees/FD closes use cleanup_end.
+            let runtime = self.runtime.ios_check_after_use(end, &self.audit);
+            let _ = expired(self.runtime.first_failure().or_else(|| runtime.as_ref().err().map(|failure| (*failure, Instant::now()))));
+            if let Err(failure) = runtime { self.failure.get_or_insert(failure); integrity = false; }
+            let tools = self.tools.check_after_use(end);
+            let _ = expired(self.tools.first_failure().or_else(|| tools.as_ref().err().map(|failure| (*failure, Instant::now()))));
+            if let Err(failure) = tools { self.failure.get_or_insert(failure); integrity = false; }
         }
-        let tools = self.tools.settle_originals(); let runtime = self.runtime.settle_originals();
+        let tools = self.tools.settle_originals(expired);
+        let runtime = self.runtime.settle_originals(expired);
+        let _ = expired(self.first_failure());
         let originals_closed = tools == CloseOutcome::Settled && runtime == CloseOutcome::Settled
             && self.tools.settled() && self.runtime.settled();
         self.phase = if originals_closed { NativePhase::Settled } else { NativePhase::Unknown };
@@ -931,14 +1125,14 @@ fn final_clock_clear(r: &Registry, owner: &Session, now: Instant) -> bool {
         && r.active.as_ref().is_some_and(|a| !a.unknown && now < owner.clocks.settlement(a.first_stop))
 }
 fn native_worker_lost(book: &Resources, owner: &Session) {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if owner.domain == SavedCommandDomain::OfflinePreflight {
         if let Some(native) = &book.offline_installed {
             match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
         }
         return;
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if owner.domain == SavedCommandDomain::ProjectRecovery {
         if let Some(native) = &book.recovery_installed {
             match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
@@ -952,10 +1146,13 @@ fn native_worker_lost(book: &Resources, owner: &Session) {
         return;
     }
     if owner.domain != SavedCommandDomain::AndroidBuild { return; }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if let Some(native) = &book.native {
         // Called ONLY after the actual original worker's failed Ready return.
-        match native.lock() { Ok(mut native) => native.interrupted(), Err(error) => error.into_inner().interrupted() }
+        let mut native=match native.lock(){Ok(native)=>native,Err(error)=>error.into_inner()};
+        native.interrupted();
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        native.publish(&mut |failure,at|owner.observe_android_failure(failure,at));
     }
 }
 fn native_final(book: &Resources, domain: SavedCommandDomain) -> bool {
@@ -969,9 +1166,15 @@ fn native_final(book: &Resources, domain: SavedCommandDomain) -> bool {
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        domain == SavedCommandDomain::IOSArchive && book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
+        book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
             && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, integrity: true })))
-            && book.ios_native.as_ref().is_some_and(|native| native.lock().is_ok_and(|native| native.settled()))
+            && match domain {
+                SavedCommandDomain::AndroidBuild=>book.ios_native.is_none() && book.native.as_ref()
+                    .is_some_and(|native|native.try_lock().is_ok_and(|native|native.settled() && native.retained_bytes()==Some(0))),
+                SavedCommandDomain::IOSArchive=>book.native.is_none() && book.ios_native.as_ref()
+                    .is_some_and(|native|native.try_lock().is_ok_and(|native|native.settled())),
+                _=>false,
+            }
     }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = book; false }
@@ -1025,7 +1228,7 @@ impl SavedCommandOwner {
     pub(crate) fn android_normal_selected(&self, identity: &Arc<()>) -> bool {
         let r = self.inner.lock();
         !r.disabled && !r.exhausted && !r.stopping && !r.document_lost && !self.inner.poisoned.load(Ordering::SeqCst)
-            && self.inner.android_installed_selected(Some(identity))
+            && !r.android_catalog.unknown() && !r.android_sources.unknown() && !r.android_sources.busy() && self.inner.android_installed_selected(Some(identity),r.android_catalog.selection())
     }
     fn require_domain(&self, domain: SavedCommandDomain) -> Result<(), BridgeError> {
         if self.inner.domain == domain { Ok(()) } else { Err(self.inner.domain.invalid_owner()) }
@@ -1152,7 +1355,7 @@ impl SavedCommandOwner {
             android_original_owner, android_document: Mutex::new(None),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
-            prepared: None, active: None, last: None, recovery_review: None, recovery: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
             fixture: Mutex::new(None),
@@ -1160,9 +1363,9 @@ impl SavedCommandOwner {
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.inner.lock().stopping }
-    pub(crate) fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst) }
+    pub(crate) fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || r.exhausted || r.android_catalog.unknown() || r.android_sources.unknown() || self.inner.poisoned.load(Ordering::SeqCst) }
     pub(crate) fn can_exit(&self) -> bool { self.reconcile(); let r = self.inner.lock();
-        !self.inner.poisoned.load(Ordering::SeqCst) && r.active.is_none() && r.prepared.is_none() }
+        !self.inner.poisoned.load(Ordering::SeqCst) && r.active.is_none() && r.prepared.is_none() && !r.android_catalog.busy() && !r.android_sources.busy() }
     pub(crate) fn busy(&self) -> bool { !self.can_exit() }
     pub(crate) fn ensure_idle(&self) -> Result<(), BridgeError> {
         if self.disabled() { Err(BridgeError::cleanup_unknown()) } else if self.stopping() { Err(BridgeError::shutdown()) }
@@ -1235,7 +1438,8 @@ impl SavedCommandOwner {
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
-        r.prepared = Some(Prepared { projection, expires, registration, project, recovery_stamp, material, recovery });
+        let android_selection = r.android_catalog.selection().cloned();
+        r.prepared = Some(Prepared { projection, expires, registration, project, recovery_stamp, material, recovery, android_selection });
         self.inner.bump(&mut r);
         // After commit, only typed status or unknown/lost reply, never the three
         // fixed preallocation refusal codes used by the renderer controller.
@@ -1279,7 +1483,7 @@ impl SavedCommandOwner {
         // It cannot license a second recovery after even a known refusal.
         r.recovery = None;
         let mut refused = if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
-            else if !material_matches || !recovery_matches || registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
+            else if !material_matches || !recovery_matches || !r.android_catalog.selection_matches(prepared.android_selection.as_ref(),&self.inner) || registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
             else if !self.inner.ios_mode_qualified(&prepared.projection.context, None) { Some(Reason::RuntimeUnavailable) }
             else { None };
         let availability = self.inner.availability(&r, gate);
@@ -1302,28 +1506,36 @@ impl SavedCommandOwner {
         let profile = profile.ok_or_else(|| self.inner.domain.unavailable())?;
         let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
         let (native_audit_cutoff, audit_cutoff) = watch::channel(clocks.audit_end(None));
+        let (native_cleanup_cutoff, cleanup_cutoff) = watch::channel(clocks.cleanup_end(None));
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        let _ = cleanup_cutoff;
         let (frames, receiver) = mpsc::channel(2);
         let context = prepared.projection.context;
         let projection = RunProjection { operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
         let owner = Arc::new(Session { domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
-            registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff,
+            registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!clocks.signed),
-            recovery: prepared.recovery,
+            recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), native_failure: Mutex::new(None),
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
             resources: AsyncMutex::new(Resources { frames: Some(receiver),
                 offline_selected: self.inner.offline_installed_selected(),
                 recovery_selected: self.inner.recovery_installed_selected(),
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 recovery_installed: self.inner.recovery_installed_selected().then(|| Arc::new(Mutex::new(ProjectRecoveryRuntimeSlots::new()))),
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 offline_installed: self.inner.offline_installed_selected().then(|| Arc::new(Mutex::new(OfflinePreflightRuntimeSlots::new()))),
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 native: if self.inner.domain == SavedCommandDomain::AndroidBuild {
                     self.inner.toolchain.clone().map(|profile| Arc::new(Mutex::new(AndroidNativeBooks::new(profile, audit_cutoff))))
                 } else { None },
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                native: if self.inner.domain == SavedCommandDomain::AndroidBuild {
+                    prepared.android_selection.as_ref().map(|selected| Arc::new(Mutex::new(
+                        AndroidNativeBooks::new(selected.data().clone(),audit_cutoff.clone(),cleanup_cutoff))))
+                } else {None},
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 ios_native: (self.inner.domain == SavedCommandDomain::IOSArchive)
                     .then(|| Arc::new(Mutex::new(IOSNativeBooks::new_selected(audit_cutoff, clocks.signed, clocks.recovery)))),
@@ -1401,6 +1613,8 @@ impl SavedCommandOwner {
     }
     pub(crate) fn document_lost(&self) {
         let mut r = self.inner.lock(); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
+        r.android_catalog.stop(crate::android_toolchain_catalog::Reason::DocumentLost,Instant::now());
+        r.android_sources.stop(crate::android_tool_sources::Reason::DocumentLost,Instant::now());
         r.recovery = None;
         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         self.inner.retire_prepared(&mut r, Reason::DocumentLost);
@@ -1409,6 +1623,8 @@ impl SavedCommandOwner {
     }
     pub(crate) fn context_changed(&self) {
         let mut r = self.inner.lock(); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+        if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,Instant::now())
+            | r.android_sources.stop(crate::android_tool_sources::Reason::ContextChanged,Instant::now()){self.inner.bump(&mut r);}
         r.recovery = None;
         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::ContextChanged, Instant::now()); }
@@ -1418,9 +1634,12 @@ impl SavedCommandOwner {
             && r.prepared.as_ref().is_none_or(|p| p.registration == registration)
             && r.recovery_review.as_ref().is_none_or(|reviewed| reviewed.registration == registration)
             && r.recovery.as_ref().is_none_or(|o| o.original.registration == registration)
+            && r.android_sources.registration_matches(registration)
     }
     pub(crate) fn request_shutdown(&self) {
         let mut r = self.inner.lock(); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
+        r.android_catalog.stop(crate::android_toolchain_catalog::Reason::Shutdown,Instant::now());
+        r.android_sources.stop(crate::android_tool_sources::Reason::Shutdown,Instant::now());
         r.recovery = None;
         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::Shutdown, Instant::now()); }
@@ -1435,7 +1654,14 @@ impl SavedCommandOwner {
         }
     }
     fn reconcile(&self) {
-        let owner = { let mut r = self.inner.lock(); self.inner.expire_prepared(&mut r, Instant::now()); r.active.as_ref().map(|a| a.owner.clone()) };
+        let owner = {
+            let mut r = self.inner.lock(); self.inner.expire_prepared(&mut r, Instant::now());
+            let changed=r.android_catalog.reconcile(&self.inner);
+            let newly_unknown=r.android_catalog.unknown() && !r.disabled;
+            if newly_unknown{r.disabled=true;}
+            if changed||newly_unknown{self.inner.bump(&mut r);}
+            r.active.as_ref().map(|a| a.owner.clone())
+        };
         let Some(owner) = owner else { return; };
         let mut r = self.inner.lock(); self.inner.advance_locked(&mut r, &owner, Instant::now());
         let Some(active) = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, &owner)) else { return; };
@@ -1623,13 +1849,18 @@ impl Inner {
     fn android_runtime_selected(&self, identity: Option<&Arc<()>>) -> bool {
         self.android_original_document_matches(identity) && self.runtime.android_build_installed_runtime_available()
     }
-    fn android_installed_selected(&self, identity: Option<&Arc<()>>) -> bool {
-        // The caller already owns Registry. Never relock it or consult an
-        // observation here; neither observer registration nor history grants.
-        self.android_runtime_selected(identity)
-            && self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)
+    fn android_installed_selected(&self, identity: Option<&Arc<()>>, selected: Option<&Arc<android_catalog::Selection>>) -> bool {
+        // The caller may already own Registry. The immutable selection is an
+        // explicit original input, never acquired by a hidden Registry relock.
+        if !self.android_runtime_selected(identity){return false;}
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {let _=selected;self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)}
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {self.toolchain.is_none() && selected.is_some_and(|selected|selected.matches_owner(self))}
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),all(target_os = "macos", target_arch = "aarch64"))))]
+        {let _=selected;false}
     }
-    fn qualified(&self) -> bool {
+    fn qualified(&self, selected: Option<&Arc<android_catalog::Selection>>) -> bool {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if recovery_observation::qualified(self) { return true; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
@@ -1652,8 +1883,15 @@ impl Inner {
             .is_some_and(|permit| permit.permits(self)) { return true; }
         match self.domain {
             SavedCommandDomain::OfflinePreflight => self.offline_installed_selected(),
-            SavedCommandDomain::AndroidBuild => self.android_installed_selected(None),
-            SavedCommandDomain::ProjectRecovery => RECOVERY_NATIVE_QUALIFIED && RECOVERY_RUNTIME_QUALIFIED && self.recovery_installed_selected(),
+            SavedCommandDomain::AndroidBuild => self.android_installed_selected(None,selected),
+            SavedCommandDomain::ProjectRecovery => {
+                // Ordinary exact Mac selection is separate from Android
+                // catalog authority and never toggles qualification evidence.
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { self.recovery_installed_selected() }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { RECOVERY_NATIVE_QUALIFIED && RECOVERY_RUNTIME_QUALIFIED && self.recovery_installed_selected() }
+            },
             SavedCommandDomain::IOSArchive => self.ios_unsigned_installed_selected(),
         }
     }
@@ -1664,7 +1902,7 @@ impl Inner {
         if r.exhausted { return; }
         match r.revision.checked_add(1).filter(|n| *n < u32::MAX) {
             Some(next) => r.revision = next,
-            None => { r.exhausted = true; r.disabled = true;
+            None => { r.exhausted = true; r.disabled = true; r.android_catalog.exhaust(); r.android_sources.exhaust();
                 if let Some(prepared) = r.prepared.take() { r.last = Some(retire(prepared.projection, Reason::CleanupUnknown)); }
                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
             },
@@ -1681,7 +1919,7 @@ impl Inner {
         if r.prepared.as_ref().is_some_and(|p| now >= p.expires) { self.retire_prepared(r, Reason::IntentExpired); }
     }
     fn availability(&self, r: &Registry, gate: Availability) -> Availability {
-        if r.disabled || r.exhausted || self.poisoned.load(Ordering::SeqCst) || gate == Availability::CleanupUnknown { Availability::CleanupUnknown }
+        if r.disabled || r.exhausted || r.android_catalog.unknown() || r.android_sources.unknown() || self.poisoned.load(Ordering::SeqCst) || gate == Availability::CleanupUnknown { Availability::CleanupUnknown }
         else if r.stopping || gate == Availability::Shutdown { Availability::Shutdown }
         // No original can have started on an unsupported backend. Its missing
         // editing/crash hook must not falsely lock unrelated passive services.
@@ -1689,8 +1927,8 @@ impl Inner {
         else if r.active.is_none() && r.prepared.is_none()
             && (Profile::current(self.domain).is_none() || gate == Availability::UnsupportedPlatform) { Availability::UnsupportedPlatform }
         else if r.document_lost || gate == Availability::DocumentLost { Availability::DocumentLost }
-        else if r.active.is_some() || r.prepared.is_some() || gate == Availability::Busy { Availability::Busy }
-        else if !self.qualified() {
+        else if r.active.is_some() || r.prepared.is_some() || r.android_catalog.busy() || r.android_sources.busy() || gate == Availability::Busy { Availability::Busy }
+        else if !self.qualified(r.android_catalog.selection()) {
             match self.domain {
                 SavedCommandDomain::OfflinePreflight | SavedCommandDomain::IOSArchive => Availability::RuntimeUnqualified,
                 SavedCommandDomain::AndroidBuild if !self.android_runtime_selected(None) => Availability::RuntimeUnqualified,
@@ -1734,14 +1972,17 @@ impl Inner {
     fn stop_locked(&self, r: &mut Registry, owner: &Session, reason: Reason, at: Instant) {
         let Some(active) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         let at = at.min(owner.clocks.work).max(owner.clocks.admitted); let mut changed = false;
-        if active.first_stop.is_none() { active.first_stop = Some(at); changed = true; }
+        let earlier = active.first_stop.is_none_or(|first| at < first);
+        if earlier { active.first_stop = Some(at); changed = true; }
+        let cleanup = owner.clocks.cleanup_end(active.first_stop);
+        owner.native_cleanup_cutoff.send_if_modified(|current| if cleanup < *current { *current = cleanup; true } else { false });
         if matches!(owner.domain, SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive) {
             let end = owner.clocks.audit_end(active.first_stop);
             owner.native_audit_cutoff.send_if_modified(|current| {
                 if end < *current { *current = end; true } else { false }
             });
         }
-        if active.projection.reason == Reason::None && reason != Reason::None { active.projection.reason = reason; changed = true; }
+        if (earlier || active.projection.reason == Reason::None) && reason != Reason::None { active.projection.reason = reason; changed = true; }
         if !active.unknown && active.projection.phase != Phase::Stopping { active.projection.phase = Phase::Stopping; changed = true; }
         if active.projection.reason != Reason::None { set_failure_outcome(&mut active.projection); }
         let first_signal = owner.stop.send_if_modified(|stopped| { if *stopped { false } else { *stopped = true; true } });
@@ -1754,11 +1995,18 @@ impl Inner {
         }
     }
     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
+        if !original_session(r,owner){return;}
         let Some(a) = r.active.as_ref().filter(|a| a.owner.id == owner.id) else { return; };
         if now >= owner.clocks.work && !a.work_expired {
             if let Some(a) = r.active.as_mut() { a.work_expired = true; }
             self.stop_locked(r, owner, Reason::TimedOut, owner.clocks.work);
         }
+        // A native return after work cannot displace the earlier work deadline;
+        // an actual F before work still shortens it and selects the first reason.
+        let native_failure=match owner.native_failure.lock(){
+            Ok(first)=>*first,Err(_)=>{owner.resource_unknown.store(true,Ordering::SeqCst);None},
+        };
+        if let Some((reason,at))=native_failure {self.stop_locked(r,owner,reason,at);}
         let finality_due = r.active.as_ref().is_some_and(|a| !a.unknown && now >= owner.clocks.settlement(a.first_stop));
         if finality_due || self.poisoned.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { self.unknown_locked(r, owner); }
     }
@@ -1946,8 +2194,17 @@ impl OutputDecoder {
         match (owner.domain, &owner.context) {
             (SavedCommandDomain::OfflinePreflight, Context::OfflinePreflight(_)) => Ok(Self::OfflinePreflight { frames: 0, failed: false }),
             (SavedCommandDomain::ProjectRecovery, Context::ProjectRecovery(_)) => Ok(Self::ProjectRecovery { frames: 0, failed: false }),
-            (SavedCommandDomain::AndroidBuild, Context::AndroidBuild(context)) =>
-                android_wire::FrameDecoder::new(&owner.id, &owner.generation, context).map(Self::AndroidBuild),
+            (SavedCommandDomain::AndroidBuild, Context::AndroidBuild(context)) => {
+                match owner.profile {
+                    Profile::AndroidBuild(android_wire::Profile::LinuxX64) if owner.android_selection.is_none()=>
+                        android_wire::FrameDecoder::new(&owner.id,&owner.generation,context).map(Self::AndroidBuild),
+                    Profile::AndroidBuild(android_wire::Profile::MacArm64)=>{
+                        let selected=owner.android_selection.as_ref().ok_or_else(BridgeError::protocol)?;
+                        android_wire::FrameDecoder::new_macos(&owner.id,&owner.generation,context,selected.data()).map(Self::AndroidBuild)
+                    },
+                    _=>Err(BridgeError::protocol()),
+                }
+            },
             (SavedCommandDomain::IOSArchive, Context::IOSArchive(context)) =>
                 ios_wire::FrameDecoder::new(&owner.id, &owner.generation, context).map(Self::IOSArchive),
             _ => Err(BridgeError::protocol()),
@@ -2095,7 +2352,7 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
     }
 }
 fn offline_installed_final(book: &Resources) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if !book.offline_selected {
             return book.offline_installed.is_none() && !book.offline_started && !book.offline_joined && !book.offline_failed
@@ -2105,7 +2362,7 @@ fn offline_installed_final(book: &Resources) -> bool {
             && matches!(book.offline_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
             && book.offline_installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { !book.offline_selected && !book.offline_started && !book.offline_joined && !book.offline_failed }
 }
 fn offline_worker_returned(started: bool, joined: bool, failed: bool, handle: bool, error: bool) -> bool {
@@ -2113,7 +2370,7 @@ fn offline_worker_returned(started: bool, joined: bool, failed: bool, handle: bo
     else if failed { !joined && handle && error }
     else { joined && !handle && !error }
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn offline_consumers_returned(book: &Resources, startup: &Startup, no_child_effect: bool) -> bool {
     if !offline_worker_returned(book.inspection_started, book.inspection_joined, book.inspection_failed,
             book.inspection.is_some(), book.inspection_error.is_some())
@@ -2138,14 +2395,14 @@ fn offline_installed_closure_ready(r: &Registry, owner: &Session, claimed: bool,
         && (!claimed || r.active.as_ref().is_some_and(|a| a.accepted && a.terminal
             && matches!(a.projection.result.as_ref(), Some(Terminal::OfflinePreflight(t)) if t.lifetime.settled())))
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn offline_installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
     owner.domain == SavedCommandDomain::OfflinePreflight && inner.offline_installed_selected()
         && final_clock_clear(r, owner, now) && !inner.poisoned.load(Ordering::SeqCst)
         && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
         && Profile::current(owner.domain) == Some(owner.profile)
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn transfer_offline_installed(book: &Resources, inner: &Inner, owner: &Session) -> Result<(), BridgeError> {
     if !book.offline_selected || !book.inspection_started || !book.inspection_joined || book.inspection_failed
         || book.inspection.is_some() || book.inspection_error.is_some() || book.acquisition_started
@@ -2158,7 +2415,7 @@ fn transfer_offline_installed(book: &Resources, inner: &Inner, owner: &Session) 
     if !offline_installed_claim_clear(inner, &r, owner, now) { return Err(owner.domain.unavailable()); }
     slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn acquire_offline_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<OfflinePreflightRuntimeSlots>>) {
     if owner.domain != SavedCommandDomain::OfflinePreflight || !inner.offline_installed_selected() {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
@@ -2166,13 +2423,21 @@ fn acquire_offline_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<
     let mut slots = match native.lock() { Ok(slots) => slots, Err(_) => { inner.unknown(owner); return; } };
     let capability = match slots.capability() { Ok(capability) => capability, Err(_) => { inner.unknown(owner); return; } };
     let stop = owner.stop.subscribe();
-    let selected = match capability.prepare_once(owner.clocks.work, &stop) {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let prepared = capability.prepare_once_observed(owner.clocks.work, &stop, &mut |first| owner.publish_native_failure(first));
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let prepared = capability.prepare_once(owner.clocks.work, &stop);
+    let selected = match prepared {
         Ok(selected) => selected, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
     };
     let mut command = Command::new(&selected.python);
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if crate::runtime::macos_installed_environment(&mut command).is_err() {
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
     let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
     let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
     if !offline_installed_claim_clear(inner, &r, owner, now) { return; }
@@ -2189,9 +2454,9 @@ fn acquire_offline_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<
 }
 async fn settle_offline_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
     if owner.domain != SavedCommandDomain::OfflinePreflight { return; }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = (book, inner, owner); }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         let Some(native) = book.offline_installed.clone() else {
             if book.offline_selected { inner.unknown(owner); }
@@ -2223,16 +2488,20 @@ async fn settle_offline_installed(book: &mut Resources, inner: &Arc<Inner>, owne
             let hold_end = {
                 let r = inner.lock(); owner.clocks.settlement(r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, owner)).and_then(|a| a.first_stop))
             };
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let original_owner = owner.clone();
             let (release, enter) = oneshot::channel();
             book.offline_started = true;
             book.offline_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if let Some(control) = hold { let _ = control.hold_settlement(hold_end); }
-                match native.lock() {
-                    Ok(mut slots) => slots.settle_originals(),
-                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
-                }
+                let mut slots = match native.lock() { Ok(slots) => slots,
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(&mut |first| original_owner.native_cleanup_expired(first)) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
             }));
             let _ = release.send(());
         }
@@ -2249,7 +2518,7 @@ async fn settle_offline_installed(book: &mut Resources, inner: &Arc<Inner>, owne
 }
 
 fn recovery_installed_final(book: &Resources) -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if !book.recovery_selected {
             return book.recovery_installed.is_none() && !book.recovery_started && !book.recovery_joined && !book.recovery_failed
@@ -2259,7 +2528,7 @@ fn recovery_installed_final(book: &Resources) -> bool {
             && matches!(book.recovery_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
             && book.recovery_installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { !book.recovery_selected && !book.recovery_started && !book.recovery_joined && !book.recovery_failed }
 }
 fn recovery_worker_returned(started: bool, joined: bool, failed: bool, handle: bool, error: bool) -> bool {
@@ -2267,7 +2536,7 @@ fn recovery_worker_returned(started: bool, joined: bool, failed: bool, handle: b
     else if failed { !joined && handle && error }
     else { joined && !handle && !error }
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn recovery_consumers_returned(book: &Resources, startup: &Startup, no_child_effect: bool) -> bool {
     if !recovery_worker_returned(book.inspection_started, book.inspection_joined, book.inspection_failed,
             book.inspection.is_some(), book.inspection_error.is_some())
@@ -2292,14 +2561,14 @@ fn recovery_installed_closure_ready(r: &Registry, owner: &Session, claimed: bool
         && (!claimed || r.active.as_ref().is_some_and(|a| a.accepted && a.terminal
             && matches!(a.projection.result.as_ref(), Some(Terminal::ProjectRecovery(t)) if t.lifetime.settled())))
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn recovery_installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
-    owner.domain == SavedCommandDomain::ProjectRecovery && inner.recovery_installed_selected() && inner.qualified()
+    owner.domain == SavedCommandDomain::ProjectRecovery && inner.recovery_installed_selected() && inner.qualified(owner.android_selection.as_ref())
         && final_clock_clear(r, owner, now) && !inner.poisoned.load(Ordering::SeqCst)
         && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
         && Profile::current(owner.domain) == Some(owner.profile)
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn transfer_recovery_installed(book: &Resources, inner: &Inner, owner: &Session) -> Result<(), BridgeError> {
     if !book.recovery_selected || !book.inspection_started || !book.inspection_joined || book.inspection_failed
         || book.inspection.is_some() || book.inspection_error.is_some() || book.acquisition_started
@@ -2312,7 +2581,7 @@ fn transfer_recovery_installed(book: &Resources, inner: &Inner, owner: &Session)
     if !recovery_installed_claim_clear(inner, &r, owner, now) { return Err(owner.domain.unavailable()); }
     slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn acquire_recovery_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<ProjectRecoveryRuntimeSlots>>) {
     if owner.domain != SavedCommandDomain::ProjectRecovery || !inner.recovery_installed_selected() {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
@@ -2320,13 +2589,30 @@ fn acquire_recovery_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex
     let mut slots = match native.lock() { Ok(slots) => slots, Err(_) => { inner.unknown(owner); return; } };
     let capability = match slots.capability() { Ok(capability) => capability, Err(_) => { inner.unknown(owner); return; } };
     let stop = owner.stop.subscribe();
-    let selected = match capability.prepare_once(owner.clocks.work, &stop) {
-        Ok(selected) => selected, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let prepared = capability.prepare_once_observed(owner.clocks.work, &stop, &mut |first| owner.publish_native_failure(first));
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let prepared = capability.prepare_once(owner.clocks.work, &stop);
+    let selected = match prepared {
+        Ok(selected) => selected,
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        Err(failure) => {
+            // Keep an earlier native F, or publish this real Err before Registry.
+            owner.publish_native_failure(Some((failure, Instant::now())));
+            inner.stop(owner, Reason::RuntimeUnavailable); return;
+        },
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
     };
     let mut command = Command::new(&selected.python);
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if crate::runtime::macos_installed_environment(&mut command).is_err() {
+        owner.publish_native_failure(Some((AdmissionFailure::Native, Instant::now())));
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
     let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
     let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
     if !recovery_installed_claim_clear(inner, &r, owner, now) { return; }
@@ -2343,9 +2629,9 @@ fn acquire_recovery_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex
 }
 async fn settle_recovery_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
     if owner.domain != SavedCommandDomain::ProjectRecovery { return; }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = (book, inner, owner); }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         let Some(native) = book.recovery_installed.clone() else {
             if book.recovery_selected { inner.unknown(owner); }
@@ -2372,16 +2658,20 @@ async fn settle_recovery_installed(book: &mut Resources, inner: &Arc<Inner>, own
             let hold_end = {
                 let r = inner.lock(); owner.clocks.settlement(r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, owner)).and_then(|a| a.first_stop))
             };
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let original_owner = owner.clone();
             let (release, enter) = oneshot::channel();
             book.recovery_started = true;
             book.recovery_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if let Some(control) = hold { let _ = control.hold_settlement(hold_end); }
-                match native.lock() {
-                    Ok(mut slots) => slots.settle_originals(),
-                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
-                }
+                let mut slots = match native.lock() { Ok(slots) => slots,
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                { slots.settle_originals(&mut |first| original_owner.native_cleanup_expired(first)) }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                { slots.settle_originals() }
             }));
             let _ = release.send(());
         }
@@ -2403,7 +2693,7 @@ fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
     }
     // This gate remains distinct from source inspection. No packaged fallback,
     // environment-selected neutral cwd or other owner's permit is accepted.
-    if inner.domain != owner.domain || !inner.qualified() || Profile::current(owner.domain) != Some(owner.profile) {
+    if inner.domain != owner.domain || !inner.qualified(owner.android_selection.as_ref()) || Profile::current(owner.domain) != Some(owner.profile) {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
     #[cfg(not(all(unix, debug_assertions, feature = "development-runtime")))]
@@ -2443,7 +2733,7 @@ fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn spawn_android_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, native: Option<Arc<Mutex<AndroidNativeBooks>>>) {
-    if owner.domain != SavedCommandDomain::AndroidBuild || inner.domain != owner.domain || !inner.qualified()
+    if owner.domain != SavedCommandDomain::AndroidBuild || inner.domain != owner.domain || !inner.qualified(owner.android_selection.as_ref())
         || Profile::current(owner.domain) != Some(owner.profile) { inner.stop(owner, Reason::ToolchainUnavailable); return; }
     let Some(native) = native else { inner.stop(owner, Reason::ToolchainUnavailable); return; };
     let mut native = match native.lock() { Ok(native) => native, Err(_) => { inner.unknown(owner); return; } };
@@ -2470,8 +2760,43 @@ fn spawn_android_original(inner: &Inner, owner: &Session, runtime: VerifiedRunti
     }
 }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn spawn_android_original(inner:&Inner,owner:&Session,runtime:VerifiedRuntime,native:Option<Arc<Mutex<AndroidNativeBooks>>>) {
+    if owner.domain!=SavedCommandDomain::AndroidBuild || inner.domain!=owner.domain
+        || !inner.qualified(owner.android_selection.as_ref()) || Profile::current(owner.domain)!=Some(owner.profile) {
+        inner.stop(owner,Reason::ToolchainUnavailable);return;
+    }
+    let Some(native)=native else{inner.stop(owner,Reason::ToolchainUnavailable);return;};
+    let mut native=match native.lock(){Ok(native)=>native,Err(_)=>{inner.unknown(owner);return;}};
+    let mut command=Command::new(&runtime.python);
+    command.args(["-I","-S","-B"]).arg(&runtime.bootstrap).arg(&runtime.core);
+    command.current_dir(&runtime.cwd).env_clear().env("LANG","C").env("LC_ALL","C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    // The reviewed Mac runtime environment is fixed before native checks and
+    // before the final original Start claim. Nothing executes after that claim
+    // except this already-constructed command's single spawn attempt.
+    if crate::runtime::macos_installed_environment(&mut command).is_err(){
+        owner.observe_android_failure(AdmissionFailure::Ownership,Instant::now());return;
+    }
+    if native.check_before_spawn(&runtime,owner.clocks.work,&owner.stop.subscribe(),
+        &mut |failure,at|owner.observe_android_failure(failure,at)).is_err(){return;}
+    let mut startup=match owner.startup.lock(){Ok(startup)=>startup,Err(_)=>{inner.unknown(owner);return;}};
+    let mut registry=inner.lock();inner.advance_locked(&mut registry,owner,Instant::now());
+    if !original_session(&registry,owner) || registry.disabled || registry.exhausted || registry.stopping || registry.document_lost
+        || !registry.android_catalog.selection_matches(owner.android_selection.as_ref(),inner)
+        || *owner.stop.borrow() || Instant::now()>=owner.clocks.work || startup.attempted || startup.returned || startup.failed
+        || startup.child.is_some() || native.phase!=NativePhase::Ready || native.first_failure().is_some() || native.settlement_started{return;}
+    if native.claim_once().is_err(){drop(registry);inner.unknown(owner);return;}
+    startup.attempted=true;
+    drop(registry);
+    match command.spawn(){
+        Ok(child)=>{startup.child=Some(child);startup.returned=true;},
+        Err(_)=>{startup.failed=true;owner.resource_unknown.store(true,Ordering::SeqCst);drop(startup);
+            inner.stop(owner,Reason::RuntimeUnavailable);inner.unknown(owner);},
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn spawn_ios_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, native: Option<Arc<Mutex<IOSNativeBooks>>>) {
-    if owner.domain != SavedCommandDomain::IOSArchive || inner.domain != owner.domain || !inner.qualified()
+    if owner.domain != SavedCommandDomain::IOSArchive || inner.domain != owner.domain || !inner.qualified(owner.android_selection.as_ref())
         || !inner.ios_mode_qualified(&owner.context, Some(owner))
         || Profile::current(owner.domain) != Some(owner.profile) { inner.stop(owner, Reason::ToolchainUnavailable); return; }
     if !owner.recovery_matches() { inner.stop(owner, Reason::StaleIntent); return; }
@@ -2484,7 +2809,8 @@ fn spawn_ios_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, 
     command.current_dir(&runtime.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
     if crate::runtime::macos_installed_environment(&mut command).is_err()
-        || native.check_before_spawn(&runtime, owner.clocks.work, &owner.stop.subscribe()).is_err() {
+        || native.check_before_spawn(&runtime, owner.clocks.work, &owner.stop.subscribe(),
+            &mut |first| owner.publish_native_failure(first)).is_err() {
         inner.stop(owner, Reason::ToolchainMismatch); return;
     }
     let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
@@ -2535,19 +2861,38 @@ async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Ses
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let selected = (owner.domain == SavedCommandDomain::AndroidBuild).then(|| book.native.clone()).flatten();
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let selected = (owner.domain == SavedCommandDomain::IOSArchive).then(|| book.ios_native.clone()).flatten();
+        let selected=match owner.domain {
+            SavedCommandDomain::AndroidBuild if book.ios_native.is_none()=>book.native.clone().map(MacNativeBook::Android),
+            SavedCommandDomain::IOSArchive if book.native.is_none()=>book.ios_native.clone().map(MacNativeBook::IOS),
+            _=>None,
+        };
         let Some(native) = selected else { inner.unknown(owner); return; };
         // Each book operation ALSO reads this same original Session cutoff, so
         // an earlier F during the audit tightens the running borrow immediately.
         let end = *owner.native_audit_cutoff.borrow();
         let (release, enter) = oneshot::channel();
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let original_owner=owner.clone();
         book.native_started = true; // Pre-rostered slot claimed before worker creation/effects.
         book.native_settlement = Some(tokio::task::spawn_blocking(move || {
             if enter.blocking_recv().is_err() { return NativeSettlement { originals_closed: false, integrity: false }; }
-            match native.lock() {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            {match native.lock() {
                 Ok(mut native) => native.settle(used, end),
                 Err(error) => { let mut native = error.into_inner(); native.interrupted(); native.settle(used, end) },
-            }
+            }}
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {match native {
+                MacNativeBook::Android(native)=>{
+                    let mut native=match native.lock(){Ok(native)=>native,Err(error)=>{let mut native=error.into_inner();native.interrupted();native}};
+                    native.settle(used,end,&mut |failure,at|original_owner.observe_android_failure(failure,at))
+                },
+                MacNativeBook::IOS(native)=>match native.lock(){
+                    Ok(mut native)=>native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first)),
+                    Err(error)=>{let mut native=error.into_inner();native.interrupted();
+                        native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first))},
+                },
+            }}
         }));
         let _ = release.send(());
     }
@@ -2564,44 +2909,70 @@ async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Ses
 }
 
 async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
-    if owner.domain == SavedCommandDomain::AndroidBuild && (!inner.qualified() || inner.toolchain.is_none()) {
+    if owner.domain == SavedCommandDomain::AndroidBuild && !inner.qualified(owner.android_selection.as_ref()) {
         inner.stop(owner, Reason::ToolchainUnavailable); return;
     }
     if owner.domain == SavedCommandDomain::IOSArchive
-        && (!inner.qualified() || !inner.ios_mode_qualified(&owner.context, Some(owner.as_ref()))) {
+        && (!inner.qualified(owner.android_selection.as_ref()) || !inner.ios_mode_qualified(&owner.context, Some(owner.as_ref()))) {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
     let mut book = owner.resources.lock().await;
     inner.endpoint(owner);
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
     let runtime = inner.runtime.clone(); let end = owner.clocks.work; let domain = owner.domain;
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let native = book.native.clone();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let ios_native = book.ios_native.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let offline_installed = book.offline_installed.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let recovery_installed = book.recovery_installed.clone();
     let stop = owner.stop.subscribe();
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let inspection_owner=owner.clone();
     let (inspect_start, inspect_enter) = oneshot::channel();
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         inspect_enter.blocking_recv().map_err(|_| domain.unavailable())?;
         match domain {
             SavedCommandDomain::OfflinePreflight => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 if let Some(native) = offline_installed {
                     let mut slots = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    return runtime.resolve_offline_preflight_installed(&mut slots, end, &stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let armed = slots.arm_acl_once(end, &stop);
+                        inspection_owner.publish_native_failure(slots.first_failure());
+                        armed.map_err(|_| domain.unavailable())?;
+                    }
+                    let result = runtime.resolve_offline_preflight_installed(&mut slots, end, &stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.publish_native_failure(slots.first_failure());
+                    return result;
                 }
                 runtime.resolve_offline_preflight(end)
             },
             SavedCommandDomain::ProjectRecovery => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 if let Some(native) = recovery_installed {
-                    let mut slots = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    return runtime.resolve_project_recovery_installed(&mut slots, end, &stop);
+                    let mut slots = native.lock().map_err(|_| {
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        inspection_owner.publish_native_failure(Some((AdmissionFailure::Unknown, Instant::now())));
+                        BridgeError::cleanup_unknown()
+                    })?;
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    {
+                        let armed = slots.arm_acl_once(end, &stop);
+                        inspection_owner.publish_native_failure(slots.first_failure()
+                            .or_else(|| armed.as_ref().err().map(|failure| (*failure, Instant::now()))));
+                        armed.map_err(|_| domain.unavailable())?;
+                    }
+                    let result = runtime.resolve_project_recovery_installed(&mut slots, end, &stop);
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    inspection_owner.publish_native_failure(slots.first_failure()
+                        .or_else(|| result.as_ref().err().map(|_| (AdmissionFailure::Native, Instant::now()))));
+                    return result;
                 }
                 runtime.resolve_project_recovery(end)
             },
@@ -2612,7 +2983,13 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     let mut native = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
                     native.inspect_once(end, &stop)
                 }
-                #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let native=native.ok_or_else(||domain.unavailable())?;
+                    let mut native=native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                    native.inspect_once(&runtime,end,&stop,&mut |failure,at|inspection_owner.observe_android_failure(failure,at))
+                }
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
                 { let _ = stop; Err(domain.unavailable()) }
             },
             SavedCommandDomain::IOSArchive => {
@@ -2620,7 +2997,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                 {
                     let native = ios_native.ok_or_else(|| domain.unavailable())?;
                     let mut native = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    native.inspect_once(&runtime, end, &stop)
+                    native.arm_acl_once(end, &stop, &mut |first| inspection_owner.publish_native_failure(first))?;
+                    native.inspect_once(&runtime, end, &stop, &mut |first| inspection_owner.publish_native_failure(first))
                 }
                 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
                 { let _ = stop; Err(domain.unavailable()) }
@@ -2646,14 +3024,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         (Context::ProjectRecovery(context), Profile::ProjectRecovery(profile)) =>
             recovery_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, owner.recovery_stamp.as_deref()),
         (Context::AndroidBuild(context), Profile::AndroidBuild(profile)) => {
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             {
                 let binding = book.native.as_ref().and_then(|native| native.lock().ok())
                     .and_then(|native| native.request_binding(&runtime).ok());
                 match binding { Some(binding) => android_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding),
                     None => Err(owner.domain.unavailable()) }
             }
-            #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
             { let _ = (context, profile); Err(owner.domain.unavailable()) }
         }
         (Context::IOSArchive(context), Profile::IOSArchive(profile)) => {
@@ -2689,19 +3067,19 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     };
     match bytes { Ok(bytes) => *owner.request.lock().await = Some(bytes), Err(_) => { inner.stop(owner, Reason::ProtocolError); return; } }
     let acquisition_owner = owner.clone(); let acquisition_inner = inner.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let acquisition_native = book.native.clone();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let acquisition_ios = book.ios_native.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let offline_installed = book.offline_installed.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let recovery_installed = book.recovery_installed.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if offline_installed.is_some() && transfer_offline_installed(&book, inner, owner).is_err() {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if recovery_installed.is_some() && transfer_recovery_installed(&book, inner, owner).is_err() {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
@@ -2711,7 +3089,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         if acquire_enter.blocking_recv().is_ok() {
             match acquisition_owner.domain {
                 SavedCommandDomain::OfflinePreflight => {
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                     if let Some(native) = offline_installed {
                         drop(runtime);
                         acquire_offline_installed(&acquisition_inner, &acquisition_owner, &native); return;
@@ -2719,7 +3097,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     spawn_original(&acquisition_inner, &acquisition_owner, runtime);
                 },
                 SavedCommandDomain::ProjectRecovery => {
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                     if let Some(native) = recovery_installed {
                         drop(runtime);
                         acquire_recovery_installed(&acquisition_inner, &acquisition_owner, &native); return;
@@ -2727,9 +3105,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     spawn_original(&acquisition_inner, &acquisition_owner, runtime);
                 },
                 SavedCommandDomain::AndroidBuild => {
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                     spawn_android_original(&acquisition_inner, &acquisition_owner, runtime, acquisition_native);
-                    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
                     acquisition_inner.stop(&acquisition_owner, Reason::ToolchainUnavailable);
                 },
                 SavedCommandDomain::IOSArchive => {
@@ -3112,6 +3490,238 @@ async fn observe_installed_ios_final(inner: &Arc<Inner>, owner: &Arc<Session>, s
     }
 }
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
+    // Inert typed state only: no Prepare/Start, entropy, task, held root,
+    // native inspection or positive worker/close return is constructed.
+    fn inert(admitted: Instant) -> (SavedCommandOwner, Arc<Session>) {
+        let application = SavedCommandOwner::project_recovery(RuntimeConfig::packaged(
+            std::path::PathBuf::from("/inert-mrk-recovery-original-not-opened")));
+        let domain = SavedCommandDomain::ProjectRecovery;
+        let context = Context::ProjectRecovery(recovery_wire::tests::context());
+        let clocks = Clocks::for_context(&context, admitted);
+        let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
+        let (frames, receiver) = mpsc::channel(2);
+        let (native_audit_cutoff, _) = watch::channel(clocks.audit_end(None));
+        let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+        let project = RegisteredRoot { path: std::path::PathBuf::from("/inert-mrk-recovery-project-not-opened"),
+            identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let owner = Arc::new(Session { domain, id: "a".repeat(32), generation: "b".repeat(32),
+            context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
+            recovery_stamp: None, request: AsyncMutex::new(None), material: Mutex::new(None), material_retired: AtomicBool::new(true),
+            recovery: None, android_selection: None, native_failure: Mutex::new(None),
+            stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
+            output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
+            driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
+            watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
+            startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
+            input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
+            error: Arc::new(AsyncMutex::new(Pipe::default())), driver: AsyncMutex::new(None), watchdog: Mutex::new(None),
+            manager: AsyncMutex::new(None), observer: AsyncMutex::new(None), driver_return: Mutex::new(None),
+            manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            fixture: None,
+        });
+        let projection = RunProjection { operation_id: owner.id.clone(), owner_generation: owner.generation.clone(), context,
+            phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
+        application.inner.lock().active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false,
+            accepted: false, terminal: false, unknown: false, final_join_seen: false, context_invalidated: false });
+        (application, owner)
+    }
+    if RECOVERY_NATIVE_QUALIFIED || RECOVERY_RUNTIME_QUALIFIED || INTENT != Duration::from_secs(300)
+        || RECOVERY_WORK != Duration::from_secs(120) || RECOVERY_HARD != Duration::from_secs(130)
+        || SETTLEMENT != Duration::from_secs(10) || Profile::current(SavedCommandDomain::ProjectRecovery).is_none() { return false; }
+    let runtime = RuntimeConfig::packaged(std::path::PathBuf::from("/inert-mrk-recovery-selection-not-opened"));
+    let selected = cfg!(feature = "custom-protocol") && runtime.project_recovery_installed_profile_available();
+    let application = SavedCommandOwner::project_recovery(runtime.clone());
+    {
+        let r = application.inner.lock();
+        if application.inner.recovery_installed_selected() != selected || application.inner.qualified(None) != selected
+            || application.inner.android_installed_selected(None, None) || application.inner.android_original_owner
+            || application.inner.toolchain.is_some() || r.android_catalog.selection().is_some() { return false; }
+    }
+    let Ok(status) = application.status_recovery(recovery_wire::Availability::Available) else { return false; };
+    if status.operation.is_some() || !application.can_exit()
+        || status.availability != if selected { recovery_wire::Availability::Available } else { recovery_wire::Availability::RuntimeUnqualified } {
+        return false;
+    }
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
+        if SavedCommandOwner::new(runtime.clone(), domain).inner.recovery_installed_selected() { return false; }
+    }
+
+    let (application, original) = inert(Instant::now() - Duration::from_secs(5)); let (_, foreign) = inert(original.clocks.admitted);
+    let t = original.clocks.admitted; let early = t + Duration::from_secs(1); let late = t + Duration::from_secs(5);
+    let cleanup = original.native_cleanup_cutoff.subscribe();
+    if original.clocks.work != t + RECOVERY_WORK || original.clocks.finality != t + RECOVERY_HARD
+        || original.clocks.cleanup != t + RECOVERY_HARD || original.clocks.signed || original.clocks.recovery
+        || *cleanup.borrow() != t + RECOVERY_HARD { return false; }
+    {
+        let mut r = application.inner.lock();
+        if !final_clock_clear(&r, &original, t) || final_clock_clear(&r, &foreign, t)
+            || recovery_installed_closure_ready(&r, &foreign, false, true)
+            || recovery_installed_closure_ready(&r, &original, true, true) { return false; }
+        application.inner.stop_locked(&mut r, &original, Reason::Cancelled, late);
+        if *cleanup.borrow() != late + SETTLEMENT { return false; }
+        // This is the actual COMMON publisher, with Registry already held.
+        // The original native observation shortens cleanup before projection.
+        original.publish_native_failure(Some((AdmissionFailure::Ownership, early)));
+        if *cleanup.borrow() != early + SETTLEMENT || r.active.as_ref().unwrap().first_stop != Some(late) { return false; }
+        application.inner.advance_locked(&mut r, &original, late);
+        if r.active.as_ref().unwrap().first_stop != Some(early)
+            || r.active.as_ref().unwrap().projection.reason != Reason::RuntimeUnavailable { return false; }
+        original.publish_native_failure(Some((AdmissionFailure::Native, late)));
+        application.inner.stop_locked(&mut r, &original, Reason::Shutdown, late);
+        if *cleanup.borrow() != early + SETTLEMENT || original.clocks.finality != t + RECOVERY_HARD
+            || original.clocks.settlement(r.active.as_ref().unwrap().first_stop) != early + SETTLEMENT { return false; }
+        application.inner.advance_locked(&mut r, &original, early + SETTLEMENT);
+        if !r.active.as_ref().unwrap().unknown || !r.disabled
+            || final_clock_clear(&r, &original, early + SETTLEMENT) { return false; }
+        let revision = r.revision;
+        application.inner.advance_locked(&mut r, &original, early + SETTLEMENT + Duration::from_secs(1));
+        if r.revision != revision || r.active.as_ref().unwrap().first_stop != Some(early) { return false; }
+    }
+    // The actual COMMON publisher must establish F+10 before a delayed
+    // Registry projection, including real Err with no Book first-F witness.
+    for callback_failure in [None, Some(AdmissionFailure::Ownership)] {
+        for returned in [AdmissionFailure::Native, AdmissionFailure::Identity] {
+            let (application, original) = inert(Instant::now() - Duration::from_secs(5));
+            let t = original.clocks.admitted; let observed = t + Duration::from_secs(2);
+            let prior = callback_failure.map(|failure| (failure, t + Duration::from_secs(1)));
+            let expected = prior.map_or(observed, |(_, at)| at); let projection_at = t + Duration::from_secs(5);
+            let cleanup = original.native_cleanup_cutoff.subscribe();
+            let mut r = application.inner.lock();
+            original.publish_native_failure(prior);
+            if *original.native_failure.lock().unwrap() != prior.map(|(_, at)| (Reason::RuntimeUnavailable, at))
+                || *original.stop.borrow() != prior.is_some() || r.active.as_ref().unwrap().first_stop.is_some()
+                || *cleanup.borrow() != prior.map_or(t + RECOVERY_HARD, |(_, at)| at + SETTLEMENT) { return false; }
+            original.publish_native_failure(Some((returned, observed)));
+            if *original.native_failure.lock().unwrap() != Some((Reason::RuntimeUnavailable, expected))
+                || !*original.stop.borrow() || r.active.as_ref().unwrap().first_stop.is_some()
+                || *cleanup.borrow() != expected + SETTLEMENT
+                || *cleanup.borrow() == projection_at + SETTLEMENT { return false; }
+            application.inner.stop_locked(&mut r, &original, Reason::RuntimeUnavailable, projection_at);
+            application.inner.advance_locked(&mut r, &original, projection_at);
+            if r.active.as_ref().unwrap().first_stop != Some(expected)
+                || r.active.as_ref().unwrap().projection.reason != Reason::RuntimeUnavailable
+                || *cleanup.borrow() != expected + SETTLEMENT
+                || original.clocks.settlement(r.active.as_ref().unwrap().first_stop) != expected + SETTLEMENT
+                || original.clocks.work != t + RECOVERY_WORK || original.clocks.finality != t + RECOVERY_HARD
+                || !final_clock_clear(&r, &original, projection_at) { return false; }
+        }
+    }
+    for observed in [Duration::from_secs(1), Duration::from_secs(121)] {
+        let (application, original) = inert(Instant::now() - Duration::from_secs(122)); let t = original.clocks.admitted;
+        original.publish_native_failure(Some((AdmissionFailure::Native, t + observed)));
+        let mut r = application.inner.lock(); application.inner.advance_locked(&mut r, &original, t + Duration::from_secs(122));
+        let active = r.active.as_ref().unwrap();
+        if active.first_stop != Some((t + observed).min(original.clocks.work))
+            || active.projection.reason != if observed < RECOVERY_WORK { Reason::RuntimeUnavailable } else { Reason::TimedOut }
+            || *original.native_cleanup_cutoff.borrow() != original.clocks.settlement(active.first_stop) { return false; }
+    }
+    let (_, expired) = inert(Instant::now() - RECOVERY_HARD - Duration::from_secs(1));
+    if !expired.native_cleanup_expired(None) || !expired.resource_unknown.load(Ordering::SeqCst) { return false; }
+
+    let (application, original) = inert(Instant::now() - RECOVERY_HARD); let t = original.clocks.admitted;
+    application.inner.accept_at(&original, Frame::ProjectRecovery(recovery_wire::Frame::Accepted), t);
+    application.inner.accept_at(&original,
+        Frame::ProjectRecovery(recovery_wire::tests::terminal_frame(&recovery_wire::tests::context())), t);
+    {
+        let mut r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+        // A settled-looking core DTO is NOT an original final-join receipt and
+        // never creates private review authority in this inert model.
+        if !active.accepted || !active.terminal || active.final_join_seen || active.projection.public().result.is_some()
+            || recovery_review_after_finality(active, &original, t).is_some() || r.recovery_review.is_some() { return false; }
+        application.inner.advance_locked(&mut r, &original, t + RECOVERY_HARD);
+        let active = r.active.as_ref().unwrap();
+        if !active.unknown || recovery_review_after_finality(active, &original, t + RECOVERY_HARD).is_some() { return false; }
+    }
+    let expiry = SavedCommandOwner::project_recovery(runtime);
+    {
+        let mut r = expiry.inner.lock(); let expires = t + INTENT;
+        r.prepared = Some(Prepared { projection: RunProjection { operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+            context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
+            reason: Reason::None, result: None, stage: None }, expires, registration: original.registration, project: original.project.clone(),
+            recovery_stamp: None, material: None, recovery: None, android_selection: None });
+        expiry.inner.expire_prepared(&mut r, expires - Duration::from_nanos(1));
+        if r.prepared.as_ref().is_none_or(|p| p.expires != expires) { return false; }
+        expiry.inner.expire_prepared(&mut r, expires); let revision = r.revision;
+        if r.prepared.is_some() || r.last.as_ref().is_none_or(|p| p.intent_usable || p.reason != Reason::IntentExpired
+            || p.result.is_some()) { return false; }
+        expiry.inner.expire_prepared(&mut r, expires + INTENT);
+        if r.revision != revision || r.active.is_some() || r.recovery_review.is_some() { return false; }
+    }
+    let mut resources = Resources::default();
+    if !recovery_installed_final(&resources) { return false; }
+    resources.recovery_selected = true;
+    if recovery_installed_final(&resources) { return false; }
+    resources.recovery_installed = Some(Arc::new(Mutex::new(ProjectRecoveryRuntimeSlots::new())));
+    if recovery_installed_final(&resources) { return false; }
+    resources.inspection_started = true;
+    if recovery_consumers_returned(&resources, &Startup::default(), true) { return false; }
+    let complete = [(false, false, false, false, false), (true, true, false, false, false), (true, false, true, true, true)];
+    for bits in 0u8..32 {
+        let state = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0);
+        if recovery_worker_returned(state.0, state.1, state.2, state.3, state.4) != complete.contains(&state) { return false; }
+    }
+    true
+}
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn installed_project_recovery_retains_original_clocks_review_and_finality() {
+    assert!(installed_project_recovery_owner_data_check());
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn installed_offline_owner_data_check() -> bool {
+    // Inert state/clock models only. Exclude the qualification test's real
+    // Prepare/getrandom call, hosted fixtures, runtime inspection and native IO.
+    offline_tests::no_owner_startup_and_unsupported_status_do_not_claim_document_loss();
+    offline_tests::intent_expires_with_a_new_revision_and_cancel_never_creates_an_owner();
+    offline_tests::start_burns_before_unavailability_and_foreign_start_grants_nothing();
+    offline_tests::whole_run_endpoints_and_first_stop_never_renew();
+    offline_tests::complete_negative_is_provisional_and_not_first_failure();
+    offline_tests::late_terminal_never_reverses_timeout_or_unknown_in_either_delivery_order();
+    offline_tests::repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks();
+    if !matches!(wire::Profile::current(), Some(wire::Profile::MacosArm64))
+        || wire::CONSENT != "saved-offline-android-v1" { return false; }
+    let runtime = RuntimeConfig::packaged(std::path::PathBuf::from("/inert-mrk-offline-owner-not-opened"));
+    let selected = cfg!(feature = "custom-protocol") && runtime.offline_preflight_installed_profile_available();
+    let owner = SavedCommandOwner::offline_preflight(runtime.clone());
+    if owner.inner.offline_installed_selected() != selected { return false; }
+    let Ok(status) = owner.status_offline(wire::Availability::Available) else { return false; };
+    if status.operation.is_some() || !owner.can_exit()
+        || status.availability != (if selected { wire::Availability::Available } else { wire::Availability::RuntimeUnqualified }) { return false; }
+    for domain in [SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
+        if SavedCommandOwner::new(runtime.clone(), domain).inner.offline_installed_selected() { return false; }
+    }
+    let mut resources = Resources::default();
+    if !offline_installed_final(&resources) { return false; }
+    resources.offline_started = true;
+    if offline_installed_final(&resources) { return false; }
+    resources.offline_started = false; resources.offline_joined = true;
+    if offline_installed_final(&resources) { return false; }
+    resources.offline_joined = false; resources.offline_failed = true;
+    if offline_installed_final(&resources) { return false; }
+    resources.offline_failed = false;
+    resources.offline_installed = Some(Arc::new(Mutex::new(OfflinePreflightRuntimeSlots::new())));
+    if offline_installed_final(&resources) { return false; }
+    resources.offline_selected = true;
+    if offline_installed_final(&resources) { return false; }
+    let complete = [(false, false, false, false, false), (true, true, false, false, false),
+        (true, false, true, true, true)];
+    for bits in 0u8..32 {
+        let state = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0);
+        if offline_worker_returned(state.0, state.1, state.2, state.3, state.4) != complete.contains(&state) { return false; }
+    }
+    true
+}
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn installed_offline_owner_keeps_domain_clocks_and_original_finality() {
+    assert!(installed_offline_owner_data_check());
+}
+
 // Fixture bodies stay lexical children of the custody owner. Only the thin
 // Offline adapter registers their ORIGINAL test names; no duplicate roster and
 // no crate-visible Inner/Session fields are introduced for tests.
@@ -3129,7 +3739,7 @@ impl SavedCommandOwner {
         let r = self.inner.lock();
         if self.inner.domain != SavedCommandDomain::AndroidBuild || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
             || r.disabled || r.stopping || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
-            || !token.document_matches(document) || !self.inner.android_installed_selected(Some(document)) {
+            || !token.document_matches(document) || !self.inner.android_installed_selected(Some(document),r.android_catalog.selection()) {
             return Err(self.inner.domain.unavailable());
         }
         let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;

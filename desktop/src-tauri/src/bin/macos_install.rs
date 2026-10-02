@@ -630,13 +630,13 @@ mod installer {
                 check(item.path.is_ascii() && safe_payload_path(&item.path) && item.path.len() <= 1024 && item.path.split('/').count() <= 17
                     && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                     && item.path.as_str() > previous && sha(&item.sha256), "inventory-path")?;
-                check(item.executable == matches!(item.path.as_str(), "app/Contents/MacOS/mobile-release-kit-desktop" | "runtime/python/bin/python3"), "inventory-executable-scope")?;
+                check(item.executable == matches!(item.path.as_str(), "app/Contents/MacOS/mobile-release-kit-desktop" | "app/Contents/Helpers/mrk-vault-keychain" | "runtime/python/bin/python3"), "inventory-executable-scope")?;
                 total = total.checked_add(item.size).ok_or("inventory-bound")?; check(total <= 512*1024*1024, "inventory-bound")?;
                 previous = &item.path; files.insert(item.path.clone(), item);
                 let mut path = item.path.as_str(); while let Some((parent,_)) = path.rsplit_once('/') { directories.insert(parent.to_owned()); path = parent; }
             }
             check(directories.len() <= 2048 && files.contains_key("app/Contents/MacOS/mobile-release-kit-desktop")
-                && files.contains_key("app/Contents/Info.plist") && files.contains_key("runtime/python/bin/python3")
+                && files.contains_key("app/Contents/Info.plist") && files.contains_key("app/Contents/Helpers/mrk-vault-keychain") && files.contains_key("runtime/python/bin/python3")
                 && files.get("runtime/manifest.json").is_some_and(|f| f.sha256 == inventory.runtime_manifest_sha256), "inventory-required")?;
             let mut folded = BTreeSet::new(); for name in files.keys().chain(directories.iter()) { check(folded.insert(name.to_ascii_lowercase()), "inventory-collision")?; }
             let support = self.support_root()?;

@@ -20,11 +20,12 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     env:
+      RUSTUP_TOOLCHAIN: "1.98.1"
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       # Exact accepted current-payload DATA; ordinary installation is not Aqua qualification.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 24795d86bc39fb7383b899c47dfc9abdb1b1c1fa0c9e2009253f822f8d1d601b
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: bbab007e23e6b80fea5f5fa7e386dcecc0bfc6af09aefd7d3625513c3a84948a
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d0c359807c8e4b882dc5ce87bd0f16b1c2868c43bb6adf7cd34a42607bc6f8b0
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 7c057555059307c24bbe210faa915f88211cd0ea4a9005187d881cf41893856a
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
@@ -40,8 +41,8 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]]
           # Historical archive reuse supplies the interpreter, not the current core.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 24795d86bc39fb7383b899c47dfc9abdb1b1c1fa0c9e2009253f822f8d1d601b ]]
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == bbab007e23e6b80fea5f5fa7e386dcecc0bfc6af09aefd7d3625513c3a84948a ]]
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == d0c359807c8e4b882dc5ce87bd0f16b1c2868c43bb6adf7cd34a42607bc6f8b0 ]]
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 7c057555059307c24bbe210faa915f88211cd0ea4a9005187d881cf41893856a ]]
           [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]]
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
@@ -54,6 +55,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Prepare the pinned Apple Instant clock toolchain
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --target aarch64-apple-darwin --no-self-update
+          rustc --version --verbose
       - name: Select DATA stager Python, not the packaged interpreter
         id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -81,8 +89,6 @@ jobs:
           import json, os, subprocess, sys
           tools = {}
           for name, command in (
-              ("rustc", ["rustc", "--version", "--verbose"]),
-              ("cargo", ["cargo", "--version", "--verbose"]),
               ("cltSdkPath", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"]),
               ("cltSdkVersion", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
               ("cltSdkBuild", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"]),
@@ -348,6 +354,55 @@ jobs:
             --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
+      - name: Build and sign the separate fixed vault helper before binding the app
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" cargo build \
+            --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --release \
+            --target aarch64-apple-darwin --message-format=json \
+            > "$MRK_MACOS_WORK/vault-helper-build.jsonl" 2> "$MRK_MACOS_WORK/vault-helper-build.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/vault-helper-build.status"
+          if [[ $status != 0 ]]; then
+            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2
+            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2
+            exit "$status"
+          fi
+          helper="$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
+          /usr/bin/codesign --force --sign - --options runtime \
+            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$helper"
+          /usr/bin/codesign --verify --strict "$helper"
+          "$MRK_PYTHON" -I -S -B - <<'PY_HELPER'
+          import hashlib, json, os, pathlib, stat
+          path = pathlib.Path(os.environ["MRK_MACOS_WORK"]) / "vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
+          with path.open("rb") as stream:
+              before = os.fstat(stream.fileno())
+              if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 32 * 1024 * 1024:
+                  raise ValueError("fixed helper compiler/signing output")
+              body = stream.read(32 * 1024 * 1024 + 1)
+              after = os.fstat(stream.fileno())
+              if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                      after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(body) != before.st_size:
+                  raise ValueError("fixed signed helper changed")
+          record = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"],
+                    "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                    "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
+                    "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "toolchain": "1.98.1",
+                    "helperSha256": hashlib.sha256(body).hexdigest(), "helperBytes": len(body),
+                    "signing": "ad-hoc-runtime-empty-entitlements-strictly-verified",
+                    "nativeCallerAndKeychainQualified": False, "developerIdOrNotarizationQualified": False}
+          with (path.parents[3] / "vault-helper-signing.json").open("x", encoding="utf-8") as output:
+              json.dump(record, output, sort_keys=True); output.write("\n")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("MRK_MACOS_VAULT_HELPER_SHA256=" + hashlib.sha256(body).hexdigest() + "\n")
+              output.write("MRK_MACOS_VAULT_HELPER_BYTES=" + str(len(body)) + "\n")
+          PY_HELPER
       - name: Build only the normal ARM64 bundled-asset shell
         timeout-minutes: 24
         shell: bash
@@ -367,6 +422,50 @@ jobs:
           printf '%s\n' "$cargo_status" > "$MRK_MACOS_WORK/normal-build.status"
           /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-build.stderr" > "$MRK_MACOS_WORK/normal-build.stderr.tail.txt"
           [[ "$cargo_status" == 0 ]]
+      - name: Record the effective pinned compiler from the successful build context
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_EFFECTIVE_RUST'
+          import json, os, subprocess, tomllib
+          from pathlib import Path
+          checkout = Path(os.environ["GITHUB_WORKSPACE"])
+          cwd = checkout / "desktop/src-tauri"
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          if (root / "normal-build.status").read_bytes() != b"0\n":
+              raise ValueError("effective versions require the original successful build")
+          repository_default = tomllib.loads((checkout / "desktop/rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          selected_toolchain = os.environ.get("RUSTUP_TOOLCHAIN")
+          if repository_default != "1.98.0" or selected_toolchain != "1.98.1":
+              raise ValueError("review the changed repository default or Mac clock toolchain before this gate")
+          # Rustup documents RUSTUP_AUTO_INSTALL=0: version queries cannot install.
+          environment = dict(os.environ, RUSTUP_AUTO_INSTALL="0")
+          versions = {}
+          for tool in ("rustc", "cargo"):
+              command = [tool, "--version", "--verbose"]
+              result = subprocess.run(command, cwd=cwd, env=environment, check=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+              if result.stderr or not result.stdout or len(result.stdout) > 4096:
+                  raise ValueError("effective version output refused")
+              output = result.stdout.decode("utf-8", "strict").strip()
+              if not output.startswith(tool + " "):
+                  raise ValueError("effective tool version output refused")
+              if tool == "rustc" and ("release: 1.98.1" not in output.splitlines()
+                      or "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985" not in output.splitlines()):
+                  raise ValueError("effective compiler differs from reviewed Apple clock binding")
+              versions[tool] = {"command": command, "output": output}
+          value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"],
+                   "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                   "cwd": "desktop/src-tauri", "autoInstall": False, "tools": versions,
+                   "repositoryDefault": repository_default, "selectedMacToolchain": selected_toolchain}
+          fd = os.open(root / "effective-rust-toolchain.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as stream:
+                  stream.write((json.dumps(value, sort_keys=True) + "\n").encode()); stream.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          PY_EFFECTIVE_RUST
       - name: Compile and run only fixed native DATA contracts and exact host-Python regressions
         id: data_contracts
         if: github.ref == 'refs/heads/verify/desktop-macos-preview'
@@ -448,6 +547,12 @@ jobs:
                   or binding["source"] != binding["workflowSource"] or inventory["source"] != binding["source"]
                   or inventory["tree"] != binding["tree"] or binding["workDirectory"] != [root_before[0], root_before[1], root_before[3]]):
               raise ValueError("original checkout/source binding")
+          rust_binding = json.loads(read(root / "effective-rust-toolchain.json", 16384))
+          if (rust_binding["source"] != binding["source"] or rust_binding["workflowSource"] != binding["workflowSource"]
+                  or rust_binding["runId"] != os.environ["GITHUB_RUN_ID"]
+                  or rust_binding["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                  or rust_binding["cwd"] != "desktop/src-tauri" or rust_binding["autoInstall"] is not False):
+              raise ValueError("effective Rust toolchain is not bound to this original build")
           source_rows = {row["path"]: row for row in inventory["files"]}
           if len(source_rows) != len(inventory["files"]): raise ValueError("duplicate source row")
           source_names = (
@@ -457,6 +562,10 @@ jobs:
               "desktop/src-tauri/src/vault_format.rs", "desktop/src-tauri/src/vault_crypto.rs", "desktop/src-tauri/src/vault_store.rs",
               "src/mobile_release/api/_candidate_evidence.py", "tests/desktop/test_workflow_transaction_profile.py",
               "tests/desktop/test_candidate_evidence.py", "tests/desktop/test_lifecycle_evidence.py",
+              "tests/desktop/test_metadata_images.py", "tests/desktop/test_metadata_images_edit.py",
+              "tests/desktop/test_metadata_images_recovery.py", "tests/desktop/test_metadata_text.py",
+              "src/mobile_release/metadata_images.py", "src/mobile_release/metadata_images_edit.py",
+              "src/mobile_release/metadata_images_recovery.py", "src/mobile_release/init_workspace_custody.py",
           )
           source_bodies = {}
           for name in source_names:
@@ -511,9 +620,29 @@ jobs:
               "test_lifecycle_evidence.LifecycleEvidenceTests.test_zero_remaining_refuses_next_nonempty_file_even_after_invalid_values",
               "test_lifecycle_evidence.LifecycleEvidenceTests.test_rejected_arrays_are_charged_before_top_level_kind_rejection",
               "test_lifecycle_evidence.LifecycleEvidenceTests.test_symlink_changed_and_original_cleanup_failures_withhold_results",
-              "test_lifecycle_evidence.LifecycleEvidenceTests.test_observation_does_not_write_launch_or_contact_services"
+              "test_lifecycle_evidence.LifecycleEvidenceTests.test_observation_does_not_write_launch_or_contact_services",
+              "test_metadata_images_edit.MetadataImagesEditTests.test_changed_sibling_target_or_saved_configuration_is_not_a_second_preview_or_write",
+              "test_metadata_images_edit.MetadataImagesEditTests.test_directory_move_lost_return_preserves_owned_transition_for_original_and_restart_rollback",
+              "test_metadata_images_edit.MetadataImagesEditTests.test_failure_after_committed_marker_never_retries_import_or_claims_false_success",
+              "test_metadata_images_edit.MetadataImagesEditTests.test_image_only_limit_accepts_a_header_checked_image_larger_than_unchanged_global_limit",
+              "test_metadata_images_edit.MetadataImagesEditTests.test_new_directory_import_is_one_shot_and_preserves_original_sources_and_saved_inputs",
+              "test_metadata_images_edit.MetadataImagesEditTests.test_private_original_object_exclusions_protect_a_target_even_without_a_relative_source_name",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_00_actual_mixed_ready_rollback_preserves_old_identity_and_readonly_facts",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_actual_committed_target_is_checked_again_before_last_backup_cleanup",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_changed_saved_dependencies_targets_and_portable_alias_refuse_without_public_effects",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_cleanup_failure_after_owned_deletion_is_not_retried_and_new_inspection_can_finish",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_committed_and_rolled_back_cleanup_accept_only_complete_controls_and_admitted_data_subset",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_complete_preparing_between_and_owned_new_directory_states",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_current_revision_rechecks_config_siblings_targets_and_journal_identity_before_apply",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_idle_and_unreadable_configuration_never_manufacture_usable_baseline_or_recovery",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_incomplete_contradictory_or_foreign_control_proof_is_conflict_not_cleanup_authority",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_one_shot_consent_immutable_authority_and_discard_do_not_erase_inspected_commit",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_original_stop_after_owned_rollback_move_preserves_failure_and_requires_new_recovery",
+              "test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_terminal_fsync_failure_keeps_rolled_back_fact_without_cleanup_or_false_success",
           ]
-          if len(names) != 39 or len(set(names)) != 39: raise ValueError("fixed selection")
+          if len(names) != 57 or len(set(names)) != 57: raise ValueError("fixed selection")
+          if hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() != "4a5c62f00838d17f54e0970c209fc44a2b5708314e39437dbb156a25ac42ffa6":
+              raise ValueError("fixed selected IDs digest")
           data = root / "data-contracts"
           os.mkdir(data, 0o700)
           temporary = data / "tmp"
@@ -542,41 +671,63 @@ jobs:
           suite = unittest.TestSuite()
           for name in NAMES:
               module, cls, method = name.split(".")
-              if module not in ("test_workflow_transaction_profile", "test_candidate_evidence", "test_lifecycle_evidence") or not method.startswith("test_"):
+              if module not in ("test_workflow_transaction_profile", "test_candidate_evidence", "test_lifecycle_evidence",
+                                "test_metadata_images_edit", "test_metadata_images_recovery") or not method.startswith("test_"):
                   raise ValueError("fixed selected method required")
               suite.addTest(getattr(importlib.import_module(module), cls)(method))
-          if suite.countTestCases() != 39 or [case.id() for case in suite] != NAMES:
+          if suite.countTestCases() != 57 or [case.id() for case in suite] != NAMES:
               raise ValueError("exact original test IDs/count required")
           result = unittest.TextTestRunner(verbosity=2, failfast=False).run(suite)
           facts = {"testsRun": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
                    "skipped": len(result.skipped), "expectedFailures": len(result.expectedFailures),
                    "unexpectedSuccesses": len(result.unexpectedSuccesses), "testIds": NAMES, "actualHostBeforeAndAfter": bool(original_host())}
           print(json.dumps(facts, sort_keys=True, separators=(",", ":")), flush=True)
-          raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 39 and facts["actualHostBeforeAndAfter"]
+          raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 57 and facts["actualHostBeforeAndAfter"]
                            and not any(facts[key] for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")) else 1)
           '''
           receipt = {"schemaVersion": 1, "scope": "fixed-native-data-contracts-and-selected-host-python-regressions",
                      "sourceCommit": binding["source"], "sourceTree": binding["tree"],
                      "sourceInventorySha256": hashlib.sha256(inventory_bytes).hexdigest(),
-                     "sourceRows": [source_rows[name] for name in source_names], "toolBindings": binding["tools"],
+                     "sourceRows": [source_rows[name] for name in source_names], "toolBindings": binding["tools"], "effectiveRustToolchain": rust_binding,
                      "python": {"executable": sys.executable, "version": sys.version, "actualPlatform": sys.platform, "actualMachine": os.uname().machine},
                      "cargoTargetDir": os.environ["CARGO_TARGET_DIR"], "temporaryOriginal": temporary_before,
                      "buildBindings": {key: os.environ[key] for key in ("CARGO_TARGET_DIR", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
                                        "MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256",
                                        "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR")},
-                     "pythonTestIds": names, "pythonExpectedCount": 39, "realFilesystemCount": 2, "evidenceReaderCount": 37,
-                     "frozenSelectionSha256": "ca33560652f0411d1a69caeae79221fda8fcfc9504771a5351ff898faab305f3",
+                     "pythonTestIds": names, "pythonExpectedCount": 57, "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
+                     "frozenSelectionSha256": "4a5c62f00838d17f54e0970c209fc44a2b5708314e39437dbb156a25ac42ffa6",
                      "aggregate": {"name": "observer_data_checks", "count": 1, "harness": False, "libtestCount": None,
                                    "sourceSha256": hashlib.sha256((start + aggregate).encode()).hexdigest(), "directSourceContractCalls": contract_calls},
                      "commands": [], "passed": False, "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
                      "nativeTlsQualified": False, "allWorkerFinalityEstablished": False}
           artifact_fd = None
           failure = None
+          def filesystem_device(raw):
+              # Apple df(path) resolves the containing filesystem. diskutil info
+              # accepts its device/mountpoint, not an arbitrary subdirectory.
+              lines = raw.decode("utf-8", "strict").splitlines()
+              if (len(lines) != 2 or not raw.endswith(b"\n") or b"\r" in raw
+                      or lines[0].split() not in (
+                          ["Filesystem", "1024-blocks", "Used", "Available", "Capacity", "Mounted", "on"],
+                          ["Filesystem", "1024-blocks", "Used", "Avail", "Capacity", "Mounted", "on"])):
+                  raise ValueError("one fixed df header and filesystem row required")
+              row = lines[1].split(None, 5)
+              if (len(row) != 6 or not re.fullmatch(r"/dev/disk[0-9]+s[0-9]+(?:s[0-9]+)?", row[0])
+                      or any(not re.fullmatch(r"-?[0-9]{1,20}", number) for number in row[1:4])
+                      or not re.fullmatch(r"[0-9]{1,4}%", row[4]) or not row[5].startswith("/")
+                      or any(ord(character) < 32 or ord(character) == 127 for character in row[5])):
+                  raise ValueError("one local disk device and bounded mountpoint required")
+              return {"device": row[0], "reportedMountPoint": row[5]}
           try:
-              # This is a closed four-command batch, not a configurable execution helper.
-              for phase in ("apfs", "build", "rust", "python"):
-                  if phase == "apfs":
-                      argv = ["/usr/sbin/diskutil", "info", "-plist", str(temporary)]
+              # A closed five-command batch, not a configurable execution helper.
+              for phase in ("mount", "apfs", "build", "rust", "python"):
+                  if phase == "mount":
+                      # -P alone does not suppress inode columns in modern Darwin
+                      # mode. Explicit -k and -I fix units and the documented shape.
+                      argv = ["/bin/df", "-P", "-k", "-I", str(temporary)]
+                      cwd, environment, seconds, limit = temporary, clean, 15, 65536
+                  elif phase == "apfs":
+                      argv = ["/usr/sbin/diskutil", "info", "-plist", receipt["filesystemSelection"]["device"]]
                       cwd, environment, seconds, limit = temporary, clean, 15, 65536
                   elif phase == "build":
                       argv = ["cargo", "test", "--locked", "--no-default-features",
@@ -651,13 +802,18 @@ jobs:
                           or not command["captureClosed"] or command["timedOut"] or command["outputOverflow"]):
                       raise ValueError("original fixed command did not completely pass: " + phase)
                   raw = bytes(output["stdout"])
-                  if phase == "apfs":
+                  if phase == "mount":
+                      receipt["filesystemSelection"] = filesystem_device(raw)
+                  elif phase == "apfs":
                       volume = plistlib.loads(raw)
                       mount = volume.get("MountPoint")
                       if (volume.get("FilesystemType") != "apfs" or volume.get("GlobalPermissionsEnabled") is not True
                               or volume.get("VolumeReadOnly") is not False or not isinstance(mount, str) or not mount.startswith("/")
-                              or not re.fullmatch(r"disk[0-9]+s[0-9]+(?:s[0-9]+)?", volume.get("DeviceIdentifier", ""))
-                              or os.stat(mount).st_dev != temporary_before[0]):
+                              or volume.get("DeviceIdentifier") != receipt["filesystemSelection"]["device"][5:]
+                              or os.stat(mount).st_dev != temporary_before[0]
+                              or os.stat(receipt["filesystemSelection"]["reportedMountPoint"]).st_dev != temporary_before[0]
+                              or sig(os.fstat(temporary_fd))[:5] != temporary_before[:5]
+                              or sig(os.fstat(temporary_fd)) != sig(os.lstat(temporary))):
                           raise ValueError("actual writable ownership-aware local APFS required")
                       receipt["actualFilesystem"] = {key: volume[key] for key in ("FilesystemType", "GlobalPermissionsEnabled", "VolumeReadOnly", "MountPoint", "DeviceIdentifier")}
                   elif phase == "build":
@@ -694,7 +850,7 @@ jobs:
                       receipt["artifact"]["originalClosed"] = True
                   else:
                       counts = json.loads(raw)
-                      if (counts.get("testsRun") != 39 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
+                      if (counts.get("testsRun") != 57 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
                               or any(type(counts.get(key)) is not int or counts[key] != 0
                                      for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"))):
                           raise ValueError("exact native Python original counts required")
@@ -721,7 +877,7 @@ jobs:
               receipt["failure"] = failure
               put("result.json", (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
           if failure is not None: raise SystemExit(1)
-          print("One native aggregate and 39 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
+          print("One native aggregate and 57 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
           PY_DATA_CONTRACTS
       - name: Assemble and ad-hoc sign the app only (never --deep or the runtime)
         timeout-minutes: 3
@@ -731,11 +887,15 @@ jobs:
           set -o noclobber
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
+            --vault-helper "$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain" \
+            --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
             --binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop" \
             --normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
             --normal-cargo-target-dir "$CARGO_TARGET_DIR" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
-          /usr/bin/codesign --force --sign - --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+          /usr/bin/codesign --force --sign - --options runtime \
+            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+          /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/mrk-vault-keychain"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
       - name: Bind this completed signed app and current-source runtime into fresh Installer DATA
         timeout-minutes: 3
@@ -744,6 +904,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
+            --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
             --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
             --current-runtime \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
@@ -1260,6 +1421,141 @@ jobs:
           finally: os.close(fd)
           print("One normal-app launch/Cancel/navigation/Quit UI scenario passed; POSIX exit and all-worker finality remain unavailable.")
           PY_UI_RESULT
+      - name: Use the normal app to select a project and persist reviewed local edits and images
+        id: normal_project_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
+        timeout-minutes: 7
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
+          # One 300s journey, after the accepted basic gate; outer ceiling420s.
+          set +e
+          clean /usr/bin/xcodebuild test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
+            -parallel-testing-enabled NO -test-iterations 1 -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
+            -disableAutomaticPackageResolution \
+            > "$MRK_MACOS_WORK/normal-ui/project-test.log" 2>&1
+          test_status=$?
+          set -e
+          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
+          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/project-test.log" > "$MRK_MACOS_WORK/normal-ui/project-test.tail.txt"
+          [[ "$test_status" == 0 ]]
+      - name: Verify the one selected project journey against its original XCTest result
+        id: normal_project_ui_result
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
+            --path "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" --compact \
+            > "$MRK_MACOS_WORK/normal-ui/project-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/project-summary.stderr"
+          summary_status=$?
+          set -e
+          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/project-summary.status"
+          /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/project-summary.stderr" > "$MRK_MACOS_WORK/normal-ui/project-summary.stderr.tail.txt"
+          [[ "$summary_status" == 0 ]]
+          "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
+          import hashlib, json, os, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          def read(path, limit):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or before.st_size > limit:
+                      raise ValueError("UI result input shape refused")
+                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                  after = os.fstat(fd)
+                  named = os.stat(path, follow_symlinks=False)
+                  identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                  if len(data) != before.st_size or identity(before) != identity(after) or identity(before) != identity(named):
+                      raise ValueError("UI result input changed")
+                  return data
+              finally: os.close(fd)
+          def unique(pairs):
+              return_value = {}
+              for key, item in pairs:
+                  if key in return_value: raise ValueError("duplicate result field")
+                  return_value[key] = item
+              return return_value
+          def document(path, limit):
+              return json.loads(read(path, limit), object_pairs_hook=unique)
+          preview = document(root / "preview/PREVIEW.json", 65536)
+          if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
+                  or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
+                  or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                  or preview["platform"] != "macOS26-arm64" or preview["instrumented"] is not False
+                  or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
+              raise ValueError("UI result is not bound to this original normal package")
+          basic = document(root / "normal-ui/result.json", 65536)
+          if (basic["scope"] != "normal-app-launch-cancel-navigation-quit-ui-only"
+                  or basic["applicationSourceCommit"] != preview["sourceCommit"]
+                  or basic["runId"] != preview["runId"] or basic["runAttempt"] != preview["runAttempt"]
+                  or basic["launchRenderCancelNavigationQuitUI"] != "passed"
+                  or basic["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"):
+              raise ValueError("project journey requires this original accepted basic UI gate")
+          for name in ("build", "project-test", "project-summary"):
+              if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
+                  raise ValueError("original native command did not pass")
+          summary_bytes = read(root / "normal-ui/project-summary.raw.json", 262144)
+          summary = json.loads(summary_bytes, object_pairs_hook=unique)
+          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
+              # Only key names are diagnostic; do not export an unrestricted native result.
+              print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
+              raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
+                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
+          result = {"schemaVersion": 1, "scope": "normal-app-project-config-workflows-text-version-images-ui",
+                    "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
+                    "sourceTree": preview["sourceTree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
+                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "platform": preview["platform"], "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
+                    "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
+                    "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
+                    "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
+                    "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
+                    "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
+                    "localProjectEditsAndImagesUI": "passed", "applicationStateAfterNormalQuit": "notRunning",
+                    "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
+                    "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+          data = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          fd = os.open(root / "normal-ui/project-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as stream:
+                  stream.write(data); stream.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          print("One normal-app project/config/workflows/text/version/images UI journey passed; POSIX exit and all-worker finality remain unavailable.")
+          PY_UI_RESULT
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
         if: always() && steps.work.outputs.root != ''
@@ -1268,7 +1564,11 @@ jobs:
           name: desktop-macos-installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
+            ${{ steps.work.outputs.root }}/effective-rust-toolchain.json
             ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/data-contracts/mount.stdout
+            ${{ steps.work.outputs.root }}/data-contracts/mount.stderr
+            ${{ steps.work.outputs.root }}/data-contracts/mount.status
             ${{ steps.work.outputs.root }}/data-contracts/apfs.stdout
             ${{ steps.work.outputs.root }}/data-contracts/apfs.stderr
             ${{ steps.work.outputs.root }}/data-contracts/apfs.status
@@ -1297,6 +1597,11 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/sdk-version.txt
             ${{ steps.work.outputs.root }}/normal-ui/sdk-build.txt
             ${{ steps.work.outputs.root }}/normal-ui/result.json
+            ${{ steps.work.outputs.root }}/normal-ui/project-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/project-test.tail.txt
+            ${{ steps.work.outputs.root }}/normal-ui/project-summary.status
+            ${{ steps.work.outputs.root }}/normal-ui/project-summary.stderr.tail.txt
+            ${{ steps.work.outputs.root }}/normal-ui/project-result.json
             ${{ steps.work.outputs.root }}/package-format-input.json
             ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
             ${{ steps.work.outputs.root }}/package-format-prepare.json
@@ -1311,6 +1616,10 @@ jobs:
             ${{ steps.work.outputs.root }}/native-acl-cleanup.status
             ${{ steps.work.outputs.root }}/native-acl-probe-result.json
             ${{ steps.work.outputs.root }}/runtime-result.json
+            ${{ steps.work.outputs.root }}/vault-helper-build.status
+            ${{ steps.work.outputs.root }}/vault-helper-build.jsonl
+            ${{ steps.work.outputs.root }}/vault-helper-build.stderr
+            ${{ steps.work.outputs.root }}/vault-helper-signing.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json
             ${{ steps.work.outputs.root }}/dialog-regressions.log
@@ -1358,7 +1667,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -1391,17 +1700,19 @@ jobs:
                   or binding["source"] != os.environ["GITHUB_SHA"]
                   or binding["frontendAbsentAtAdmission"] is not True or not shutil.rmtree.avoids_symlink_attacks):
               raise ValueError("task cleanup original refused")
-          for path in (root / "cargo-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
-                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/tmp",
+          for path in (root / "cargo-target", root / "vault-helper-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
+                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/tmp",
                        root / "data-contracts/tmp"):
               try: selected = os.lstat(path)
               except FileNotFoundError: continue
               if not stat.S_ISDIR(selected.st_mode) or selected.st_uid != os.getuid() or selected.st_dev != current.st_dev:
                   raise ValueError("task cleanup output refused")
               shutil.rmtree(path)
-          for name in ("build.log", "test.log", "summary.raw.json", "summary.stderr"):
+          for name in ("build.log", "test.log", "summary.raw.json", "summary.stderr",
+                       "project-test.log", "project-summary.raw.json", "project-summary.stderr"):
               path = root / "normal-ui" / name
-              selected = os.lstat(path)
+              try: selected = os.lstat(path)
+              except FileNotFoundError: continue
               if not stat.S_ISREG(selected.st_mode) or selected.st_uid != os.getuid() or selected.st_nlink != 1 or selected.st_dev != current.st_dev:
                   raise ValueError("task cleanup closed log refused")
               os.unlink(path)

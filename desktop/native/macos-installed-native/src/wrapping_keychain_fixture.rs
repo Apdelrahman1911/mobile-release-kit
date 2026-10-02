@@ -17,7 +17,8 @@
 use super::{
     qualification::{Case, CaseReturn, Harness, OwnerFixturePin, PeerLookup, Refused, CALL_ROSTER},
     private_pair::{self, ControlBook},
-    native_frame_bytes, AddEffect, Admission, Checkpoint, Context, Custody, Facts, Operation,
+    native_frame_bytes, AddEffect, Admission, Checkpoint, CleanupAdmission, Context, Custody, Facts, Operation,
+    ProcessInteractionObservation, NativeCleanupAdmission, cleanup_admission_bridge,
     Outcome, RawResult, ReferenceObservation, KEY_BYTES, KNOWN, UNKNOWN,
 };
 use std::{
@@ -32,7 +33,7 @@ const CALLS: usize = 1024;
 const REFS: usize = 10;
 const SELECTIONS: usize = 4;
 const MEMBERS: u32 = 64;
-const NATIVE_RESULT_BYTES: usize = 29384;
+const NATIVE_RESULT_BYTES: usize = 33200;
 const FIXTURE_FRAME_LIMIT: usize = 196608;
 const PUBLIC_OUTPUT_LIMIT: usize = 128 * 1024;
 const CALLER_OWNED_CHARGE_LIMIT: usize = 2 * 1024 * 1024;
@@ -73,6 +74,7 @@ struct RawFixture {
     references: [ReferenceObservation; REFS],
     selections: [Selection; SELECTIONS],
     namespace: RawResult,
+    policies: [ProcessInteractionObservation; ACTIONS],
 }
 const _: () = assert!(size_of::<Call>() == 24 && size_of::<ActionObservation>() == 24 && size_of::<Selection>() == 60);
 const _: () = assert!(size_of::<RawFixture>() == NATIVE_RESULT_BYTES);
@@ -86,10 +88,11 @@ impl RawFixture {
             actions: [ActionObservation::default(); ACTIONS], calls: [Call::default(); CALLS],
             references: [ReferenceObservation::default(); REFS], selections: [Selection::default(); SELECTIONS],
             namespace: RawResult::empty(Operation::Lookup, 0),
+            policies: [ProcessInteractionObservation::default(); ACTIONS],
         }
     }
     fn prefix_valid(&self) -> bool {
-        self.version == 1 && self.bytes as usize == NATIVE_RESULT_BYTES && self.reserved == 0
+        self.version == 2 && self.bytes as usize == NATIVE_RESULT_BYTES && self.reserved == 0
             && (1..=ACTIONS as u32).contains(&self.action_count)
             && self.call_count as usize <= CALLS && self.ref_count as usize <= REFS
             && self.create_effect <= 2
@@ -99,14 +102,14 @@ impl RawFixture {
             && self.sync_returned <= self.sync_entered && self.sync_absent_empty <= self.sync_returned
             && self.root_removed <= self.root_created && self.provider_deleted <= u32::from(self.create_effect == 1)
             && ((self.unknown | self.stopped | self.exception) == 0 || self.failed == 1)
-            && self.namespace.valid(false)
+            && self.namespace.valid(false) && self.namespace.policy == ProcessInteractionObservation::default()
     }
     fn valid(&self, final_return: bool) -> bool {
         if !self.prefix_valid() || final_return && self.callbacks_cleared != 1 { return false; }
         let mut previous_end = 0;
         for (i, row) in self.actions.iter().enumerate() {
             if i >= self.action_count as usize {
-                if *row != ActionObservation::default() { return false; }
+                if *row != ActionObservation::default() || self.policies[i] != ProcessInteractionObservation::default() { return false; }
                 continue;
             }
             if row.kind != i as u32 + 1 || row.entered != 1 || row.returned > 1 || row.completed > row.returned
@@ -115,6 +118,12 @@ impl RawFixture {
                 || (row.returned == 1 && !(row.first_call..=self.call_count).contains(&row.end_call))
                 || (i + 1 < self.action_count as usize && row.completed != 1)
                 || final_return && row.returned != 1 { return false; }
+            let policy = &self.policies[i];
+            if !policy.valid(row.returned == 1) || policy.kind != if i == 12 { 3 } else { 2 }
+                || (row.completed == 1 && (policy.role != 1
+                    || if i == 12 { !policy.namespace_complete() } else { !policy.complete() })) {
+                return false;
+            }
             if row.returned == 1 { previous_end = row.end_call; }
         }
         if final_return && previous_end != self.call_count { return false; }
@@ -165,6 +174,7 @@ impl RawFixture {
             || self.action_count != before.action_count + 1 || self.call_count < before.call_count
             || self.ref_count < before.ref_count
             || self.actions[..before.action_count as usize] != before.actions[..before.action_count as usize]
+            || self.policies[..before.action_count as usize] != before.policies[..before.action_count as usize]
             || self.calls[..before.call_count as usize] != before.calls[..before.call_count as usize]
             || self.namespace.native.entered < before.namespace.native.entered
             || self.namespace.acl.snapshots_entered < before.namespace.acl.snapshots_entered { return false; }
@@ -225,7 +235,7 @@ unsafe extern "C" {
     fn mrk_wrapping_fixture_abi() -> u32;
     fn mrk_wrapping_fixture_new() -> *mut c_void;
     fn mrk_wrapping_fixture_run(frame: *mut c_void, action: u32, admission: NativeAdmission,
-        context: *mut c_void, out: *mut RawFixture);
+        context: *mut c_void, cleanup: NativeCleanupAdmission, cleanup_context: *mut c_void, out: *mut RawFixture);
     fn mrk_wrapping_fixture_material(frame: *mut c_void, token: *mut u8, key: *mut u8, ids: *mut u8) -> u32;
     fn mrk_wrapping_fixture_binding(frame: *mut c_void, out: *mut Binding) -> u32;
     fn mrk_wrapping_fixture_free(frame: *mut c_void) -> u32;
@@ -250,7 +260,7 @@ impl Fixture {
         self.pointer.is_some()
     }
     fn pointer(&self) -> *mut c_void { self.pointer.map_or(std::ptr::null_mut(), NonNull::as_ptr) }
-    fn run<F: FnMut(Checkpoint) -> Admission>(&mut self, action: Action, admission: &mut F) -> Option<FixtureReturn> {
+    fn run<F: FnMut(Checkpoint) -> Admission>(&mut self, action: Action, admission: &mut F, mut cleanup: CleanupAdmission) -> Option<FixtureReturn> {
         if self.pointer.is_none() || self.blocked || self.next != action.raw() || self.next > ACTIONS as u32 { return None; }
         self.next += 1; // Spend the fixed action before entry, never as a retry.
         let mut raw = RawFixture::empty();
@@ -258,10 +268,11 @@ impl Fixture {
         // SAFETY: unique retained native frame, stable bridge/output for the
         // entire synchronous call. Native clears both callback pointers on return.
         unsafe { mrk_wrapping_fixture_run(self.pointer(), action.raw(), fixture_admission::<F>,
-            (&mut bridge as *mut Bridge<'_, F>).cast(), &mut raw); }
+            (&mut bridge as *mut Bridge<'_, F>).cast(), cleanup_admission_bridge,
+            (&mut cleanup as *mut CleanupAdmission).cast(), &mut raw); }
         let verified = raw.valid(true) && raw.action_count == action.raw() && !bridge.malformed;
-        if !verified || bridge.panic.is_some() || raw.failed != 0 || raw.unknown != 0 || raw.stopped != 0 { self.blocked = true; }
-        Some(FixtureReturn { raw, action, verified, ffi_returned: true, callback_panic: bridge.panic })
+        if !verified || bridge.panic.is_some() || cleanup.failed() || raw.failed != 0 || raw.unknown != 0 || raw.stopped != 0 { self.blocked = true; }
+        Some(FixtureReturn { raw, action, verified, ffi_returned: true, callback_panic: bridge.panic, cleanup })
     }
     fn retire_allocation(&mut self) -> bool {
         if self.pointer.is_none() || self.blocked || self.free_spent || self.next != ACTIONS as u32 + 1 { return false; }
@@ -276,10 +287,11 @@ impl Fixture {
 struct FixtureReturn {
     raw: RawFixture, action: Action, verified: bool, ffi_returned: bool,
     callback_panic: Option<Box<dyn Any + Send>>,
+    cleanup: CleanupAdmission,
 }
 impl FixtureReturn {
     fn completed(&self) -> bool {
-        self.ffi_returned && self.verified && self.callback_panic.is_none() && self.raw.failed == 0
+        self.ffi_returned && self.verified && self.callback_panic.is_none() && !self.cleanup.failed() && self.raw.failed == 0
             && self.raw.unknown == 0 && self.raw.stopped == 0
             && self.raw.actions[self.action.raw() as usize - 1].completed == 1
     }
@@ -387,8 +399,9 @@ fn fixture_action(fixture: &mut Fixture, originals: &mut Vec<FixtureReturn>, clo
     action: Action, original_retirement: bool) -> bool {
     if originals.len() + 1 != action.raw() as usize || originals.len() >= ACTIONS
         || originals.capacity() < ACTIONS || clock.admit(original_retirement) != Admission::Continue { return false; }
+    let cleanup = CleanupAdmission::from_original_cutoff(clock.cutoff);
     let mut admission = |_checkpoint| clock.admit(original_retirement);
-    let Some(actual) = fixture.run(action, &mut admission) else { return false; };
+    let Some(actual) = fixture.run(action, &mut admission, cleanup) else { return false; };
     originals.push(actual); // Original retained BEFORE checking its contents.
     originals.last().is_some_and(FixtureReturn::completed)
         && (originals.len() == 1 || originals[originals.len() - 1].raw.extends(&originals[originals.len() - 2].raw))
@@ -408,6 +421,7 @@ fn expected_case(actual: &CaseReturn) -> bool {
     let facts = actual.facts(); let selection = actual.selection();
     if !facts.native_run_returned() || !facts.verified_native_run_receipt() || facts.custody() != Custody::Settled
         || facts.callback_panicked() || facts.native_exception() || !facts.ordinary_user_admitted()
+        || !facts.process_interaction_restored()
         || !selection.verified() || !selection.account_selected() || !selection.callbacks_cleared() { return false; }
     let case = actual.case();
     if !case.terminal_stop() && facts.stopped() { return false; }
@@ -508,7 +522,7 @@ impl Cohort {
             let Some((book, acl)) = private_pair::native_control_charge() else { return false; };
             self.control_bytes = book; self.control_acl_bytes = acl;
         }
-        if self.native_abi != 0x51460101 || self.fixture_bytes == 0 || self.fixture_bytes > FIXTURE_FRAME_LIMIT
+        if self.native_abi != 0x51460201 || self.fixture_bytes == 0 || self.fixture_bytes > FIXTURE_FRAME_LIMIT
             || self.fixtures.capacity() < ACTIONS || self.cases.capacity() < 14
             || self.output.get_mut().capacity() < PUBLIC_OUTPUT_LIMIT { return false; }
         // Full original Vec capacities, all14 complete adapter frame charges,
@@ -597,6 +611,7 @@ impl Cohort {
         let Some(harness) = self.harness.as_mut() else { return false; };
         let clock = &mut self.clock; let fixture = &mut self.fixture; let fixtures = &mut self.fixtures;
         let post_add = &mut self.post_add; let stop = &mut self.stop;
+        let cleanup = CleanupAdmission::from_original_cutoff(clock.cutoff);
         let mut admission = |checkpoint: Checkpoint, facts: &Facts| {
             let current = clock.admit(false);
             if current != Admission::Continue { return current; }
@@ -631,7 +646,7 @@ impl Cohort {
         // SAFETY: exact fixed roster, precharged full adapter frame, native
         // originals retained in this same caller; every callback uses its ONE
         // cutoff. Explicit post-add and STOP action registrations are above.
-        let actual = unsafe { harness.run_next(case, key, &mut admission) };
+        let actual = unsafe { harness.run_next(case, key, &mut admission, cleanup) };
         match actual {
             Ok(original) => self.cases.push(original), // BEFORE result checks/consumption.
             Err(refused) => { self.harness_refusal = Some(refused); return false; }
@@ -683,7 +698,8 @@ impl Cohort {
         }
         let clock = &mut self.clock;
         if clock.admit(false) != Admission::Continue { return false; }
-        match unsafe { self.peer.as_mut().unwrap().run(&mut |_, _| clock.admit(false)) } {
+        let cleanup = CleanupAdmission::from_original_cutoff(clock.cutoff);
+        match unsafe { self.peer.as_mut().unwrap().run(&mut |_, _| clock.admit(false), cleanup) } {
             Ok(actual) => self.positive = Some(actual), // Retain before inspection/consumption.
             Err(refused) => { self.positive_refused = Some(refused); return false; }
         }
@@ -823,9 +839,9 @@ impl Cohort {
         let mut buffer = self.output.borrow_mut();
         buffer.clear();
         let out = &mut Bounded { value: &mut buffer };
-        write!(out, "MRK_WRAPPING_PRIVATE_RESULT={{\"schemaVersion\":1,\"scope\":\"{}\",", self.report_scope())?;
+        write!(out, "MRK_WRAPPING_PRIVATE_RESULT={{\"schemaVersion\":2,\"scope\":\"{}\",", self.report_scope())?;
         out.write_str("\"provisional\":true,\"outerFinalityRequired\":true,\"shippingBinaryQualified\":false,")?;
-        out.write_str("\"distributionQualified\":false,\"perQueryUIFailQualified\":false,")?;
+        out.write_str("\"distributionQualified\":false,\"perQueryUIFailQualified\":false,\"processNonInteractionQualified\":false,")?;
         write!(out, "\"cutoffSeconds\":{},\"adapterInvocationBound\":{},\"fixtureActionBound\":17,", COHORT_SECONDS, if self.pair_enabled { 15 } else { 14 })?;
         write!(out, "\"caller\":{{\"runEntered\":{},\"runReturned\":{},\"completed\":{},\"originalSlotRetained\":true,",
             self.run_entered, self.run_returned, self.cohort_completed)?;
@@ -833,7 +849,7 @@ impl Cohort {
             self.registered, self.charged_bytes, CALLER_OWNED_CHARGE_LIMIT, self.native_abi, self.fixture_bytes, self.adapter_bytes)?;
         write!(out, "\"retirementAdmitted\":{},\"stopRequested\":{},\"deadlineObserved\":{},\"poisoned\":{},\"stage\":{},\"callbackOrCallerPanic\":{},",
             self.retirement_admitted, self.clock.stop_requested, self.clock.deadline_observed, self.clock.poisoned,
-            self.stage, self.panic.is_some() || self.fixtures.iter().any(|row| row.callback_panic.is_some())
+            self.stage, self.panic.is_some() || self.fixtures.iter().any(|row| row.callback_panic.is_some() || row.cleanup.panic.is_some())
                 || self.cases.iter().any(|row| row.facts().callback_panicked()))?;
         write!(out, "\"clockChecks\":{},\"forwardAdmissions\":{},\"retirementAdmissions\":{},\"harnessRefused\":{},\"materialWiped\":{},",
             self.clock.checks, self.clock.forward_admissions, self.clock.retirement_admissions,
@@ -893,6 +909,12 @@ impl Cohort {
             }
             out.write_str("],\"namespace\":")?;
             native_result(out, &raw.namespace)?;
+            out.write_str(",\"policies\":[")?;
+            for (i, policy) in raw.policies.iter().enumerate() {
+                if i != 0 { out.write_char(',')?; }
+                private_pair::policy_result(out, policy)?;
+            }
+            out.write_char(']')?;
             out.write_char('}')?;
         } else { out.write_str("null")?; }
         out.write_str(",\"cases\":[")?;
@@ -942,12 +964,12 @@ impl Cohort {
         // actual outer process return and strict receipt validation remain due.
         let buffer = self.output.borrow();
         let fallback: &[u8] = match self.terminal {
-            Case::StopBeforeAdd => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-stop-before-add\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
-            Case::StopBeforeLookup => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-stop-before-lookup\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
-            _ => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-common-cohort\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
+            Case::StopBeforeAdd => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":2,\"scope\":\"wrapping-private-stop-before-add\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
+            Case::StopBeforeLookup => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":2,\"scope\":\"wrapping-private-stop-before-lookup\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
+            _ => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":2,\"scope\":\"wrapping-private-common-cohort\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
         };
         let fallback = if self.pair_enabled {
-            b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-creator-pair\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n".as_slice()
+            b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":2,\"scope\":\"wrapping-private-creator-pair\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n".as_slice()
         } else { fallback };
         let bytes = if self.report_built { buffer.as_bytes() } else { fallback };
         let mut stdout = io::stdout().lock();
@@ -964,19 +986,18 @@ impl Cohort {
     }
 }
 
-// This single slot is a process-lifetime address of THIS original libtest
+// This single slot is a process-lifetime address of THIS original helper-main
 // caller, not a reusable registry/executor or another work owner. No thread,
 // task, path, clock or permission is acquired from it and no getter is exposed.
-// It keeps failed/panicked originals reachable after the test thread returns;
+// It keeps failed/panicked originals reachable after the helper call returns;
 // an outer timeout/process exit still cannot authorize fixture deletion.
-fn run_registered_cohort(entry: Instant, terminal: Case) { run_registered_variant(entry, terminal, false); }
 fn run_registered_variant(entry: Instant, terminal: Case, pair_enabled: bool) {
     static CLAIMED: AtomicBool = AtomicBool::new(false);
     #[used]
     static ORIGINAL: AtomicPtr<ManuallyDrop<Cohort>> = AtomicPtr::new(std::ptr::null_mut());
     assert!(!CLAIMED.swap(true, Ordering::AcqRel), "private cohort is single-use");
     let mut original = Cohort::empty(entry);
-    original.terminal = terminal; // A source-fixed test entry, never ambient input.
+    original.terminal = terminal; // A fixed closed helper mode, never an arbitrary test filter.
     original.pair_enabled = pair_enabled;
     let pointer = Box::into_raw(Box::new(ManuallyDrop::new(original)));
     ORIGINAL.store(pointer, Ordering::Release);
@@ -1009,24 +1030,15 @@ fn run_registered_variant(entry: Instant, terminal: Case, pair_enabled: bool) {
     assert!(complete, "private cohort incomplete; retain originals and fixture");
 }
 
-#[test]
-fn private_keychain_cohort() {
-    let entry = Instant::now(); // FIRST action: ONE cutoff covers every later step.
-    run_registered_cohort(entry, Case::StopAfterAdd);
-}
-#[test]
-fn private_keychain_stop_before_add() {
-    let entry = Instant::now(); // Its separately registered original, not a reset.
-    run_registered_cohort(entry, Case::StopBeforeAdd);
-}
-#[test]
-fn private_keychain_stop_before_lookup() {
-    let entry = Instant::now(); // Its separately registered original, not a reset.
-    run_registered_cohort(entry, Case::StopBeforeLookup);
-}
-
-#[test]
-fn private_keychain_creator_pair() {
-    let entry = Instant::now(); // FIRST action: same original45s covers peer wait and retirement.
-    run_registered_variant(entry, Case::StopAfterAdd, true);
+/// Closed modes of the one fixed, nonshipping cohort executable. This shares
+/// the original Cohort engine/roster; libtest defines no activation symbol.
+pub enum CohortMode { Common, StopBeforeAdd, StopBeforeLookup, CreatorPair }
+pub fn cohort_entry(entry: Instant, mode: CohortMode) {
+    let (terminal, pair) = match mode {
+        CohortMode::Common => (Case::StopAfterAdd, false),
+        CohortMode::StopBeforeAdd => (Case::StopBeforeAdd, false),
+        CohortMode::StopBeforeLookup => (Case::StopBeforeLookup, false),
+        CohortMode::CreatorPair => (Case::StopAfterAdd, true),
+    };
+    run_registered_variant(entry, terminal, pair);
 }

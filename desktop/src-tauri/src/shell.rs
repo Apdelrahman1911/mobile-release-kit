@@ -153,6 +153,13 @@ async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> 
     result
 }
 #[tauri::command]
+fn reveal_installation(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::RevealRequestSent, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    crate::installation::reveal_request(request_body(&request)?)?;
+    state.document.reveal_installation()
+}
+#[tauri::command]
 async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=catalog-enter\n");
     fixture_command!(state, Catalog, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -288,6 +295,55 @@ async fn cancel_android_build(webview: Webview, request: tauri::ipc::Request<'_>
     let result = state.document.cancel_android_build(args);
     installed_command_result!(state, AndroidCancel, &result);
     result
+}
+#[tauri::command]
+async fn android_tool_sources_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_tool_sources::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_tool_sources::invalid())?;
+    crate::android_tool_sources::parse_empty(android_sources_request_body(request.body())?)?;
+    state.document.android_tool_sources_status()
+}
+#[tauri::command]
+async fn choose_android_tool_source(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_tool_sources::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_tool_sources::invalid())?;
+    let input = crate::android_tool_sources::Choose::parse(android_sources_request_body(request.body())?)?;
+    state.document.choose_android_tool_source(app, input)
+}
+#[tauri::command]
+async fn cancel_android_tool_source(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_tool_sources::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_tool_sources::invalid())?;
+    let input = crate::android_tool_sources::Cancel::parse(android_sources_request_body(request.body())?)?;
+    state.document.cancel_android_tool_source(input)
+}
+#[tauri::command]
+async fn android_toolchain_catalog_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
+    crate::android_toolchain_catalog::parse_empty(android_catalog_request_body(request.body())?)?;
+    state.document.android_toolchain_catalog_status()
+}
+#[tauri::command]
+async fn refresh_android_toolchain_catalog(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
+    crate::android_toolchain_catalog::parse_empty(android_catalog_request_body(request.body())?)?;
+    state.document.refresh_android_toolchain_catalog()
+}
+#[tauri::command]
+async fn select_android_toolchain(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
+    let input=crate::android_toolchain_catalog::Select::parse(android_catalog_request_body(request.body())?)?;
+    state.document.select_android_toolchain(input)
+}
+#[tauri::command]
+async fn cancel_android_toolchain_catalog(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
+    let input=crate::android_toolchain_catalog::Cancel::parse(android_catalog_request_body(request.body())?)?;
+    state.document.cancel_android_toolchain_catalog(input)
 }
 #[tauri::command]
 async fn prepare_project_recovery(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_recovery_protocol::Status, BridgeError> {
@@ -541,6 +597,19 @@ fn android_build_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, Br
         // Json value has already lost that evidence and is not admitted here.
         tauri::ipc::InvokeBody::Raw(bytes) => crate::android_build_protocol::raw_request(bytes),
         tauri::ipc::InvokeBody::Json(_) => Err(crate::android_build_protocol::invalid()),
+    }
+}
+fn android_sources_request_body(body: &tauri::ipc::InvokeBody) -> Result<&[u8], BridgeError> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= crate::android_tool_sources::REQUEST_LIMIT => Ok(bytes),
+        _ => Err(crate::android_tool_sources::invalid()),
+    }
+}
+fn android_catalog_request_body(body: &tauri::ipc::InvokeBody) -> Result<&[u8], BridgeError> {
+    match body {
+        // Native duplicate-key and original-byte bounds precede DTO copying.
+        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= crate::android_toolchain_catalog::REQUEST_LIMIT => Ok(bytes),
+        _ => Err(crate::android_toolchain_catalog::invalid()),
     }
 }
 fn project_recovery_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
@@ -1437,6 +1506,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut project_recovery_revision = None;
         let mut project_recovery_relay_failed = false;
         let mut android_build_revision = None;
+        let mut android_catalog_revision = None;
+        let mut android_sources_revision = None;
         let mut android_build_relay_failed = false;
         let mut ios_archive_revision = None;
         let mut ios_archive_relay_failed = false;
@@ -1537,6 +1608,32 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                         if android_build_revision != Some(status.status_revision) {
                             android_build_revision = Some(status.status_revision);
                             if app.emit_to(MAIN_WINDOW, crate::android_build_protocol::EVENT, &status).is_err() {
+                                android_build_relay_failed = true; document.android_build_relay_lost();
+                            }
+                        }
+                    },
+                    Err(_) => { android_build_relay_failed = true; document.android_build_relay_lost(); },
+                }
+            }
+            if !android_build_relay_failed {
+                match document.android_toolchain_catalog_status() {
+                    Ok(status) => {
+                        if android_catalog_revision != Some(status.status_revision) {
+                            android_catalog_revision = Some(status.status_revision);
+                            if app.emit_to(MAIN_WINDOW, crate::android_toolchain_catalog::EVENT, &status).is_err() {
+                                android_build_relay_failed = true; document.android_build_relay_lost();
+                            }
+                        }
+                    },
+                    Err(_) => { android_build_relay_failed = true; document.android_build_relay_lost(); },
+                }
+            }
+            if !android_build_relay_failed {
+                match document.android_tool_sources_status() {
+                    Ok(status) => {
+                        if android_sources_revision != Some(status.status_revision) {
+                            android_sources_revision = Some(status.status_revision);
+                            if app.emit_to(MAIN_WINDOW, crate::android_tool_sources::EVENT, &status).is_err() {
                                 android_build_relay_failed = true; document.android_build_relay_lost();
                             }
                         }
@@ -1694,16 +1791,19 @@ fn request_shutdown(app: &tauri::AppHandle) {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit }
+pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    AndroidToolSource(crate::android_tool_sources::Role),
+}
 
 #[cfg(target_os = "linux")]
 fn requires_recent_files_suppression(choice: DialogChoice) -> bool {
     matches!(choice, DialogChoice::File(_) | DialogChoice::PublicImages | DialogChoice::Project | DialogChoice::EvidenceFolder | DialogChoice::ProjectPath(_))
 }
 
-// Public-image selection is separately qualified. The existing macOS/Windows
-// credential/project chooser capability is never an image adapter receipt.
-#[cfg(not(target_os = "linux"))]
+// Public-image selection is separately qualified. The existing private-file
+// or project chooser capability is never an image adapter receipt.
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) async fn run_owned_images_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<std::path::PathBuf>>, Reason> {
     owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
@@ -1717,7 +1817,7 @@ pub(crate) async fn run_owned_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalW
 #[path = "shell_macos_dialog.rs"]
 mod owned_macos;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use owned_macos::run_owned_dialog;
+pub(crate) use owned_macos::{run_owned_dialog, run_owned_images_dialog};
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 #[path = "shell_windows.rs"]
@@ -2997,12 +3097,14 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
                 tauri::generate_handler![
-            app_info, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
+            app_info, reveal_installation, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             release_evidence_choose, release_evidence_status, release_evidence_observe, release_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
             prepare_android_build, start_android_build, android_build_status, cancel_android_build,
+            android_toolchain_catalog_status, refresh_android_toolchain_catalog, select_android_toolchain, cancel_android_toolchain_catalog,
+            android_tool_sources_status, choose_android_tool_source, cancel_android_tool_source,
             prepare_project_recovery, start_project_recovery, project_recovery_status, cancel_project_recovery,
             prepare_ios_archive, start_ios_archive, ios_archive_status, cancel_ios_archive,
             validate_config, suggest_config, preview_config,
