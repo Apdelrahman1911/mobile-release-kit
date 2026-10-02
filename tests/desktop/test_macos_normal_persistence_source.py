@@ -5,8 +5,10 @@ the reviewed hosted Mac candidate. These checks never produce native receipts.
 """
 import ast
 import base64
+import hashlib
 import json
 from pathlib import Path
+import re
 import unittest
 
 
@@ -102,6 +104,33 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         guidance = (ROOT / "desktop/src/components/ReleaseInputGuidance.tsx").read_text()
         self.assertIn("encrypted storage has its own native availability", guidance)
         self.assertNotIn("persistent encrypted storage remains unavailable", guidance)
+
+
+    def test_local_project_journey_precedes_persistence_without_changing_its_gates(self):
+        source = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_bytes()
+        blocks = re.findall(rb"(?ms)^      - name: .*?(?=^      - name: |\Z)", source)
+        ids = []
+        for block in blocks:
+            found = re.search(rb"(?m)^        id: ([a-z0-9_]+)$", block)
+            ids.append(found[1] if found else None)
+        order = (b"normal_ui_result", b"normal_project_ui_test", b"normal_project_ui_result",
+                 b"normal_persistence_ui_test", b"normal_persistence_ui_result")
+        for identifier in order:
+            self.assertEqual(ids.count(identifier), 1, identifier)
+        start = ids.index(order[0])
+        self.assertEqual(tuple(ids[start:start + len(order)]), order)
+        # These are the unchanged cddcb74 project blocks, not native-success
+        # receipts. Keep success-only admission, original package/test count
+        # bindings, deadlines and explicit finality limitations when moving them.
+        pins = {
+            b"normal_project_ui_test": "36683e59244e8f5a206c669a04f3bbcb2916dd54e41e018822b935fe764a02f3",
+            b"normal_project_ui_result": "9dfb28a9c746958d0c2df3e922706445e66faf43e60e49533ecc26a462aa21d5",
+        }
+        for identifier, expected in pins.items():
+            self.assertEqual(hashlib.sha256(blocks[ids.index(identifier)]).hexdigest(), expected)
+        self.assertEqual(source.count(
+            b"-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages"
+        ), 1)
 
 
 if __name__ == "__main__":

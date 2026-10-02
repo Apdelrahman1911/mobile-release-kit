@@ -1514,6 +1514,141 @@ jobs:
           finally: os.close(fd)
           print("One normal-app launch/Cancel/navigation/Quit UI scenario passed; POSIX exit and all-worker finality remain unavailable.")
           PY_UI_RESULT
+      - name: Use the normal app to select a project and persist reviewed local edits and images
+        id: normal_project_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
+        timeout-minutes: 7
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
+          # One 300s journey, after the accepted basic gate; outer ceiling420s.
+          set +e
+          clean /usr/bin/xcodebuild test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
+            -disableAutomaticPackageResolution \
+            > "$MRK_MACOS_WORK/normal-ui/project-test.log" 2>&1
+          test_status=$?
+          set -e
+          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
+          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/project-test.log" > "$MRK_MACOS_WORK/normal-ui/project-test.tail.txt"
+          [[ "$test_status" == 0 ]]
+      - name: Verify the one selected project journey against its original XCTest result
+        id: normal_project_ui_result
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
+            --path "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" --compact \
+            > "$MRK_MACOS_WORK/normal-ui/project-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/project-summary.stderr"
+          summary_status=$?
+          set -e
+          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/project-summary.status"
+          /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/project-summary.stderr" > "$MRK_MACOS_WORK/normal-ui/project-summary.stderr.tail.txt"
+          [[ "$summary_status" == 0 ]]
+          "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
+          import hashlib, json, os, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          def read(path, limit):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or before.st_size > limit:
+                      raise ValueError("UI result input shape refused")
+                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                  after = os.fstat(fd)
+                  named = os.stat(path, follow_symlinks=False)
+                  identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                  if len(data) != before.st_size or identity(before) != identity(after) or identity(before) != identity(named):
+                      raise ValueError("UI result input changed")
+                  return data
+              finally: os.close(fd)
+          def unique(pairs):
+              return_value = {}
+              for key, item in pairs:
+                  if key in return_value: raise ValueError("duplicate result field")
+                  return_value[key] = item
+              return return_value
+          def document(path, limit):
+              return json.loads(read(path, limit), object_pairs_hook=unique)
+          preview = document(root / "preview/PREVIEW.json", 65536)
+          if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
+                  or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
+                  or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                  or preview["platform"] != "macOS26-arm64" or preview["instrumented"] is not False
+                  or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
+              raise ValueError("UI result is not bound to this original normal package")
+          basic = document(root / "normal-ui/result.json", 65536)
+          if (basic["scope"] != "normal-app-launch-cancel-navigation-quit-ui-only"
+                  or basic["applicationSourceCommit"] != preview["sourceCommit"]
+                  or basic["runId"] != preview["runId"] or basic["runAttempt"] != preview["runAttempt"]
+                  or basic["launchRenderCancelNavigationQuitUI"] != "passed"
+                  or basic["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"):
+              raise ValueError("project journey requires this original accepted basic UI gate")
+          for name in ("build", "project-test", "project-summary"):
+              if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
+                  raise ValueError("original native command did not pass")
+          summary_bytes = read(root / "normal-ui/project-summary.raw.json", 262144)
+          summary = json.loads(summary_bytes, object_pairs_hook=unique)
+          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
+              # Only key names are diagnostic; do not export an unrestricted native result.
+              print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
+              raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
+                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
+          result = {"schemaVersion": 1, "scope": "normal-app-project-config-workflows-text-version-images-ui",
+                    "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
+                    "sourceTree": preview["sourceTree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
+                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "platform": preview["platform"], "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
+                    "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
+                    "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
+                    "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
+                    "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
+                    "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
+                    "localProjectEditsAndImagesUI": "passed", "applicationStateAfterNormalQuit": "notRunning",
+                    "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
+                    "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+          data = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          fd = os.open(root / "normal-ui/project-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as stream:
+                  stream.write(data); stream.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          print("One normal-app project/config/workflows/text/version/images UI journey passed; POSIX exit and all-worker finality remain unavailable.")
+          PY_UI_RESULT
       - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
         id: normal_persistence_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
@@ -1705,141 +1840,6 @@ jobs:
           finally: os.close(fd)
           print("One ordinary synthetic persistence UI journey passed; restart, signing and all-worker finality remain unproved.")
           PY_PERSISTENCE_RESULT
-      - name: Use the normal app to select a project and persist reviewed local edits and images
-        id: normal_project_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
-        timeout-minutes: 7
-        shell: bash
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          clean() {
-            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
-              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
-              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
-              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
-          }
-          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # One 300s journey, after the accepted basic gate; outer ceiling420s.
-          set +e
-          clean /usr/bin/xcodebuild test-without-building \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
-            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
-            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
-            -parallel-testing-enabled NO -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
-            -disableAutomaticPackageResolution \
-            > "$MRK_MACOS_WORK/normal-ui/project-test.log" 2>&1
-          test_status=$?
-          set -e
-          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
-          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/project-test.log" > "$MRK_MACOS_WORK/normal-ui/project-test.tail.txt"
-          [[ "$test_status" == 0 ]]
-      - name: Verify the one selected project journey against its original XCTest result
-        id: normal_project_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
-        timeout-minutes: 1
-        shell: bash
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          set +e
-          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
-            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
-            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
-            --path "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" --compact \
-            > "$MRK_MACOS_WORK/normal-ui/project-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/project-summary.stderr"
-          summary_status=$?
-          set -e
-          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/project-summary.status"
-          /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/project-summary.stderr" > "$MRK_MACOS_WORK/normal-ui/project-summary.stderr.tail.txt"
-          [[ "$summary_status" == 0 ]]
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
-          import hashlib, json, os, stat
-          from pathlib import Path
-          root = Path(os.environ["MRK_MACOS_WORK"])
-          def read(path, limit):
-              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-              try:
-                  before = os.fstat(fd)
-                  if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or before.st_size > limit:
-                      raise ValueError("UI result input shape refused")
-                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
-                  after = os.fstat(fd)
-                  named = os.stat(path, follow_symlinks=False)
-                  identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-                  if len(data) != before.st_size or identity(before) != identity(after) or identity(before) != identity(named):
-                      raise ValueError("UI result input changed")
-                  return data
-              finally: os.close(fd)
-          def unique(pairs):
-              return_value = {}
-              for key, item in pairs:
-                  if key in return_value: raise ValueError("duplicate result field")
-                  return_value[key] = item
-              return return_value
-          def document(path, limit):
-              return json.loads(read(path, limit), object_pairs_hook=unique)
-          preview = document(root / "preview/PREVIEW.json", 65536)
-          if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
-                  or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
-                  or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
-                  or preview["platform"] != "macOS26-arm64" or preview["instrumented"] is not False
-                  or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
-              raise ValueError("UI result is not bound to this original normal package")
-          basic = document(root / "normal-ui/result.json", 65536)
-          if (basic["scope"] != "normal-app-launch-cancel-navigation-quit-ui-only"
-                  or basic["applicationSourceCommit"] != preview["sourceCommit"]
-                  or basic["runId"] != preview["runId"] or basic["runAttempt"] != preview["runAttempt"]
-                  or basic["launchRenderCancelNavigationQuitUI"] != "passed"
-                  or basic["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"):
-              raise ValueError("project journey requires this original accepted basic UI gate")
-          for name in ("build", "project-test", "project-summary"):
-              if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
-                  raise ValueError("original native command did not pass")
-          summary_bytes = read(root / "normal-ui/project-summary.raw.json", 262144)
-          summary = json.loads(summary_bytes, object_pairs_hook=unique)
-          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
-          if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
-              # Only key names are diagnostic; do not export an unrestricted native result.
-              print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
-              raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
-          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
-                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
-                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
-          if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
-          result = {"schemaVersion": 1, "scope": "normal-app-project-config-workflows-text-version-images-ui",
-                    "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
-                    "sourceTree": preview["sourceTree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
-                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                    "platform": preview["platform"], "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
-                    "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
-                    "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
-                    "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
-                    "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
-                    "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
-                    "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
-                    "localProjectEditsAndImagesUI": "passed", "applicationStateAfterNormalQuit": "notRunning",
-                    "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
-                    "fullUIQualified": False, "distributionQualified": False, "productReady": False}
-          data = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          fd = os.open(root / "normal-ui/project-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "wb", closefd=False) as stream:
-                  stream.write(data); stream.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          print("One normal-app project/config/workflows/text/version/images UI journey passed; POSIX exit and all-worker finality remain unavailable.")
-          PY_UI_RESULT
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
         if: always() && steps.work.outputs.root != ''
