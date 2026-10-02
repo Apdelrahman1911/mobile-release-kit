@@ -1037,7 +1037,7 @@ mod tests {
         // Exact synthetic receipt DATA for the narrow publisher predicate, NOT
         // executed joins/native Check or core policy acceptance.
         owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
-        owner.child.lock().unwrap().receipt = JoinReceipt::Returned;
+        owner.child.try_lock().unwrap().receipt = JoinReceipt::Returned;
         owner.ended.store(true, Ordering::SeqCst);
         let mut slot = Slot::new(owner, Operation::Bind, Some(context.clone()), Some(key.clone()), None);
         slot.kind = Some(kind); slot.vault.lease = Some(session.store.clone());
@@ -1105,7 +1105,7 @@ mod tests {
                 1 => slot.vault.lease = Some(Arc::new(Mutex::new(store::StoreBook::new()))),
                 2 => state.vault.as_mut().unwrap().key = Some(Arc::new(crypto::lifecycle_data_key(identity()))),
                 3 => slot.owner.coordinator.lock().unwrap().receipt = JoinReceipt::Failed,
-                4 => slot.owner.child.lock().unwrap().receipt = JoinReceipt::Pending,
+                4 => slot.owner.child.try_lock().unwrap().receipt = JoinReceipt::Pending,
                 5 => state.vault.as_mut().unwrap().read_only = true,
                 6 => state.vault.as_mut().unwrap().registry_generation += 1,
                 _ => state.unknown = true,
