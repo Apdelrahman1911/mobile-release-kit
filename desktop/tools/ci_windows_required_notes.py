@@ -146,7 +146,8 @@ def source_contract(context: dict) -> dict:
 def inputs(context: dict, *, retention_only: bool = False) -> None:
     root, source = Path(context["root"]), Path(context["source"])
     rows = base.validate_environment_inventory(context["sourceFiles"], maximum=64 << 20)
-    for path in sorted({root, source, root / "cargo", root / "target", root / "public",
+    for path in sorted({root, source, root / "cargo", root / "target", root / "metadata-target", root / "public",
+                        *((root / "metadata-target" / role) for role in ROLES),
                         *((source / row["path"]).parent for row in rows)}, key=str):
         base.windows_installed_directories(path)
     observed = (base.fixed_file_inventory(source, tuple(row["path"] for row in rows)) if retention_only
@@ -180,9 +181,10 @@ def context(*, create: bool, retention_only: bool = False) -> dict:
     require(python.is_absolute() and python == Path(sys.executable), "Notes selected Python differs")
     if create:
         root.mkdir(mode=0o700)
-        for name in ("home", "cargo", "rustup", "tmp", "target", "appdata", "localappdata", "public"):
+        for name in ("home", "cargo", "rustup", "tmp", "metadata-target", "target", "appdata", "localappdata", "public"):
             (root / name).mkdir(mode=0o700)
         for role in ROLES:
+            (root / "metadata-target" / role).mkdir(mode=0o700)
             (root / "target" / role).mkdir(mode=0o700)
         (root / "gitconfig-empty").touch(mode=0o600, exist_ok=False)
         git, rustup = shutil.which("git"), shutil.which("rustup")
@@ -506,7 +508,7 @@ def small_graph(value: object, lock: object, *, source: Path, root: Path, role: 
     root_id = local[ROLES[role][1]]
     require(value.get("workspace_root") == str(source / ROLES[role][0])
             and value.get("workspace_members") == [root_id] and value.get("workspace_default_members") == [root_id]
-            and value.get("target_directory") == str(root / "target" / role), "Notes fixed small workspace differs")
+            and value.get("target_directory") == str(root / "metadata-target" / role), "Notes fixed small workspace differs")
     resolve = value.get("resolve")
     require(type(resolve) is dict and resolve.get("root") == root_id and type(resolve.get("nodes")) is list,
             "Notes small active resolution differs")
@@ -903,7 +905,7 @@ def app_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
             "Windows app publisher feature must forward only the production native feature")
     require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_APP)
             and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
-            and value.get("target_directory") == str(root / "target" / "app"), "Windows app original workspace/target differs")
+            and value.get("target_directory") == str(root / "metadata-target" / "app"), "Windows app original workspace/target differs")
     # Cargo filters package/resolve rows, not the selected app's declarations.
     # Keep the source lock's six locals separate from actual Windows packages:
     # three native normal declarations, the qualified Windows dev declaration,
@@ -1044,7 +1046,9 @@ def invoke(context: dict, stage: str, role: str, environment: dict, deadline: fl
         argv = fixed_argv(context, stage, role, compiler)
         stem = role + ("-metadata" if stage == "acquire" else "-compile")
         output_name = stem + (".json" if stage == "acquire" else ".jsonl")
-        environment = {**environment, "CARGO_TARGET_DIR": str(root / "target" / role)}
+        # Acquisition scratch is never a source of original compiler artifacts.
+        target_family = "metadata-target" if stage == "acquire" else "target"
+        environment = {**environment, "CARGO_TARGET_DIR": str(root / target_family / role)}
         ceiling = 600 if stage == "acquire" else 1000
     elif stage == "rust-contracts":
         require(role in ROLES and type(artifact) is dict, "Notes fixed Rust original is missing")
