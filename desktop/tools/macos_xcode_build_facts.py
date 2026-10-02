@@ -30,7 +30,86 @@ MAX_ENTRIES = 8192
 SCOPE = "same-XCTRunner-build-infrastructure-only"
 SETTINGS_OPTIONS = frozenset(("-showBuildSettings", "-json", "-project", "-workspace", "-scheme", "-target",
                               "-configuration", "-destination", "-destination-timeout", "-derivedDataPath",
-                              "-disableAutomaticPackageResolution", "-sdk", "-arch", "-help", "-usage"))
+                              "-disableAutomaticPackageResolution", "-sdk", "-arch", "-help", "-usage",
+                              "-resultBundlePath", "-resultStreamPath", "-toolchain"))
+
+# Ordered diagnostic tokens, not raw prose or an inferred native cause. Every
+# emitted string is a literal in these closed tables (or the opaque marker).
+SETTINGS_WORDS = {word: word for word in """
+a an the this that these those it its of to from for with without in on at by as
+and or but if when while because before after only either both any all no not
+is are was were be been being can cannot could will would should must may
+can't couldn't doesn't isn't aren't wasn't won't has have had do does did
+unable failed failure error errors invalid valid missing expected required
+require requires requiring specified specify specifying selected select using
+use used supported unsupported available unavailable found find exist exists
+existing already create created creating creation write writing written writable
+read reading readable open opening opened load loading loaded resolve resolving
+resolved locate determine parse decoding initialize initialized initialization
+connect connection communication launch launching execute execution start started
+stop stopped enable enabled disable disabled allow allowed incompatible conflict
+conflicting argument arguments option options flag flags value values name names
+file files directory directories folder folders path paths project projects
+workspace workspaces scheme schemes target targets configuration configurations
+destination destinations device devices architecture architectures platform sdk
+build building settings result results bundle bundles temporary temp derived data
+cache index store resource resources operation permission permissions denied
+permitted prohibited restricted access readonly read-only disk space full large
+limit size memory timeout timed out busy interrupted input output process service
+session server developer development tool toolchain xcode xcodebuild xcrun
+license agreement accepted accept installed installation version active default
+format malformed empty nonempty non-empty request requested compatible
+mutually exclusive together under into through home environment
+working current root parent child shared library libraries support package
+packages dependency dependencies resolution identifier domain code errno
+action actions checking check obtain accessing database locked overwrite
+overwriting remove removing delete deleting completed completion requested
+provided provide passed pathnames absolute relative location locations
+""".split()}
+SETTINGS_LABELS = {
+    **{option: option for option in SETTINGS_OPTIONS},
+    **{domain: "domain:" + domain for domain in ("NSPOSIXErrorDomain", "NSCocoaErrorDomain",
+                                                "IDEFoundationErrorDomain", "DVTFoundationErrorDomain")},
+    **{name: "errno:" + name for name in ("EACCES", "EPERM", "ENOENT", "EEXIST", "ENOTDIR", "EISDIR",
+                                         "EROFS", "ENOSPC", "EFBIG", "EINVAL", "EIO", "EBUSY", "EINTR",
+                                         "ETIMEDOUT", "ENOTSUP", "ENOMEM", "EMFILE", "ENFILE")},
+    "/usr/bin/xcodebuild": "path:xcodebuild", "/usr/bin/xcrun": "path:xcrun",
+    "/Applications/Xcode.app": "path:xcode-app",
+    "/Applications/Xcode.app/Contents/Developer": "path:xcode-developer",
+    "/Library/Developer/CommandLineTools": "path:command-line-tools",
+    "/Users/runner": "path:runner-home", "/Users/runner/work/_temp": "path:runner-temp-root",
+    "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj": "path:normal-ui-project",
+    "MRKNormalAppUI.xcodeproj": "project:normal-ui", "MRKNormalAppUI": "scheme:normal-ui",
+    "Debug": "configuration:debug",
+}
+# Quotes are one opaque value unless their WHOLE content is a fixed label.
+# Unclosed quotes mask the remaining line. Path/identifier/numeric atoms never
+# split into English substrings; contractions remain one vocabulary lookup.
+SETTINGS_TOKEN = re.compile(r""""(?:\\.|[^"\\])*(?:"|\\?$)|'(?:\\.|[^'\\])*(?:'|\\?$)|“[^”]*(?:”|$)|‘[^’]*(?:’|$)|[^\s"',;:=()\[\]{}“”‘’]+(?:['’][A-Za-z]+)?""")
+
+
+def settings_error_tokens(errors):
+    lines, truncated = [], len(errors) > 4
+    quote_ends = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+    for line in errors[:4]:
+        tokens = []
+        for match in SETTINGS_TOKEN.finditer(line[len("xcodebuild: error:"):]):
+            raw = match.group()
+            if raw[0] in quote_ends:
+                token = SETTINGS_LABELS.get(raw[1:-1], "opaque") if len(raw) > 1 and raw[-1] == quote_ends[raw[0]] else "opaque"
+            else:
+                atom = raw.rstrip(".!?")
+                if not atom:
+                    continue
+                token = SETTINGS_LABELS.get(atom, SETTINGS_WORDS.get(atom.lower().replace("’", "'"), "opaque"))
+            if token == "opaque" and tokens and tokens[-1] == "opaque":
+                continue
+            if len(tokens) == 96:
+                truncated = True
+                break
+            tokens.append(token)
+        lines.append(tokens)
+    return lines, truncated
 
 
 def closed_settings_facts(stdout, stderr, status, bash_version):
@@ -58,12 +137,14 @@ def closed_settings_facts(stdout, stderr, status, bash_version):
         kinds = ["usage" if usage else "unclassified"]
     mentioned = sorted(option for option in SETTINGS_OPTIONS
                        if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(option) + r"(?![A-Za-z0-9_-])", message))
+    error_tokens, tokens_truncated = settings_error_tokens(errors)
     return {"schemaVersion": 1, "scope": "same-XCTRunner-settings-command-only",
             "originalSettingsExit": status, "bashVersion": bash_version,
             "stdoutBytes": len(stdout), "stdoutSha256": hashlib.sha256(stdout).hexdigest(),
             "stderrBytes": len(stderr), "stderrSha256": hashlib.sha256(stderr).hexdigest(),
             "errorLineCount": len(errors), "usagePresent": usage, "errorKinds": kinds,
-            "mentionedOptions": mentioned, "rawOutputIncluded": False, "productQualified": False}
+            "mentionedOptions": mentioned, "errorTokens": error_tokens, "errorTokensTruncated": tokens_truncated,
+            "rawOutputIncluded": False, "productQualified": False}
 
 
 def compiler_file_budget(pair):

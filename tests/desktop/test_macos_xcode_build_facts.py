@@ -366,7 +366,8 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", json.dumps(result))
         self.assertEqual(set(result), {"schemaVersion", "scope", "originalSettingsExit", "bashVersion",
                          "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256", "errorLineCount",
-                         "usagePresent", "errorKinds", "mentionedOptions", "rawOutputIncluded", "productQualified"})
+                         "usagePresent", "errorKinds", "mentionedOptions", "errorTokens", "errorTokensTruncated",
+                         "rawOutputIncluded", "productQualified"})
 
     def test_settings_projection_distinguishes_usage_conflict_and_unknown_messages(self):
         result = M.closed_settings_facts(b"", b"xcodebuild: error: -json cannot be used with -target\n", 64, [3, 2, 57])
@@ -386,6 +387,89 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
         self.assertEqual(result["errorKinds"], [])
         self.assertEqual(result["originalSettingsExit"], 0)
         self.assertFalse(result["productQualified"])
+
+    def test_settings_error_tokens_describe_different_failure_shapes_without_a_cause_claim(self):
+        cases = (
+            (b"xcodebuild: error: Could not create result bundle at path '/PRIVATE/run.xcresult': permission denied EACCES\n",
+             ["could", "not", "create", "result", "bundle", "at", "path", "opaque", "permission", "denied", "errno:EACCES"]),
+            (b'xcodebuild: error: Unable to load project "PRIVATE.xcodeproj" because the directory does not exist.\n',
+             ["unable", "to", "load", "project", "opaque", "because", "the", "directory", "does", "not", "exist"]),
+            (b"xcodebuild: error: The active developer directory /Library/Developer/CommandLineTools is invalid.\n",
+             ["the", "active", "developer", "directory", "path:command-line-tools", "is", "invalid"]),
+            (b"xcodebuild: error: -resultBundlePath requires a writable directory.\nUsage: xcodebuild -PRIVATE\n",
+             ["-resultBundlePath", "requires", "a", "writable", "directory"]),
+        )
+        for raw, tokens in cases:
+            with self.subTest(raw=raw):
+                result = M.closed_settings_facts(b"", raw, 64, [3, 2, 57])
+                self.assertEqual(result["errorTokens"], [tokens])
+                self.assertFalse(result["errorTokensTruncated"])
+                self.assertEqual(result["originalSettingsExit"], 64)
+                self.assertFalse(result["rawOutputIncluded"] or result["productQualified"])
+                self.assertNotIn("PRIVATE", json.dumps(result))
+                self.assertNotIn("nativeCause", result)
+
+    def test_settings_token_projection_masks_private_values_and_never_emits_unknown_text(self):
+        raw = ('xcodebuild: error: failed "permission denied PRIVATE" /private/PRIVATE/project.xcodeproj '
+               '12345 PRIVATE_KEY=PRIVATE_VALUE -json-private NSCocoaErrorDomainPRIVATE '
+               'https://PRIVATE.invalid result "unterminated PRIVATE value\n'
+               "xcodebuild: error: 'project permission' error PRIVATE_ID EACCES 13 Code=987654\n"
+               'non-error PRIVATE SHOULD NOT BE PROJECTED\n').encode()
+        result = M.closed_settings_facts(b"PRIVATE STDOUT", raw, 64, [3, 2, 57])
+        self.assertEqual(result["errorTokens"], [["failed", "opaque", "result", "opaque"],
+                                               ["opaque", "error", "opaque", "errno:EACCES", "opaque", "code", "opaque"]])
+        self.assertFalse(result["errorTokensTruncated"])
+        permitted = set(M.SETTINGS_WORDS.values()) | set(M.SETTINGS_LABELS.values()) | {"opaque"}
+        for line in result["errorTokens"]:
+            self.assertTrue(set(line) <= permitted)
+            self.assertFalse(any(a == b == "opaque" for a, b in zip(line, line[1:])))
+        public = json.dumps(result)
+        for private in ("PRIVATE", "12345", "987654", "permission denied", "/private/", "https://"):
+            self.assertNotIn(private, public)
+
+    def test_settings_tokens_use_only_whole_fixed_paths_options_domains_and_errno_labels(self):
+        raw = ('xcodebuild: error: "/usr/bin/xcodebuild" /Applications/Xcode.app/Contents/Developer '
+               "'-resultBundlePath' NSPOSIXErrorDomain EROFS MRKNormalAppUI Debug "
+               '"write" /usr/bin/xcodebuild-PRIVATE /Users/runner/PRIVATE -json.private '
+               'NSPOSIXErrorDomain_PRIVATE 64\n').encode()
+        result = M.closed_settings_facts(b"", raw, 64, [3, 2, 57])
+        self.assertEqual(result["errorTokens"], [["path:xcodebuild", "path:xcode-developer", "-resultBundlePath",
+                                               "domain:NSPOSIXErrorDomain", "errno:EROFS", "scheme:normal-ui",
+                                               "configuration:debug", "opaque"]])
+        self.assertFalse(result["errorTokensTruncated"])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        # Quoted free prose never becomes an apparently observed native reason.
+        for quote in ('"', "'", "“", "‘"):
+            end = {'"': '"', "'": "'", "“": "”", "‘": "’"}[quote]
+            text = f"xcodebuild: error: {quote}permission denied{end}\n".encode()
+            self.assertEqual(M.closed_settings_facts(b"", text, 64, [3, 2, 57])["errorTokens"], [["opaque"]])
+        # An escaped quote or trailing escape in an unclosed quoted value must
+        # not re-expose English tokens from the value as diagnostic prose.
+        for quote in ('"', "'"):
+            for tail in (f"PRIVATE error \\{quote} permission denied", "PRIVATE error \\"):
+                text = f"xcodebuild: error: {quote}{tail}\n".encode()
+                self.assertEqual(M.closed_settings_facts(b"", text, 64, [3, 2, 57])["errorTokens"], [["opaque"]])
+
+    def test_settings_token_line_and_count_caps_have_explicit_truncation(self):
+        for count, truncated in ((96, False), (97, True)):
+            raw = ("xcodebuild: error: " + "error " * count + "\n").encode()
+            result = M.closed_settings_facts(b"", raw, 64, [3, 2, 57])
+            self.assertEqual(result["errorTokens"], [["error"] * 96])
+            self.assertEqual(result["errorTokensTruncated"], truncated)
+            self.assertEqual(result["stderrBytes"], len(raw))
+            self.assertEqual(result["stderrSha256"], hashlib.sha256(raw).hexdigest())
+        for count, truncated in ((4, False), (5, True)):
+            raw = b"xcodebuild: error: failed PRIVATE\n" * count
+            result = M.closed_settings_facts(b"", raw, 64, [3, 2, 57])
+            self.assertEqual(result["errorTokens"], [["failed", "opaque"]] * 4)
+            self.assertEqual(result["errorTokensTruncated"], truncated)
+            self.assertEqual(result["errorLineCount"], count)
+        collapsed = M.closed_settings_facts(b"", b"xcodebuild: error: " + b"PRIVATE " * 200, 64, [3, 2, 57])
+        self.assertEqual(collapsed["errorTokens"], [["opaque"]])
+        self.assertFalse(collapsed["errorTokensTruncated"])
+        result = M.closed_settings_facts(b"", b"Usage: xcodebuild PRIVATE\n", 64, [3, 2, 57])
+        self.assertEqual(result["errorTokens"], [])
+        self.assertFalse(result["errorTokensTruncated"])
 
     def test_settings_diagnostic_refuses_unbounded_or_malformed_inputs(self):
         for stdout, stderr, status, version in (
