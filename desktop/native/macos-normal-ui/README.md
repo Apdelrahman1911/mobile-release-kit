@@ -13,6 +13,15 @@ Installer and pass the independent nonroot byte/mode readback. Never point
 this scenario at a shared/personal desktop: XCTest launch may terminate an
 already-running application. A non-running precondition is mandatory.
 
+The generated XCTest runner is sandboxed. On macOS, `NSHomeDirectory()` then
+names its container, not the operating-system account home. Admission uses one
+bounded `getpwuid_r` lookup of the original UID and requires the exact nonroot
+runner account/home instead; it does not remove the runner sandbox. Both app
+launch sites replace the environment with those admitted account values and
+the fixed PATH/locale/timezone. They do not copy the runner's sandbox home or
+temporary directory; absent TMPDIR leaves normal platform temp selection to
+the product. No environment value is published in account diagnostics.
+
 The tiny target has no package dependencies and no app-under-test build target.
 It uses ad-hoc local signing for its test runner only; no signing account,
 provisioning profile or production credential is needed. The workflow selects

@@ -58,7 +58,56 @@ final class NormalAppUITests: XCTestCase {
         return sheet
     }
 
-    @MainActor private func admitHostedAccount() throws {
+    private struct HostedAccount {
+        let name: String
+        let home: String
+    }
+
+    // getpwuid_r owns these C-string bytes in its caller-supplied buffer. Match
+    // only the two fixed public values, including their terminator, in bounds.
+    // Never inspect password/gecos or copy an unbounded native string.
+    private func accountFieldMatches(_ value: UnsafeMutablePointer<CChar>?, _ expected: String,
+                                     buffer: UnsafeMutableBufferPointer<CChar>) -> Bool {
+        guard let value, let base = buffer.baseAddress else { return false }
+        let address = UInt(bitPattern: value), start = UInt(bitPattern: base)
+        let bytes = Array(expected.utf8)
+        guard address >= start, address - start < UInt(buffer.count),
+              UInt(bytes.count) < UInt(buffer.count) - (address - start) else { return false }
+        let offset = Int(address - start)
+        for (index, byte) in bytes.enumerated() {
+            guard UInt8(bitPattern: buffer[offset + index]) == byte else { return false }
+        }
+        return buffer[offset + bytes.count] == 0
+    }
+
+    @MainActor private func hostedAccountRecord() throws -> HostedAccount {
+        var record = passwd()
+        var bytes = [CChar](repeating: 0, count: 64 * 1024)
+        let uid = getuid(), gid = getgid()
+        var lookupSucceeded = false, originalRecord = false
+        var uidMatches = false, gidMatches = false, nameMatches = false, homeMatches = false
+        bytes.withUnsafeMutableBufferPointer { buffer in
+            withUnsafeMutablePointer(to: &record) { entry in
+                var result: UnsafeMutablePointer<passwd>?
+                let status = getpwuid_r(uid, entry, buffer.baseAddress!, buffer.count, &result)
+                lookupSucceeded = status == 0
+                originalRecord = lookupSucceeded && result == entry
+                guard originalRecord else { return }
+                uidMatches = entry.pointee.pw_uid == uid
+                gidMatches = entry.pointee.pw_gid == gid
+                nameMatches = accountFieldMatches(entry.pointee.pw_name, "runner", buffer: buffer)
+                homeMatches = accountFieldMatches(entry.pointee.pw_dir, "/Users/runner", buffer: buffer)
+            }
+        }
+        print("MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=\(lookupSucceeded);originalRecord=\(originalRecord);uidMatches=\(uidMatches);gidMatches=\(gidMatches);nameMatches=\(nameMatches);homeMatches=\(homeMatches)")
+        try require(lookupSucceeded && originalRecord && uidMatches && gidMatches && nameMatches && homeMatches,
+                    "unsupported hosted account database record")
+        // Only fixed values proved against the original UID record escape the
+        // native buffer. Foundation's sandbox home is not account authority.
+        return HostedAccount(name: "runner", home: "/Users/runner")
+    }
+
+    @MainActor private func admitHostedAccount() throws -> HostedAccount {
         let context = ProcessInfo.processInfo.environment
         try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
                     "this scenario is not admitted on a shared or personal desktop")
@@ -80,13 +129,14 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_UI_HOST_ENV_FACTS=homeIsRunner=\(envHome);userIsRunner=\(envUser);lognameIsRunner=\(envLogname);fixedHomePresent=\(fixedHomePresent);versionCompatPresent=\(versionCompatPresent)")
         try require(version.majorVersion == 26, "unsupported hosted OS major")
         try require(runnerName, "unsupported hosted Foundation account name")
-        try require(fixedHome, "unsupported hosted Foundation home")
+        let account = try hostedAccountRecord()
         let applicationSource = context["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? ""
         let harnessSource = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""
         let hexadecimal = CharacterSet(charactersIn: "0123456789abcdef")
         try require(applicationSource.utf8.count == 40 && applicationSource.unicodeScalars.allSatisfy(hexadecimal.contains)
                     && applicationSource == harnessSource,
                     "this same-build scenario needs exact application and harness source bindings")
+        return account
     }
 
     // SAME generated XCTRunner and account admission, but never constructs or
@@ -95,7 +145,7 @@ final class NormalAppUITests: XCTestCase {
     func testHostedAccountAdmissionOnly() throws {
         continueAfterFailure = false
         executionTimeAllowance = 60
-        try admitHostedAccount()
+        _ = try admitHostedAccount()
         print("MRK_MACOS_UI_HOST_ADMISSION=accepted;applicationLaunched=false;productQualified=false")
     }
 
@@ -105,7 +155,7 @@ final class NormalAppUITests: XCTestCase {
         // XCTest rounds to whole minutes; this is an actual 60-second setting,
         // not a claimed exact 90-second setting that silently becomes 120.
         executionTimeAllowance = 60
-        try admitHostedAccount()
+        let account = try admitHostedAccount()
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
         try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop"
@@ -120,8 +170,8 @@ final class NormalAppUITests: XCTestCase {
         // No token, project path, development runtime or observer flag is passed.
         app.launchEnvironment = [
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": NSHomeDirectory(), "USER": NSUserName(), "LOGNAME": NSUserName(),
-            "TMPDIR": NSTemporaryDirectory(), "LANG": "en_US.UTF-8",
+            "HOME": account.home, "USER": account.name, "LOGNAME": account.name,
+            "LANG": "en_US.UTF-8",
             "LC_ALL": "en_US.UTF-8", "TZ": "UTC"
         ]
         // Register cleanup only AFTER the notRunning precondition. A refused
@@ -752,7 +802,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {
-        try admitHostedAccount()
+        let account = try admitHostedAccount()
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
         try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop"
@@ -767,8 +817,8 @@ final class NormalAppUITests: XCTestCase {
         // No token, project path, development runtime or observer flag is passed.
         app.launchEnvironment = [
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": NSHomeDirectory(), "USER": NSUserName(), "LOGNAME": NSUserName(),
-            "TMPDIR": NSTemporaryDirectory(), "LANG": "en_US.UTF-8",
+            "HOME": account.home, "USER": account.name, "LOGNAME": account.name,
+            "LANG": "en_US.UTF-8",
             "LC_ALL": "en_US.UTF-8", "TZ": "UTC"
         ]
         // Register cleanup only AFTER the notRunning precondition. A refused

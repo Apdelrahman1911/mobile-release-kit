@@ -3,11 +3,13 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import pathlib
 from pathlib import Path
 from contextlib import ExitStack, nullcontext
 from types import SimpleNamespace
 import textwrap
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -245,7 +247,12 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
                 self.assertFalse(M.compiler_file_budget(pair))
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-ui-host.yml").read_text()
         self.assertEqual(workflow.count("ulimit -f 33554432"), 1)
-        self.assertEqual(workflow.count("ulimit -f 32768"), 2)
+        self.assertEqual(workflow.count("ulimit -f 32768"), 1)  # unchanged settings inspection only
+        self.assertEqual(workflow.count("ulimit -f 1048576 || exit $?"), 1)
+        test_phase = workflow.split("        id: native_test\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("resource.getrlimit(resource.RLIMIT_FSIZE)", test_phase)
+        self.assertIn("if actual != (expected, expected):", test_phase)
+        self.assertLess(test_phase.index("PY_TEST_BUDGET"), test_phase.index("xcodebuild test-without-building"))
         before = workflow.split("      - name: Build only the unchanged external XCTest target", 1)[1].split("      - name:", 1)[0]
         ordered = ("ulimit -f 33554432", "file_limit_status=$?", '[[ "$file_limit_status" == 0 ]]',
                    'macos_xcode_build_facts.py before "$MRK_UI_HOST_WORK"', "before_status=$?",
@@ -497,7 +504,7 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
         self.assertIn('[[ "$value" =~ ^(0|[1-9][0-9]{0,2})$ ]] || exit 1', workflow)
         self.assertLess(workflow.index("bash-guard-facts.json"), workflow.index("xcodebuild build-for-testing"))
         self.assertEqual(workflow.count("ulimit -f 33554432"), 1)
-        self.assertEqual(workflow.count("ulimit -f 32768"), 2)
+        self.assertEqual(workflow.count("ulimit -f 32768"), 1)
         body = workflow.split("        id: inspection\n", 1)[1].split("      - name:", 1)[0]
         query = body[body.index("clean /usr/bin/xcodebuild build-for-testing -showBuildSettings"):body.index("\n          settings_status=$?")]
         expected = r'''clean /usr/bin/xcodebuild build-for-testing -showBuildSettings -json \
@@ -531,6 +538,51 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
         self.assertLess(diagnostic, published)
         self.assertLess(published, body.index('runner="$MRK_UI_HOST_WORK/DerivedData'))
         self.assertIn('("build", "settings", "settings-diagnostic", "runner-codesign"', workflow)
+
+    def summary_failure_code(self):
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-ui-host.yml").read_text()
+        prefix, body = workflow.split("<<'PY_SUMMARY_FAILURE'\n", 1)
+        code, tail = body.split("          PY_SUMMARY_FAILURE\n", 1)
+        self.assertIn('if [[ "$status" != 0 ]]; then', prefix)
+        self.assertTrue(tail.startswith('            set -e\n            exit "$status"\n          fi\n'))
+        return compile(textwrap.dedent(code), "<original-summary-failure-heredoc>", "exec")
+
+    def test_failed_summary_keeps_original_status_and_only_closed_error_facts(self):
+        code = self.summary_failure_code()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "evidence").mkdir()
+            raw = b"Error: incomplete result: Info.plist does not exist at PRIVATE-SYNTHETIC-PATH\nUsage: xcresulttool\n"
+            (root / "summary.stderr").write_bytes(raw)
+            with patch("sys.argv", ["diagnostic", str(root), "64"]):
+                exec(code, {"__name__": "__main__"})
+            encoded = (root / "evidence/summary-command.json").read_text()
+            result = json.loads(encoded)
+            self.assertNotIn("PRIVATE-SYNTHETIC-PATH", encoded)
+            self.assertEqual((result["originalSummaryExit"], result["stderrBytes"], result["stderrSha256"]),
+                             (64, len(raw), hashlib.sha256(raw).hexdigest()))
+            self.assertEqual(result["errorKinds"], {"usage": True, "unknown-option": False,
+                             "missing-file": True, "invalid-result": False, "incomplete-result": True})
+            for key in ("rawOutputIncluded", "testCountsEstablished", "productQualified"):
+                self.assertIs(result[key], False)
+
+    def test_failed_summary_refuses_unsafe_input_and_existing_output_without_overwrite(self):
+        code = self.summary_failure_code()
+        for case in ("oversize", "symlink", "hardlink", "collision", "not-a-failure"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); (root / "evidence").mkdir()
+                source = root / "summary.stderr"
+                if case == "symlink":
+                    source.symlink_to("absent")
+                else:
+                    source.write_bytes(b"x" * 65537 if case == "oversize" else b"unknown option --fixture")
+                if case == "hardlink": os.link(source, root / "alias")
+                output = root / "evidence/summary-command.json"
+                if case == "collision": output.write_bytes(b"preserve")
+                with patch("sys.argv", ["diagnostic", str(root), "0" if case == "not-a-failure" else "64"]):
+                    with self.assertRaises((OSError, ValueError)):
+                        exec(code, {"__name__": "__main__"})
+                if case == "collision": self.assertEqual(output.read_bytes(), b"preserve")
+                else: self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

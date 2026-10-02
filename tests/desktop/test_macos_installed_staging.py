@@ -1906,13 +1906,35 @@ class MacNormalPreviewData(unittest.TestCase):
                           "tccutil", "killall", "pkill", "sudo "):
             self.assertNotIn(forbidden, workflow)
         self.assertIn("ENABLE_APP_SANDBOX = NO;", project)  # Existing policy, not a new workaround.
-        admission = swift.split("private func admitHostedAccount() throws {", 1)[1].split("// SAME generated", 1)[0]
+        admission = swift.split("private func admitHostedAccount() throws -> HostedAccount {", 1)[1].split("// SAME generated", 1)[0]
         for required in ('context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64"',
                          "require(nonroot && sameUid && sameGid", "version.majorVersion == 26",
                          'NSUserName() == "runner"', 'NSHomeDirectory() == "/Users/runner"',
                          "applicationSource.utf8.count == 40", "applicationSource == harnessSource",
-                         "require(runnerName,", "require(fixedHome,", "MRK_MACOS_UI_HOST_FACTS="):
+                         "require(runnerName,", "try hostedAccountRecord()", "MRK_MACOS_UI_HOST_FACTS="):
             self.assertIn(required, admission)
+        self.assertNotIn("require(fixedHome,", admission)
+        account = swift.split("private func hostedAccountRecord() throws -> HostedAccount {", 1)[1].split(
+            "private func admitHostedAccount()", 1)[0]
+        for required in ("count: 64 * 1024", "getpwuid_r(uid, entry, buffer.baseAddress!, buffer.count, &result)",
+                         "lookupSucceeded && result == entry", "guard originalRecord else { return }",
+                         "entry.pointee.pw_uid == uid", "entry.pointee.pw_gid == gid",
+                         'accountFieldMatches(entry.pointee.pw_name, "runner", buffer: buffer)',
+                         'accountFieldMatches(entry.pointee.pw_dir, "/Users/runner", buffer: buffer)',
+                         "lookupSucceeded && originalRecord && uidMatches && gidMatches && nameMatches && homeMatches",
+                         'HostedAccount(name: "runner", home: "/Users/runner")'):
+            self.assertIn(required, account)
+        for forbidden in ("pw_passwd", "pw_gecos", "String(cString:", "setenv(", "unsetenv("):
+            self.assertNotIn(forbidden, account)
+        field = swift.split("private func accountFieldMatches(", 1)[1].split("private func hostedAccountRecord()", 1)[0]
+        self.assertIn("UInt(bytes.count) < UInt(buffer.count) - (address - start)", field)
+        self.assertIn("buffer[offset + bytes.count] == 0", field)
+        environments = [block.split("\n        ]", 1)[0] for block in swift.split("app.launchEnvironment = [\n")[1:]]
+        self.assertEqual(len(environments), 2)
+        for environment in environments:
+            self.assertIn('"HOME": account.home, "USER": account.name, "LOGNAME": account.name', environment)
+            for forbidden in ("NSHomeDirectory", "NSTemporaryDirectory", "TMPDIR", "CFFIXED_USER_HOME"):
+                self.assertNotIn(forbidden, environment)
         diagnostic = swift.split("func testHostedAccountAdmissionOnly() throws {", 1)[1].split("\n    }", 1)[0]
         self.assertIn("try admitHostedAccount()", diagnostic)
         for forbidden in ("XCUIApplication", "LocalFixture", "launchForJourney", "launchedApplication =", "app.launch", "URL("):

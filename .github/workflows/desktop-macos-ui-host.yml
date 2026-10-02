@@ -266,7 +266,21 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          ulimit -f 32768
+          # The prior 32 MiB test-phase limit killed the original xcodebuild
+          # with SIGXFSZ while finishing its result. This remains a finite
+          # per-file allowance, not an aggregate disk/RAM or finality claim.
+          ulimit -f 1048576 || exit $?
+          /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_TEST_BUDGET'
+          import json, pathlib, resource, sys
+          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
+          expected = 1024 * 1024 * 1024
+          if actual != (expected, expected):
+              raise ValueError("actual test file allowance differs from the finite reviewed budget")
+          value = {"schemaVersion": 1, "scope": "same-XCTRunner-test-file-budget-only",
+                   "softBytes": actual[0], "hardBytes": actual[1], "productQualified": False}
+          with (pathlib.Path(sys.argv[1]) / "evidence/test-file-budget.json").open("x") as stream:
+              json.dump(value, stream, sort_keys=True); stream.write("\n")
+          PY_TEST_BUDGET
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
             "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
@@ -305,7 +319,49 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/summary.status"
-          [[ "$status" == 0 ]] || exit "$status"
+          if [[ "$status" != 0 ]]; then
+            # A failed/incomplete result is never parsed as successful counts.
+            # Collect only bounded closed error facts, then preserve the
+            # original xcresulttool failure even if this diagnostic fails.
+            set +e
+            clean /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" "$status" <<'PY_SUMMARY_FAILURE'
+          import hashlib, json, os, pathlib, stat, sys
+          root = pathlib.Path(sys.argv[1])
+          status = int(sys.argv[2])
+          if not 1 <= status <= 255:
+              raise ValueError("invalid original summary failure")
+          path = root / "summary.stderr"
+          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+          identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+          try:
+              before = os.fstat(fd)
+              if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                      or before.st_nlink != 1 or not 0 <= before.st_size <= 65536):
+                  raise ValueError("summary diagnostic input refused")
+              with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(65537)
+              if (len(data) != before.st_size or identity(os.fstat(fd)) != identity(before)
+                      or identity(path.lstat()) != identity(before)):
+                  raise ValueError("summary diagnostic input changed")
+          finally:
+              os.close(fd)
+          lower = data.lower()
+          categories = {
+              "usage": b"usage:" in lower,
+              "unknown-option": b"unknown option" in lower or b"unrecognized option" in lower,
+              "missing-file": b"no such file" in lower or b"does not exist" in lower,
+              "invalid-result": b"invalid result" in lower or b"not a valid result" in lower,
+              "incomplete-result": b"incomplete" in lower or b"info.plist" in lower,
+          }
+          value = {"schemaVersion": 1, "scope": "same-XCTRunner-summary-command-only",
+                   "originalSummaryExit": status, "stderrBytes": len(data),
+                   "stderrSha256": hashlib.sha256(data).hexdigest(), "errorKinds": categories,
+                   "rawOutputIncluded": False, "testCountsEstablished": False, "productQualified": False}
+          with (root / "evidence/summary-command.json").open("x") as stream:
+              json.dump(value, stream, sort_keys=True); stream.write("\n")
+          PY_SUMMARY_FAILURE
+            set -e
+            exit "$status"
+          fi
           clean /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_SUMMARY'
           import json, os, pathlib, re, stat, sys
           root = pathlib.Path(sys.argv[1])
@@ -331,7 +387,9 @@ jobs:
           log = read("test.log", 16777216).decode("utf-8", "strict")
           facts = re.findall(r"^MRK_MACOS_UI_HOST_FACTS=os=\d+\.\d+\.\d+;nonroot=(?:true|false);sameUid=(?:true|false);sameGid=(?:true|false);runnerName=(?:true|false);fixedHome=(?:true|false)$", log, re.M)
           env_facts = re.findall(r"^MRK_MACOS_UI_HOST_ENV_FACTS=homeIsRunner=(?:true|false);userIsRunner=(?:true|false);lognameIsRunner=(?:true|false);fixedHomePresent=(?:true|false);versionCompatPresent=(?:true|false)$", log, re.M)
-          if len(facts) != 1 or len(env_facts) != 1: raise ValueError("missing or repeated closed native observations")
+          account_facts = re.findall(r"^MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=(?:true|false);originalRecord=(?:true|false);uidMatches=(?:true|false);gidMatches=(?:true|false);nameMatches=(?:true|false);homeMatches=(?:true|false)$", log, re.M)
+          if len(facts) != 1 or len(env_facts) != 1 or len(account_facts) != 1:
+              raise ValueError("missing or repeated closed native observations")
           statuses = {key: int(read("evidence/" + key + ".status", 16)) for key in ("build", "settings", "settings-diagnostic", "runner-codesign", "test-bundle-codesign", "test", "summary")}
           passed = counts["passedTests"] == 1 and all(v == 0 for v in statuses.values())
           result = {"schemaVersion": 1, "scope": "HOST_ADMISSION_DIAGNOSTIC_ONLY", "platform": "macOS26-arm64",
@@ -340,6 +398,7 @@ jobs:
                     "workflow": ".github/workflows/desktop-macos-ui-host.yml",
                     "runAttempt": read("evidence/run-attempt.txt", 64).decode().strip(), "testCounts": counts,
                     "originalCommandStatuses": statuses, "facts": facts, "environmentFacts": env_facts,
+                    "accountRecordFacts": account_facts,
                     "hostAdmission": "passed" if passed else "failed", "applicationLaunched": False, "productQualified": False}
           with (root / "evidence/result.json").open("x") as stream:
               json.dump(result, stream, sort_keys=True); stream.write("\n")
