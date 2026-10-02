@@ -895,19 +895,8 @@ def dependency_inputs(source, work, compiler, runtime, policy, command, *, suppo
     # dpkg-shlibdeps supplies actual distro symbols/shlibs relations, not guessed
     # ABI versions. The only excluded dependency is proven shipped OpenSSL self.
     dependencies = []
-    for role, paths in (("gui-publisher", [compiler["main"], compiler["publisher"]]),
-                        ("private-runtime", [runtime / name for name in sorted(U.RUNTIME_ELF)])):
-        query_root = work / ("shlibdeps-" + role)
-        debian = query_root / "debian"
-        debian.mkdir(mode=0o700, parents=True)
-        D.write(debian / "control", b"Source: mobile-release-kit-desktop\nSection: devel\nPriority: optional\nMaintainer: Mobile Release Kit contributors <noreply@github.com>\nStandards-Version: 4.7.0\n\nPackage: mobile-release-kit-desktop\nArchitecture: amd64\nDescription: nonproduction Ubuntu alpha\n")
-        argv = ["/usr/bin/dpkg-shlibdeps", "-O"]
-        if role == "private-runtime":
-            D.write(debian / "shlibs.local", b"libssl 3 mobile-release-kit-desktop\nlibcrypto 3 mobile-release-kit-desktop\n")
-            argv += ["-l" + str(runtime / "python/lib"), "-xmobile-release-kit-desktop"]
-        argv += ["-e" + str(path) for path in paths]
-        result = command("shlibdeps-" + role, argv, cwd=query_root, timeout=90, limit=128 << 10)
-        dependencies.extend(shlibdeps_relations(result.stdout, result.stderr))
+    for role in ("gui-publisher", "private-runtime"):
+        dependencies.extend(query_shlibdeps(work, role, initial, policy["manifestSha256"], command))
     # Dynamically selected modules and WebKit children are real package needs.
     # Use the observed build-host version as a conservative minimum, never a
     # guessed earlier ABI floor. Exact build versions remain in the evidence;
@@ -922,6 +911,105 @@ def dependency_inputs(source, work, compiler, runtime, policy, command, *, suppo
             "packageFiles": {name: sorted(members) for name, members in package_files.items()}}
 
 
+
+
+def query_shlibdeps(work, role, initial, manifest_sha, command):
+    """Query independent, already-admitted ELF copies in their package layout.
+
+    dpkg discovers package roots through an uppercase DEBIAN directory. Passing
+    compiler outputs directly loses both that root and $ORIGIN-relative layout.
+    These are query DATA only; no payload is executed or package installed.
+    """
+    D.need(role in ("gui-publisher", "private-runtime"), "Unknown shlibdeps role")
+    D.sha(manifest_sha)
+    D.directory(work)
+    query_root = work / ("shlibdeps-" + role)
+    query_root.mkdir(mode=0o700)  # A pre-existing query is never reused/overwritten.
+    debian = query_root / "debian"
+    debian.mkdir(mode=0o700)
+    package = debian / "mobile-release-kit-desktop"
+    package.mkdir(mode=0o700)
+    (package / "DEBIAN").mkdir(mode=0o700)
+    D.write(debian / "control", b"Source: mobile-release-kit-desktop\nSection: devel\nPriority: optional\nMaintainer: Mobile Release Kit contributors <noreply@github.com>\nStandards-Version: 4.7.0\n\nPackage: mobile-release-kit-desktop\nArchitecture: amd64\nDescription: nonproduction Ubuntu alpha\n")
+    prefix = "usr/lib/mobile-release-kit/runtime-input/" + TARGET + "/" + manifest_sha
+    if role == "gui-publisher":
+        members = [(name, S.BINARIES[ROLES[name][0]], 0o755) for name in ("main", "publisher")]
+    else:
+        members = [("private:" + name, prefix + "/" + name,
+                    0o555 if name == "python/bin/python3" else 0o444) for name in sorted(U.RUNTIME_ELF)]
+    bindings, paths = [], []
+    for name, destination, mode in members:
+        admitted = initial[name]["file"]
+        expected = {key: admitted[key] for key in ("path", "size", "sha256")}
+        original = Path(admitted["selectedPath"])
+        before = D.state(original.lstat())
+        D.bound(original, expected)
+        D.need(D.state(original.lstat()) == before, "Shlibdeps original changed before staging")
+        target = package / destination
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        D.copy(original, target, expected, mode)
+        copied = D.state(target.lstat())
+        D.need(copied[:2] != before[:2], "Shlibdeps query copy aliases its original")
+        bindings.extend(((original, expected, before), (target, expected, copied)))
+        paths.append(target)
+
+    def unchanged():
+        for path, expected, original in bindings:
+            D.need(D.state(path.lstat()) == original, "Shlibdeps input identity or mode changed")
+            D.bound(path, expected)
+            D.need(D.state(path.lstat()) == original, "Shlibdeps input changed during postcheck")
+
+    argv = ["/usr/bin/dpkg-shlibdeps", "-O"]
+    if role == "private-runtime":
+        D.write(debian / "shlibs.local", b"libssl 3 mobile-release-kit-desktop\nlibcrypto 3 mobile-release-kit-desktop\n")
+        argv += ["-l" + str(package / prefix / "python/lib"), "-xmobile-release-kit-desktop"]
+    argv += ["-e" + str(path) for path in paths]
+    unchanged()
+    try:
+        result = command("shlibdeps-" + role, argv, cwd=query_root, timeout=90, limit=128 << 10)
+    except BaseException:
+        try:
+            unchanged()
+        except BaseException:
+            pass  # The original command failure remains the first cause; never success.
+        raise
+    unchanged()
+    try:
+        return shlibdeps_relations(result.stdout, result.stderr)
+    except (D.Refused, UnicodeError) as error:
+        try:
+            error.shlibdeps_failure = shlibdeps_diagnostic(role, result.stdout, result.stderr)
+        except BaseException:
+            pass  # Diagnostic failure cannot replace the actual parser refusal.
+        raise
+
+
+def shlibdeps_diagnostic(role, stdout, stderr):
+    """Bounded failure-only counts/hashes; no raw diagnostic or filesystem path."""
+    D.need(role in ("gui-publisher", "private-runtime")
+           and type(stdout) is bytes and len(stdout) <= 128 << 10
+           and type(stderr) is bytes and len(stderr) <= 128 << 10, "Shlibdeps diagnostic bounds")
+    counts = dict.fromkeys(("package-layout", "unresolved-symbol", "missing-library",
+                            "missing-dependency-info", "other-warning", "unclassified"), 0)
+    for line in stderr.splitlines():
+        category = "unclassified"
+        if line.startswith(b"dpkg-shlibdeps: warning:"):
+            category = "other-warning"
+            if b"binaries to analyze should already be installed in their package's directory" in line:
+                category = "package-layout"
+            elif b"found in none of the libraries" in line or b"contains an unresolvable reference to" in line:
+                category = "unresolved-symbol"
+            elif b"cannot find library" in line:
+                category = "missing-library"
+        elif line.startswith(b"dpkg-shlibdeps: error:"):
+            if b"cannot find library" in line:
+                category = "missing-library"
+            elif b"no dependency information found for" in line:
+                category = "missing-dependency-info"
+        counts[category] += 1
+    return {"role": role, "reason": "nonempty-stderr" if stderr else "invalid-stdout",
+            "stdoutBytes": len(stdout), "stderrBytes": len(stderr),
+            "stdoutSha256": sha(stdout), "stderrSha256": sha(stderr), "lineCategories": counts}
 
 
 def shlibdeps_relations(stdout, stderr):

@@ -377,6 +377,91 @@ class CompilerAndDependencyContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             A.shlibdeps_relations(raw + b"hidden second record\n", b"")
 
+    def test_shlibdeps_queries_use_separate_package_roots_and_preserve_original_inputs(self):
+        raw, manifest = b"shlibs:Depends=libc6 (>= 2.38)\n", "a" * 64
+        with tempfile.TemporaryDirectory(prefix="mrk-alpha-shlibdeps-contract-") as temporary:
+            root, initial = Path(temporary), {}
+            members = [(role, "compiled/" + A.ROLES[role][0]) for role in ("main", "publisher")]
+            members += [("private:" + name, "runtime/" + name) for name in sorted(A.U.RUNTIME_ELF)]
+            for key, name in members:
+                original = root / name
+                original.parent.mkdir(parents=True, exist_ok=True)
+                body = ("inert ELF-layout DATA; never execute: " + key).encode()
+                original.write_bytes(body)
+                original.chmod(0o755 if not key.startswith("private:") else 0o644)
+                initial[key] = {"file": {**pin(name, body), "selectedPath": str(original)}}
+            work = root / "queries"
+            work.mkdir()
+            calls = []
+            def command(label, argv, *, cwd, timeout, limit):
+                role = label.removeprefix("shlibdeps-")
+                calls.append(role)
+                package = cwd / "debian/mobile-release-kit-desktop"
+                self.assertEqual(cwd, work / label)
+                self.assertTrue((package / "DEBIAN").is_dir())
+                self.assertTrue((cwd / "debian/control").is_file())
+                self.assertEqual((argv[:2], timeout, limit), (["/usr/bin/dpkg-shlibdeps", "-O"], 90, 128 << 10))
+                if role == "gui-publisher":
+                    selected = [(key, A.S.BINARIES[A.ROLES[key][0]], 0o755) for key in ("main", "publisher")]
+                    self.assertFalse(any(arg.startswith(("-l", "-x")) for arg in argv[2:]))
+                    self.assertFalse((cwd / "debian/shlibs.local").exists())
+                else:
+                    prefix = "usr/lib/mobile-release-kit/runtime-input/" + A.TARGET + "/" + manifest
+                    selected = [("private:" + name, prefix + "/" + name,
+                                 0o555 if name == "python/bin/python3" else 0o444) for name in sorted(A.U.RUNTIME_ELF)]
+                    self.assertEqual(argv[2:4], ["-l" + str(package / prefix / "python/lib"),
+                                                "-xmobile-release-kit-desktop"])
+                    self.assertEqual((cwd / "debian/shlibs.local").read_bytes(),
+                                     b"libssl 3 mobile-release-kit-desktop\nlibcrypto 3 mobile-release-kit-desktop\n")
+                    self.assertEqual((package / prefix / "python/bin/../lib").resolve(),
+                                     package / prefix / "python/lib")
+                self.assertEqual([arg[2:] for arg in argv if arg.startswith("-e")],
+                                 [str(package / name) for _, name, _ in selected])
+                for key, name, mode in selected:
+                    original, staged = Path(initial[key]["file"]["selectedPath"]), package / name
+                    self.assertEqual(staged.read_bytes(), original.read_bytes())
+                    self.assertNotEqual(staged.stat().st_ino, original.stat().st_ino)
+                    self.assertEqual(staged.stat().st_nlink, 1)
+                    self.assertEqual(stat.S_IMODE(staged.stat().st_mode), mode)
+                return SimpleNamespace(stdout=raw, stderr=b"")
+            for role in ("gui-publisher", "private-runtime"):
+                self.assertEqual(A.query_shlibdeps(work, role, initial, manifest, command), ["libc6 (>= 2.38)"])
+            self.assertEqual(calls, ["gui-publisher", "private-runtime"])
+            marker = work / "shlibdeps-gui-publisher/keep"
+            marker.write_bytes(b"existing work must survive")
+            with self.assertRaises(FileExistsError):
+                A.query_shlibdeps(work, "gui-publisher", initial, manifest, mock.Mock())
+            self.assertEqual(marker.read_bytes(), b"existing work must survive")
+
+            for drift in ("copy-bytes", "copy-mode", "original-mode", "original-command-failure", "stderr", "stdout"):
+                with self.subTest(drift=drift):
+                    query = root / drift
+                    query.mkdir()
+                    original = Path(initial["main"]["file"]["selectedPath"])
+                    failure = RuntimeError("original command failure")
+                    def changed(_label, argv, **_options):
+                        copied = Path(next(arg[2:] for arg in argv if arg.startswith("-e")))
+                        if drift == "copy-bytes":
+                            copied.write_bytes(b"different query DATA")
+                        elif drift == "copy-mode":
+                            copied.chmod(0o644)
+                        elif drift == "original-mode":
+                            original.chmod(0o700)
+                        elif drift == "original-command-failure":
+                            copied.chmod(0o644)
+                            raise failure
+                        return SimpleNamespace(stdout=raw if drift != "stdout" else b"not a dependency record\n",
+                            stderr=b"dpkg-shlibdeps: warning: symbol unresolved\n" if drift == "stderr" else b"")
+                    with self.assertRaises(RuntimeError if drift == "original-command-failure" else ValueError) as caught:
+                        A.query_shlibdeps(query, "gui-publisher", initial, manifest, changed)
+                    if drift == "original-command-failure":
+                        self.assertIs(caught.exception, failure)
+                    elif drift in ("stdout", "stderr"):
+                        diagnostic = caught.exception.shlibdeps_failure
+                        self.assertEqual(O.public_shlibdeps_failure(diagnostic), diagnostic)
+                        self.assertEqual(diagnostic["reason"], "invalid-stdout" if drift == "stdout" else "nonempty-stderr")
+                    original.chmod(0o755)
+
 
 class HostedDistroDataContracts(unittest.TestCase):
     def test_mode_only_data_transition_requires_original_identity_and_complete_roster(self):
@@ -1046,6 +1131,36 @@ class OwnerFailureContracts(unittest.TestCase):
         self.assertEqual(public["command"]["label"], "metadata-main")
         self.assertEqual(public["buildFailure"], unknown)
         self.assertNotIn("buildFailure", project(raw, False))
+        stderr = (b"dpkg-shlibdeps: warning: binaries to analyze should already be installed in their package's directory\n"
+                  b"dpkg-shlibdeps: warning: symbol private_marker found in none of the libraries\n"
+                  + marker.encode() + b"\n")
+        shlibdeps = A.shlibdeps_diagnostic("private-runtime", b"shlibs:Depends=libc6 (>= 2.38)\n", stderr)
+        self.assertEqual(shlibdeps["lineCategories"], {"package-layout": 1, "unresolved-symbol": 1,
+            "missing-library": 0, "missing-dependency-info": 0, "other-warning": 0, "unclassified": 1})
+        detail = {"stage": "dependency-inputs", "errorClass": "Refused", "locations": [],
+                  "shlibdepsFailure": shlibdeps}
+        parser_error = A.D.Refused(marker)
+        parser_error.shlibdeps_failure = shlibdeps
+        self.assertEqual(O.build_failure_diagnostic("dependency-inputs", parser_error, SOURCE), detail)
+        self.assertNotIn("shlibdepsFailure", O.build_failure_diagnostic("compile-main", parser_error, SOURCE))
+        record = O.canonical({"event": "build-failed", "diagnostic": detail}) + b"\n"
+        self.assertEqual(project(record)["buildFailure"], detail)
+        self.assertNotIn("buildFailure", project(record, False))
+        self.assertNotIn(marker, record.decode())
+        self.assertNotIn("private_marker", record.decode())
+        for key, value in (("role", marker), ("reason", marker), ("stdoutBytes", True),
+                           ("stderrBytes", 0), ("stdoutSha256", "not-a-hash"),
+                           ("extra", marker), ("lineCategories", {"raw": marker})):
+            with self.subTest(shlibdeps_field=key):
+                changed = copy.deepcopy(detail)
+                changed["shlibdepsFailure"][key] = value
+                self.assertIsNone(O.public_build_diagnostic(changed))
+        for key, value in (("stage", "compile-main"), ("errorClass", "ValueError")):
+            changed = {**detail, key: value}
+            self.assertIsNone(O.public_build_diagnostic(changed))
+        changed = copy.deepcopy(detail)
+        changed["shlibdepsFailure"]["lineCategories"]["package-layout"] = True
+        self.assertIsNone(O.public_build_diagnostic(changed))
         malformed = []
         for key, value in (("stage", marker), ("errorClass", marker),
                            ("locations", [{"file": marker, "line": 1}]),

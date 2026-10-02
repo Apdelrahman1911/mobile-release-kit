@@ -279,11 +279,16 @@ def build_failure_diagnostic(stage, error, source):
     if traceback is not None:
         locations = []  # An over-bound traceback is unavailable, not a guessed origin.
     error_class = type(error).__name__
-    return {
+    result = {
         "stage": stage if type(stage) is str and stage in BUILD_STAGES else "unknown",
         "errorClass": error_class if error_class in BUILD_ERROR_CLASSES else "unexpected",
         "locations": locations,
     }
+    if result["stage"] == "dependency-inputs" and result["errorClass"] in ("Refused", "UnicodeDecodeError"):
+        failure = public_shlibdeps_failure(getattr(error, "shlibdeps_failure", None))
+        if failure is not None:
+            result["shlibdepsFailure"] = failure
+    return result
 
 
 def public_notice_failures(value, total):
@@ -311,13 +316,39 @@ def public_notice_failures(value, total):
     return result
 
 
+def public_shlibdeps_failure(value):
+    """Closed failed-query projection; classification never authorizes warnings."""
+    if (type(value) is not dict or set(value) != {
+            "role", "reason", "stdoutBytes", "stderrBytes", "stdoutSha256", "stderrSha256", "lineCategories"}
+            or type(value["role"]) is not str or value["role"] not in ("gui-publisher", "private-runtime")
+            or type(value["reason"]) is not str or value["reason"] not in ("nonempty-stderr", "invalid-stdout")):
+        return None
+    for stream in ("stdout", "stderr"):
+        count, digest = value[stream + "Bytes"], value[stream + "Sha256"]
+        if (type(count) is not int or not 0 <= count <= 128 << 10
+                or type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or count == 0 and digest != hashlib.sha256(b"").hexdigest()):
+            return None
+    counts = value["lineCategories"]
+    if (type(counts) is not dict or set(counts) != {
+            "package-layout", "unresolved-symbol", "missing-library",
+            "missing-dependency-info", "other-warning", "unclassified"}
+            or any(type(count) is not int or not 0 <= count <= 128 << 10 for count in counts.values())
+            or sum(counts.values()) > value["stderrBytes"]
+            or (sum(counts.values()) == 0) != (value["stderrBytes"] == 0)
+            or value["reason"] != ("nonempty-stderr" if value["stderrBytes"] else "invalid-stdout")):
+        return None
+    return {**value, "lineCategories": dict(counts)}
+
+
 def public_build_diagnostic(value):
     """Accept only the closed diagnostic shape after original-worker finality."""
     fields = {"stage", "errorClass", "locations"}
     if type(value) is not dict:
         return None
     has_notices = set(value) == fields | {"noticeFailures", "noticeFailureTotal"}
-    if (set(value) != fields and not has_notices
+    has_shlibdeps = set(value) == fields | {"shlibdepsFailure"}
+    if (set(value) != fields and not has_notices and not has_shlibdeps
             or type(value["stage"]) is not str or value["stage"] not in BUILD_STAGES
             or type(value["errorClass"]) is not str or value["errorClass"] not in BUILD_ERROR_CLASSES
             or type(value["locations"]) is not list or len(value["locations"]) > 2):
@@ -336,6 +367,13 @@ def public_build_diagnostic(value):
         if rows is None:
             return None
         result.update(noticeFailures=rows, noticeFailureTotal=value["noticeFailureTotal"])
+    if has_shlibdeps:
+        if value["stage"] != "dependency-inputs" or value["errorClass"] not in ("Refused", "UnicodeDecodeError"):
+            return None
+        failure = public_shlibdeps_failure(value["shlibdepsFailure"])
+        if failure is None:
+            return None
+        result["shlibdepsFailure"] = failure
     return result
 
 
