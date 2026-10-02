@@ -75,7 +75,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          ulimit -f 32768
+          ulimit -f 1048576
           clean() {
             /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
               "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
