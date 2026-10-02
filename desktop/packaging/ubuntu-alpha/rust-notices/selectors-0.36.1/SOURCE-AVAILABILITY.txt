@@ -1,0 +1,18 @@
+Mobile Release Kit - source availability for selectors 0.36.1
+
+This explanatory notice is written by Mobile Release Kit, not by Mozilla
+or the Servo project. It does not change the accompanying original MPL2.0.
+
+The selectors dependency is used without first-party source modifications.
+Its complete source package is available at no charge from:
+https://static.crates.io/crates/selectors/selectors-0.36.1.crate
+SHA256: c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c
+
+Upstream repository: https://github.com/servo/stylo
+Upstream revision: 635e1a19d02960588a00e189bd4bd5bdb150ec3d
+Upstream crate directory: selectors
+
+License: Mozilla Public License Version 2.0
+Canonical license: https://mozilla.org/MPL/2.0/
+Complete license text is included with this notice. The original lib.rs
+licensing declaration is also preserved in this component notice set.

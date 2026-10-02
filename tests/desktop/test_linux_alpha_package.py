@@ -1108,8 +1108,33 @@ class CargoNoticeContracts(unittest.TestCase):
 
     def test_real_supplement_inventory_is_source_bound_and_cms_attribution_is_accurate(self):
         root, records, rules = A._rust_notice_inputs(SOURCE)
-        self.assertEqual(set(rules), {("cms", "0.2.3"), ("defmt-parser", "1.0.0"),
-                                      ("r-efi", "5.3.0"), ("r-efi", "6.0.0")})
+        self.assertEqual(set(rules), {
+            ("alloc-stdlib", "0.2.4"), ("cms", "0.2.3"), ("defmt-parser", "1.0.0"),
+            ("dlopen2", "0.8.2"), ("dlopen2_derive", "0.4.3"),
+            ("r-efi", "5.3.0"), ("r-efi", "6.0.0"), ("selectors", "0.36.1"),
+            ("unic-char-property", "0.9.0"), ("unic-char-range", "0.9.0"),
+            ("unic-common", "0.9.0"), ("unic-ucd-ident", "0.9.0"), ("unic-ucd-version", "0.9.0"),
+        })
+        for (name, _), rule in rules.items():
+            if name.startswith("unic-"):
+                self.assertIsNone(rule["pathInVcs"])
+                self.assertEqual(rule["licenseMetadata"], "MIT/Apache-2.0")
+        selectors = rules[("selectors", "0.36.1")]
+        self.assertEqual(selectors["selectedLicense"], "MPL-2.0")
+        self.assertEqual([row["path"] for row in selectors["archiveMembers"]], ["lib.rs"])
+        canonical, availability = selectors["upstreamNotices"]
+        self.assertEqual(canonical["origin"], "canonical-license-text")
+        self.assertEqual(canonical["sourceUrl"], "https://www.mozilla.org/media/MPL/2.0/index.txt")
+        self.assertEqual(availability["origin"], "first-party-source-availability")
+        self.assertEqual(availability["sourceArchiveSha256"], selectors["archiveSha256"])
+        for row in (canonical, availability):
+            self.assertNotIn("gitBlob", row)
+            self.assertEqual(row["sourceArchiveUrl"],
+                             "https://static.crates.io/crates/selectors/selectors-0.36.1.crate")
+        self.assertTrue((root / canonical["path"]).read_bytes().startswith(b"Mozilla Public License Version 2.0"))
+        source_notice = (root / availability["path"]).read_text(encoding="utf-8")
+        self.assertIn(availability["sourceArchiveUrl"], source_notice)
+        self.assertIn(selectors["archiveSha256"], source_notice)
         cms = rules[("cms", "0.2.3")]
         self.assertEqual(cms["selectedLicense"], "Apache-2.0")
         self.assertEqual([row["path"] for row in cms["archiveMembers"]], ["README.md"])

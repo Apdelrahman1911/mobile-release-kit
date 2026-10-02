@@ -35,7 +35,7 @@ S = local("stage_ubuntu_deb")
 TARGET = "x86_64-unknown-linux-gnu"
 CONTROLS = Path("desktop/packaging/ubuntu-alpha")
 RUST_NOTICE_ROOT = CONTROLS / "rust-notices"
-RUST_NOTICE_INPUTS_SHA256 = "9907ff5d471ad84c008cd1bd56e8e75f928140ab665d750cd2c9fdcacec5494e"
+RUST_NOTICE_INPUTS_SHA256 = "1ce7f4a6180bade2a1ee32a9da089ec85af9982d7ab789d076b9c864ff8bd336"
 MAP_SHA = "37d9fb826f5ed04cd691c5b8d08c2061e8f1691e279993d5ea6ef65b8f59c150"
 VITE_SHA = "ed97e7caa84c313e6e80028447e62b039e9006810e6228837a7b2914c1b438ec"
 NPM_LOCK_SHA = "61ed80ddda8840a13fdb54c7aac6b0d5edc3c270c0731d4044542b29fc6736cb"
@@ -279,13 +279,13 @@ def _rust_notice_inputs(source):
     value = D.decode(raw, 256 << 10)
     D.need(type(value) is dict and set(value) == {"schema", "files", "packages"}
            and value["schema"] == "mrk-ubuntu-alpha-original-rust-notices-v1"
-           and type(value["packages"]) is list and len(value["packages"]) == 4,
+           and type(value["packages"]) is list and len(value["packages"]) == 13,
            "Reviewed Cargo notice input profile differs")
     records = D.records(value["files"])
     C.conventional_files(D, root, sorted([*records.values(), D.file_record(root / "inputs.json")],
                                         key=lambda row: row["path"]))
     rules = {(row["name"], row["version"]): row for row in value["packages"]}
-    D.need(len(rules) == 4, "Reviewed Cargo notice input identities duplicate")
+    D.need(len(rules) == 13, "Reviewed Cargo notice input identities duplicate")
     for rule in rules.values():
         D.need(all(item["path"] in records for item in rule["upstreamNotices"]),
                "Reviewed upstream notice has no original record")

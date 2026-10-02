@@ -1,6 +1,11 @@
 {
   "files": [
     {
+      "path": "alloc-stdlib-0.2.4/LICENSE",
+      "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+      "size": 1483
+    },
+    {
       "path": "cms-0.2.3/der/LICENSE-APACHE",
       "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
       "size": 10849
@@ -14,9 +19,53 @@
       "path": "defmt-parser-1.0.0/LICENSE-MIT",
       "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50",
       "size": 1053
+    },
+    {
+      "path": "dlopen2-0.8.2/LICENSE",
+      "sha256": "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
+      "size": 1184
+    },
+    {
+      "path": "rust-unic-0.9.0/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "rust-unic-0.9.0/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "selectors-0.36.1/LICENSE-MPL-2.0",
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+      "size": 16726
+    },
+    {
+      "path": "selectors-0.36.1/SOURCE-AVAILABILITY.txt",
+      "sha256": "d48aeedf961346c8ef78617643f594dbb85e194b1880b9a315b75f9c85aa7f14",
+      "size": 869
     }
   ],
   "packages": [
+    {
+      "archiveMembers": [],
+      "archiveSha256": "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195",
+      "licenseMetadata": "BSD-3-Clause",
+      "name": "alloc-stdlib",
+      "packageRepository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+      "pathInVcs": "alloc-stdlib",
+      "revision": "ae42d22078b98549e987d2f03d12df7b984fde47",
+      "selectedLicense": "BSD-3-Clause",
+      "upstreamNotices": [
+        {
+          "gitBlob": "cd496ba72eb37e83a44958358d1f89a8a28cbc15",
+          "path": "alloc-stdlib-0.2.4/LICENSE",
+          "upstreamPath": "LICENSE"
+        }
+      ],
+      "upstreamRepository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+      "version": "0.2.4"
+    },
     {
       "archiveMembers": [
         {
@@ -73,6 +122,44 @@
       "version": "1.0.0"
     },
     {
+      "archiveMembers": [],
+      "archiveSha256": "5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4",
+      "licenseMetadata": "MIT",
+      "name": "dlopen2",
+      "packageRepository": "https://github.com/OpenByteDev/dlopen2",
+      "pathInVcs": "dlopen2",
+      "revision": "cc80e4a0a90d499b677fdf7743699b4b3a43a989",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "d38093a7a564c64ad15e459f2e0a1f86a443c8b3",
+          "path": "dlopen2-0.8.2/LICENSE",
+          "upstreamPath": "LICENSE"
+        }
+      ],
+      "upstreamRepository": "https://github.com/OpenByteDev/dlopen2",
+      "version": "0.8.2"
+    },
+    {
+      "archiveMembers": [],
+      "archiveSha256": "0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f",
+      "licenseMetadata": "MIT",
+      "name": "dlopen2_derive",
+      "packageRepository": "https://github.com/OpenByteDev/dlopen2",
+      "pathInVcs": "dlopen2-derive",
+      "revision": "cc80e4a0a90d499b677fdf7743699b4b3a43a989",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "d38093a7a564c64ad15e459f2e0a1f86a443c8b3",
+          "path": "dlopen2-0.8.2/LICENSE",
+          "upstreamPath": "LICENSE"
+        }
+      ],
+      "upstreamRepository": "https://github.com/OpenByteDev/dlopen2",
+      "version": "0.4.3"
+    },
+    {
       "archiveMembers": [
         {
           "path": "AUTHORS",
@@ -109,6 +196,161 @@
       "upstreamNotices": [],
       "upstreamRepository": "https://github.com/r-efi/r-efi",
       "version": "6.0.0"
+    },
+    {
+      "archiveMembers": [
+        {
+          "path": "lib.rs",
+          "sha256": "d54c6e13e9e952dac17d209171df8657e3cae93beaddace4906150cdec8d02e9",
+          "size": 643
+        }
+      ],
+      "archiveSha256": "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c",
+      "licenseMetadata": "MPL-2.0",
+      "name": "selectors",
+      "packageRepository": "https://github.com/servo/stylo",
+      "pathInVcs": "selectors",
+      "revision": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+      "selectedLicense": "MPL-2.0",
+      "upstreamNotices": [
+        {
+          "declarationUrl": "https://mozilla.org/MPL/2.0/",
+          "origin": "canonical-license-text",
+          "path": "selectors-0.36.1/LICENSE-MPL-2.0",
+          "sourceArchiveUrl": "https://static.crates.io/crates/selectors/selectors-0.36.1.crate",
+          "sourceUrl": "https://www.mozilla.org/media/MPL/2.0/index.txt",
+          "upstreamPath": "canonical/MPL-2.0.txt"
+        },
+        {
+          "origin": "first-party-source-availability",
+          "path": "selectors-0.36.1/SOURCE-AVAILABILITY.txt",
+          "sourceArchiveSha256": "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c",
+          "sourceArchiveUrl": "https://static.crates.io/crates/selectors/selectors-0.36.1.crate",
+          "upstreamPath": "mrk/SOURCE-AVAILABILITY.txt"
+        }
+      ],
+      "upstreamRepository": "https://github.com/servo/stylo",
+      "version": "0.36.1"
+    },
+    {
+      "archiveMembers": [],
+      "archiveSha256": "a8c57a407d9b6fa02b4795eb81c5b6652060a15a7903ea981f3d723e6c0be221",
+      "licenseMetadata": "MIT/Apache-2.0",
+      "name": "unic-char-property",
+      "packageRepository": "https://github.com/open-i18n/rust-unic/",
+      "pathInVcs": null,
+      "revision": "5878605364af97a3358368a6eaef02104af2e016",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1",
+          "path": "rust-unic-0.9.0/LICENSE-APACHE",
+          "upstreamPath": "LICENSE-APACHE"
+        },
+        {
+          "gitBlob": "31aa79387f27e730e33d871925e152e35e428031",
+          "path": "rust-unic-0.9.0/LICENSE-MIT",
+          "upstreamPath": "LICENSE-MIT"
+        }
+      ],
+      "upstreamRepository": "https://github.com/open-i18n/rust-unic",
+      "version": "0.9.0"
+    },
+    {
+      "archiveMembers": [],
+      "archiveSha256": "0398022d5f700414f6b899e10b8348231abf9173fa93144cbc1a43b9793c1fbc",
+      "licenseMetadata": "MIT/Apache-2.0",
+      "name": "unic-char-range",
+      "packageRepository": "https://github.com/open-i18n/rust-unic/",
+      "pathInVcs": null,
+      "revision": "5878605364af97a3358368a6eaef02104af2e016",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1",
+          "path": "rust-unic-0.9.0/LICENSE-APACHE",
+          "upstreamPath": "LICENSE-APACHE"
+        },
+        {
+          "gitBlob": "31aa79387f27e730e33d871925e152e35e428031",
+          "path": "rust-unic-0.9.0/LICENSE-MIT",
+          "upstreamPath": "LICENSE-MIT"
+        }
+      ],
+      "upstreamRepository": "https://github.com/open-i18n/rust-unic",
+      "version": "0.9.0"
+    },
+    {
+      "archiveMembers": [],
+      "archiveSha256": "80d7ff825a6a654ee85a63e80f92f054f904f21e7d12da4e22f9834a4aaa35bc",
+      "licenseMetadata": "MIT/Apache-2.0",
+      "name": "unic-common",
+      "packageRepository": "https://github.com/open-i18n/rust-unic/",
+      "pathInVcs": null,
+      "revision": "5878605364af97a3358368a6eaef02104af2e016",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1",
+          "path": "rust-unic-0.9.0/LICENSE-APACHE",
+          "upstreamPath": "LICENSE-APACHE"
+        },
+        {
+          "gitBlob": "31aa79387f27e730e33d871925e152e35e428031",
+          "path": "rust-unic-0.9.0/LICENSE-MIT",
+          "upstreamPath": "LICENSE-MIT"
+        }
+      ],
+      "upstreamRepository": "https://github.com/open-i18n/rust-unic",
+      "version": "0.9.0"
+    },
+    {
+      "archiveMembers": [],
+      "archiveSha256": "e230a37c0381caa9219d67cf063aa3a375ffed5bf541a452db16e744bdab6987",
+      "licenseMetadata": "MIT/Apache-2.0",
+      "name": "unic-ucd-ident",
+      "packageRepository": "https://github.com/open-i18n/rust-unic/",
+      "pathInVcs": null,
+      "revision": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1",
+          "path": "rust-unic-0.9.0/LICENSE-APACHE",
+          "upstreamPath": "LICENSE-APACHE"
+        },
+        {
+          "gitBlob": "31aa79387f27e730e33d871925e152e35e428031",
+          "path": "rust-unic-0.9.0/LICENSE-MIT",
+          "upstreamPath": "LICENSE-MIT"
+        }
+      ],
+      "upstreamRepository": "https://github.com/open-i18n/rust-unic",
+      "version": "0.9.0"
+    },
+    {
+      "archiveMembers": [],
+      "archiveSha256": "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4",
+      "licenseMetadata": "MIT/Apache-2.0",
+      "name": "unic-ucd-version",
+      "packageRepository": "https://github.com/open-i18n/rust-unic/",
+      "pathInVcs": null,
+      "revision": "5878605364af97a3358368a6eaef02104af2e016",
+      "selectedLicense": "MIT",
+      "upstreamNotices": [
+        {
+          "gitBlob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1",
+          "path": "rust-unic-0.9.0/LICENSE-APACHE",
+          "upstreamPath": "LICENSE-APACHE"
+        },
+        {
+          "gitBlob": "31aa79387f27e730e33d871925e152e35e428031",
+          "path": "rust-unic-0.9.0/LICENSE-MIT",
+          "upstreamPath": "LICENSE-MIT"
+        }
+      ],
+      "upstreamRepository": "https://github.com/open-i18n/rust-unic",
+      "version": "0.9.0"
     }
   ],
   "schema": "mrk-ubuntu-alpha-original-rust-notices-v1"
