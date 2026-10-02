@@ -511,7 +511,11 @@ impl Inner {
         if changed { self.bump(r); }
     }
     fn unknown_locked(&self, r: &mut Registry, owner: &Session) {
-        self.stop_locked(r, owner, Reason::CleanupUnknown, Instant::now());
+        self.unknown_locked_at(r, owner, Instant::now());
+    }
+    fn unknown_locked_at(&self, r: &mut Registry, owner: &Session, at: Instant) {
+        // Keep the event time already observed by time-aware state transitions.
+        self.stop_locked(r, owner, Reason::CleanupUnknown, at);
         if let Some(a) = r.active.as_mut().filter(|a| a.owner.id == owner.id) {
             if !a.unknown {
                 a.unknown = true; a.projection.phase = Phase::RetainedUnknown; a.projection.finality = Finality::Unknown;
@@ -538,7 +542,7 @@ impl Inner {
             };
             if let Some((reason, at)) = first { self.stop_locked(r, owner, reason, at); }
         }
-        if finality_due || self.poisoned.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { self.unknown_locked(r, owner); }
+        if finality_due || self.poisoned.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { self.unknown_locked_at(r, owner, now); }
     }
     fn stop(&self, owner: &Session, reason: Reason) {
         let mut r = self.lock(); self.advance_locked(&mut r, owner, Instant::now());
@@ -578,11 +582,11 @@ impl Inner {
                     if let Some(a) = r.active.as_mut() { if !a.unknown { a.projection.phase = Phase::Stopping; } }
                     owner.stop.send_replace(true); owner.wake.notify_waiters(); self.bump(&mut r);
                 } else { self.stop_locked(&mut r, owner, reason, now); }
-                if !settled { owner.resource_unknown.store(true, Ordering::SeqCst); self.unknown_locked(&mut r, owner); }
+                if !settled { owner.resource_unknown.store(true, Ordering::SeqCst); self.unknown_locked_at(&mut r, owner, now); }
             }
             _ => {
                 owner.resource_unknown.store(true, Ordering::SeqCst);
-                self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner);
+                self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked_at(&mut r, owner, now);
             }
         }
         owner.wake.notify_waiters();
@@ -1407,6 +1411,19 @@ mod tests {
             let state = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0);
             if original_worker_returned(state.0, state.1, state.2, state.3, state.4) != complete.contains(&state) { return false; }
         }
+        blocked_startup_and_lost_terminal_data();
+        repeated_unknown_endpoints_data();
+        // A duplicate frame fails at its supplied event time, not at the real
+        // clock sample near this inert model's deliberately earlier admission.
+        let (application, original) = inert_active(); let t = original.clocks.admitted;
+        let observed = t + Duration::from_secs(2);
+        application.inner.accept_at(&original, Frame::Accepted, t);
+        application.inner.accept_at(&original, Frame::Accepted, observed);
+        let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+        if !active.unknown || !r.disabled || !original.resource_unknown.load(Ordering::SeqCst)
+            || active.first_stop != Some(observed) || active.projection.reason != Reason::ProtocolError
+            || active.projection.finality != Finality::Unknown || r.last.is_some()
+            || original.clocks.work != t + WORK || original.clocks.finality != t + FINALITY { return false; }
         true
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1717,6 +1734,9 @@ mod tests {
     }
     #[test]
     fn blocked_startup_and_lost_terminal_reach_same_original_h_and_retain_slot() {
+        blocked_startup_and_lost_terminal_data();
+    }
+    fn blocked_startup_and_lost_terminal_data() {
         for accepted in [false, true] {
             let (owner, session) = inert_active(); let t = session.clocks.admitted;
             if accepted { owner.inner.accept_at(&session, Frame::Accepted, t); }
@@ -1727,12 +1747,18 @@ mod tests {
             let active = r.active.as_ref().unwrap();
             assert!(active.unknown && r.disabled && *session.stop.borrow());
             assert_eq!(active.projection.finality, Finality::Unknown); assert_eq!(active.first_stop, Some(session.clocks.work));
+            assert_eq!(active.projection.reason, Reason::TimedOut);
             assert_eq!(session.clocks.finality.duration_since(t), FINALITY); assert!(r.last.is_none());
         }
     }
     #[test]
     fn repeated_unknown_endpoints_do_not_notify_their_own_waiters() {
-        let (owner, session) = inert_active();
+        repeated_unknown_endpoints_data();
+    }
+    fn repeated_unknown_endpoints_data() {
+        // endpoint() samples the real clock. Put this inert session fully in
+        // the past so its repeated reads cannot predate the supplied expiry.
+        let (owner, session) = inert_active_at(Instant::now() - FINALITY - Duration::from_secs(1));
         let mut stop = session.stop.subscribe();
         let waker = Waker::from(Arc::new(NoWake)); let mut context = TaskContext::from_waker(&waker);
         let mut first_wake = Box::pin(session.wake.notified());

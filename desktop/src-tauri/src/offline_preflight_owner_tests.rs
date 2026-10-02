@@ -142,10 +142,20 @@ pub(crate) fn whole_run_endpoints_and_first_stop_never_renew() {
     owner.original_for_test().inner.stop_locked(&mut r, &session, Reason::ProtocolError, first + Duration::from_secs(9));
     let a = r.active.as_ref().unwrap(); assert_eq!(a.first_stop, Some(first));
     assert_eq!(session.clocks.settlement(a.first_stop), first + SETTLEMENT);
+    assert_eq!(*session.native_cleanup_cutoff.borrow(), first + SETTLEMENT);
     owner.original_for_test().inner.advance_locked(&mut r, &session, first + SETTLEMENT);
     let a = r.active.as_ref().unwrap(); assert!(a.unknown && r.disabled); assert_eq!(a.first_stop, Some(first));
+    assert_eq!(a.projection.reason, Reason::Cancelled);
+    assert_eq!(*session.native_cleanup_cutoff.borrow(), first + SETTLEMENT);
     let p = a.projection.public(); assert_eq!((p.phase, p.outcome, p.reason), (Phase::Unknown, Some(Outcome::Unknown), Reason::CleanupUnknown));
     assert!(p.result.is_none());
+    for later in [1, 2] {
+        owner.original_for_test().inner.advance_locked(&mut r, &session, first + SETTLEMENT + Duration::from_secs(later));
+        let a = r.active.as_ref().unwrap();
+        assert!(a.unknown && r.disabled);
+        assert_eq!((a.first_stop, a.projection.reason), (Some(first), Reason::Cancelled));
+        assert_eq!(*session.native_cleanup_cutoff.borrow(), first + SETTLEMENT);
+    }
 }
 
 pub(crate) fn complete_negative_is_provisional_and_not_first_failure() {
@@ -171,6 +181,17 @@ pub(crate) fn late_terminal_never_reverses_timeout_or_unknown_in_either_delivery
         assert_eq!(a.projection.reason, Reason::TimedOut); assert_eq!(a.projection.outcome, Some(Outcome::TimedOut));
         assert_eq!(a.unknown, due == OFFLINE_HARD); assert!(a.projection.public().result.is_none()); assert!(r.last.is_none());
     } }
+    // A protocol failure has its own supplied event time, not the wall-clock
+    // instant at which this inert future-time model happens to execute.
+    let (owner, session) = active();
+    let at = session.clocks.admitted + Duration::from_secs(5);
+    owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::Frame::Accepted), session.clocks.admitted);
+    owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::Frame::Accepted), at);
+    let r = owner.original_for_test().inner.lock(); let a = r.active.as_ref().unwrap();
+    assert!(a.unknown && r.disabled && session.resource_unknown.load(Ordering::SeqCst));
+    assert_eq!((a.first_stop, a.projection.reason), (Some(at), Reason::ProtocolError));
+    assert_eq!(*session.native_cleanup_cutoff.borrow(), at + SETTLEMENT);
+    assert!(a.projection.public().result.is_none() && r.last.is_none());
 }
 
 pub(crate) fn repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks() {

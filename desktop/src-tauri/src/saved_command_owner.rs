@@ -2017,7 +2017,12 @@ impl Inner {
         if changed || first_signal { owner.wake.notify_waiters(); } if changed { self.bump(r); }
     }
     fn unknown_locked(&self, r: &mut Registry, owner: &Session) {
-        self.stop_locked(r, owner, Reason::CleanupUnknown, Instant::now());
+        self.unknown_locked_at(r, owner, Instant::now());
+    }
+    fn unknown_locked_at(&self, r: &mut Registry, owner: &Session, at: Instant) {
+        // Time-aware callers already observed this event. Do not replace its
+        // timestamp with a second clock sample during the Unknown transition.
+        self.stop_locked(r, owner, Reason::CleanupUnknown, at);
         if let Some(a) = r.active.as_mut().filter(|a| a.owner.id == owner.id) {
             if !a.unknown { a.unknown = true; a.projection.phase = Phase::Unknown; r.disabled = true; self.bump(r); }
         }
@@ -2036,7 +2041,7 @@ impl Inner {
         };
         if let Some((reason,at))=native_failure {self.stop_locked(r,owner,reason,at);}
         let finality_due = r.active.as_ref().is_some_and(|a| !a.unknown && now >= owner.clocks.settlement(a.first_stop));
-        if finality_due || self.poisoned.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { self.unknown_locked(r, owner); }
+        if finality_due || self.poisoned.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { self.unknown_locked_at(r, owner, now); }
     }
     fn stop(&self, owner: &Session, reason: Reason) { let mut r = self.lock(); self.advance_locked(&mut r, owner, Instant::now()); self.stop_locked(&mut r, owner, reason, Instant::now()); }
     fn unknown(&self, owner: &Session) { let mut r = self.lock(); self.advance_locked(&mut r, owner, Instant::now()); self.unknown_locked(&mut r, owner); }
@@ -2050,7 +2055,7 @@ impl Inner {
         let mut r = self.lock(); self.advance_locked(&mut r, owner, now);
         if owner.domain != self.domain || owner.context.domain() != owner.domain {
             owner.resource_unknown.store(true, Ordering::SeqCst);
-            self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner); return;
+            self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked_at(&mut r, owner, now); return;
         }
         // Only these two typed streams exist; crossing domains is a protocol
         // failure, never a reinterpretation of an Offline terminal as Android.
@@ -2068,7 +2073,7 @@ impl Inner {
             (SavedCommandDomain::IOSArchive, Frame::IOSArchive(ios_wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::IOSArchive(t)),
             _ => {
                 owner.resource_unknown.store(true, Ordering::SeqCst);
-                self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner); return;
+                self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked_at(&mut r, owner, now); return;
             }
         };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
@@ -2095,7 +2100,7 @@ impl Inner {
                 if let Some(stage) = stage {
                     if a.projection.stage.is_none_or(|previous| !stage.at_or_after(previous)) {
                         owner.resource_unknown.store(true, Ordering::SeqCst);
-                        self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner); return;
+                        self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked_at(&mut r, owner, now); return;
                     }
                     a.projection.stage = Some(stage);
                 }
@@ -2108,9 +2113,9 @@ impl Inner {
                     if let Some(a) = r.active.as_mut() { if !a.unknown { a.projection.phase = Phase::Stopping; } }
                     owner.stop.send_replace(true); owner.wake.notify_waiters(); self.bump(&mut r);
                 } else { self.stop_locked(&mut r, owner, reason, now); }
-                if !settled { owner.resource_unknown.store(true, Ordering::SeqCst); self.unknown_locked(&mut r, owner); }
+                if !settled { owner.resource_unknown.store(true, Ordering::SeqCst); self.unknown_locked_at(&mut r, owner, now); }
             }
-            _ => { owner.resource_unknown.store(true, Ordering::SeqCst); self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner); }
+            _ => { owner.resource_unknown.store(true, Ordering::SeqCst); self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked_at(&mut r, owner, now); }
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if signed_inputs_bound {
