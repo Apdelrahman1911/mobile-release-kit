@@ -720,9 +720,132 @@ def macho(body):
     need(offset == 32 + size and minimum == [(1, 26 << 16)], "macho-minimum-macos26")
 
 
+
+def normal_cargo_artifact(messages, binary, target_dir, body):
+    """Bind one ordinary Cargo result to the exact bytes copied into the app.
+
+    This is bounded DATA validation, not compiler execution or GUI acceptance.
+    The fixed workflow separately preserves Cargo's original process status.
+    """
+    name = "mobile-release-kit-desktop"
+    cargo_root = DESKTOP / "src-tauri"
+    need(type(messages) is bytes and 0 < len(messages) <= 8 * 1024 * 1024
+         and messages.endswith(b"\n"), "normal-cargo-messages-bound")
+    need(type(body) is bytes and 32 <= len(body) <= MAX_BYTES, "normal-cargo-binary-bound")
+    target_dir, binary = Path(target_dir), Path(binary)
+    need(target_dir.is_absolute() and binary.is_absolute()
+         and all(p not in (".", "..") for p in target_dir.parts + binary.parts),
+         "normal-cargo-absolute-path")
+    expected = target_dir / "aarch64-apple-darwin/release" / name
+    need(binary == expected, "normal-cargo-release-output")
+    lines = messages.splitlines()
+    need(1 < len(lines) <= 10000 and all(lines), "normal-cargo-record-count")
+    selected = []
+    finished = False
+    for line in lines:
+        need(not finished, "normal-cargo-after-finish")
+        item = decode(line)
+        need(type(item) is dict, "normal-cargo-record-shape")
+        reason = item.get("reason")
+        need(reason in ("compiler-artifact", "compiler-message", "build-script-executed", "build-finished"),
+             "normal-cargo-record-kind")
+        if reason == "build-finished":
+            need(set(item) == {"reason", "success"} and item["success"] is True, "normal-cargo-not-successful")
+            finished = True
+        elif reason == "compiler-artifact":
+            target = item.get("target")
+            need(type(target) is dict, "normal-cargo-target-shape")
+            if target.get("name") == name or item.get("executable") == str(expected):
+                selected.append(item)
+    need(finished and len(selected) == 1, "normal-cargo-unique-completed-bin")
+    item = selected[0]
+    target, profile = item["target"], item.get("profile")
+    need(target.get("name") == name and target.get("kind") == ["bin"]
+         and target.get("crate_types") == ["bin"] and target.get("src_path") == str(cargo_root / "src/main.rs"),
+         "normal-cargo-main-bin")
+    need(item.get("manifest_path") == str(cargo_root / "Cargo.toml")
+         and item.get("package_id") == "path+" + cargo_root.as_uri() + "#mobile-release-kit-desktop@0.1.0",
+         "normal-cargo-source-package")
+    need(type(profile) is dict and profile.get("test") is False and profile.get("debug_assertions") is False
+         and profile.get("opt_level") == "3", "normal-cargo-release-profile")
+    need(item.get("features") in (["custom-protocol", "desktop-shell"], ["desktop-shell", "custom-protocol"]),
+         "normal-cargo-exact-features")
+    need(item.get("executable") == str(expected) and item.get("filenames") == [str(expected)]
+         and type(item.get("fresh")) is bool, "normal-cargo-executable")
+    return {"schemaVersion": 1, "entrypoint": "src/main.rs", "targetKind": "bin", "target": "aarch64-apple-darwin",
+            "profileTest": False, "features": ["custom-protocol", "desktop-shell"],
+            "cargoMessagesSha256": digest(messages), "binarySha256": digest(body),
+            "binarySize": len(body), "instrumented": False, "qualification": "ordinary-bin-data-not-launched"}
+
+
+def preview_command(args):
+    """Copy only an audited, normally built and read-back package to fresh output."""
+    need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source),
+         "preview-source")
+    work = Path(args.work)
+    need(work.is_absolute(), "preview-work-absolute")
+    binding = decode(read(work / "source-binding.json", 65536))
+    source = decode(read(work / "source-inventory.json", 1024 * 1024))
+    need(type(binding) is dict and type(source) is dict
+         and source.get("source") == binding.get("source") == args.expected_source
+         and binding.get("workflowSource") == args.expected_source
+         and source.get("tree") == binding.get("tree") and type(source.get("tree")) is str
+         and re.fullmatch(r"[0-9a-f]{40}", source["tree"])
+         and binding.get("scope") == "normal-macos-early-preview" and binding.get("instrumented") is False,
+         "preview-source-binding")
+    need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
+             for k in ("runId", "runAttempt")), "preview-run-binding")
+    need(read(work / "normal-build.status", 4) == b"0\n"
+         and read(work / "installer-output.status", 4) == b"0\n", "preview-original-statuses")
+    original = work / "cargo-target/aarch64-apple-darwin/release/mobile-release-kit-desktop"
+    normal = normal_cargo_artifact(read(work / "normal-build.jsonl", 8 * 1024 * 1024),
+                                  original, work / "cargo-target", read(original))
+    app = decode(read(work / "app-result.json", 16384))
+    need(type(app) is dict and app.get("normalCargoArtifact") == normal
+         and app.get("appBinarySha256BeforeSigning") == normal["binarySha256"], "preview-normal-app-binding")
+    observed = decode(read(work / "installation-observation.json", INSTALLER_RESULT_BYTES))
+    need(type(observed) is dict and observed.get("sourceCommit") == args.expected_source
+         and observed.get("installerDeadlineMetAfterFinalCloses") is True
+         and observed.get("installerReportedOriginalsSettled") is True
+         and observed.get("applicationLaunched") is False and observed.get("guiSaveQualified") is False
+         and observed.get("runtimeManifestSha256") == binding.get("runtimeManifestSha256"),
+         "preview-installation-readback")
+    bound_original_result(observed.get("originalInstallerResult"), (None, "confirmed", "confirmed", "installed", True, 0),
+                          args.expected_source, observed.get("inventorySha256"), observed.get("runtimeManifestSha256"))
+    expected = observation_inventory(argparse.Namespace(input=work / "input",
+        expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"]))
+    need(observed.get("nonrootReadbackFileCount") == len(expected), "preview-readback-roster")
+    audit = decode(read(work / "package-audit.json", 16384))
+    package = read(work / "package-final/MobileReleaseKit.pkg")
+    need(type(audit) is dict and audit.get("packageSha256") == digest(package)
+         and type(audit.get("packageSize")) is int and audit["packageSize"] == len(package)
+         and audit.get("packageIdentifier") == "dev.mobile-release-kit.desktop.installed"
+         and audit.get("qualification") == "scripts-only-package-audited-not-installed-or-GUI-qualified",
+         "preview-original-audited-package")
+    summary = {"schemaVersion": 1, "scope": "normal-macos-early-preview", "sourceCommit": args.expected_source,
+        "sourceTree": source["tree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
+        "runId": binding["runId"], "runAttempt": binding["runAttempt"], "platform": "macOS26-arm64",
+        "packageSha256": digest(package), "packageSize": len(package), "runtimeManifestSha256": observed["runtimeManifestSha256"],
+        "installerInventorySha256": observed["inventorySha256"], "normalBinaryBeforeSigningSha256": normal["binarySha256"],
+        "signedAppBinarySha256": expected["app/" + APP_BINARY]["sha256"], "instrumented": False,
+        "normalBuild": "passed", "packageAudit": "passed", "installationReadback": "passed",
+        "automaticWindowOpen": "unexecuted", "normalQuit": "unexecuted", "manualUIAcceptance": "pending",
+        "unexecutedReason": "original-normal-app-quit-custody-not-established",
+        "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+    guide = read(DESKTOP / "packaging/macos-preview.md", 32768)
+    write_tree(args.output, {"MobileReleaseKit.pkg": (package, 0o444), "README.md": (guide, 0o444),
+                            "PREVIEW.json": (canonical(summary) + b"\n", 0o444)})
+    return {"schemaVersion": 1, "sourceCommit": args.expected_source, "packageSha256": digest(package),
+            "fileCount": 3, "qualification": "normal-early-preview-not-launched-or-product-qualified"}
+
 def app_command(args):
+    cargo_messages = getattr(args, "normal_cargo_messages", None)
+    cargo_target = getattr(args, "normal_cargo_target_dir", None)
+    need((cargo_messages is None) == (cargo_target is None), "normal-cargo-paired-inputs")
     body = read(args.binary)
     macho(body)
+    normal = (normal_cargo_artifact(read(cargo_messages, 8 * 1024 * 1024), args.binary, cargo_target, body)
+              if cargo_messages is not None else None)
     info = read(DESKTOP / "macos-installed-inputs/Info.plist", 16384)
     parsed = plistlib.loads(info)
     need(parsed["CFBundleExecutable"] == "mobile-release-kit-desktop" and parsed["LSMinimumSystemVersion"] == "26.0", "app-info-binding")
@@ -733,7 +856,10 @@ def app_command(args):
     # copy. It may modify the app only; the runtime is not nested in the app.
     # Root/Contents must remain writable to that original codesign writer.
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
-    return {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "qualification": "app-copied-not-signed-or-launched"}
+    result = {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "qualification": "app-copied-not-signed-or-launched"}
+    if normal is not None:
+        result["normalCargoArtifact"] = normal
+    return result
 
 
 def runtime_tree(root, expected, *, current=False):
@@ -1531,6 +1657,12 @@ def main(argv=None):
     app = commands.add_parser("app")
     app.add_argument("--binary", required=True, type=Path)
     app.add_argument("--output", required=True, type=Path)
+    app.add_argument("--normal-cargo-messages", type=Path)
+    app.add_argument("--normal-cargo-target-dir", type=Path)
+    preview = commands.add_parser("preview")
+    preview.add_argument("--work", required=True, type=Path)
+    preview.add_argument("--expected-source", required=True)
+    preview.add_argument("--output", required=True, type=Path)
     inputs = commands.add_parser("input")
     inputs.add_argument("--app", required=True, type=Path)
     inputs.add_argument("--runtime", required=True, type=Path)
@@ -1587,7 +1719,7 @@ def main(argv=None):
         print(canonical(result).decode("utf-8"))
         return status
     action = {"describe-runtime": runtime_command, "runtime": runtime_command,
-              "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command,
+              "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command, "preview": preview_command,
               "input": input_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,
               "check-installer-result-absent": installer_result_absent_command,

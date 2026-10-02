@@ -1288,5 +1288,218 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertIn("No normal P2/project-picker qualification bit is enabled", guide)
 
 
+
+def normal_cargo_fixture(target=None):
+    target = target or Path("/synthetic-mrk-preview/cargo-target")
+    binary = target / "aarch64-apple-darwin/release/mobile-release-kit-desktop"
+    cargo_root = TOOL.DESKTOP / "src-tauri"
+    artifact = {"reason": "compiler-artifact", "package_id": "path+" + cargo_root.as_uri() + "#mobile-release-kit-desktop@0.1.0",
+        "manifest_path": str(cargo_root / "Cargo.toml"),
+        "target": {"name": "mobile-release-kit-desktop", "kind": ["bin"], "crate_types": ["bin"],
+                   "src_path": str(cargo_root / "src/main.rs")},
+        "profile": {"opt_level": "3", "debug_assertions": False, "test": False},
+        "features": ["custom-protocol", "desktop-shell"], "filenames": [str(binary)],
+        "executable": str(binary), "fresh": False}
+    body = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 1, 24, 0, 0) + struct.pack("<6I", 0x32, 24, 1, 26 << 16, 26 << 16, 0)
+    return target, binary, artifact, body
+
+
+def cargo_lines(*items):
+    return b"".join(TOOL.canonical(item) + b"\n" for item in items)
+
+
+@unittest.skipUnless(TOOL is not None, "POSIX DATA definitions only")
+class MacNormalPreviewData(unittest.TestCase):
+    def test_only_complete_normal_main_bin_receives_original_byte_binding(self):
+        target, binary, item, body = normal_cargo_fixture()
+        messages = cargo_lines(item, {"reason": "build-finished", "success": True})
+        result = TOOL.normal_cargo_artifact(messages, binary, target, body)
+        self.assertEqual(result["binarySha256"], TOOL.digest(body))
+        self.assertEqual(result["cargoMessagesSha256"], TOOL.digest(messages))
+        self.assertEqual(result["entrypoint"], "src/main.rs")
+        self.assertFalse(result["profileTest"])
+        self.assertFalse(result["instrumented"])
+        self.assertEqual(result["qualification"], "ordinary-bin-data-not-launched")
+        info = TOOL.plistlib.dumps({"CFBundleExecutable": binary.name, "LSMinimumSystemVersion": "26.0"})
+        values = {binary: body, Path("/synthetic-mrk-preview/cargo.jsonl"): messages,
+                  TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
+                  TOOL.DESKTOP / "src-tauri/icons/icon.png": b"synthetic-icon"}
+        args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
+            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=target)
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
+                mock.patch.object(TOOL, "write_tree") as output:
+            staged = TOOL.app_command(args)
+        self.assertEqual(staged["normalCargoArtifact"], result)
+        self.assertEqual(output.call_args.args[1][TOOL.APP_BINARY], (body, 0o755))
+
+    def test_test_targets_feature_drift_and_foreign_artifacts_never_stage(self):
+        target, binary, original, body = normal_cargo_fixture()
+        mutations = [
+            ("target", "kind", ["test"]), ("target", "crate_types", ["lib"]),
+            ("target", "src_path", str(TOOL.DESKTOP / "src-tauri/tests/installed_shell_observation.rs")),
+            ("profile", "test", True), ("profile", "test", 0), ("profile", "debug_assertions", True),
+            ("profile", "opt_level", "0"), (None, "features", ["desktop-shell"]),
+            (None, "features", ["desktop-shell", "custom-protocol", "macos-installed-observation"]),
+            (None, "features", ["custom-protocol", "desktop-shell", "desktop-shell"]),
+            (None, "executable", str(target / "debug/mobile-release-kit-desktop")),
+            (None, "filenames", [str(binary), str(target / "foreign")]),
+            (None, "manifest_path", "/foreign/Cargo.toml"), (None, "package_id", "registry+foreign"),
+            (None, "fresh", 1),
+        ]
+        for section, field, value in mutations:
+            item = TOOL.decode(TOOL.canonical(original))
+            (item if section is None else item[section])[field] = value
+            messages = cargo_lines(item, {"reason": "build-finished", "success": True})
+            with self.subTest(section=section, field=field, value=value), \
+                    self.assertRaises(TOOL.Refused):
+                TOOL.normal_cargo_artifact(messages, binary, target, body)
+
+    def test_original_terminal_success_is_unique_and_not_a_log_hint(self):
+        target, binary, item, body = normal_cargo_fixture()
+        end = {"reason": "build-finished", "success": True}
+        bad = [cargo_lines(item), cargo_lines(item, {"reason": "build-finished", "success": False}),
+               cargo_lines(item, end, end), cargo_lines(item, item, end), cargo_lines(end),
+               cargo_lines(item, end) + b"trailing\n", cargo_lines(item, end) + b"\n",
+               cargo_lines(item) + b'{"reason":"build-finished","success":false,"success":true}\n',
+               cargo_lines(item, {"reason": "build-finished", "success": 1})]
+        for messages in bad:
+            with self.subTest(messages=messages[-80:]), self.assertRaises((TOOL.Refused, ValueError)):
+                TOOL.normal_cargo_artifact(messages, binary, target, body)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.normal_cargo_artifact(cargo_lines(item, end), target / "debug" / binary.name, target, body)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.normal_cargo_artifact(cargo_lines(item, end), binary, Path("relative"), body)
+
+    def test_optional_gate_is_paired_and_failure_precedes_any_app_write(self):
+        target, binary, item, body = normal_cargo_fixture()
+        args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
+            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=None)
+        with mock.patch.object(TOOL, "read", return_value=body), mock.patch.object(TOOL, "write_tree") as output:
+            with self.assertRaises(TOOL.Refused):
+                TOOL.app_command(args)
+            output.assert_not_called()
+        args.normal_cargo_target_dir = target
+        item["profile"]["test"] = True
+        messages = cargo_lines(item, {"reason": "build-finished", "success": True})
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: body if path == binary else messages), \
+                mock.patch.object(TOOL, "write_tree") as output:
+            with self.assertRaises(TOOL.Refused):
+                TOOL.app_command(args)
+            output.assert_not_called()
+
+    def preview_fixture(self):
+        work = Path("/synthetic-mrk-preview")
+        target, binary, item, body = normal_cargo_fixture(work / "cargo-target")
+        messages = cargo_lines(item, {"reason": "build-finished", "success": True})
+        normal = TOOL.normal_cargo_artifact(messages, binary, target, body)
+        binding = {"source": "a" * 40, "workflowSource": "a" * 40, "tree": "b" * 40,
+            "scope": "normal-macos-early-preview", "instrumented": False, "runId": "123", "runAttempt": "1",
+            "runtimeManifestSha256": "c" * 64}
+        observed = {"sourceCommit": "a" * 40, "installerDeadlineMetAfterFinalCloses": True,
+            "installerReportedOriginalsSettled": True, "applicationLaunched": False, "guiSaveQualified": False,
+            "runtimeManifestSha256": "c" * 64, "inventorySha256": "d" * 64, "nonrootReadbackFileCount": 1,
+            "originalInstallerResult": {"syntheticDelegation": True}}
+        package = b"synthetic-package-DATA-not-native-Installer-evidence"
+        values = {work / "normal-build.jsonl": messages, binary: body,
+            work / "normal-build.status": b"0\n", work / "installer-output.status": b"0\n",
+            work / "package-final/MobileReleaseKit.pkg": package,
+            TOOL.DESKTOP / "packaging/macos-preview.md": b"# Synthetic preview guide\n"}
+        documents = {"source-binding.json": binding, "source-inventory.json": {"source": "a" * 40, "tree": "b" * 40},
+            "app-result.json": {"normalCargoArtifact": normal, "appBinarySha256BeforeSigning": TOOL.digest(body)},
+            "installation-observation.json": observed,
+            "package-audit.json": {"packageSha256": TOOL.digest(package), "packageSize": len(package),
+                "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+                "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}}
+        values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
+        expected = {"app/" + TOOL.APP_BINARY: {"sha256": "e" * 64}}
+        return work, values, documents, expected
+
+    def test_preview_roster_has_no_raw_evidence_and_keeps_open_and_quit_unexecuted(self):
+        work, values, documents, expected = self.preview_fixture()
+        args = SimpleNamespace(work=work, output=work / "preview", expected_source="a" * 40)
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
+                mock.patch.object(TOOL, "bound_original_result") as original, \
+                mock.patch.object(TOOL, "observation_inventory", return_value=expected), \
+                mock.patch.object(TOOL, "write_tree") as output:
+            result = TOOL.preview_command(args)
+        original.assert_called_once_with(documents["installation-observation.json"]["originalInstallerResult"],
+            (None, "confirmed", "confirmed", "installed", True, 0), "a" * 40, "d" * 64, "c" * 64)
+        files = output.call_args.args[1]
+        self.assertEqual(set(files), {"MobileReleaseKit.pkg", "README.md", "PREVIEW.json"})
+        self.assertEqual(files["MobileReleaseKit.pkg"], (values[work / "package-final/MobileReleaseKit.pkg"], 0o444))
+        summary = TOOL.decode(files["PREVIEW.json"][0])
+        self.assertEqual(summary["automaticWindowOpen"], "unexecuted")
+        self.assertEqual(summary["normalQuit"], "unexecuted")
+        self.assertEqual(summary["manualUIAcceptance"], "pending")
+        self.assertFalse(summary["fullUIQualified"])
+        self.assertFalse(summary["distributionQualified"])
+        self.assertFalse(summary["productReady"])
+        self.assertEqual(result["fileCount"], 3)
+
+    def test_failed_original_status_changed_package_or_unsettled_readback_cannot_publish(self):
+        failures = [
+            ("normal-build.status", None, b"1\n"), ("installer-output.status", None, b"20\n"),
+            ("source-binding.json", "instrumented", True), ("source-inventory.json", "tree", "f" * 40),
+            ("app-result.json", "appBinarySha256BeforeSigning", "f" * 64),
+            ("installation-observation.json", "installerDeadlineMetAfterFinalCloses", False),
+            ("installation-observation.json", "installerReportedOriginalsSettled", False),
+            ("installation-observation.json", "runtimeManifestSha256", "f" * 64),
+            ("installation-observation.json", "nonrootReadbackFileCount", 2),
+            ("package-audit.json", "packageSha256", "f" * 64),
+        ]
+        for name, field, value in failures:
+            work, values, documents, expected = self.preview_fixture()
+            if field is None:
+                values[work / name] = value
+            else:
+                documents[name][field] = value
+                values[work / name] = TOOL.canonical(documents[name])
+            args = SimpleNamespace(work=work, output=work / "preview", expected_source="a" * 40)
+            with self.subTest(name=name, field=field), \
+                    mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
+                    mock.patch.object(TOOL, "bound_original_result"), \
+                    mock.patch.object(TOOL, "observation_inventory", return_value=expected), \
+                    mock.patch.object(TOOL, "write_tree") as output:
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.preview_command(args)
+                output.assert_not_called()
+
+    def test_preview_route_targets_only_unrelated_groups_and_retains_package_gates(self):
+        root = Path(__file__).absolute().parents[2]
+        workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        selected = {block.splitlines()[0].strip() for block in workflow.split("      - name: ")[1:]
+                    if "if: github.ref == 'refs/heads/verify/desktop-macos-installed'" in block}
+        self.assertEqual(selected, {
+            "Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive",
+            "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)",
+            "Build the separate fixed seven-case Installer package from the same completed input",
+            "Standard Installer runs the one fixed fixture, never root libtest or a scenario selector",
+            "Nonroot fixture readback leaves protected0700 staging closed and unchanged"})
+        self.assertIn("      - verify/desktop-macos-preview\n", workflow)
+        self.assertIn("--message-format=json", workflow)
+        self.assertIn('--normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', workflow)
+        self.assertIn('--normal-cargo-target-dir "$CARGO_TARGET_DIR"', workflow)
+        for name in ("Fail fast on native Scripts ownership and package format (never Installer)",
+                     "Build the fixed one-shot root Installer and scripts-only package",
+                     "Nonroot byte/mode readback, not a headless GUI substitute"):
+            block = workflow.split("      - name: " + name + "\n", 1)[1].split("      - name: ", 1)[0]
+            self.assertNotIn("if:", block)
+        self.assertLess(workflow.index("observe-installation"), workflow.index("stage_macos_installed.py preview"))
+        publish = workflow.split("      - name: Upload only the normal user preview package and guide\n", 1)[1].split("      - name: ", 1)[0]
+        self.assertIn("steps.preview.outcome == 'success'", publish)
+        self.assertIn("/preview/MobileReleaseKit.pkg", publish)
+        self.assertIn("/preview/README.md", publish)
+        self.assertIn("/preview/PREVIEW.json", publish)
+        self.assertNotIn("**", publish)
+        for forbidden in ("continue-on-error:", "normal_app_launch_probe", "forceTerminate", "/usr/bin/open ",
+                          "macos-installed-observation", "workflow_dispatch:"):
+            self.assertNotIn(forbidden, workflow)
+        guide = (root / "desktop/packaging/macos-preview.md").read_text()
+        for required in ("Automatic window-open and normal-Quit verification are unexecuted",
+                         "Gatekeeper", "Do not disable", "NOT READY / undelivered",
+                         "project-relative field pickers", "No Store mutation"):
+            self.assertIn(required, guide)
+
+
 if __name__ == "__main__":
     unittest.main()

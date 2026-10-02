@@ -1,9 +1,10 @@
-name: Desktop Mac installed engineering package (Aqua gate separate)
+name: Desktop Mac normal package and limited early preview (Aqua gate separate)
 
 on:
   push:
     branches:
       - verify/desktop-macos-installed
+      - verify/desktop-macos-preview
 
 permissions:
   contents: read
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   engineering-install:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-installed'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview')
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -35,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
-          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed ]]
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ) ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]]
           # Historical archive reuse supplies the interpreter, not the current core.
@@ -71,6 +72,8 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]]
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
@@ -90,7 +93,11 @@ jobs:
               result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=15)
               if not result.stdout or len(result.stdout) > 4096: raise ValueError("tool version output refused")
               tools[name] = {"command": command, "output": result.stdout.decode("utf-8", "strict").strip()}
+          work_info = os.stat(os.path.dirname(sys.argv[1]), follow_symlinks=False)
+          source_tree = subprocess.run(["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD^{tree}"], check=True, stdout=subprocess.PIPE, timeout=15).stdout.decode().strip()
           value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "tree": source_tree, "workDirectory": [work_info.st_dev, work_info.st_ino, work_info.st_uid],
+                   "frontendAbsentAtAdmission": True,
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
                    "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
@@ -101,6 +108,10 @@ jobs:
                    "aclPrimitiveCases": 6,
                    "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "pending"}
+          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-preview":
+              value.update({"scope": "normal-macos-early-preview", "fixedFixtureCases": 0, "aclPrimitiveCases": 0,
+                            "selectedRegressionGroups": [], "instrumented": False, "applicationLaunched": False,
+                            "fullUIQualified": False, "distributionQualified": False})
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
           if len(data) > 65536: raise ValueError("source/tool binding size refused")
           fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -112,6 +123,54 @@ jobs:
               os.fsync(fd)
           finally: os.close(fd)
           PY
+      - name: Bind the complete reviewed first-party checkout before compilation
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
+          import hashlib, json, os, stat, subprocess, sys
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15).stdout
+          rows = git("ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
+          if rows[-1] or len(rows) > 4096: raise ValueError("tracked inventory bound")
+          files = []
+          for row in rows[:-1]:
+              header, raw_name = row.split(b"\t", 1)
+              mode, kind, blob = header.split(b" ")
+              name = raw_name.decode("utf-8", "strict")
+              if kind != b"blob" or mode not in (b"100644", b"100755") or any(p in ("", ".", "..") for p in name.split("/")): raise ValueError("tracked inventory path/type")
+              fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 32 * 1024 * 1024: raise ValueError("tracked input refused")
+                  digest = hashlib.sha256()
+                  blob_digest = hashlib.sha1(b"blob " + str(before.st_size).encode() + b"\0")
+                  size = 0
+                  while block := os.read(fd, 65536):
+                      size += len(block)
+                      if size > before.st_size: raise ValueError("tracked input grew")
+                      digest.update(block)
+                      blob_digest.update(block)
+                  after = os.fstat(fd)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if size != before.st_size or sig(before) != sig(after) or sig(after) != sig(os.stat(name, follow_symlinks=False)): raise ValueError("tracked input changed")
+              finally:
+                  os.close(fd)
+              if blob_digest.hexdigest() != blob.decode() or bool(before.st_mode & 0o111) != (mode == b"100755"): raise ValueError("tracked blob or executable mode mismatch")
+              files.append({"path": name, "gitMode": mode.decode(), "blob": blob.decode(), "size": size, "sha256": digest.hexdigest()})
+          value = {"source": os.environ["GITHUB_SHA"], "tree": git("rev-parse", "HEAD^{tree}").decode().strip(), "files": files}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 2 * 1024 * 1024: raise ValueError("source inventory output bound")
+          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(data)
+              stream.flush()
+              os.fsync(stream.fileno())
+          PY_SOURCE
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         timeout-minutes: 2
         shell: bash
@@ -163,6 +222,7 @@ jobs:
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
           # Only inert archive bytes were checked. Never run this exit97 hook.
       - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed'
         timeout-minutes: 2
         shell: bash
         run: |
@@ -294,11 +354,19 @@ jobs:
         run: |
           set -euo pipefail
           cd desktop
-          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund --cache "$MRK_MACOS_WORK/npm-cache"
           npm run build
           cd src-tauri
+          set -o noclobber
+          set +e
           cargo build --locked --release --no-default-features --features desktop-shell,custom-protocol \
-            --target aarch64-apple-darwin --bin mobile-release-kit-desktop
+            --target aarch64-apple-darwin --bin mobile-release-kit-desktop --message-format=json \
+            > "$MRK_MACOS_WORK/normal-build.jsonl" 2> "$MRK_MACOS_WORK/normal-build.stderr"
+          cargo_status=$?
+          set -e
+          printf '%s\n' "$cargo_status" > "$MRK_MACOS_WORK/normal-build.status"
+          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-build.stderr" > "$MRK_MACOS_WORK/normal-build.stderr.tail.txt"
+          [[ "$cargo_status" == 0 ]]
       - name: Assemble and ad-hoc sign the app only (never --deep or the runtime)
         timeout-minutes: 3
         shell: bash
@@ -308,6 +376,8 @@ jobs:
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
             --binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop" \
+            --normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
+            --normal-cargo-target-dir "$CARGO_TARGET_DIR" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
           /usr/bin/codesign --force --sign - --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
@@ -344,6 +414,7 @@ jobs:
           # authorized build into its one-shot installer; it grants no runtime,
           # GUI, distribution, update or arbitrary adjacent-file authority.
       - name: Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed'
         timeout-minutes: 12
         shell: bash
         run: |
@@ -427,6 +498,7 @@ jobs:
               os.fsync(stream.fileno())
           PY
       - name: Build the separate fixed seven-case Installer package from the same completed input
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed'
         timeout-minutes: 8
         shell: bash
         run: |
@@ -484,6 +556,7 @@ jobs:
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
       - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed'
         timeout-minutes: 18
         shell: bash
         run: |
@@ -522,6 +595,7 @@ jobs:
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
       - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -639,13 +713,44 @@ jobs:
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
           printf '%s\n' 'Engineering installation only. Actual installed runtime, Aqua project/Quit, and Save gates remain unverified.'
+      - name: Stage only the audited normal early-preview deliverables
+        id: preview
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview \
+            --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
+            --output "$MRK_MACOS_WORK/preview" > "$MRK_MACOS_WORK/preview-result.json"
+          printf '%s\n' 'Normal preview built/installed/read back; automatic open and normal Quit unexecuted; manual UI acceptance pending.'
+      - name: Upload only the normal user preview package and guide
+        id: preview_upload
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-arm64-preview-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/preview/MobileReleaseKit.pkg
+            ${{ steps.work.outputs.root }}/preview/README.md
+            ${{ steps.work.outputs.root }}/preview/PREVIEW.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
+        id: evidence
         if: always() && steps.work.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
+            ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/normal-build.jsonl
+            ${{ steps.work.outputs.root }}/normal-build.status
+            ${{ steps.work.outputs.root }}/normal-build.stderr.tail.txt
+            ${{ steps.work.outputs.root }}/preview-result.json
             ${{ steps.work.outputs.root }}/package-format-input.json
             ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
             ${{ steps.work.outputs.root }}/package-format-prepare.json
@@ -706,3 +811,43 @@ jobs:
       # publication of a release, Store workflow, or synthetic GUI success here.
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
+      - name: Remove only this completed preview build's disposable compiler outputs
+        if: always() && steps.preview_upload.outcome == 'success' && steps.evidence.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          # No application/test/daemon is launched by this preview. Every fixed
+          # compiler/Installer command returned before the accepted readback.
+          # Retain package/evidence and protected installation; never touch shared caches.
+          "$MRK_PYTHON" -I -S -B - <<'PY_CLEAN'
+          import json, os, shutil, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          if root.parent != Path("/Users/runner/work/_temp") or not root.name.startswith("mrk-macos-installed.") or workspace != Path("/Users/runner/work/mobile-release-kit/mobile-release-kit"):
+              raise ValueError("task cleanup route refused")
+          fd = os.open(root / "source-binding.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              info = os.fstat(fd)
+              if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+                  raise ValueError("task cleanup binding refused")
+              data = os.read(fd, 65537)
+              if len(data) != info.st_size: raise ValueError("task cleanup binding incomplete")
+              binding = json.loads(data)
+          finally:
+              os.close(fd)
+          original = binding["workDirectory"]
+          current = os.lstat(root)
+          if (not stat.S_ISDIR(current.st_mode) or current.st_uid != os.getuid() or os.getuid() == 0
+                  or [current.st_dev, current.st_ino, current.st_uid] != original
+                  or binding["source"] != os.environ["GITHUB_SHA"]
+                  or binding["frontendAbsentAtAdmission"] is not True or not shutil.rmtree.avoids_symlink_attacks):
+              raise ValueError("task cleanup original refused")
+          for path in (root / "cargo-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist"):
+              try: selected = os.lstat(path)
+              except FileNotFoundError: continue
+              if not stat.S_ISDIR(selected.st_mode) or selected.st_uid != os.getuid() or selected.st_dev != current.st_dev:
+                  raise ValueError("task cleanup output refused")
+              shutil.rmtree(path)
+          PY_CLEAN
