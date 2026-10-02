@@ -175,8 +175,11 @@ fn panel_readiness(panel: &ObservedPanel, id: u32, kind: mrk_macos_installed_nat
     Ok(true)
 }
 
-const METHODS: [&str; 10] = ["capabilities", "catalog", "project.snapshot", "config.validate",
-    "config.suggest", "config.preview", "environment.requirements", "github.setup.propose", "release.version.observe", "credentials.assess"];
+// Fixed current-core roster, independently checked against the Mac passive
+// allowlist plus original-session assessment; never inferred from the reply.
+const METHODS: [&str; 14] = ["capabilities", "catalog", "project.snapshot", "config.validate",
+    "config.suggest", "config.preview", "environment.requirements", "github.setup.propose", "release.version.observe", "credentials.assess",
+    "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"];
 const APP_ID: &str = "org.example.mrk.observed";
 const VERSION: &[u8] = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n";
 const SOURCE: &[u8] = b"plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
@@ -2898,7 +2901,7 @@ impl Observation {
         }).collect::<Option<Vec<_>>>()?;
         let mut report = json!({"schemaVersion":1,"sourceCommit":option_env!("GITHUB_SHA"),"runId":option_env!("GITHUB_RUN_ID"),
             "runAttempt":option_env!("GITHUB_RUN_ATTEMPT"),"case":self.case.name(),"instrumentedEngineeringApp":true,
-            "shippingBinaryQualified":false,"distributionQualified":false,"methods":"ten-passive-with-session-assessment","actionsAvailable":false,
+            "shippingBinaryQualified":false,"distributionQualified":false,"methods":"fourteen-passive-with-session-assessment","actionsAvailable":false,
             "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.project_settled && completion_selection.is_some_and(|s| s.succeeded(self.case.selected_id())),
                 "originalWindow":r.original_window.map(OriginalWindowSample::value),
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
@@ -3655,6 +3658,17 @@ fn bootstrap_diagnostic_data_checks() -> bool {
         (&malformed, "bootstrap-info-method-availability")] {
         if classify(&info(), values, &actions) != Some(reason) { return false; }
     }
+    for name in ["metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"] {
+        let Some(index) = METHODS.iter().position(|expected| *expected == name) else { return false; };
+        let mut missing = methods.clone(); missing[index]["available"] = Value::Bool(false);
+        if classify(&info(), &missing, &actions) != Some("bootstrap-info-available-count") { return false; }
+        for replacement in ["unexpected.method", METHODS[0]] {
+            let mut changed = methods.clone(); changed[index]["method"] = json!(replacement);
+            if classify(&info(), &changed, &actions) != Some("bootstrap-info-required-method") { return false; }
+        }
+    }
+    let mut extra_available = methods.clone(); extra_available.push(json!({"method":"unexpected.method","available":true}));
+    if classify(&info(), &extra_available, &actions) != Some("bootstrap-info-available-count") { return false; }
     for available in [Value::Bool(true), Value::Null] {
         if classify(&info(), &methods, &[json!({"available":available})]) != Some("bootstrap-info-action-availability") { return false; }
     }

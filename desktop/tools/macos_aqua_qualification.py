@@ -1265,7 +1265,7 @@ def expected_result(binding, case):
             "nativeReason": native, "nativeFinality": "settled", "writerFrames": 3 if applied else 2,
             "stdoutFrames": 3, "originalsJoined": True})
     return {"schemaVersion": 1, **binding.public(), "case": case, "instrumentedEngineeringApp": True,
-        "shippingBinaryQualified": False, "distributionQualified": False, "methods": "ten-passive-with-session-assessment", "actionsAvailable": False,
+        "shippingBinaryQualified": False, "distributionQualified": False, "methods": "fourteen-passive-with-session-assessment", "actionsAvailable": False,
         "native": {"projectCancelSettled": first, "selectedPathMatched": case != "picker-loss",
             "originalWindow": {"mechanism": "passive-original-window-callback-v1", "accessorReturned": True,
                 "nativeReturned": True, "result": "ok", "admitted": True,
@@ -2466,7 +2466,7 @@ def _bootstrap_failure_context(value, source, step, reason):
          and all(type(value[key]) is bool for key in flags), "failure-context")
     count, admitted = value["methods"], value["originalWindowAdmitted"]
     need(type(count) is int and 0 <= count <= 64 and (admitted is None or type(admitted) is bool)
-         and (10 <= count if value["info"] else count == 0)
+         and (14 <= count if value["info"] else count == 0)
          and (not value["loaded"] or value["started"])
          and (not value["catalog"] or value["info"])
          and (not value["reloadNavigation"] or value["reloadRequested"] and value["loaded"])

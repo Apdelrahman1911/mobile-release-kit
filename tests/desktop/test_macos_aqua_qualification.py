@@ -7,6 +7,7 @@ does not substitute for required installed hosted Aqua/core/native evidence.
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
+import ast
 import importlib.util
 from importlib.machinery import ModuleSpec
 import io
@@ -794,7 +795,7 @@ class AquaDataTests(unittest.TestCase):
                 M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
         # A later report Step is not the nested first-failure sample's time.
         self.assertEqual(M.failure_context(b"", project_selection_row(good, "bootstrap-info-duplicate", "Environment")), good)
-        for count in (10, 64):
+        for count in (14, 64):
             accepted = deepcopy(good); accepted["bootstrap"].update(info=True, catalog=True, methods=count)
             self.assertEqual(M.failure_context(b"", project_selection_row(accepted, "bootstrap-info-duplicate", "Bootstrap")), accepted)
         for admitted in (None, False):
@@ -824,6 +825,8 @@ class AquaDataTests(unittest.TestCase):
                          ("originalWindowAdmitted", 1), ("reloadNavigation", True), ("lossSeen", True)):
             value = deepcopy(good); value["bootstrap"][key] = bad; variants.append(value)
         value = deepcopy(good); value["bootstrap"]["privatePath"] = "PRIVATE"; variants.append(value)
+        for count in range(10, 14):
+            value = deepcopy(good); value["bootstrap"].update(info=True, catalog=True, methods=count); variants.append(value)
         value = deepcopy(good); del value["bootstrap"]["loaded"]; variants.append(value)
         value = deepcopy(good); value["bootstrap"] = None; variants.append(value)
         for source in (None, "prearm-open-progress", "first-failure-record"):
@@ -3838,13 +3841,29 @@ class IOSAquaDataTests(unittest.TestCase):
             self.assertIn(term, control)
         self.assertNotIn("SessionAdmission", control)
 
-        methods = M.re.search(r'const METHODS: \[&str; 10\] = \[(.*?)\];', observer, M.re.S)
+        methods = M.re.search(r'const METHODS: \[&str; 14\] = \[(.*?)\];', observer, M.re.S)
         self.assertIsNotNone(methods)
         names = M.re.findall(r'"([a-z.]+)"', methods.group(1))
-        self.assertEqual(len(names), 10)
-        self.assertEqual(len(set(names)), 10)
+        self.assertEqual(len(names), 14)
+        self.assertEqual(len(set(names)), 14)
         self.assertEqual(names.count("credentials.assess"), 1)
+        # Compare independent checked-in contracts, not a self-constructed
+        # response. Parse core literal DATA without importing the engine.
+        syntax = ast.parse((PATH.parents[2] / "src/mobile_release/api/__init__.py").read_text())
+        definitions = [node.value for node in syntax.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "METHODS" for target in node.targets)]
+        self.assertEqual(len(definitions), 1)
+        core_names = ast.literal_eval(definitions[0])
+        self.assertEqual(len(core_names), len(names))
+        self.assertEqual(set(core_names), set(names))
+        passive = runtime.split("fn macos_installed_passive_method(", 1)[1].split("\n}", 1)[0]
+        passive_names = M.re.findall(r'"([a-z.]+)"', passive)
+        self.assertEqual(len(passive_names), 13)
+        self.assertEqual(set(passive_names) | {"credentials.assess"}, set(names))
+        self.assertNotIn("credentials.assess", passive_names)
+        self.assertIn('installed_passive_method(name) || name == "credentials.assess" && self.installed_session_profile(None)', runtime)
         self.assertIn("fn methods(self) -> usize { METHODS.len() }", observer)
+        self.assertIn('methods.iter().filter(available).count() != expected_methods', observer)
         self.assertIn('METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m["method"].as_str() == Some(*name)).count() == 1)', observer)
         finish = observer.split("fn finish(&self) -> Option<Value>", 1)[1].split("\n}\n\nfn phase(", 1)[0]
         self.assertIn("let normal_registered = self.ios.as_ref().is_some_and(|control| control.normal_session_registered());", finish)
@@ -3865,11 +3884,12 @@ class IOSAquaDataTests(unittest.TestCase):
         self.assertIn("signed.report(false).is_some()", producer)
         for case in M.ALL_CASES:
             value = M.expected_result(BINDING, case)
-            self.assertEqual(value["methods"], "ten-passive-with-session-assessment")
+            self.assertEqual(value["methods"], "fourteen-passive-with-session-assessment")
         for case in ("first-save", "ios-unsigned-archive"):
-            old = M.expected_result(BINDING, case); old["methods"] = "nine-passive"
-            with self.assertRaises(M.Refused):
-                M.parse_result(captured(old), b"", BINDING, case)
+            for old_label in ("nine-passive", "ten-passive-with-session-assessment"):
+                old = M.expected_result(BINDING, case); old["methods"] = old_label
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(old), b"", BINDING, case)
 
     def test_literal_fixture_matches_native_and_has_no_packages_or_scripts(self):
         import plistlib
