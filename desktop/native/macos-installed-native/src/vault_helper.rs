@@ -1,5 +1,7 @@
 //! The one fixed helper main. It is not an application worker, provider service,
 //! configurable command runner, or a second operation/deadline owner.
+#[path = "vault_helper_startup.rs"]
+mod startup;
 use std::{ffi::c_void,mem::ManuallyDrop,os::fd::{FromRawFd,OwnedFd},
     panic::{catch_unwind,AssertUnwindSafe},ptr::NonNull};
 use nix::{fcntl::{fcntl,FcntlArg,OFlag},unistd};
@@ -265,7 +267,10 @@ impl Work{
 /// add_only/lookup remain unsupported even though it shares the DATA types.
 pub fn main_entry()->i32{
     std::panic::set_hook(Box::new(|_|{})); // Before any credentials; no panic output.
-    if std::env::args_os().take(2).count()!=1 || std::env::vars_os().next().is_some(){return 64;}
+    // Split failures only. std still snapshots/copies argv and environment;
+    // iterator limits are not native allocation bounds or origin proof.
+    if let Some(code)=startup::refusal(std::env::args_os().take(2).count(),
+        ||std::env::vars_os().map(|(name,_)|name)){return code;}
     let mut work=Work::new();
     let ran=match catch_unwind(AssertUnwindSafe(||work.run())){
         Ok(value)=>value,Err(payload)=>{work.panic[0]=Some(payload);fail();false}
