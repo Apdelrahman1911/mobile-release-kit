@@ -3,6 +3,7 @@
 // observes a refusal BEFORE scheduling cleanup under its original endpoint.
 #include <sys/acl.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
