@@ -499,8 +499,8 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
         self.assertEqual(workflow.count("ulimit -f 33554432"), 1)
         self.assertEqual(workflow.count("ulimit -f 32768"), 2)
         body = workflow.split("        id: inspection\n", 1)[1].split("      - name:", 1)[0]
-        query = body[body.index("clean /usr/bin/xcodebuild -showBuildSettings"):body.index("\n          settings_status=$?")]
-        expected = r'''clean /usr/bin/xcodebuild -showBuildSettings -json \
+        query = body[body.index("clean /usr/bin/xcodebuild build-for-testing -showBuildSettings"):body.index("\n          settings_status=$?")]
+        expected = r'''clean /usr/bin/xcodebuild build-for-testing -showBuildSettings -json \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_UI_HOST_WORK/DerivedData" -disableAutomaticPackageResolution \

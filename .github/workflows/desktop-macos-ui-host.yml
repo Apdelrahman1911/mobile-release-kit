@@ -164,8 +164,10 @@ jobs:
             /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
               "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
           }
+          # This scheme has only a testing build entry. The informational
+          # option does not build; select the same action as the compiled target.
           set +e
-          clean /usr/bin/xcodebuild -showBuildSettings -json \
+          clean /usr/bin/xcodebuild build-for-testing -showBuildSettings -json \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_UI_HOST_WORK/DerivedData" -disableAutomaticPackageResolution \
