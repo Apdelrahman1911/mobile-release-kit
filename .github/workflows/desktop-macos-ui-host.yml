@@ -1,0 +1,290 @@
+name: Desktop Mac same-XCTRunner account diagnostic (no app launch)
+
+on:
+  push:
+    branches: [verify/desktop-macos-ui-host]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-ui-host-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  account-diagnostic:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-ui-host'
+    runs-on: macos-26
+    timeout-minutes: 12
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Admit only the exact disposable hosted Mac diagnostic
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-ui-host && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-ui-host.yml@$GITHUB_REF" ]]
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]]
+          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+      - name: Check out exact source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reserve private work and bind source and toolchain
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && -z "$(git status --porcelain=v1)" ]]
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-ui-host.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_UI_HOST_WORK=%s\n' "$root" >> "$GITHUB_ENV"
+          /bin/mkdir -m 700 "$root/tmp" "$root/evidence"
+          printf '%s\n' "$GITHUB_SHA" > "$root/evidence/source-commit.txt"
+          git rev-parse 'HEAD^{tree}' > "$root/evidence/source-tree.txt"
+          printf '%s/%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$root/evidence/run-attempt.txt"
+          /usr/bin/stat -f '%d:%i:%u' "$root" > "$root/original-directory.txt"
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$root/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
+          }
+          clean /usr/bin/xcodebuild -version > "$root/evidence/xcode-version.txt"
+          clean /usr/bin/xcrun --sdk macosx --show-sdk-path > "$root/evidence/sdk-path.txt"
+          clean /usr/bin/xcrun --sdk macosx --show-sdk-version > "$root/evidence/sdk-version.txt"
+          clean /usr/bin/xcrun --sdk macosx --show-sdk-build-version > "$root/evidence/sdk-build.txt"
+      - name: Build only the unchanged external XCTest target
+        id: build
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 32768
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
+          }
+          set +e
+          clean /usr/bin/xcodebuild build-for-testing \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_UI_HOST_WORK/DerivedData" -jobs 2 \
+            -disableAutomaticPackageResolution COMPILER_INDEX_STORE_ENABLE=NO \
+            > "$MRK_UI_HOST_WORK/build.log" 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/build.status"
+          /usr/bin/tail -c 65536 "$MRK_UI_HOST_WORK/build.log" > "$MRK_UI_HOST_WORK/evidence/build.tail.txt"
+          exit "$status"
+      - name: Inspect generated runner settings and signed entitlement booleans without executing it
+        id: inspection
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 32768
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
+          }
+          set +e
+          clean /usr/bin/xcodebuild -showBuildSettings -json \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_UI_HOST_WORK/DerivedData" -disableAutomaticPackageResolution \
+            COMPILER_INDEX_STORE_ENABLE=NO > "$MRK_UI_HOST_WORK/settings.json" 2> "$MRK_UI_HOST_WORK/settings.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/settings.status"
+          [[ "$status" == 0 ]]
+          runner="$MRK_UI_HOST_WORK/DerivedData/Build/Products/Debug/MRKNormalAppUITests-Runner.app"
+          test_bundle="$runner/Contents/PlugIns/MRKNormalAppUITests.xctest"
+          for kind in runner test-bundle; do
+            bundle="$runner"
+            if [[ "$kind" == test-bundle ]]; then bundle="$test_bundle"; fi
+            [[ -d "$bundle" && ! -L "$bundle" ]]
+            set +e
+            clean /usr/bin/codesign --display --entitlements :- "$bundle" \
+              > "$MRK_UI_HOST_WORK/$kind.entitlements.plist" 2> "$MRK_UI_HOST_WORK/$kind.codesign.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/$kind-codesign.status"
+            [[ "$status" == 0 ]]
+          done
+          clean /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_INSPECT'
+          import json, os, pathlib, plistlib, stat, sys
+          root = pathlib.Path(sys.argv[1])
+          def read(name, limit):
+              path = root / name
+              identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or not 0 <= before.st_size <= limit:
+                      raise ValueError("unexpected task-owned diagnostic file")
+                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                  if len(data) != before.st_size or identity(os.fstat(fd)) != identity(before) or identity(path.lstat()) != identity(before):
+                      raise ValueError("diagnostic changed during read")
+                  return data
+              finally: os.close(fd)
+          rows = json.loads(read("settings.json", 1048576))
+          selected = [r["buildSettings"] for r in rows if r.get("target") == "MRKNormalAppUITests"]
+          if len(selected) != 1: raise ValueError("expected exactly one XCTest target")
+          fields = ("ARCHS", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "ENABLE_APP_SANDBOX", "ENABLE_HARDENED_RUNTIME",
+                    "CODE_SIGN_ENTITLEMENTS", "CODE_SIGN_IDENTITY", "CODE_SIGN_STYLE", "PRODUCT_BUNDLE_IDENTIFIER", "TEST_HOST")
+          settings = {key: selected[0].get(key) for key in fields}
+          if any(v is not None and (type(v) is not str or len(v) > 512) for v in settings.values()):
+              raise ValueError("unexpected selected setting shape")
+          signed = {}
+          for kind in ("runner", "test-bundle"):
+              raw = read(kind + ".entitlements.plist", 65536)
+              entitlements = plistlib.loads(raw) if raw.strip() else {}
+              if type(entitlements) is not dict: raise ValueError("entitlements are not a dictionary")
+              facts = {key: entitlements.get(key) for key in ("com.apple.security.app-sandbox", "com.apple.security.get-task-allow")}
+              if any(v is not None and type(v) is not bool for v in facts.values()):
+                  raise ValueError("unexpected entitlement type")
+              signed[kind] = {"hasEntitlements": bool(raw.strip()), "booleans": facts}
+          result = {"schemaVersion": 1, "scope": "same-XCTRunner-read-only-inspection", "resolvedSettings": settings,
+                    "signedEntitlements": signed, "productQualified": False}
+          with (root / "evidence/inspection.json").open("x") as stream:
+              json.dump(result, stream, sort_keys=True); stream.write("\n")
+          PY_INSPECT
+      - name: Run exactly one same-XCTRunner admission test without launching the app
+        id: native_test
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 32768
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
+            TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            /usr/bin/xcodebuild test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_UI_HOST_WORK/DerivedData" -resultBundlePath "$MRK_UI_HOST_WORK/test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testHostedAccountAdmissionOnly \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60 \
+            -disableAutomaticPackageResolution > "$MRK_UI_HOST_WORK/test.log" 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/test.status"
+          /usr/bin/tail -c 65536 "$MRK_UI_HOST_WORK/test.log" > "$MRK_UI_HOST_WORK/evidence/test.tail.txt"
+          printf 'returned=true\n' >> "$GITHUB_OUTPUT"
+          exit "$status"
+      - name: Preserve exact original counts and closed diagnostics even for a failed guard
+        id: summary
+        if: always() && !cancelled() && steps.native_test.outputs.returned == 'true'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
+          }
+          set +e
+          clean /usr/bin/xcrun xcresulttool get test-results summary --path "$MRK_UI_HOST_WORK/test.xcresult" --compact \
+            > "$MRK_UI_HOST_WORK/summary.json" 2> "$MRK_UI_HOST_WORK/summary.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/summary.status"
+          [[ "$status" == 0 ]]
+          clean /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_SUMMARY'
+          import json, os, pathlib, re, stat, sys
+          root = pathlib.Path(sys.argv[1])
+          def read(name, limit):
+              path = root / name
+              identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or not 0 <= before.st_size <= limit:
+                      raise ValueError("unexpected task-owned result file")
+                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                  if len(data) != before.st_size or identity(os.fstat(fd)) != identity(before) or identity(path.lstat()) != identity(before):
+                      raise ValueError("result changed during read")
+                  return data
+              finally: os.close(fd)
+          summary = json.loads(read("summary.json", 262144))
+          counts = {key: summary.get(key) for key in ("totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures")}
+          if any(type(v) is not int for v in counts.values()) or counts["totalTestCount"] != 1 or counts["skippedTests"] != 0 or counts["expectedFailures"] != 0:
+              raise ValueError("expected exactly one non-skipped diagnostic")
+          if (counts["passedTests"], counts["failedTests"]) not in ((1, 0), (0, 1)):
+              raise ValueError("unexpected diagnostic test outcome")
+          log = read("test.log", 16777216).decode("utf-8", "strict")
+          facts = re.findall(r"^MRK_MACOS_UI_HOST_FACTS=os=\d+\.\d+\.\d+;nonroot=(?:true|false);sameUid=(?:true|false);sameGid=(?:true|false);runnerName=(?:true|false);fixedHome=(?:true|false)$", log, re.M)
+          env_facts = re.findall(r"^MRK_MACOS_UI_HOST_ENV_FACTS=homeIsRunner=(?:true|false);userIsRunner=(?:true|false);lognameIsRunner=(?:true|false);fixedHomePresent=(?:true|false);versionCompatPresent=(?:true|false)$", log, re.M)
+          if len(facts) != 1 or len(env_facts) != 1: raise ValueError("missing or repeated closed native observations")
+          statuses = {key: int(read("evidence/" + key + ".status", 16)) for key in ("build", "settings", "runner-codesign", "test-bundle-codesign", "test", "summary")}
+          passed = counts["passedTests"] == 1 and all(v == 0 for v in statuses.values())
+          result = {"schemaVersion": 1, "scope": "HOST_ADMISSION_DIAGNOSTIC_ONLY", "platform": "macOS26-arm64",
+                    "harnessSourceCommit": read("evidence/source-commit.txt", 41).decode().strip(),
+                    "sourceTree": read("evidence/source-tree.txt", 41).decode().strip(),
+                    "workflow": ".github/workflows/desktop-macos-ui-host.yml",
+                    "runAttempt": read("evidence/run-attempt.txt", 64).decode().strip(), "testCounts": counts,
+                    "originalCommandStatuses": statuses, "facts": facts, "environmentFacts": env_facts,
+                    "hostAdmission": "passed" if passed else "failed", "applicationLaunched": False, "productQualified": False}
+          with (root / "evidence/result.json").open("x") as stream:
+              json.dump(result, stream, sort_keys=True); stream.write("\n")
+          print(json.dumps(result, sort_keys=True))
+          if not passed: raise SystemExit(1)
+          PY_SUMMARY
+      - name: Retain only bounded synthetic diagnostics, never raw xcresult attachments
+        id: upload
+        if: always() && steps.work.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-ui-host-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/evidence/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retire only returned successful diagnostic compiler output
+        if: always() && steps.summary.outcome == 'success' && steps.upload.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Uncertain/failed execution instead receives fresh hosted-job disposal.
+          # Never stop system test services, another application or shared workers.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_UI_HOST_WORK/tmp/" "DEVELOPER_DIR=$DEVELOPER_DIR" \
+            /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_CLEAN'
+          import os, pathlib, shutil, stat, sys
+          root = pathlib.Path(sys.argv[1]); current = root.lstat()
+          original = (root / "original-directory.txt").read_text().strip()
+          if (root.parent != pathlib.Path("/Users/runner/work/_temp") or not root.name.startswith("mrk-macos-ui-host.")
+                  or not stat.S_ISDIR(current.st_mode) or current.st_uid != os.getuid() or os.getuid() == 0
+                  or original != f"{current.st_dev}:{current.st_ino}:{current.st_uid}" or not shutil.rmtree.avoids_symlink_attacks):
+              raise ValueError("original task-directory cleanup refused")
+          for name in ("DerivedData", "test.xcresult", "tmp"):
+              path = root / name; item = path.lstat()
+              if not stat.S_ISDIR(item.st_mode) or item.st_uid != os.getuid() or item.st_dev != current.st_dev:
+                  raise ValueError("owned compiler-output cleanup refused")
+              shutil.rmtree(path)
+          PY_CLEAN

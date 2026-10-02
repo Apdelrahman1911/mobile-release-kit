@@ -58,27 +58,54 @@ final class NormalAppUITests: XCTestCase {
         return sheet
     }
 
-    @MainActor
-    func testLaunchCancelAndQuit() throws {
-        continueAfterFailure = false
-        // XCTest rounds to whole minutes; this is an actual 60-second setting,
-        // not a claimed exact 90-second setting that silently becomes 120.
-        executionTimeAllowance = 60
+    @MainActor private func admitHostedAccount() throws {
         let context = ProcessInfo.processInfo.environment
         try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
                     "this scenario is not admitted on a shared or personal desktop")
-        try require(getuid() != 0 && getuid() == geteuid() && getgid() == getegid(),
+        let nonroot = getuid() != 0
+        let sameUid = getuid() == geteuid()
+        let sameGid = getgid() == getegid()
+        try require(nonroot && sameUid && sameGid,
                     "the ordinary application must run as the original nonroot account")
-        try require(ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 26
-                    && NSUserName() == "runner" && NSHomeDirectory() == "/Users/runner",
-                    "unsupported hosted platform/account")
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let runnerName = NSUserName() == "runner"
+        let fixedHome = NSHomeDirectory() == "/Users/runner"
+        // Closed diagnostics only: never raw account/home/environment contents.
+        print("MRK_MACOS_UI_HOST_FACTS=os=\(version.majorVersion).\(version.minorVersion).\(version.patchVersion);nonroot=\(nonroot);sameUid=\(sameUid);sameGid=\(sameGid);runnerName=\(runnerName);fixedHome=\(fixedHome)")
+        let envHome = context["HOME"] == "/Users/runner"
+        let envUser = context["USER"] == "runner"
+        let envLogname = context["LOGNAME"] == "runner"
+        let fixedHomePresent = context["CFFIXED_USER_HOME"] != nil
+        let versionCompatPresent = context["SYSTEM_VERSION_COMPAT"] != nil
+        print("MRK_MACOS_UI_HOST_ENV_FACTS=homeIsRunner=\(envHome);userIsRunner=\(envUser);lognameIsRunner=\(envLogname);fixedHomePresent=\(fixedHomePresent);versionCompatPresent=\(versionCompatPresent)")
+        try require(version.majorVersion == 26, "unsupported hosted OS major")
+        try require(runnerName, "unsupported hosted Foundation account name")
+        try require(fixedHome, "unsupported hosted Foundation home")
         let applicationSource = context["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? ""
         let harnessSource = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""
         let hexadecimal = CharacterSet(charactersIn: "0123456789abcdef")
         try require(applicationSource.utf8.count == 40 && applicationSource.unicodeScalars.allSatisfy(hexadecimal.contains)
                     && applicationSource == harnessSource,
                     "this same-build scenario needs exact application and harness source bindings")
+    }
 
+    // SAME generated XCTRunner and account admission, but never constructs or
+    // launches the product, a fixture, a credential operation or another process.
+    @MainActor
+    func testHostedAccountAdmissionOnly() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 60
+        try admitHostedAccount()
+        print("MRK_MACOS_UI_HOST_ADMISSION=accepted;applicationLaunched=false;productQualified=false")
+    }
+
+    @MainActor
+    func testLaunchCancelAndQuit() throws {
+        continueAfterFailure = false
+        // XCTest rounds to whole minutes; this is an actual 60-second setting,
+        // not a claimed exact 90-second setting that silently becomes 120.
+        executionTimeAllowance = 60
+        try admitHostedAccount()
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
         try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop"
@@ -725,21 +752,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {
-        let context = ProcessInfo.processInfo.environment
-        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
-                    "this scenario is not admitted on a shared or personal desktop")
-        try require(getuid() != 0 && getuid() == geteuid() && getgid() == getegid(),
-                    "the ordinary application must run as the original nonroot account")
-        try require(ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 26
-                    && NSUserName() == "runner" && NSHomeDirectory() == "/Users/runner",
-                    "unsupported hosted platform/account")
-        let applicationSource = context["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? ""
-        let harnessSource = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""
-        let hexadecimal = CharacterSet(charactersIn: "0123456789abcdef")
-        try require(applicationSource.utf8.count == 40 && applicationSource.unicodeScalars.allSatisfy(hexadecimal.contains)
-                    && applicationSource == harnessSource,
-                    "this same-build scenario needs exact application and harness source bindings")
-
+        try admitHostedAccount()
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
         try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop"

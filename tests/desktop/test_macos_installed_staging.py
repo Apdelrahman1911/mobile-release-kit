@@ -1884,6 +1884,45 @@ class MacNormalPreviewData(unittest.TestCase):
                     TOOL.preview_command(args)
                 output.assert_not_called()
 
+    def test_same_xctrunner_diagnostic_keeps_account_policy_and_cannot_launch_product(self):
+        root = Path(__file__).absolute().parents[2]
+        workflow = (root / ".github/workflows/desktop-macos-ui-host.yml").read_text()
+        swift = (root / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        project = (root / "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj/project.pbxproj").read_text()
+        self.assertIn("branches: [verify/desktop-macos-ui-host]", workflow)
+        for required in ("runs-on: macos-26", "contents: read", "persist-credentials: false",
+                         '"$RUNNER_ENVIRONMENT" == github-hosted', '"$RUNNER_ARCH" == ARM64',
+                         '"$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA"', "-project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj",
+                         "-configuration Debug -destination 'platform=macOS,arch=arm64'", "/usr/bin/env -i",
+                         "-parallel-testing-enabled NO", "-maximum-test-execution-time-allowance 60",
+                         "--display --entitlements :-", '"productQualified": False',
+                         'counts["totalTestCount"] != 1', 'counts["skippedTests"] != 0',
+                         "exit \"$status\"", "!cancelled() && steps.native_test.outputs.returned == 'true'"):
+            self.assertIn(required, workflow)
+        self.assertEqual(workflow.count("-only-testing:"), 1)
+        self.assertIn("-only-testing:MRKNormalAppUITests/NormalAppUITests/testHostedAccountAdmissionOnly", workflow)
+        for forbidden in ("testLaunchCancelAndQuit", "testProject", "cargo ", "npm ", "installer ",
+                          "continue-on-error:", "-retry-tests-on-failure", "-test-iterations", "workflow_dispatch:",
+                          "tccutil", "killall", "pkill", "sudo "):
+            self.assertNotIn(forbidden, workflow)
+        self.assertIn("ENABLE_APP_SANDBOX = NO;", project)  # Existing policy, not a new workaround.
+        admission = swift.split("private func admitHostedAccount() throws {", 1)[1].split("// SAME generated", 1)[0]
+        for required in ('context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64"',
+                         "require(nonroot && sameUid && sameGid", "version.majorVersion == 26",
+                         'NSUserName() == "runner"', 'NSHomeDirectory() == "/Users/runner"',
+                         "applicationSource.utf8.count == 40", "applicationSource == harnessSource",
+                         "require(runnerName,", "require(fixedHome,", "MRK_MACOS_UI_HOST_FACTS="):
+            self.assertIn(required, admission)
+        diagnostic = swift.split("func testHostedAccountAdmissionOnly() throws {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("try admitHostedAccount()", diagnostic)
+        for forbidden in ("XCUIApplication", "LocalFixture", "launchForJourney", "launchedApplication =", "app.launch", "URL("):
+            self.assertNotIn(forbidden, diagnostic)
+        # Both ordinary journeys retain the same shared guard before app construction.
+        self.assertEqual(swift.count("try admitHostedAccount()"), 3)
+        for name in ("func testLaunchCancelAndQuit() throws {", "private func launchForJourney() throws"):
+            body = swift.split(name, 1)[1]
+            self.assertLess(body.index("try admitHostedAccount()"), body.index("XCUIApplication(url:"))
+
     def test_preview_route_targets_only_unrelated_groups_and_retains_package_gates(self):
         root = Path(__file__).absolute().parents[2]
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
