@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed hosted startup diagnosis of the real release helper; never a runner UI.
+"""Fixed hosted startup-policy checks of the real release helper; never a runner UI.
 
 Only the native main loads the existing owner. Imports/tests are DATA-only.
 No helper request, credential, environment value or child output is exported.
@@ -26,7 +26,7 @@ HELPER = "vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
 TIMEOUT = 10
 OUTPUT_LIMIT = 4096
 FILE_LIMIT = 32 * 1024 * 1024
-CATEGORIES = {64: "bad-argc", 65: "cf-name-only", 66: "other-nonempty-environment", 1: "no-startup-category"}
+CATEGORIES = {64: "bad-argc", 65: "cf-encoding-refused", 66: "other-nonempty-environment", 1: "no-startup-refusal"}
 
 
 class Refused(Exception):
@@ -48,13 +48,16 @@ class Case:
 
 def cases(uid):
     need(type(uid) is int and 0 < uid <= 0xFFFFFFFF, "account")
-    # A deliberately synthetic value, never inherited or published. A name
-    # match reports no framework provenance or authenticated environment.
+    # Deliberately synthetic values, never inherited or published. The malformed
+    # case keeps the UID correct so the historical framework getter need not
+    # replace a foreign-UID preference before main. Native results, not that
+    # history, establish today's compatibility; no case authenticates a caller.
     return (
         Case("bad-argc", ("mrk-startup-fixture",), {}, (64,)),
-        Case("known-name", (), {"__CF_USER_TEXT_ENCODING": f"0x{uid:X}:0:0"}, (65,)),
+        Case("canonical-cf", (), {"__CF_USER_TEXT_ENCODING": f"0x{uid:X}:0:0"}, (1,)),
+        Case("malformed-cf", (), {"__CF_USER_TEXT_ENCODING": f"0x{uid:X}:not-an-encoding"}, (65,)),
         Case("other-name", (), {"MRK_STARTUP_DIAGNOSTIC": "synthetic"}, (66,)),
-        Case("empty-parent-env", (), {}, (1, 64, 65, 66)),
+        Case("empty-parent-env", (), {}, (1,)),
     )
 
 
@@ -272,10 +275,10 @@ def main():
     label = str(error) if type(error) is Refused else "adapter-or-owner-error" if error else None
     if label is not None and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", label) is None:
         label = "adapter-error"
-    passed = error is None and not state.failed and closed and len(state.rows) == 4
+    passed = error is None and not state.failed and closed and len(state.rows) == 5
     # A settled mismatch is still failed, but it can safely retire owned build
     # scratch. Any exception/unknown keeps those originals for host teardown.
-    safe_cleanup = error is None and closed and not state.inflight and len(state.rows) == 4
+    safe_cleanup = error is None and closed and not state.inflight and len(state.rows) == 5
     value = {"schemaVersion": 1, "type": "macos-vault-helper-startup", "status": "passed" if passed else "failed",
              "workflow": WORKFLOW, "platform": "macos-26-arm64", "toolchain": "1.98.1",
              "profile": "release-aarch64-apple-darwin",

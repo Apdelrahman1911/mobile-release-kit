@@ -267,10 +267,12 @@ impl Work{
 /// add_only/lookup remain unsupported even though it shares the DATA types.
 pub fn main_entry()->i32{
     std::panic::set_hook(Box::new(|_|{})); // Before any credentials; no panic output.
-    // Split failures only. std still snapshots/copies argv and environment;
-    // iterator limits are not native allocation bounds or origin proof.
+    // Keep empty parent-supplied env; only the bounded same-real-UID CF
+    // preference is admitted after framework startup, never arbitrary entries.
+    // std snapshots/copies remain unbounded by iterator/value limits; neither
+    // this parsed-input hygiene nor a CF name establishes origin or auth.
     if let Some(code)=startup::refusal(std::env::args_os().take(2).count(),
-        ||std::env::vars_os().map(|(name,_)|name)){return code;}
+        ||std::env::vars_os(), ||unistd::getuid().as_raw()){return code;}
     let mut work=Work::new();
     let ran=match catch_unwind(AssertUnwindSafe(||work.run())){
         Ok(value)=>value,Err(payload)=>{work.panic[0]=Some(payload);fail();false}

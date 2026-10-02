@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -10,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "desktop/tools/macos_vault_helper_startup.py"
@@ -20,7 +23,7 @@ spec.loader.exec_module(adapter)
 
 
 class StartupAdapterData(unittest.TestCase):
-    def exercise(self, codes=(64, 65, 66, 65), *, failure=None):
+    def exercise(self, codes=(64, 1, 65, 66, 1), *, failure=None):
         calls, checks = [], []
         state = adapter.Run()
 
@@ -37,10 +40,13 @@ class StartupAdapterData(unittest.TestCase):
     def test_cases_are_fixed_explicit_environment_and_no_request_input(self):
         result, calls, checks, state = self.exercise()
         self.assertTrue(result)
-        self.assertEqual(len(checks), 8)
-        self.assertEqual([call[0] for call in calls], [["/inert/helper", "mrk-startup-fixture"]] + [["/inert/helper"]] * 3)
+        self.assertEqual(len(checks), 10)
+        self.assertEqual([call[0] for call in calls], [["/inert/helper", "mrk-startup-fixture"]] + [["/inert/helper"]] * 4)
         self.assertEqual([call[1]["environ"] for call in calls], [{}, {"__CF_USER_TEXT_ENCODING": "0x1F5:0:0"},
-                                                                {"MRK_STARTUP_DIAGNOSTIC": "synthetic"}, {}])
+                            {"__CF_USER_TEXT_ENCODING": "0x1F5:not-an-encoding"},
+                            {"MRK_STARTUP_DIAGNOSTIC": "synthetic"}, {}])
+        self.assertEqual([row["case"] for row in state.rows],
+                         ["bad-argc", "canonical-cf", "malformed-cf", "other-name", "empty-parent-env"])
         for _, keywords in calls:
             self.assertEqual(set(keywords), {"environ", "cwd", "timeout", "capture", "text", "output_limit"})
             self.assertEqual((keywords["timeout"], keywords["capture"], keywords["text"], keywords["output_limit"]),
@@ -48,24 +54,29 @@ class StartupAdapterData(unittest.TestCase):
         self.assertFalse(state.inflight)
         self.assertTrue(all(row["originalCallSettled"] and row["outputEmpty"] for row in state.rows))
 
-    def test_baseline_is_observation_not_an_assumed_cf_diagnosis(self):
-        for code in (1, 64, 65, 66):
-            result, _, _, state = self.exercise((64, 65, 66, code))
-            self.assertTrue(result)
-            self.assertEqual(state.rows[-1]["exitCode"], code)
-        result, calls, _, state = self.exercise((64, 65, 66, 99))
-        self.assertFalse(result)
-        self.assertEqual(len(calls), 4)
-        self.assertEqual(state.rows[-1]["category"], "unexpected-code")
+    def test_canonical_and_empty_parent_cases_require_eof_not_a_startup_refusal(self):
+        result, _, _, state = self.exercise()
+        self.assertTrue(result)
+        self.assertEqual([row["exitCode"] for row in state.rows], [64, 1, 65, 66, 1])
+        self.assertEqual(state.rows[2]["category"], "cf-encoding-refused")
+        for index in (1, 4):
+            for code in (64, 65, 66, 99):
+                codes = [64, 1, 65, 66, 1]
+                codes[index] = code
+                result, calls, _, state = self.exercise(codes)
+                self.assertFalse(result)
+                self.assertEqual(len(calls), 5)
+                self.assertFalse(state.rows[index]["matched"])
+                self.assertTrue(state.failed)
 
     def test_zero_stops_without_readback_later_case_or_cleanup_authority(self):
-        for stop_at in (0, 3):
+        for stop_at in (0, 4):
             state, calls, checks = adapter.Run(), [], []
 
             def fake_owner(argv, **kwargs):
                 index = len(calls)
                 calls.append(argv)
-                code = 0 if index == stop_at else (64, 65, 66, 1)[index]
+                code = 0 if index == stop_at else (64, 1, 65, 66, 1)[index]
                 return subprocess.CompletedProcess(argv, code, b"", b"")
 
             with self.assertRaisesRegex(adapter.Refused, "unexpected-success"):
@@ -77,10 +88,10 @@ class StartupAdapterData(unittest.TestCase):
             self.assertTrue(state.inflight)  # main cannot close originals or authorize cleanup.
 
     def test_settled_mismatch_continues_but_never_repairs_aggregate_failure(self):
-        result, calls, checks, state = self.exercise((64, 66, 66, 65))
+        result, calls, checks, state = self.exercise((64, 66, 65, 66, 1))
         self.assertFalse(result)
-        self.assertEqual((len(calls), len(checks)), (4, 8))
-        self.assertEqual([row["matched"] for row in state.rows], [True, False, True, True])
+        self.assertEqual((len(calls), len(checks)), (5, 10))
+        self.assertEqual([row["matched"] for row in state.rows], [True, False, True, True, True])
         self.assertTrue(state.failed)
 
     def test_owner_exception_preserves_identity_and_stops_without_readback(self):
@@ -171,6 +182,56 @@ class StartupAdapterData(unittest.TestCase):
             finally:
                 originals.close()
 
+    def test_main_requires_the_complete_five_case_roster_for_pass_or_cleanup(self):
+        # DATA-only main integration: no owner, helper or filesystem is used.
+        binding = {"source": "a" * 40, "tree": "b" * 40, "workflowSource": "a" * 40,
+                   "runId": "1", "runAttempt": "1"}
+        for row_count, failed in ((4, False), (5, False), (6, False), (5, True)):
+            output, closes = [], []
+
+            class DataOriginals:
+                digest, bytes = "c" * 64, 1
+
+                def __init__(self, *args):
+                    pass
+
+                def open(self, *args):
+                    pass
+
+                def check(self):
+                    raise AssertionError("no original descriptor in this DATA test")
+
+                def close(self):
+                    closes.append(True)
+
+            def no_owner(*args, **kwargs):
+                raise AssertionError("no owner execution in this DATA test")
+
+            def data_cases(_owner, _helper, _cwd, _uid, _check, state):
+                state.rows = [{"case": "synthetic-row"} for _ in range(row_count)]
+                state.failed = failed
+
+            def data_write(fd, payload):
+                self.assertEqual(fd, 1)
+                output.append(payload)
+                return len(payload)
+
+            with patch.object(adapter, "admit", return_value=(Path("/inert/work"),
+                              dict(binding, workDirectory=[]), {})), \
+                 patch.object(adapter, "Originals", DataOriginals), \
+                 patch.object(adapter, "load_owner", return_value=SimpleNamespace(run_owned=no_owner)), \
+                 patch.object(adapter, "run_cases", side_effect=data_cases), \
+                 patch.object(adapter.os, "write", side_effect=data_write):
+                result = adapter.main()
+            self.assertEqual(closes, [True])
+            self.assertEqual(len(output), 1)
+            report = json.loads(output[0])
+            expected_pass = row_count == 5 and not failed
+            self.assertEqual(result, 0 if expected_pass else 1)
+            self.assertEqual(report["status"], "passed" if expected_pass else "failed")
+            self.assertEqual(report["cleanupAuthorized"], row_count == 5)
+            self.assertFalse(report["keychainQualified"])
+
     def test_workflow_and_source_keep_actual_graph_and_existing_owner_only(self):
         workflow = (ROOT / ".github/workflows/desktop-macos-vault-startup.yml").read_text()
         for action, pin in re.findall(r"uses:\s*([^@\s]+)@([0-9a-f]+)", workflow):
@@ -194,7 +255,7 @@ class StartupAdapterData(unittest.TestCase):
         helper = (ROOT / "desktop/native/macos-installed-native/src/vault_helper.rs").read_text()
         self.assertEqual(helper.count("std::env::vars_os()"), 1)
         self.assertIn("startup::refusal(std::env::args_os().take(2).count(),", helper)
-        self.assertIn("||std::env::vars_os().map(|(name,_)|name)", helper)
+        self.assertIn("||std::env::vars_os(), ||unistd::getuid().as_raw()", helper)
         self.assertLess(helper.index("if let Some(code)=startup::refusal"), helper.index("let mut work=Work::new()"))
 
 
