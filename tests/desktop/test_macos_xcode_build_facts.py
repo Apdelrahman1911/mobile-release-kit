@@ -23,6 +23,19 @@ def fixture(**changes):
     return (json.dumps({"bug_type": "309", "name": "XCBBuildService"}) + "\n" + json.dumps(body)).encode()
 
 
+def retained_build():
+    begin = M.timestamp("2026-10-02T12:00:00Z")
+    before = {"schemaVersion": 1, "scope": M.SCOPE, "originalDirectory": "1:2:501",
+              "beginEpochSeconds": begin, "productQualified": False, "serviceLimitsObserved": False}
+    after = {"schemaVersion": 1, "scope": M.SCOPE, "beginEpochSeconds": begin, "endEpochSeconds": begin + 2,
+             "originalBuildExit": 65, "productQualified": False, "serviceLimitsObserved": False,
+             "processOwnershipOrFinalityEstablished": False}
+    return {"source-commit.txt": b"a" * 40 + b"\n", "source-tree.txt": b"b" * 40 + b"\n",
+            "run-attempt.txt": b"31/1\n", "build.status": b"65\n",
+            "build-infrastructure-before.json": json.dumps(before).encode(),
+            "build-infrastructure-after.json": json.dumps(after).encode()}
+
+
 class XcodeBuildFactsDataTests(unittest.TestCase):
     def parse(self, raw):
         begin = M.timestamp("2026-10-02T12:00:00Z")
@@ -48,6 +61,52 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
         self.assertFalse(value["captureInBuildInterval"] or value["launchInBuildInterval"])
         for path in ("/Applications/Xcode.app/Contents-other/service", "/Applications/Xcode.app/Contents/../service", "PRIVATE", None):
             self.assertFalse(self.parse(fixture(procPath=path))["sameToolchainContents"])
+
+    def test_nonfatal_and_simulated_are_explicit_not_inferred_from_a_signal(self):
+        missing = self.parse(fixture())
+        self.assertIsNone(missing["isNonFatal"])
+        self.assertIsNone(missing["isSimulated"])
+        for nonfatal, simulated in ((True, False), (False, True)):
+            value = self.parse(fixture(isNonFatal=nonfatal, isSimulated=simulated))
+            self.assertEqual((value["isNonFatal"], value["isSimulated"]), (nonfatal, simulated))
+            self.assertFalse(value["processOwnershipEstablished"])
+        for key in ("isNonFatal", "isSimulated"):
+            for value in (1, "PRIVATE-MUST-NOT-LEAVE", None):
+                with self.assertRaises(ValueError):
+                    self.parse(fixture(**{key: value}))
+
+    def test_late_report_keeps_original_failed_result_and_capture_interval(self):
+        original = M.late_build_inputs(retained_build(), "1:2:501", "a" * 40, "b" * 40, "31/1")
+        self.assertEqual(original["originalBuildExit"], 65)
+        self.assertEqual(original["endEpochSeconds"] - original["beginEpochSeconds"], 2)
+        self.assertFalse(original["productQualified"] or original["processOwnershipOrFinalityEstablished"])
+        # Publication twenty seconds later does not make a later crash match.
+        for capture, matches in (("2026-10-02T12:00:01Z", True), ("2026-10-02T12:00:05Z", False)):
+            facts = M.closed_crash_facts(fixture(captureTime=capture), original["beginEpochSeconds"],
+                                        original["endEpochSeconds"], "/Applications/Xcode.app/Contents")
+            self.assertEqual(facts["captureInBuildInterval"], matches)
+
+    def test_late_observation_refuses_changed_bindings_success_or_conflicting_originals(self):
+        for name, replacement in (("source-commit.txt", b"c" * 40 + b"\n"),
+                                  ("source-tree.txt", b"c" * 40 + b"\n"),
+                                  ("run-attempt.txt", b"31/2\n"), ("build.status", b"0\n")):
+            raw = retained_build()
+            raw[name] = replacement
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                M.late_build_inputs(raw, "1:2:501", "a" * 40, "b" * 40, "31/1")
+        for key, value in (("originalBuildExit", 0), ("originalBuildExit", True),
+                           ("beginEpochSeconds", 0), ("endEpochSeconds", float("nan")),
+                           ("productQualified", True), ("schemaVersion", True)):
+            raw = retained_build()
+            after = json.loads(raw["build-infrastructure-after.json"])
+            after[key] = value
+            raw["build-infrastructure-after.json"] = json.dumps(after).encode()
+            if key == "originalBuildExit" and type(value) is int:
+                raw["build.status"] = (str(value) + "\n").encode()
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                M.late_build_inputs(raw, "1:2:501", "a" * 40, "b" * 40, "31/1")
+        with self.assertRaises(ValueError):
+            M.late_build_inputs(retained_build(), "1:3:501", "a" * 40, "b" * 40, "31/1")
 
     def test_malformed_ambiguous_or_oversize_reports_are_unavailable(self):
         for raw in (b"", fixture() + b"{}", fixture()[:-1], b"x" * (M.MAX_REPORT_BYTES + 1),

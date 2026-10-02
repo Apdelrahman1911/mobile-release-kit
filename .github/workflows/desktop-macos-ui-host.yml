@@ -93,6 +93,9 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/build.status"
+          if [[ "$status" != 0 ]]; then
+            printf 'original_failed=true\n' >> "$GITHUB_OUTPUT"
+          fi
           /usr/bin/tail -c 65536 "$MRK_UI_HOST_WORK/build.log" > "$MRK_UI_HOST_WORK/evidence/build.tail.txt"
           set +e
           clean /usr/bin/python3 -I -S -B desktop/tools/macos_xcode_build_facts.py after "$MRK_UI_HOST_WORK" "$status"
@@ -102,6 +105,28 @@ jobs:
           # Diagnostics never hide the original build failure or convert it to success.
           [[ "$status" == 0 ]] || exit "$status"
           [[ "$before_status" == 0 && "$after_status" == 0 ]] || exit 1
+          exit "$status"
+      - name: Observe one delayed closed crash-report snapshot after the original failed build
+        id: late_build_diagnostic
+        if: always() && !cancelled() && steps.work.outcome == 'success' && steps.build.outcome == 'failure' && steps.build.outputs.original_failed == 'true'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && -z "$(git status --porcelain=v1)" ]]
+          tree=$(git rev-parse 'HEAD^{tree}')
+          # Separate observation only: never overwrite before/after/status or
+          # change the failed compiler result, command, environment or limit.
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
+            /usr/bin/python3 -I -S -B desktop/tools/macos_xcode_build_facts.py late "$MRK_UI_HOST_WORK" \
+            "$GITHUB_SHA" "$tree" "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/build-diagnostic-late.status"
           exit "$status"
       - name: Inspect generated runner settings and signed entitlement booleans without executing it
         id: inspection
