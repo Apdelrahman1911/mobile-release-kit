@@ -81,6 +81,9 @@ jobs:
               "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
           }
           set +e
+          clean /usr/bin/python3 -I -S -B desktop/tools/macos_xcode_build_facts.py before "$MRK_UI_HOST_WORK"
+          before_status=$?
+          printf '%s\n' "$before_status" > "$MRK_UI_HOST_WORK/evidence/build-diagnostic-before.status"
           clean /usr/bin/xcodebuild build-for-testing \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
@@ -91,6 +94,14 @@ jobs:
           set -e
           printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/build.status"
           /usr/bin/tail -c 65536 "$MRK_UI_HOST_WORK/build.log" > "$MRK_UI_HOST_WORK/evidence/build.tail.txt"
+          set +e
+          clean /usr/bin/python3 -I -S -B desktop/tools/macos_xcode_build_facts.py after "$MRK_UI_HOST_WORK" "$status"
+          after_status=$?
+          set -e
+          printf '%s\n' "$after_status" > "$MRK_UI_HOST_WORK/evidence/build-diagnostic-after.status"
+          # Diagnostics never hide the original build failure or convert it to success.
+          [[ "$status" == 0 ]] || exit "$status"
+          [[ "$before_status" == 0 && "$after_status" == 0 ]] || exit 1
           exit "$status"
       - name: Inspect generated runner settings and signed entitlement booleans without executing it
         id: inspection
