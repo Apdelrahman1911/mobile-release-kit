@@ -718,6 +718,21 @@ jobs:
                       or any(ord(character) < 32 or ord(character) == 127 for character in row[5])):
                   raise ValueError("one local disk device and bounded mountpoint required")
               return {"device": row[0], "reportedMountPoint": row[5]}
+          def filesystem_volume(raw, selected):
+              # diskutil's plist names positive volume writability explicitly.
+              # A missing key is not a writable volume, and media writability
+              # alone is not sufficient for a writable mounted filesystem.
+              volume = plistlib.loads(raw)
+              if not isinstance(volume, dict):
+                  raise ValueError("one diskutil volume dictionary required")
+              mount = volume.get("MountPoint")
+              if (volume.get("FilesystemType") != "apfs" or volume.get("GlobalPermissionsEnabled") is not True
+                      or volume.get("WritableVolume") is not True
+                      or not isinstance(mount, str) or not mount.startswith("/") or len(mount.encode("utf-8")) > 4096
+                      or any(ord(character) < 32 or ord(character) == 127 for character in mount)
+                      or volume.get("DeviceIdentifier") != selected["device"][5:]):
+                  raise ValueError("actual writable ownership-aware local APFS volume required")
+              return {key: volume[key] for key in ("FilesystemType", "GlobalPermissionsEnabled", "WritableVolume", "MountPoint", "DeviceIdentifier")}
           try:
               # A closed five-command batch, not a configurable execution helper.
               for phase in ("mount", "apfs", "build", "rust", "python"):
@@ -805,17 +820,14 @@ jobs:
                   if phase == "mount":
                       receipt["filesystemSelection"] = filesystem_device(raw)
                   elif phase == "apfs":
-                      volume = plistlib.loads(raw)
-                      mount = volume.get("MountPoint")
-                      if (volume.get("FilesystemType") != "apfs" or volume.get("GlobalPermissionsEnabled") is not True
-                              or volume.get("VolumeReadOnly") is not False or not isinstance(mount, str) or not mount.startswith("/")
-                              or volume.get("DeviceIdentifier") != receipt["filesystemSelection"]["device"][5:]
-                              or os.stat(mount).st_dev != temporary_before[0]
+                      volume = filesystem_volume(raw, receipt["filesystemSelection"])
+                      mount = volume["MountPoint"]
+                      if (os.stat(mount).st_dev != temporary_before[0]
                               or os.stat(receipt["filesystemSelection"]["reportedMountPoint"]).st_dev != temporary_before[0]
                               or sig(os.fstat(temporary_fd))[:5] != temporary_before[:5]
                               or sig(os.fstat(temporary_fd)) != sig(os.lstat(temporary))):
                           raise ValueError("actual writable ownership-aware local APFS required")
-                      receipt["actualFilesystem"] = {key: volume[key] for key in ("FilesystemType", "GlobalPermissionsEnabled", "VolumeReadOnly", "MountPoint", "DeviceIdentifier")}
+                      receipt["actualFilesystem"] = volume
                   elif phase == "build":
                       rows = [json.loads(line) for line in raw.splitlines()]
                       if [row.get("success") for row in rows if row.get("reason") == "build-finished"] != [True]:
