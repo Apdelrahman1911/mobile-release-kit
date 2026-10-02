@@ -44,6 +44,9 @@ ROLES = {
     "main": ("mobile-release-kit-desktop", "src/main.rs", ["custom-protocol", "desktop-shell"]),
     "publisher": ("mrk-runtime-publish", "src/bin/runtime_publish.rs", ["ubuntu-runtime-publisher"]),
 }
+SHLIBDEPS_LOADER = "ld-linux-x86-64.so.2"
+SHLIBDEPS_LOADER_PATH = U.SHELL_LIBRARY_ROOT + "/" + SHLIBDEPS_LOADER
+SHLIBDEPS_LOADER_SYMBOLS = "/var/lib/dpkg/info/libc6:amd64.symbols"
 NPM_REQUIRED = {
     "@tauri-apps/api": "2.11.1", "react": "19.3.0",
     "react-dom": "19.3.0", "scheduler": "0.28.0",
@@ -895,8 +898,10 @@ def dependency_inputs(source, work, compiler, runtime, policy, command, *, suppo
     # dpkg-shlibdeps supplies actual distro symbols/shlibs relations, not guessed
     # ABI versions. The only excluded dependency is proven shipped OpenSSL self.
     dependencies = []
+    loader_input = shlibdeps_loader_input(context, libraries)
     for role in ("gui-publisher", "private-runtime"):
-        dependencies.extend(query_shlibdeps(work, role, initial, policy["manifestSha256"], command))
+        dependencies.extend(query_shlibdeps(work, role, initial, policy["manifestSha256"], command,
+                                           loader_input=loader_input))
     # Dynamically selected modules and WebKit children are real package needs.
     # Use the observed build-host version as a conservative minimum, never a
     # guessed earlier ABI floor. Exact build versions remain in the evidence;
@@ -913,7 +918,35 @@ def dependency_inputs(source, work, compiler, runtime, policy, command, *, suppo
 
 
 
-def query_shlibdeps(work, role, initial, manifest_sha, command):
+def shlibdeps_loader_input(context, libraries):
+    """Bind the actual loader's original distro symbols, not a guessed ABI floor."""
+    row = libraries.get(SHLIBDEPS_LOADER)
+    D.need(type(row) is dict and row.get("domain") == "os" and row.get("package") == "libc6:amd64"
+           and type(row.get("elf")) is dict and row["elf"].get("soname") == SHLIBDEPS_LOADER
+           and type(row.get("file")) is dict, "Shlibdeps loader supplier differs")
+    loader = context["files"].get(row["file"].get("selectedPath"))
+    supplier = context["packages"].get("libc6:amd64")
+    D.need(type(loader) is dict and loader["path"] == SHLIBDEPS_LOADER_PATH
+           and D.same(U.shell_file_projection(loader), row["file"])
+           and type(supplier) is dict and supplier.get("binaryPackage") == "libc6:amd64"
+           and supplier.get("architecture") == "amd64", "Shlibdeps loader lacks its original package binding")
+    result = context["run"]("loader-symbols", [
+        "/usr/bin/dpkg-query", "--control-path", "libc6:amd64", "symbols"], limit=4096)
+    D.need(result.stderr == b"" and result.stdout == (SHLIBDEPS_LOADER_SYMBOLS + "\n").encode("ascii"),
+           "Shlibdeps loader symbols control path differs")
+    symbols = context["host"](SHLIBDEPS_LOADER_SYMBOLS, 2 << 20)
+    D.need(symbols["path"] == symbols["selectedPath"] == SHLIBDEPS_LOADER_SYMBOLS,
+           "Shlibdeps loader symbols original differs")
+    raw = D.read(Path(symbols["path"]), 2 << 20)
+    D.need(len(raw) == symbols["size"] and sha(raw) == symbols["sha256"]
+           and raw.splitlines().count((SHLIBDEPS_LOADER + " libc6 #MINVER#").encode("ascii")) == 1,
+           "Shlibdeps original loader symbols changed or lack the loader")
+    # context.host retains this original metadata in the existing complete OS
+    # postchecks. The whole symbols file is copied unchanged; no local override.
+    return {"loader": loader, "symbols": symbols}
+
+
+def query_shlibdeps(work, role, initial, manifest_sha, command, *, loader_input):
     """Query independent, already-admitted ELF copies in their package layout.
 
     dpkg discovers package roots through an uppercase DEBIAN directory. Passing
@@ -921,6 +954,8 @@ def query_shlibdeps(work, role, initial, manifest_sha, command):
     These are query DATA only; no payload is executed or package installed.
     """
     D.need(role in ("gui-publisher", "private-runtime"), "Unknown shlibdeps role")
+    D.need(type(loader_input) is dict and set(loader_input) == {"loader", "symbols"},
+           "Shlibdeps loader query inputs differ")
     D.sha(manifest_sha)
     D.directory(work)
     query_root = work / ("shlibdeps-" + role)
@@ -938,20 +973,35 @@ def query_shlibdeps(work, role, initial, manifest_sha, command):
         members = [("private:" + name, prefix + "/" + name,
                     0o555 if name == "python/bin/python3" else 0o444) for name in sorted(U.RUNTIME_ELF)]
     bindings, paths = [], []
-    for name, destination, mode in members:
-        admitted = initial[name]["file"]
+
+    def stage_input(admitted, target, mode, *, os_input=False):
         expected = {key: admitted[key] for key in ("path", "size", "sha256")}
-        original = Path(admitted["selectedPath"])
+        original = Path(admitted["path"] if os_input else admitted["selectedPath"])
         before = D.state(original.lstat())
+        if os_input:
+            D.need(before == tuple(admitted["identity"]), "Shlibdeps OS input changed before staging")
         D.bound(original, expected)
         D.need(D.state(original.lstat()) == before, "Shlibdeps original changed before staging")
-        target = package / destination
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         D.copy(original, target, expected, mode)
         copied = D.state(target.lstat())
         D.need(copied[:2] != before[:2], "Shlibdeps query copy aliases its original")
         bindings.extend(((original, expected, before), (target, expected, copied)))
+
+    for name, destination, mode in members:
+        target = package / destination
+        stage_input(initial[name]["file"], target, mode)
         paths.append(target)
+
+    # A query-only package root makes the genuine canonical loader available
+    # before dpkg searches all host aliases (including Ubuntu's /lib64 diversion).
+    # Keep it outside debian/*: its full symbols must not become a global fallback.
+    # It is neither analyzed as an -e input nor included in the shipped package.
+    provider = query_root / "loader-provider"
+    provider.mkdir(mode=0o700)
+    (provider / "DEBIAN").mkdir(mode=0o700)
+    stage_input(loader_input["loader"], provider / SHLIBDEPS_LOADER_PATH.lstrip("/"), 0o444, os_input=True)
+    stage_input(loader_input["symbols"], provider / "DEBIAN/symbols", 0o444, os_input=True)
 
     def unchanged():
         for path, expected, original in bindings:
@@ -959,7 +1009,7 @@ def query_shlibdeps(work, role, initial, manifest_sha, command):
             D.bound(path, expected)
             D.need(D.state(path.lstat()) == original, "Shlibdeps input changed during postcheck")
 
-    argv = ["/usr/bin/dpkg-shlibdeps", "-O"]
+    argv = ["/usr/bin/dpkg-shlibdeps", "-O", "-S" + str(provider)]
     if role == "private-runtime":
         D.write(debian / "shlibs.local", b"libssl 3 mobile-release-kit-desktop\nlibcrypto 3 mobile-release-kit-desktop\n")
         argv += ["-l" + str(package / prefix / "python/lib"), "-xmobile-release-kit-desktop"]

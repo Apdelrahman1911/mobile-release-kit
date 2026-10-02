@@ -369,11 +369,75 @@ class CompilerAndDependencyContracts(unittest.TestCase):
             A.package_dependencies(packages, set(), ["unbound-provider (>= 1)"])
 
 
+    def test_shlibdeps_loader_symbols_require_the_actual_bound_supplier_and_control_path(self):
+        raw = b"ld-linux-x86-64.so.2 libc6 #MINVER#\n __tls_get_addr@GLIBC_2.3 2.3\n"
+        def context():
+            loader = {**pin(A.SHLIBDEPS_LOADER_PATH, b"inert-loader-DATA"),
+                      "selectedPath": A.SHLIBDEPS_LOADER_PATH,
+                      "identity": [1, 2, stat.S_IFREG | 0o755, 0, 0, 1, 17, 0, 0]}
+            symbols = {**pin(A.SHLIBDEPS_LOADER_SYMBOLS, raw),
+                       "selectedPath": A.SHLIBDEPS_LOADER_SYMBOLS}
+            values = {"files": {A.SHLIBDEPS_LOADER_PATH: loader},
+                      "packages": {"libc6:amd64": {"binaryPackage": "libc6:amd64", "architecture": "amd64"}},
+                      "run": mock.Mock(return_value=SimpleNamespace(
+                          stdout=(A.SHLIBDEPS_LOADER_SYMBOLS + "\n").encode(), stderr=b""))}
+            def host(path, limit):
+                self.assertEqual((path, limit), (A.SHLIBDEPS_LOADER_SYMBOLS, 2 << 20))
+                values["files"][path] = symbols
+                return symbols
+            values["host"] = mock.Mock(side_effect=host)
+            libraries = {A.SHLIBDEPS_LOADER: {
+                "domain": "os", "package": "libc6:amd64", "elf": {"soname": A.SHLIBDEPS_LOADER},
+                "file": A.U.shell_file_projection(loader)}}
+            return values, libraries, loader, symbols
+
+        values, libraries, loader, symbols = context()
+        with mock.patch.object(A.D, "read", return_value=raw) as read:
+            self.assertEqual(A.shlibdeps_loader_input(values, libraries), {"loader": loader, "symbols": symbols})
+        read.assert_called_once_with(Path(A.SHLIBDEPS_LOADER_SYMBOLS), 2 << 20)
+        values["run"].assert_called_once_with("loader-symbols", [
+            "/usr/bin/dpkg-query", "--control-path", "libc6:amd64", "symbols"], limit=4096)
+        self.assertIs(values["files"][A.SHLIBDEPS_LOADER_SYMBOLS], symbols)
+
+        for mutation in ("supplier", "file-binding", "architecture", "control-path", "stderr",
+                         "symbols-path", "symbols-bytes", "missing-loader"):
+            with self.subTest(mutation=mutation):
+                values, libraries, loader, symbols = context()
+                observed = raw
+                if mutation == "supplier":
+                    libraries[A.SHLIBDEPS_LOADER]["package"] = "unrelated:amd64"
+                elif mutation == "file-binding":
+                    libraries[A.SHLIBDEPS_LOADER]["file"]["sha256"] = "0" * 64
+                elif mutation == "architecture":
+                    values["packages"]["libc6:amd64"]["architecture"] = "arm64"
+                elif mutation == "control-path":
+                    values["run"].return_value.stdout = b"/different/control/symbols\n"
+                elif mutation == "stderr":
+                    values["run"].return_value.stderr = b"unexpected control query diagnostic\n"
+                elif mutation == "symbols-path":
+                    symbols["path"] = "/different/control/symbols"
+                elif mutation == "symbols-bytes":
+                    observed = raw + b"changed\n"
+                elif mutation == "missing-loader":
+                    observed = b"libc.so.6 libc6 #MINVER#\n"
+                    symbols.update(pin(A.SHLIBDEPS_LOADER_SYMBOLS, observed))
+                with mock.patch.object(A.D, "read", return_value=observed):
+                    with self.assertRaises(ValueError):
+                        A.shlibdeps_loader_input(values, libraries)
+
     def test_clean_shlibdeps_stdout_does_not_hide_unresolved_symbol_warning(self):
         raw = b"shlibs:Depends=libc6 (>= 2.38)\n"
         self.assertEqual(A.shlibdeps_relations(raw, b""), ["libc6 (>= 2.38)"])
-        with self.assertRaises(ValueError):
-            A.shlibdeps_relations(raw, b"dpkg-shlibdeps: warning: symbol unresolved\n")
+        for stderr in (
+            b"dpkg-shlibdeps: warning: symbol unresolved\n",
+            b"dpkg-shlibdeps: warning: diversions involved - output may be incorrect\n"
+            b" diversion by libc6 from: /lib64/ld-linux-x86-64.so.2\n"
+            b"dpkg-shlibdeps: warning: diversions involved - output may be incorrect\n"
+            b" diversion by libc6 to: /lib64/ld-linux-x86-64.so.2.usr-is-merged\n",
+        ):
+            with self.subTest(stderr=stderr):
+                with self.assertRaises(ValueError):
+                    A.shlibdeps_relations(raw, stderr)
         with self.assertRaises(ValueError):
             A.shlibdeps_relations(raw + b"hidden second record\n", b"")
 
@@ -390,6 +454,19 @@ class CompilerAndDependencyContracts(unittest.TestCase):
                 original.write_bytes(body)
                 original.chmod(0o755 if not key.startswith("private:") else 0o644)
                 initial[key] = {"file": {**pin(name, body), "selectedPath": str(original)}}
+            def loader_inputs(name):
+                directory = root / ("os-inputs-" + name)
+                directory.mkdir()
+                inputs = {}
+                for role in ("loader", "symbols"):
+                    path = directory / role
+                    body = ("inert query-provider DATA: " + role).encode()
+                    path.write_bytes(body)
+                    path.chmod(0o644)
+                    inputs[role] = {**pin(str(path), body), "selectedPath": str(path),
+                                    "identity": list(A.D.state(path.lstat()))}
+                return inputs
+            actual_loader = loader_inputs("normal")
             work = root / "queries"
             work.mkdir()
             calls = []
@@ -400,16 +477,28 @@ class CompilerAndDependencyContracts(unittest.TestCase):
                 self.assertEqual(cwd, work / label)
                 self.assertTrue((package / "DEBIAN").is_dir())
                 self.assertTrue((cwd / "debian/control").is_file())
-                self.assertEqual((argv[:2], timeout, limit), (["/usr/bin/dpkg-shlibdeps", "-O"], 90, 128 << 10))
+                provider = cwd / "loader-provider"
+                self.assertEqual((argv[:3], timeout, limit),
+                                 (["/usr/bin/dpkg-shlibdeps", "-O", "-S" + str(provider)], 90, 128 << 10))
+                self.assertNotIn("debian", provider.relative_to(cwd).parts)
+                self.assertFalse((provider / "lib64").exists())
+                for key, relative in (("loader", A.SHLIBDEPS_LOADER_PATH.lstrip("/")),
+                                      ("symbols", "DEBIAN/symbols")):
+                    original, staged = Path(actual_loader[key]["path"]), provider / relative
+                    self.assertEqual(staged.read_bytes(), original.read_bytes())
+                    self.assertNotEqual(staged.stat().st_ino, original.stat().st_ino)
+                    self.assertEqual(staged.stat().st_nlink, 1)
+                    self.assertEqual(stat.S_IMODE(staged.stat().st_mode), 0o444)
+                    self.assertNotIn("-e" + str(staged), argv)
                 if role == "gui-publisher":
                     selected = [(key, A.S.BINARIES[A.ROLES[key][0]], 0o755) for key in ("main", "publisher")]
-                    self.assertFalse(any(arg.startswith(("-l", "-x")) for arg in argv[2:]))
+                    self.assertFalse(any(arg.startswith(("-l", "-x")) for arg in argv[3:]))
                     self.assertFalse((cwd / "debian/shlibs.local").exists())
                 else:
                     prefix = "usr/lib/mobile-release-kit/runtime-input/" + A.TARGET + "/" + manifest
                     selected = [("private:" + name, prefix + "/" + name,
                                  0o555 if name == "python/bin/python3" else 0o444) for name in sorted(A.U.RUNTIME_ELF)]
-                    self.assertEqual(argv[2:4], ["-l" + str(package / prefix / "python/lib"),
+                    self.assertEqual(argv[3:5], ["-l" + str(package / prefix / "python/lib"),
                                                 "-xmobile-release-kit-desktop"])
                     self.assertEqual((cwd / "debian/shlibs.local").read_bytes(),
                                      b"libssl 3 mobile-release-kit-desktop\nlibcrypto 3 mobile-release-kit-desktop\n")
@@ -425,19 +514,22 @@ class CompilerAndDependencyContracts(unittest.TestCase):
                     self.assertEqual(stat.S_IMODE(staged.stat().st_mode), mode)
                 return SimpleNamespace(stdout=raw, stderr=b"")
             for role in ("gui-publisher", "private-runtime"):
-                self.assertEqual(A.query_shlibdeps(work, role, initial, manifest, command), ["libc6 (>= 2.38)"])
+                self.assertEqual(A.query_shlibdeps(work, role, initial, manifest, command,
+                                                   loader_input=actual_loader), ["libc6 (>= 2.38)"])
             self.assertEqual(calls, ["gui-publisher", "private-runtime"])
             marker = work / "shlibdeps-gui-publisher/keep"
             marker.write_bytes(b"existing work must survive")
             with self.assertRaises(FileExistsError):
-                A.query_shlibdeps(work, "gui-publisher", initial, manifest, mock.Mock())
+                A.query_shlibdeps(work, "gui-publisher", initial, manifest, mock.Mock(), loader_input=actual_loader)
             self.assertEqual(marker.read_bytes(), b"existing work must survive")
 
-            for drift in ("copy-bytes", "copy-mode", "original-mode", "original-command-failure", "stderr", "stdout"):
+            for drift in ("copy-bytes", "copy-mode", "original-mode", "original-command-failure", "stderr", "stdout",
+                          "loader-copy-bytes", "symbols-copy-mode", "loader-original-mode", "symbols-original-bytes"):
                 with self.subTest(drift=drift):
                     query = root / drift
                     query.mkdir()
                     original = Path(initial["main"]["file"]["selectedPath"])
+                    provider_inputs = loader_inputs(drift)
                     failure = RuntimeError("original command failure")
                     def changed(_label, argv, **_options):
                         copied = Path(next(arg[2:] for arg in argv if arg.startswith("-e")))
@@ -450,10 +542,21 @@ class CompilerAndDependencyContracts(unittest.TestCase):
                         elif drift == "original-command-failure":
                             copied.chmod(0o644)
                             raise failure
+                        elif drift == "loader-copy-bytes":
+                            target = _options["cwd"] / "loader-provider" / A.SHLIBDEPS_LOADER_PATH.lstrip("/")
+                            target.chmod(0o644)
+                            target.write_bytes(b"changed provider copy")
+                            target.chmod(0o444)
+                        elif drift == "symbols-copy-mode":
+                            (_options["cwd"] / "loader-provider/DEBIAN/symbols").chmod(0o644)
+                        elif drift == "loader-original-mode":
+                            Path(provider_inputs["loader"]["path"]).chmod(0o640)
+                        elif drift == "symbols-original-bytes":
+                            Path(provider_inputs["symbols"]["path"]).write_bytes(b"changed original symbols")
                         return SimpleNamespace(stdout=raw if drift != "stdout" else b"not a dependency record\n",
                             stderr=b"dpkg-shlibdeps: warning: symbol unresolved\n" if drift == "stderr" else b"")
                     with self.assertRaises(RuntimeError if drift == "original-command-failure" else ValueError) as caught:
-                        A.query_shlibdeps(query, "gui-publisher", initial, manifest, changed)
+                        A.query_shlibdeps(query, "gui-publisher", initial, manifest, changed, loader_input=provider_inputs)
                     if drift == "original-command-failure":
                         self.assertIs(caught.exception, failure)
                     elif drift in ("stdout", "stderr"):
@@ -461,6 +564,15 @@ class CompilerAndDependencyContracts(unittest.TestCase):
                         self.assertEqual(O.public_shlibdeps_failure(diagnostic), diagnostic)
                         self.assertEqual(diagnostic["reason"], "invalid-stdout" if drift == "stdout" else "nonempty-stderr")
                     original.chmod(0o755)
+
+            early = root / "early-os-drift"
+            early.mkdir()
+            provider_inputs = loader_inputs("early-os-drift")
+            Path(provider_inputs["loader"]["path"]).chmod(0o640)
+            uncalled = mock.Mock()
+            with self.assertRaisesRegex(ValueError, "OS input changed before staging"):
+                A.query_shlibdeps(early, "gui-publisher", initial, manifest, uncalled, loader_input=provider_inputs)
+            uncalled.assert_not_called()
 
 
 class HostedDistroDataContracts(unittest.TestCase):
