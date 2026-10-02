@@ -934,7 +934,7 @@ mod observation {
         selection_outside_entry_role_mask: u32, selection_fixture_label_mask: u32,
         selection_expected_label_relations: u32, selection_expected_label_role_mask: u32,
         selection_sample: u32, selection_calls_before: u32, selection_cf_before: u32, selection_wait: u32,
-        selection_pending: [[u32; 16]; 7] }
+        selection_pending: [[u32; 16]; 7], selection_projection_diagnostic: [u32; 20] }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct RecheckWire { known: u32, error: u32, prompt: u32, proof: IdentityProofWire }
@@ -1169,13 +1169,108 @@ mod observation {
             expected_label_role_mask: w.selection_expected_label_role_mask,
         }))
     }
+    /// One bounded read-only extension of the first completed zero-match census.
+    /// Fixed masks only; VERSION in outside_field_mask may be the name field.
+    /// Complete describes only this finite probe, not an atomic directory view.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SelectionProjectionDiagnostic {
+        pub version: u32, pub state: &'static str, pub normal_fixture_mask: u32,
+        pub calls_before: u32, pub calls_after: u32, pub cf_before: u32, pub cf_after: u32,
+        pub eligible_frontiers: u32, pub attempted_frontiers: u32, pub added_nodes: u32, pub max_depth: u32,
+        pub alternate_value_mask: u32, pub frontier_label_mask: u32, pub outside_field_mask: u32,
+        pub alternate_role_mask: u32, pub frontier_role_mask: u32, pub unavailable: u32,
+        pub omissions: u32, pub duplicates: u32, pub non_string_values: u32,
+    }
+    fn selection_projection_diagnostic_return(w: OpenWire) -> Option<Option<SelectionProjectionDiagnostic>> {
+        let row = w.selection_projection_diagnostic;
+        if row == [0; 20] { return Some(None); } // Unentered is indeterminate, never a negative observation.
+        let [version, state, normal_fixture_mask, calls_before, calls_after, cf_before, cf_after,
+            eligible_frontiers, attempted_frontiers, added_nodes, max_depth, alternate_value_mask,
+            frontier_label_mask, outside_field_mask, alternate_role_mask, frontier_role_mask,
+            unavailable, omissions, duplicates, non_string_values] = row;
+        if version != 1 || !(1..=3).contains(&state) || w.selection_mode != 1
+            || !(1..=SELECT_SAMPLES).contains(&w.selection_sample)
+            || calls_before == 0 || calls_before > calls_after || calls_after > SELECT_CALLS
+            || cf_before == 0 || cf_before > cf_after || cf_after > SELECT_CF
+            || calls_after - calls_before > 1024 || cf_after - cf_before > 512
+            || eligible_frontiers >= SELECT_NODES || attempted_frontiers > eligible_frontiers || attempted_frontiers > 64
+            || added_nodes > 64 || max_depth > 8 || (added_nodes == 0) != (max_depth == 0)
+            || normal_fixture_mask > 31 || alternate_value_mask > 31 || frontier_label_mask > 31 || outside_field_mask > 31
+            || alternate_role_mask & !0x7004 != 0 || frontier_role_mask & !0x1f004 != 0
+            || (alternate_value_mask == 0) != (alternate_role_mask == 0)
+            || (frontier_label_mask == 0) != (frontier_role_mask == 0)
+            || unavailable & !63 != 0 || omissions & !1023 != 0
+            || duplicates > 32 * (attempted_frontiers + added_nodes)
+            || non_string_values > cf_after - cf_before
+            || 2 * added_nodes > cf_after - cf_before
+            || alternate_value_mask.count_ones() > cf_after - cf_before
+            || outside_field_mask.count_ones() > cf_after - cf_before
+            || alternate_role_mask.count_ones() > cf_after - cf_before
+            || frontier_label_mask.count_ones() > 2 * added_nodes || frontier_role_mask.count_ones() > added_nodes
+            || added_nodes != 0 && attempted_frontiers == 0 { return None; }
+        let (first_nodes, first_mask, first_calls, first_cf) = if w.selection_sample == 1 {
+            if w.selection_checks != 1 || w.selection_matches != 0 || w.selection_flags != 0
+                || w.selection_summary_version != 2 { return None; }
+            (w.selection_nodes, w.selection_fixture_label_mask, w.calls, w.owned)
+        } else {
+            let first = w.selection_pending[0];
+            if first[0] != 1 || first[1] != 0 || first[3] != 0 || first[11..16] != [1, 0, 0, 0, 2]
+                || state == 1 { return None; }
+            (first[5], first[9], first[2], first[4])
+        };
+        if !(1..SELECT_NODES).contains(&first_nodes) || first_mask != normal_fixture_mask
+            || calls_after != first_calls || cf_after != first_cf || eligible_frontiers > first_nodes
+            || first_nodes + 1 + added_nodes > SELECT_NODES
+            || state == 1 && w.error == 0
+            || state == 2 && (unavailable != 0 || omissions != 0 || non_string_values != 0
+                || attempted_frontiers != eligible_frontiers)
+            || state == 3 && unavailable == 0 && omissions == 0 && non_string_values == 0
+                && attempted_frontiers == eligible_frontiers && w.error == 0 { return None; }
+        Some(Some(SelectionProjectionDiagnostic { version,
+            state: *["unentered", "entered", "returned-complete", "returned-incomplete"].get(state as usize)?,
+            normal_fixture_mask, calls_before, calls_after, cf_before, cf_after,
+            eligible_frontiers, attempted_frontiers, added_nodes, max_depth, alternate_value_mask,
+            frontier_label_mask, outside_field_mask, alternate_role_mask, frontier_role_mask,
+            unavailable, omissions, duplicates, non_string_values }))
+    }
+    fn projection_diagnostic_data_check() -> bool {
+        // Inert wire DATA only. This does not simulate AX timing, return or readiness.
+        if selection_projection_diagnostic_return(OpenWire::default()) != Some(None) { return false; }
+        let row = [1, 2, 24, 205, 221, 110, 120, 1, 1, 1, 4, 0, 2, 1, 0, 1 << 15, 0, 0, 0, 0];
+        let wire = OpenWire { selection_mode: 1, selection_sample: 1, selection_checks: 1,
+            selection_summary_version: 2, selection_nodes: 12, selection_fixture_label_mask: 24,
+            calls: 221, owned: 120, selection_projection_diagnostic: row, ..OpenWire::default() };
+        let Some(Some(data)) = selection_projection_diagnostic_return(wire) else { return false; };
+        if data.state != "returned-complete" || data.frontier_label_mask != 2 || data.outside_field_mask != 1 { return false; }
+        for index in 0..20 {
+            let mut bad = wire; bad.selection_projection_diagnostic[index] = u32::MAX;
+            if selection_projection_diagnostic_return(bad).is_some() { return false; }
+        }
+        for (state, unavailable, error, valid) in [(1, 0, 14, true), (1, 0, 0, false),
+            (2, 32, 0, false), (3, 32, 0, true), (3, 0, 0, false), (3, 0, 8, true)] {
+            let mut current = wire; current.error = error;
+            current.selection_projection_diagnostic[1] = state;
+            current.selection_projection_diagnostic[16] = unavailable;
+            if selection_projection_diagnostic_return(current).is_some() != valid { return false; }
+        }
+        let mut later = wire; later.selection_sample = 2; later.selection_checks = 0; later.selection_nodes = 1;
+        later.calls = 240; later.owned = 132;
+        later.selection_pending[0] = [1, 0, 221, 0, 120, 12, 4, 16, 2, 24, 0, 1, 0, 0, 0, 2];
+        if selection_projection_diagnostic_return(later) != Some(Some(data)) { return false; }
+        later.selection_pending[0][9] = 1;
+        if selection_projection_diagnostic_return(later).is_some() { return false; }
+        let mut outside_only = wire;
+        for index in [9, 10, 12, 15] { outside_only.selection_projection_diagnostic[index] = 0; }
+        selection_projection_diagnostic_return(outside_only)
+            .is_some_and(|r| r.is_some_and(|r| r.frontier_label_mask == 0 && r.outside_field_mask == 1))
+    }
     /// The actual selecting operation's closed DATA; neither labels nor file identity.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct VersionSourceSelection {
         pub checks: [bool; 5], pub attempted: bool, pub returned: bool, pub selected: Option<bool>,
         pub nodes: u32, pub matches: u32, pub attribute: &'static str, pub last_role: &'static str, pub depth: u32,
         pub limit: Option<SelectionLimit>, pub projection_summary: Option<SelectionProjectionSummary>,
-        pub content_readiness: Option<ContentReadiness>,
+        pub content_readiness: Option<ContentReadiness>, pub projection_diagnostic: Option<SelectionProjectionDiagnostic>,
     }
     impl VersionSourceSelection {
         pub fn matched(self) -> bool {
@@ -1255,7 +1350,7 @@ mod observation {
             last_role: *["not-read", "Sheet", "Group", "SplitGroup", "Button", "Browser", "Table", "Outline", "ScrollArea", "opaque",
                 "Column", "List", "Row", "Cell", "Image", "StaticText", "TextField"].get(w.selection_last_role as usize)?,
             depth: w.selection_depth, limit: selection_limit_return(w)?, projection_summary: selection_projection_summary_return(w)?,
-            content_readiness: content_readiness_return(w)?,
+            content_readiness: content_readiness_return(w)?, projection_diagnostic: selection_projection_diagnostic_return(w)?,
         })
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1293,7 +1388,7 @@ mod observation {
             || w.selection_outside_entry_role_mask != 0 || w.selection_fixture_label_mask != 0
             || w.selection_expected_label_relations != 0 || w.selection_expected_label_role_mask != 0
             || w.selection_sample != 0 || w.selection_calls_before != 0 || w.selection_cf_before != 0 || w.selection_wait != 0
-            || w.selection_pending != [[0; 16]; 7]) { return None; }
+            || w.selection_pending != [[0; 16]; 7] || w.selection_projection_diagnostic != [0; 20]) { return None; }
         // Only the already-bound original mode chooses the whole-call envelope.
         let (calls, slots) = prompt_limits(selecting);
         // Control completion bits form a prefix over the eligible projection,
@@ -1843,9 +1938,10 @@ mod observation {
         // Inert decoder/timeout DATA only: never manufacture a native return.
         let ordinary_return = |w, r: [Option<OpenRecheckReturn>; 2], known|
             open_return(w, [None, r[0], r[1]], known, false);
-        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 624
+        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 704
             || std::mem::offset_of!(OpenWire, selection_sample) != 160
             || std::mem::offset_of!(OpenWire, selection_pending) != 176
+            || std::mem::offset_of!(OpenWire, selection_projection_diagnostic) != 624
             || std::mem::offset_of!(OpenWire, selection_limit_observed) != 96
             || std::mem::offset_of!(OpenWire, ax_failure_operation) != 104
             || std::mem::offset_of!(OpenWire, ax_failure_attribute) != 108
@@ -1862,7 +1958,8 @@ mod observation {
             || std::mem::offset_of!(OpenWire, selection_expected_label_relations) != 152
             || std::mem::offset_of!(OpenWire, selection_expected_label_role_mask) != 156
             || std::mem::size_of::<RecheckWire>() != 48 || std::mem::size_of::<OpenTimeout>() != 16
-            || !completion_data_check() || !selection_data_check() || !ax_failure_data_check() { return false; }
+            || !completion_data_check() || !selection_data_check() || !ax_failure_data_check()
+            || !projection_diagnostic_data_check() { return false; }
         let p = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
             children: 2, originals: 2, site: 14, error: 0 };
         let rw = RecheckWire { known: 1, error: 0, prompt: 1, proof: p };

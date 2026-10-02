@@ -1031,6 +1031,7 @@ def expected_result(binding, case):
                         "attempted": True, "returned": True, "selected": True, "nodes": 12, "matches": 1,
                         "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4, "limit": None,
                         "contentReadiness": {"sample": 1, "callsBefore": 0, "cfBefore": 0, "wait": 0, "pending": []},
+                        "projectionDiagnostic": None,
                         "projectionSummary": {"tableRoles": 1, "outlineRoles": 0, "listRoles": 0, "entryRoots": 2,
                             "titlePresent": 0, "titleAbsent": 2, "valuePresent": 2, "outsideEntryRoleMask": 0,
                             "fixtureLabelMask": 1, "expectedLabelRelations": 1, "expectedLabelRoleMask": 1 << 15}}}
@@ -1593,11 +1594,69 @@ def _accessibility_content_readiness(value, selection, button, site, error):
     return value
 
 
+def _accessibility_selection_projection_diagnostic(value, selection, button, error):
+    """First-zero finite projection DATA, not atomic presentation or selection authority."""
+    label = "accessibility-selection-data"
+    if value is None:
+        return None  # Unentered is indeterminate, never proof that a label was absent.
+    fields = {"version", "state", "normalFixtureMask", "callsBefore", "callsAfter", "cfBefore", "cfAfter",
+              "eligibleFrontiers", "attemptedFrontiers", "addedNodes", "maxDepth", "alternateValueMask",
+              "frontierLabelMask", "outsideFieldMask", "alternateRoleMask", "frontierRoleMask",
+              "unavailable", "omissions", "duplicates", "nonStringValues"}
+    need(type(value) is dict and set(value) == fields, label)
+    need(all(type(value[key]) is int and 0 <= value[key] < (1 << 32) for key in fields - {"state"}), label)
+    need(value["version"] == 1 and type(value["state"]) is str
+         and value["state"] in ("entered", "returned-complete", "returned-incomplete"), label)
+    calls, slots = value["callsAfter"] - value["callsBefore"], value["cfAfter"] - value["cfBefore"]
+    eligible, attempted, added = value["eligibleFrontiers"], value["attemptedFrontiers"], value["addedNodes"]
+    need(0 < value["callsBefore"] <= value["callsAfter"] <= ACCESSIBILITY_SELECT_CALLS and 0 <= calls <= 1024
+         and 0 < value["cfBefore"] <= value["cfAfter"] <= ACCESSIBILITY_SELECT_CF and 0 <= slots <= 512
+         and eligible < ACCESSIBILITY_SELECT_NODES and attempted <= min(64, eligible) and added <= 64
+         and value["maxDepth"] <= 8 and (added == 0) == (value["maxDepth"] == 0), label)
+    for key, allowed in (("normalFixtureMask", 31), ("alternateValueMask", 31), ("frontierLabelMask", 31),
+                         ("outsideFieldMask", 31), ("alternateRoleMask", 0x7004), ("frontierRoleMask", 0x1f004),
+                         ("unavailable", 63), ("omissions", 1023)):
+        need(value[key] & ~allowed == 0, label)
+    need((value["alternateValueMask"] == 0) == (value["alternateRoleMask"] == 0)
+         and (value["frontierLabelMask"] == 0) == (value["frontierRoleMask"] == 0)
+         and value["duplicates"] <= 32 * (attempted + added) and value["nonStringValues"] <= slots
+         and 2 * added <= slots and (added == 0 or attempted > 0)
+         and value["alternateValueMask"].bit_count() <= slots and value["outsideFieldMask"].bit_count() <= slots
+         and value["alternateRoleMask"].bit_count() <= slots
+         and value["frontierLabelMask"].bit_count() <= 2 * added and value["frontierRoleMask"].bit_count() <= added, label)
+    content = selection["contentReadiness"]
+    need(content is not None, label)
+    if content["sample"] == 1:
+        need(selection["checks"] == dict(zip(ACCESSIBILITY_SELECTION_CHECKS, (True, False, False, False, False)))
+             and selection["matches"] == 0 and not selection["attempted"] and not selection["returned"]
+             and selection["selected"] is None and selection["projectionSummary"] is not None, label)
+        first_nodes, first_mask = selection["nodes"], selection["projectionSummary"]["fixtureLabelMask"]
+        first_calls, first_cf = button["calls"], button["cfSlots"]
+    else:
+        first = content["pending"][0]  # Already validated complete; never use the last partial sample.
+        first_nodes, first_mask, first_calls, first_cf = first[5], first[9], first[2], first[4]
+        need(value["state"] != "entered", label)
+    need(1 <= first_nodes < ACCESSIBILITY_SELECT_NODES and value["normalFixtureMask"] == first_mask
+         and value["callsAfter"] == first_calls and value["cfAfter"] == first_cf
+         and eligible <= first_nodes and first_nodes + 1 + added <= ACCESSIBILITY_SELECT_NODES, label)
+    incomplete = value["unavailable"] or value["omissions"] or value["nonStringValues"] or attempted != eligible
+    if value["state"] == "entered":
+        need(error not in (None, "none"), label)
+    elif value["state"] == "returned-complete":
+        need(not incomplete, label)
+    else:
+        need(incomplete or error not in (None, "none"), label)
+    # VERSION alone outside the entry grammar can be the prefilled name field.
+    # Even a new sibling route is non-atomic relative to the original census;
+    # compare later unchanged normal samples, never infer an action permit.
+    return value
+
+
 def _accessibility_selection(value, button, site, error, *, content=False):
     """Actual selector scalars, never a filename, URL, or substitute Open proof."""
     label = "accessibility-selection-data"
     need(type(value) is dict and set(value) == {"checks", "attempted", "returned", "selected",
-         "nodes", "matches", "attribute", "lastRole", "depth", "limit", "projectionSummary", *({"contentReadiness"} if content else set())}, label)
+         "nodes", "matches", "attribute", "lastRole", "depth", "limit", "projectionSummary", *({"contentReadiness", "projectionDiagnostic"} if content else set())}, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
          and all(type(v) is bool for v in checks.values()), label)
@@ -1623,6 +1682,8 @@ def _accessibility_selection(value, button, site, error, *, content=False):
         _accessibility_content_readiness(value["contentReadiness"], value, button, site, error)
     _accessibility_selection_limit(value["limit"], value, button, site, error)
     _accessibility_selection_projection_summary(value["projectionSummary"], value, site)
+    if content:
+        _accessibility_selection_projection_diagnostic(value["projectionDiagnostic"], value, button, error)
     return value
 
 

@@ -915,6 +915,13 @@ typedef struct {
     uint32_t ordinal, calls_before, calls_after, cf_before, cf_after, nodes, depth, role,
         entries, fixture_mask, relations, checks, matches, flags, error, wait;
 } MRKContentPending;
+// One diagnostic at the first completed zero-match census; never selection authority.
+typedef struct {
+    uint32_t version, state, normal_fixture_mask, calls_before, calls_after, cf_before, cf_after,
+        eligible_frontiers, attempted_frontiers, added_nodes, max_depth, alternate_value_mask,
+        frontier_label_mask, outside_field_mask, alternate_role_mask, frontier_role_mask,
+        unavailable, omissions, duplicates, non_string_values;
+} MRKProjectionDiagnostic;
 typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_examined, recheck_nodes_examined, owned, released;
     int32_t ax_error; uint32_t last_role, last_depth;
     uint32_t selection_mode, selection_checks, selection_flags, selection_nodes, selection_matches,
@@ -931,9 +938,12 @@ typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_exami
         selection_expected_label_role_mask;
     uint32_t selection_sample, selection_calls_before, selection_cf_before, selection_wait;
     MRKContentPending selection_pending[MRK_SELECT_PENDING];
+    MRKProjectionDiagnostic selection_projection_diagnostic;
 } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 624 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 704 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKProjectionDiagnostic) == 80 && offsetof(MRKOpenResult, selection_projection_diagnostic) == 624,
+    "fixed first-zero projection diagnostic ABI");
 _Static_assert(sizeof(MRKContentPending) == 64 && offsetof(MRKOpenResult, selection_sample) == 160
     && offsetof(MRKOpenResult, selection_pending) == 176, "fixed bounded content-readiness history ABI");
 _Static_assert(sizeof(CFIndex) == sizeof(int64_t) && offsetof(MRKOpenResult, selection_limit_observed) == 96,
@@ -1304,6 +1314,17 @@ typedef struct {
     CFStringRef label_attribute; // Public constant only; all objects are owned by the original CF ledger.
     uint32_t label_attribute_code; // The same public constant, not another observation.
 } MRKSelectionPass;
+enum { MRK_DIAG_FRONTIERS = 64, MRK_DIAG_NODES = 64, MRK_DIAG_CALLS = 1024, MRK_DIAG_CF = 512 };
+enum { MRK_DIAG_CHILD_COUNT = 1u, MRK_DIAG_CHILD_COPY = 2u, MRK_DIAG_ROLE = 4u,
+    MRK_DIAG_PARENT = 8u, MRK_DIAG_TITLE = 16u, MRK_DIAG_VALUE = 32u };
+enum { MRK_DIAG_OMIT_FRONTIERS = 1u, MRK_DIAG_OMIT_CHILDREN = 2u, MRK_DIAG_OMIT_NEW_NODES = 4u,
+    MRK_DIAG_OMIT_COMBINED_NODES = 8u, MRK_DIAG_OMIT_DEPTH = 16u, MRK_DIAG_OMIT_CALLS = 32u,
+    MRK_DIAG_OMIT_CF = 64u, MRK_DIAG_OMIT_EDGE = 128u, MRK_DIAG_OMIT_ROLE = 256u, MRK_DIAG_OMIT_LABEL = 512u };
+typedef struct {
+    // Borrowed only from the SAME original append-only CF ledger; no new owners.
+    AXUIElementRef nodes[MRK_DIAG_NODES], parents[MRK_DIAG_NODES];
+    unsigned depths[MRK_DIAG_NODES], roles[MRK_DIAG_NODES];
+} MRKProjectionScratch;
 typedef union { CFTypeRef value; CFArrayRef array; } MRKPromptOwned;
 typedef struct {
     AXUIElementRef nodes[MRK_CONTROL_NODES];
@@ -1317,6 +1338,7 @@ typedef struct {
     AXUIElementRef button; // Borrowed only from the first pass's retained original CFArray.
     BOOL cleanupKnown;
     MRKSelectionPass selection[MRK_SELECT_SAMPLES]; // Every sampled chain remains immutable and retained.
+    MRKProjectionScratch projection_diagnostic; // Separate DATA, never a candidate/label chain.
     unsigned selection_queued; // Same original loop's bounded queue, not another AX observation.
     CFArrayRef selection_attributes; // Borrowed from this original's registered CF slot.
     AXUIElementRef timeout_element; // Exact retained pointer, not CFEqual or proof authority.
@@ -1700,6 +1722,200 @@ static unsigned mrk_ax_selection_role(CFStringRef role) {
     if (CFEqual(role, kAXTextFieldRole)) return MRK_SELECT_FIELD;
     return mrk_ax_role(role);
 }
+// Diagnostic-only reads use the original timeout/admission and CF custody.
+// A credit refusal records an omitted probe, not fresh budget or an action permit.
+static BOOL mrk_ax_diag_stopped(MRKPrompt *s) {
+    return s->result.error || (s->result.selection_projection_diagnostic.omissions
+        & (MRK_DIAG_OMIT_CALLS | MRK_DIAG_OMIT_CF));
+}
+static BOOL mrk_ax_diag_credit(MRKPrompt *s, unsigned calls, unsigned slots) {
+    MRKProjectionDiagnostic *d = &s->result.selection_projection_diagnostic;
+    if (mrk_ax_diag_stopped(s)) return NO;
+    if (s->result.calls < d->calls_before || s->count < d->cf_before
+        || s->result.calls < s->result.selection_calls_before || s->count < s->result.selection_cf_before
+        || s->result.calls > MRK_SELECT_TOTAL_CALLS || s->count > MRK_SELECT_TOTAL_CF) {
+        s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
+    }
+    // Reserve the worst case, INCLUDING the guarded primitive's timeout setter.
+    // Also stop before exhausting shared credit; do not manufacture a selection
+    // limit at a completed census or relax the original sample/aggregate limits.
+    if (s->result.calls - d->calls_before > MRK_DIAG_CALLS - calls
+        || s->result.calls - s->result.selection_calls_before > MRK_SELECT_CALLS - calls
+        || s->result.calls > MRK_SELECT_TOTAL_CALLS - calls) d->omissions |= MRK_DIAG_OMIT_CALLS;
+    if (s->count - d->cf_before > MRK_DIAG_CF - slots
+        || s->count - s->result.selection_cf_before > MRK_SELECT_CF - slots
+        || s->count > MRK_SELECT_TOTAL_CF - slots) d->omissions |= MRK_DIAG_OMIT_CF;
+    return !mrk_ax_diag_stopped(s);
+}
+static CFTypeRef mrk_ax_diag_copy(MRKPrompt *s, AXUIElementRef node, CFStringRef attribute,
+    uint32_t attribute_code, uint32_t unavailable) {
+    if (!mrk_ax_diag_credit(s, 2, 1)) return NULL;
+    // Optional Title, Value, Role and Parent all use this documented primitive.
+    // Only NoValue/AttributeUnsupported with no object is absence. All other
+    // errors keep mrk_ax_copy's original fatal status and post-call admission.
+    CFTypeRef value = mrk_ax_copy(s, node, attribute, YES, attribute_code);
+    if (!value && !s->result.error) s->result.selection_projection_diagnostic.unavailable |= unavailable;
+    return value;
+}
+static BOOL mrk_ax_diag_label(MRKPrompt *s, AXUIElementRef node, unsigned role, CFStringRef attribute,
+    uint32_t attribute_code, uint32_t unavailable, uint32_t *mask, uint32_t *roles) {
+    CFTypeRef value = mrk_ax_diag_copy(s, node, attribute, attribute_code, unavailable);
+    if (!value) return !mrk_ax_diag_stopped(s);
+    MRKProjectionDiagnostic *d = &s->result.selection_projection_diagnostic;
+    if (CFGetTypeID(value) != CFStringGetTypeID()) {
+        if (attribute_code == MRK_AX_ATTR_VALUE) d->non_string_values++;
+        else d->omissions |= MRK_DIAG_OMIT_LABEL;
+        return YES; // Never format, traverse or coerce a non-string.
+    }
+    if (CFStringGetLength(value) > 512) { d->omissions |= MRK_DIAG_OMIT_LABEL; return YES; }
+    static const CFStringRef fixture_labels[] = {
+        CFSTR("VERSION"), CFSTR("link-input"), CFSTR("kind-input"), CFSTR("inputs"), CFSTR("version.properties")
+    };
+    for (unsigned i = 0; i < 5; ++i) {
+        if (CFEqual(value, fixture_labels[i])) {
+            *mask |= 1u << i;
+            if (roles) *roles |= 1u << role;
+        }
+    }
+    return YES;
+}
+static BOOL mrk_ax_diag_children(MRKPrompt *s, const MRKSelectionPass *p, unsigned original_count,
+    AXUIElementRef node, unsigned depth) {
+    MRKProjectionDiagnostic *d = &s->result.selection_projection_diagnostic;
+    MRKProjectionScratch *q = &s->projection_diagnostic;
+    if (!mrk_ax_diag_credit(s, 2, 0) || !mrk_ax_before(s, node)) return NO;
+    CFIndex expected = -1; s->result.calls++;
+    AXError status = AXUIElementGetAttributeValueCount(node, kAXChildrenAttribute, &expected);
+    BOOL absent = status == kAXErrorNoValue || status == kAXErrorAttributeUnsupported;
+    BOOL counted = absent || mrk_ax_status(s, status, MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT, MRK_AX_ATTR_CHILDREN);
+    BOOL admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (absent) d->unavailable |= MRK_DIAG_CHILD_COUNT;
+    if (!counted || !admitted) return NO;
+    if (absent) return YES;
+    if (expected < 0) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+    if (expected > MRK_SELECT_ROWS) { d->omissions |= MRK_DIAG_OMIT_CHILDREN; return YES; }
+    if (!expected) return YES;
+    if (depth >= MRK_CONTROL_DEPTH) { d->omissions |= MRK_DIAG_OMIT_DEPTH; return YES; }
+    if (!mrk_ax_diag_credit(s, 2, 1)) return NO;
+    MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, node)) return NO;
+    s->result.calls++;
+    status = AXUIElementCopyAttributeValues(node, kAXChildrenAttribute, 0, MRK_SELECT_ROWS + 1, &slot->array);
+    absent = !slot->value && (status == kAXErrorNoValue || status == kAXErrorAttributeUnsupported);
+    BOOL copied = absent || mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUES, MRK_AX_ATTR_CHILDREN);
+    admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (absent) d->unavailable |= MRK_DIAG_CHILD_COPY;
+    if (!copied || !admitted) return NO;
+    if (absent) return YES;
+    if (!mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NO;
+    CFIndex count = CFArrayGetCount(slot->array);
+    if (count < 0) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+    if (count > MRK_SELECT_ROWS) { d->omissions |= MRK_DIAG_OMIT_CHILDREN; return YES; }
+    if (count != expected) { d->omissions |= MRK_DIAG_OMIT_EDGE; return YES; }
+    for (CFIndex i = 0; i < count; ++i) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(slot->array, i);
+        if (!mrk_ax_type(s, child, s->elementType)) return NO;
+        BOOL known = NO;
+        for (unsigned at = 0; at < original_count; ++at) {
+            if (!CFEqual(child, p->nodes[at])) continue;
+            known = YES; d->duplicates++;
+            if (!at || !CFEqual(node, p->nodes[p->parents[at]])) d->omissions |= MRK_DIAG_OMIT_EDGE;
+            break;
+        }
+        if (!known) for (unsigned at = 0; at < d->added_nodes; ++at) {
+            if (!CFEqual(child, q->nodes[at])) continue;
+            known = YES; d->duplicates++;
+            if (!CFEqual(node, q->parents[at])) d->omissions |= MRK_DIAG_OMIT_EDGE;
+            break;
+        }
+        if (known) continue; // Retained by the returned array; never re-enqueued.
+        if (d->added_nodes == MRK_DIAG_NODES) { d->omissions |= MRK_DIAG_OMIT_NEW_NODES; continue; }
+        if (original_count + d->added_nodes == MRK_SELECT_NODES) {
+            d->omissions |= MRK_DIAG_OMIT_COMBINED_NODES; continue;
+        }
+        CFTypeRef parent = mrk_ax_diag_copy(s, child, kAXParentAttribute, MRK_AX_ATTR_PARENT, MRK_DIAG_PARENT);
+        if (!parent) { if (mrk_ax_diag_stopped(s)) return NO; continue; }
+        if (!mrk_ax_type(s, parent, s->elementType)) return NO;
+        if (!CFEqual(parent, node)) { d->omissions |= MRK_DIAG_OMIT_EDGE; continue; }
+        CFTypeRef role = mrk_ax_diag_copy(s, child, kAXRoleAttribute, MRK_AX_ATTR_ROLE, MRK_DIAG_ROLE);
+        if (!role) { if (mrk_ax_diag_stopped(s)) return NO; continue; }
+        if (!mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        unsigned at = d->added_nodes++;
+        q->nodes[at] = child; q->parents[at] = node; q->depths[at] = depth + 1;
+        q->roles[at] = mrk_ax_selection_role(role);
+        if (q->depths[at] > d->max_depth) d->max_depth = q->depths[at];
+    }
+    return YES;
+}
+static BOOL mrk_ax_diag_frontier(const MRKSelectionPass *p, unsigned at) {
+    return !p->entries[at] && (p->roles[at] == MRK_ROLE_TABLE || p->roles[at] == MRK_ROLE_OUTLINE
+        || p->roles[at] == MRK_ROLE_OPAQUE);
+}
+static void mrk_ax_projection_diagnostic_probe(MRKPrompt *s, const MRKSelectionPass *p, unsigned original_count) {
+    MRKProjectionDiagnostic *d = &s->result.selection_projection_diagnostic;
+    MRKProjectionScratch *q = &s->projection_diagnostic;
+    // Omitted structural routes first; never let an ancestor's alternate labels
+    // consume all diagnostic credit before reaching its frontier.
+    for (unsigned at = 0; at < original_count; ++at) {
+        if (!mrk_ax_diag_frontier(p, at)) continue;
+        if (d->attempted_frontiers == MRK_DIAG_FRONTIERS) { d->omissions |= MRK_DIAG_OMIT_FRONTIERS; break; }
+        d->attempted_frontiers++;
+        if (!mrk_ax_diag_children(s, p, original_count, p->nodes[at], p->depths[at])) return;
+    }
+    for (unsigned at = 0; at < d->added_nodes; ++at) {
+        unsigned role = q->roles[at];
+        BOOL text = role == MRK_SELECT_TEXT || role == MRK_SELECT_FIELD;
+        BOOL entry = role == MRK_ROLE_GROUP || role == MRK_SELECT_ROW || role == MRK_SELECT_CELL || role == MRK_SELECT_IMAGE;
+        if (entry && !mrk_ax_diag_label(s, q->nodes[at], role, kAXTitleAttribute, MRK_AX_ATTR_TITLE,
+            MRK_DIAG_TITLE, &d->frontier_label_mask, &d->frontier_role_mask)) return;
+        if ((text || entry) && !mrk_ax_diag_label(s, q->nodes[at], role, kAXValueAttribute, MRK_AX_ATTR_VALUE,
+            MRK_DIAG_VALUE, &d->frontier_label_mask, &d->frontier_role_mask)) return;
+        if (text || role == MRK_SELECT_IMAGE) continue;
+        if (role == MRK_ROLE_BUTTON) { d->omissions |= MRK_DIAG_OMIT_ROLE; continue; }
+        // Remaining closed roles are structural/opaque or row/cell containers.
+        if (!mrk_ax_diag_children(s, p, original_count, q->nodes[at], q->depths[at])) return;
+    }
+    for (unsigned at = 0; at < original_count; ++at) {
+        unsigned role = p->roles[at];
+        if (p->entries[at] && (role == MRK_ROLE_GROUP || role == MRK_SELECT_ROW
+            || role == MRK_SELECT_CELL || role == MRK_SELECT_IMAGE)) {
+            if (!mrk_ax_diag_label(s, p->nodes[at], role, kAXValueAttribute, MRK_AX_ATTR_VALUE,
+                MRK_DIAG_VALUE, &d->alternate_value_mask, &d->alternate_role_mask)) return;
+        } else if (!p->entries[at] && (role == MRK_SELECT_TEXT || role == MRK_SELECT_FIELD)) {
+            // A prefilled VERSION name field is NOT target-directory evidence.
+            if (!mrk_ax_diag_label(s, p->nodes[at], role, kAXValueAttribute, MRK_AX_ATTR_VALUE,
+                MRK_DIAG_VALUE, &d->outside_field_mask, NULL)) return;
+        }
+    }
+}
+static void mrk_ax_first_zero_diagnostic(MRKPrompt *s, AXUIElementRef sheet) {
+    MRKProjectionDiagnostic *d = &s->result.selection_projection_diagnostic;
+    if (d->version) return; // A returned or interrupted diagnostic is never retried.
+    const MRKSelectionPass *p = &s->selection[0];
+    if (s->result.selection_mode != 1 || s->result.selection_sample != 1
+        || s->result.selection_checks != 1 || s->result.selection_matches || s->result.selection_flags
+        || s->result.flags || s->result.error || s->result.selection_nodes >= MRK_SELECT_NODES
+        || s->selection_queued != s->result.selection_nodes + 1 || p->nodes[0] != sheet) {
+        s->cleanupKnown = NO; mrk_ax_fail(s, MRK_OPEN_CUSTODY); return;
+    }
+    d->version = 1u; d->state = 1u; // Latch BEFORE the first extra AX observation.
+    d->normal_fixture_mask = s->result.selection_fixture_label_mask;
+    d->calls_before = d->calls_after = s->result.calls;
+    d->cf_before = d->cf_after = s->count;
+    unsigned original_count = s->result.selection_nodes + 1;
+    for (unsigned at = 0; at < original_count; ++at)
+        if (mrk_ax_diag_frontier(p, at)) d->eligible_frontiers++;
+    BOOL returned = NO;
+    @try {
+        mrk_ax_projection_diagnostic_probe(s, p, original_count);
+        returned = YES;
+    } @finally {
+        // Snapshot on an exception as well; do not catch/clear the original error
+        // or claim a return. The existing outer owner still governs finality.
+        d->calls_after = s->result.calls; d->cf_after = s->count;
+        if (returned) d->state = s->result.error || d->unavailable || d->omissions || d->non_string_values
+            || d->attempted_frontiers != d->eligible_frontiers ? 3u : 2u;
+    }
+}
 static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned at,
     CFStringRef attribute, BOOL optional, CFStringRef expected, uint32_t attribute_code) {
     CFTypeRef value = mrk_ax_copy(s, p->nodes[at], attribute, optional, attribute_code);
@@ -1925,6 +2141,11 @@ static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *
         for (;;) {
             if (!mrk_ax_selection_roster(s, sheet, filename->value)) return;
             if (s->result.selection_matches == 1) break;
+            if (s->result.selection_sample == 1 && s->result.selection_checks == 1
+                && !s->result.selection_matches && !s->result.selection_flags && !s->result.flags && !s->result.error) {
+                mrk_ax_first_zero_diagnostic(s, sheet);
+                if (s->result.error) return;
+            }
             if (s->result.selection_sample == MRK_SELECT_SAMPLES) {
                 mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return; // Bounded no-content failure, not readiness.
             }

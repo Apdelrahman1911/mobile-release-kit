@@ -1170,8 +1170,8 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(attributes.count("None"), 1)
         self.assertIn("uint32_t ax_failure_operation, ax_failure_attribute;", native)
         self.assertIn("selection_limit_observed: i64, ax_failure_operation: u32, ax_failure_attribute: u32", rust)
-        self.assertIn("sizeof(MRKOpenResult) == 624 && sizeof(MRKOpenRecheck) == 48", native)
-        self.assertIn("std::mem::size_of::<OpenWire>() != 624", rust)
+        self.assertIn("sizeof(MRKOpenResult) == 704 && sizeof(MRKOpenRecheck) == 48", native)
+        self.assertIn("std::mem::size_of::<OpenWire>() != 704", rust)
         for field, offset in (("selection_limit_observed", 96), ("ax_failure_operation", 104), ("ax_failure_attribute", 108),
                               ("selection_summary_version", 112), ("selection_table_roles", 116), ("selection_outline_roles", 120),
                               ("selection_list_roles", 124), ("selection_entry_roots", 128), ("selection_title_present", 132),
@@ -1275,6 +1275,8 @@ class AquaDataTests(unittest.TestCase):
             "AXUIElementCopyMultipleAttributeValues(element, s->selection_attributes,\n"
             "        kAXCopyMultipleAttributeOptionStopOnError, &slot->array)",
             "AXUIElementCopyActionNames(button, &slot->array)",
+            "AXUIElementGetAttributeValueCount(node, kAXChildrenAttribute, &expected)",
+            "AXUIElementCopyAttributeValues(node, kAXChildrenAttribute, 0, MRK_SELECT_ROWS + 1, &slot->array)",
             "AXUIElementIsAttributeSettable(container, attribute, &settable)",
             "AXUIElementSetAttributeValue(container, attribute, selected->array)",
             "AXUIElementGetTypeID()", "AXUIElementCreateApplication(getpid())",
@@ -1287,11 +1289,13 @@ class AquaDataTests(unittest.TestCase):
             "mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUES, attribute_code)",
             "mrk_ax_status(s, status, MRK_AX_OP_COPY_MULTIPLE_ATTRIBUTE_VALUES, MRK_AX_ATTR_NONE)",
             "mrk_ax_status(s, status, MRK_AX_OP_COPY_ACTION_NAMES, MRK_AX_ATTR_NONE)",
+            "mrk_ax_status(s, status, MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT, MRK_AX_ATTR_CHILDREN)",
+            "mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUES, MRK_AX_ATTR_CHILDREN)",
             "mrk_ax_status(s, status, MRK_AX_OP_IS_ATTRIBUTE_SETTABLE, attribute_code)",
             "mrk_ax_status(s, status, MRK_AX_OP_SET_ATTRIBUTE_VALUE, attribute_code)",
             "mrk_ax_status(s, status, MRK_AX_OP_PERFORM_ACTION, MRK_AX_ATTR_NONE)",
         ])
-        for helper, count in (("mrk_ax_copy", 11), ("mrk_ax_array", 6), ("mrk_ax_equal_attribute", 8),
+        for helper, count in (("mrk_ax_copy", 12), ("mrk_ax_array", 6), ("mrk_ax_equal_attribute", 8),
                               ("mrk_ax_selection_pair", 2), ("mrk_ax_selection_label", 3)):
             self.assertEqual(len(expressions(helper)), count)  # One definition and only these closed uses.
         for call, count in (
@@ -1309,6 +1313,7 @@ class AquaDataTests(unittest.TestCase):
             ("mrk_ax_equal_attribute(s, node, kAXParentAttribute, at ? original->nodes[original->parents[at]] : parent, MRK_AX_ATTR_PARENT)", 1),
             ("mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt, MRK_AX_ATTR_TITLE)", 1),
             ("mrk_ax_copy(s, button, kAXEnabledAttribute, NO, MRK_AX_ATTR_ENABLED)", 1),
+            ("mrk_ax_copy(s, node, attribute, YES, attribute_code)", 1),
             ("mrk_ax_copy(s, p->nodes[at], attribute, optional, attribute_code)", 1),
             ("mrk_ax_selection_pair(s, node, p->nodes[p->parents[at]])", 1),
             ("mrk_ax_selection_label(s, p, at, kAXValueAttribute, NO, expected, MRK_AX_ATTR_VALUE)", 1),
@@ -2644,9 +2649,9 @@ class AquaDataTests(unittest.TestCase):
                            ("Browser", "BROWSER"), ("Table", "TABLE"), ("Outline", "OUTLINE"), ("ScrollArea", "SCROLL_AREA")):
             self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_ROLE_{code};", roles)
         self.assertIn("return MRK_ROLE_OPAQUE;", roles)
-        self.assertTrue("sizeof(MRKOpenResult) == 624 && sizeof(MRKOpenRecheck) == 48" in native,
-                        "native selection/Open wire624B and unchanged recheck48B")
-        self.assertTrue("std::mem::size_of::<OpenWire>() != 624" in rust, "Rust selection/Open wire must be624B")
+        self.assertTrue("sizeof(MRKOpenResult) == 704 && sizeof(MRKOpenRecheck) == 48" in native,
+                        "native selection/Open wire704B and unchanged recheck48B")
+        self.assertTrue("std::mem::size_of::<OpenWire>() != 704" in rust, "Rust selection/Open wire must be704B")
         self.assertIn("offsetof(MRKOpenResult, selection_limit_observed) == 96", native)
         self.assertIn("std::mem::offset_of!(OpenWire, selection_limit_observed) != 96", rust)
         for field, offset in (("ax_failure_operation", 104), ("ax_failure_attribute", 108)):
@@ -2676,7 +2681,7 @@ class AquaDataTests(unittest.TestCase):
                       "            || w.selection_outside_entry_role_mask != 0 || w.selection_fixture_label_mask != 0\n"
                       "            || w.selection_expected_label_relations != 0 || w.selection_expected_label_role_mask != 0\n"
                       "            || w.selection_sample != 0 || w.selection_calls_before != 0 || w.selection_cf_before != 0 || w.selection_wait != 0\n"
-                      "            || w.selection_pending != [[0; 16]; 7]) { return None; }")
+                      "            || w.selection_pending != [[0; 16]; 7] || w.selection_projection_diagnostic != [0; 20]) { return None; }")
         choose_limits = "let (calls, slots) = prompt_limits(selecting);"
         self.assertEqual(wire.count(choose_limits), 1)
         self.assertLess(wire.index(mode_guard) + len(mode_guard), wire.index(choose_limits))
@@ -5161,7 +5166,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         # the v8 history envelope or qualify a new successful field journey.
         old = stopped(0, 0, "unsupported")
         old["mechanism"] = "accessibility-version-source-selection-press-v7"
-        old["selection"].pop("contentReadiness")
+        old["selection"].pop("contentReadiness"); old["selection"].pop("projectionDiagnostic")
         frame = accessibility_context_data(); step = "ProjectFields(Native(0))"
         frame.update(snapshotSource="record", accessibility=old)
         frame["nativeHandler"]["step"] = step
@@ -5173,8 +5178,119 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         old_success = deepcopy(good)
         old_action = old_success["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]
         old_action["mechanism"] = old["mechanism"]; old_action["selection"].pop("contentReadiness")
+        old_action["selection"].pop("projectionDiagnostic")
         with self.assertRaises(M.Refused):
             M.parse_result(captured(old_success), b"", BINDING, "project-fields")
+
+    def test_first_zero_projection_diagnostic_is_closed_indeterminate_data_not_selection_authority(self):
+        # Pure parser vectors. No AX emulation, clock, native return or receipt.
+        action = M.expected_result(BINDING, "project-fields")["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]
+        selection, button = action["selection"], action["promptButton"]
+        selection.update(checks={key: i == 0 for i, key in enumerate(M.ACCESSIBILITY_SELECTION_CHECKS)},
+                         attempted=False, returned=False, selected=None, matches=0, attribute="not-read")
+        selection["projectionSummary"].update(fixtureLabelMask=24, expectedLabelRelations=0, expectedLabelRoleMask=0)
+        diagnostic = dict(zip(("version", "state", "normalFixtureMask", "callsBefore", "callsAfter", "cfBefore", "cfAfter",
+            "eligibleFrontiers", "attemptedFrontiers", "addedNodes", "maxDepth", "alternateValueMask",
+            "frontierLabelMask", "outsideFieldMask", "alternateRoleMask", "frontierRoleMask",
+            "unavailable", "omissions", "duplicates", "nonStringValues"),
+            (1, "returned-complete", 24, 205, 221, 110, 120, 1, 1, 1, 4, 0, 2, 1, 0, 1 << 15, 0, 0, 0, 0)))
+
+        def parsed(data, error="none", current=None, counters=None):
+            current = deepcopy(selection if current is None else current)
+            current["projectionDiagnostic"] = data
+            return M._accessibility_selection(current, button if counters is None else counters,
+                                              "selection-projection", error, content=True)
+
+        for data, error in ((None, "deadline"), (diagnostic, "none"),
+                            ({**diagnostic, "state": "entered"}, "objc-exception"),
+                            ({**diagnostic, "state": "returned-incomplete", "unavailable": 32}, "none"),
+                            ({**diagnostic, "state": "returned-incomplete", "omissions": 32}, "none"),
+                            ({**diagnostic, "state": "returned-incomplete"}, "deadline")):
+            with self.subTest(state=None if data is None else data["state"], error=error):
+                value = parsed(data, error)
+                self.assertEqual(value["projectionDiagnostic"], data)
+                self.assertFalse(M._selection_succeeded(value))
+        outside_only = {**diagnostic, "addedNodes": 0, "maxDepth": 0, "frontierLabelMask": 0, "frontierRoleMask": 0}
+        value = parsed(outside_only)
+        self.assertEqual(value["projectionDiagnostic"]["outsideFieldMask"], 1)
+        self.assertEqual(value["projectionDiagnostic"]["frontierLabelMask"], 0)
+        self.assertFalse(M._selection_succeeded(value))  # Prefilled VERSION cannot select an entry.
+        later = deepcopy(selection)
+        later["contentReadiness"] = {"sample": 2, "callsBefore": 221, "cfBefore": 120, "wait": 0,
+            "pending": [[1, 0, 221, 0, 120, 12, 4, 16, 2, 24, 0, 1, 0, 0, 0, 2]]}
+        later["projectionSummary"]["fixtureLabelMask"] = 0
+        counters = {**button, "calls": 300, "cfSlots": 160, "cfSlotsRetired": 160}
+        self.assertEqual(parsed(diagnostic, current=later, counters=counters)["projectionDiagnostic"], diagnostic)
+        with self.assertRaises(M.Refused):
+            parsed({**diagnostic, "normalFixtureMask": 0}, current=later, counters=counters)
+        with self.assertRaises(M.Refused):
+            parsed({**diagnostic, "state": "entered"}, "objc-exception", current=later, counters=counters)
+
+        for field, invalid in (("version", 0), ("version", True), ("state", "complete"),
+            ("callsBefore", 0), ("callsBefore", 222), ("callsAfter", 3073), ("cfAfter", 1025),
+            ("eligibleFrontiers", 13), ("attemptedFrontiers", 65), ("addedNodes", 65), ("maxDepth", 9),
+            ("normalFixtureMask", 32), ("alternateRoleMask", 1 << 4), ("frontierRoleMask", 1 << 4),
+            ("frontierLabelMask", 0), ("unavailable", 64), ("omissions", 1024), ("duplicates", 65),
+            ("nonStringValues", 11), ("unavailable", 32), ("omissions", 32), ("nonStringValues", 1),
+            ("state", "entered"), ("state", "returned-incomplete")):
+            with self.subTest(field=field, invalid=invalid), self.assertRaises(M.Refused):
+                parsed({**diagnostic, field: invalid})
+        for data in ({}, [], True, {**diagnostic, "rawLabel": "VERSION"},
+                     {key: value for key, value in diagnostic.items() if key != "outsideFieldMask"}):
+            with self.assertRaises(M.Refused): parsed(data)
+        missing = deepcopy(selection); missing.pop("projectionDiagnostic")
+        with self.assertRaises(M.Refused):
+            M._accessibility_selection(missing, button, "selection-projection", "deadline", content=True)
+
+    def test_first_zero_projection_source_keeps_original_owner_caps_and_action_grammar(self):
+        root = PATH.parents[1]
+        native = (root / "native/macos-installed-native/src/native.m").read_text()
+        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        diagnostic = native.split("// Diagnostic-only reads use the original timeout/admission and CF custody.", 1)[1]
+        diagnostic = diagnostic.split("static BOOL mrk_ax_selection_label(", 1)[0]
+        self.assertIn("sizeof(MRKProjectionDiagnostic) == 80", native)
+        self.assertIn("offsetof(MRKOpenResult, selection_projection_diagnostic) == 624", native)
+        self.assertIn("selection_projection_diagnostic: [u32; 20]", rust)
+        self.assertIn("std::mem::offset_of!(OpenWire, selection_projection_diagnostic) != 624", rust)
+        self.assertIn("MRK_DIAG_FRONTIERS = 64, MRK_DIAG_NODES = 64, MRK_DIAG_CALLS = 1024, MRK_DIAG_CF = 512", native)
+        self.assertIn("MRK_SELECT_NODES = 256, MRK_SELECT_ROWS = 32, MRK_SELECT_CALLS = 3072, MRK_SELECT_CF = 1024", native)
+        for bound in ("MRK_DIAG_CALLS - calls", "MRK_DIAG_CF - slots", "MRK_SELECT_CALLS - calls",
+                      "MRK_SELECT_CF - slots", "MRK_SELECT_TOTAL_CALLS - calls", "MRK_SELECT_TOTAL_CF - slots"):
+            self.assertIn(bound, diagnostic)
+        self.assertIn("mrk_ax_copy(s, node, attribute, YES, attribute_code)", diagnostic)
+        self.assertIn("if (!mrk_ax_diag_credit(s, 2, 1)) return NULL;", diagnostic)
+        children = diagnostic.split("static BOOL mrk_ax_diag_children(", 1)[1].split("static BOOL mrk_ax_diag_frontier(", 1)[0]
+        self.assertLess(children.index("if (expected > MRK_SELECT_ROWS)"), children.index("AXUIElementCopyAttributeValues("))
+        self.assertLess(children.index("MRKPromptOwned *slot = mrk_ax_slot(s)"), children.index("AXUIElementCopyAttributeValues("))
+        self.assertIn("mrk_ax_admit(s, 0, 0, NULL)", children)
+        self.assertIn("original_count + d->added_nodes == MRK_SELECT_NODES", children)
+        self.assertLess(children.index("if (!CFEqual(parent, node))"), children.index("q->nodes[at] = child"))
+        self.assertIn("if (known) continue;", children)
+        self.assertIn("if (depth >= MRK_CONTROL_DEPTH)", children)
+        self.assertIn("const MRKSelectionPass *p = &s->selection[0];", diagnostic)
+        self.assertLess(diagnostic.index("d->version = 1u; d->state = 1u;"),
+                        diagnostic.index("mrk_ax_projection_diagnostic_probe(s, p, original_count)"))
+        self.assertIn("if (d->version) return;", diagnostic)
+        self.assertIn("} @finally {", diagnostic)
+        self.assertIn("d->calls_after = s->result.calls; d->cf_after = s->count;", diagnostic)
+        self.assertIn("if (returned) d->state = s->result.error || d->unavailable || d->omissions || d->non_string_values", diagnostic)
+        for forbidden in ("AXUIElementSetAttributeValue", "AXUIElementPerformAction", "CFRelease(",
+                          "CFStringGetCString", "UTF8String", "printf(", "pthread_create", "dispatch_", "nanosleep"):
+            self.assertNotIn(forbidden, diagnostic)
+        self.assertNotRegex(diagnostic, r"s->result\.selection_(?:matches|checks|flags|nodes)\s*(?:=(?!=)|\|=|\+\+)")
+        action = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_prompt_press(", 1)[0]
+        self.assertEqual(action.count("mrk_ax_first_zero_diagnostic(s, sheet)"), 1)
+        self.assertLess(action.index("if (s->result.selection_matches == 1) break;"), action.index("mrk_ax_first_zero_diagnostic(s, sheet)"))
+        self.assertLess(action.index("mrk_ax_first_zero_diagnostic(s, sheet)"), action.index("mrk_ax_content_wait(s)"))
+        next_sample = native.split("static BOOL mrk_ax_next_content_sample(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
+        self.assertNotIn("projection_diagnostic", next_sample)
+        matching = rust.split("impl VersionSourceSelection {", 1)[1].split("fn content_readiness_data_check(", 1)[0]
+        self.assertNotIn("projection_diagnostic", matching)
+        success = PATH.read_text().split("def _selection_succeeded(", 1)[1].split("def _accessibility_selection_limit(", 1)[0]
+        self.assertNotIn("projectionDiagnostic", success)
+        serialized = observer.split('"projectionDiagnostic":p.projection_diagnostic.map(|r| json!({', 1)[1].split("}))", 1)[0]
+        self.assertEqual(len(M.re.findall(r'"([A-Za-z]+)":', serialized)), 20)
 
     def test_content_readiness_uses_original_owner_wait_budgets_and_bounded_filter_diagnostics(self):
         # SOURCE/closed scalar DATA only. Sleep return is not readiness, source
@@ -5278,6 +5394,13 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             action["selection"].update(nodes=255, depth=8, attribute="SelectedChildren")
             action["selection"]["contentReadiness"] = {
                 "sample": 8, "callsBefore": 21504, "cfBefore": 7168, "wait": 0, "pending": deepcopy(pending)}
+            action["selection"]["projectionDiagnostic"] = {
+                "version": 1, "state": "returned-incomplete", "normalFixtureMask": 31,
+                "callsBefore": 2048, "callsAfter": 3072, "cfBefore": 512, "cfAfter": 1024,
+                "eligibleFrontiers": 255, "attemptedFrontiers": 64, "addedNodes": 0, "maxDepth": 0,
+                "alternateValueMask": 31, "frontierLabelMask": 0, "outsideFieldMask": 31,
+                "alternateRoleMask": 0x7004, "frontierRoleMask": 0, "unavailable": 63,
+                "omissions": 1023, "duplicates": 2048, "nonStringValues": 100}
             action["promptButton"].update(calls=24576, cfSlots=8192, cfSlotsRetired=8192,
                                          initialNodesExamined=16, recheckNodesExamined=16, lastDepth=8)
         for row in largest["projectFields"]["rows"]:
