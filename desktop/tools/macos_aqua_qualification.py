@@ -2474,6 +2474,74 @@ def _bootstrap_failure_context(value, source, step, reason):
     return value
 
 
+def _vault_original_failure_data(value):
+    """Closed partial original facts, deliberately NOT helper-success validation."""
+    flags = {"go", "requestSent", "writeAttempted", "stopAttempted", "stopSent", "notice", "terminal",
+             "successfulAddTerminal", "terminalSuccess", "outputFailed", "stderrSeen", "tryWaitEntered",
+             "tryWaitReturned", "waitEntered", "exitObserved", "waitFailed", "killAttempted", "killFailed",
+             "stdoutEof", "stderrEof", "helperSlotsSettled", "driverReturned", "driverBeforeCleanup",
+             "blockingChildJoined", "resourcesSettled", "allocationsReleased", "cleanupContracted", "cleanupUnknown",
+             "applicationCandidateConstructed", "applicationCandidateTaken", "applicationCallbackReturned"}
+    nullable = {"authSettled", "filesystemSettled", "nativeInputClosed", "addSettled", "lookupSettled",
+                "addItemCallsAbsent", "addPrerequisiteRefused", "nativeCandidateConsumed", "exitSuccess"}
+    need(type(value) is dict and set(value) == flags | nullable | {"addEffect", "addOutcome", "firstFailure", "pipeClosed"}
+         and all(type(value[k]) is bool for k in flags)
+         and all(value[k] is None or type(value[k]) is bool for k in nullable), "failure-context")
+    need(type(value["addEffect"]) is int and 0 <= value["addEffect"] < 2**32
+         and type(value["pipeClosed"]) is list and len(value["pipeClosed"]) == 3
+         and all(type(v) is bool for v in value["pipeClosed"]), "failure-context")
+    outcomes = {"pending", "added", "candidate", "missing", "duplicate", "locked", "interaction-required",
+                "authentication-failed", "user-canceled", "unavailable", "unsupported", "invalid-input", "invalid-result",
+                "allocation", "stopped", "custody-unknown", "native-failure", "native-exception"}
+    problems = {"interrupted", "cleanup-unknown", "capacity", "locked", "missing-key", "denied", "unsupported-provider",
+                "unavailable", "invalid-input", "identity-mismatch", "crypto", "protocol"}
+    for key, vocabulary in (("addOutcome", outcomes), ("firstFailure", problems)):
+        need(value[key] is None or type(value[key]) is str and value[key] in vocabulary, "failure-context")
+    # Do not invent consistency/finality out of a partial native observation.
+    # The unchanged successful-result parser separately requires real joins,
+    # EOF/close/terminal evidence and original application consumption.
+    return value
+
+
+def _vault_failure_context(value, source, step, reason, case):
+    need(source == "record" and case in VAULT_HELPER_CASES and reason == "vault-finality-contract"
+         and type(step) is str and step in FAILURE_STEPS and step.startswith("Vault(")
+         and type(value) is dict and set(value) == {"source", "step", "observationOnly", "snapshot"}
+         and value["source"] == "first-original-vault-snapshot" and value["step"] == step
+         and value["observationOnly"] is True, "failure-context")
+    snapshot = value["snapshot"]
+    flags = {"unknown", "originalsSettled", "empty", "documentUnknown", "exhausted", "lostObserved", "originalBound",
+             "keyPresent", "initializePreview", "previewConsumed"}
+    fields = {"originals", "operationId", "operationPhase", "operationReason", "operationSettlement",
+              "state", "storage", "initialize", "lookup"}
+    need(type(snapshot) is dict and set(snapshot) == flags | fields
+         and all(type(snapshot[k]) is bool for k in flags) and snapshot["unknown"]
+         and snapshot["unknown"] == (snapshot["documentUnknown"] or snapshot["exhausted"] or snapshot["lostObserved"] or not snapshot["originalBound"])
+         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
+    phases = {"idle", "admitting", "picking", "capturing", "selected", "assessing", "preview", "mutating", "stopping", "unknown"}
+    reasons = {"none", "closed", "unqualified", "unsupported-platform", "unsupported-filesystem", "unsupported-format",
+               "invalid-request", "busy", "source-refused", "source-changed", "material-limit", "parser-limit", "project-overlap",
+               "exclusion-unconfirmed", "capacity", "context-stale", "user-cancelled", "review-expired", "deadline", "document-lost",
+               "shutdown", "cleanup-unknown", "vault-uninitialized", "vault-key-missing", "vault-keyring-locked", "vault-keyring-denied",
+               "vault-keyring-unavailable", "vault-provider-unsupported", "vault-corrupt", "vault-interrupted", "vault-durability-unknown"}
+    for key, vocabulary in (("operationPhase", phases), ("operationReason", reasons),
+                             ("operationSettlement", {"pending", "known", "unknown", "late-known"}),
+                             ("state", {"uninitialized", "locked", "unlocked", "initializing", "mutating", "interrupted", "unknown"})):
+        need(snapshot[key] is None or type(snapshot[key]) is str and snapshot[key] in vocabulary, "failure-context")
+    identifier = snapshot["operationId"]
+    operation_fields = (snapshot[k] for k in ("operationPhase", "operationReason", "operationSettlement"))
+    need((identifier is None and all(v is None for v in operation_fields))
+         or (type(identifier) is int and 1 <= identifier <= snapshot["originals"] and all(v is not None for v in operation_fields)), "failure-context")
+    storage = snapshot["storage"]
+    if storage is not None:
+        need(type(storage) is dict and set(storage) == {"reservation", "header", "durability"}
+             and all(type(v) is list and len(v) == 2 and all(type(b) is bool for b in v) for v in storage.values()), "failure-context")
+    for key in ("initialize", "lookup"):
+        if snapshot[key] is not None:
+            _vault_original_failure_data(snapshot[key])
+    return value
+
+
 def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -2481,7 +2549,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -2492,6 +2560,9 @@ def failure_context(stdout, stderr, case=None):
         if "bootstrap" in value:
             value["bootstrap"] = _bootstrap_failure_context(value["bootstrap"], value.get("snapshotSource"),
                                                             failure_step(stdout, stderr), failure_reason(stdout, stderr))
+        if "vault" in value:
+            value["vault"] = _vault_failure_context(value["vault"], value.get("snapshotSource"),
+                                                    failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "originalWindow" in value:
             value["originalWindow"] = _original_window_context(value["originalWindow"])
         if "projectSelection" in value:

@@ -124,6 +124,26 @@ def bootstrap_context_data():
                           "originalWindowAdmitted": True}}
 
 
+def vault_failure_context_data():
+    # Partial DATA only: an unavailable terminal is null, not a negative
+    # provider result. These facts do not assert native execution or finality.
+    helper = M._expected_vault_original("before-go")
+    helper.update(driverReturned=False, driverBeforeCleanup=False, blockingChildJoined=False,
+                  exitObserved=False, exitSuccess=None, resourcesSettled=False, allocationsReleased=False,
+                  firstFailure="cleanup-unknown", cleanupUnknown=True)
+    return {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None,
+            "vault": {"source": "first-original-vault-snapshot", "step": "Vault(Initialized)",
+                      "observationOnly": True, "snapshot": {
+                          "unknown": True, "documentUnknown": True, "exhausted": False,
+                          "lostObserved": False, "originalBound": True, "originals": 4,
+                          "originalsSettled": False, "empty": False, "operationId": 4,
+                          "operationPhase": "unknown", "operationReason": "cleanup-unknown",
+                          "operationSettlement": "unknown", "state": "interrupted", "keyPresent": False,
+                          "initializePreview": False, "previewConsumed": True,
+                          "storage": {"reservation": [True, False], "header": [False, False], "durability": [False, False]},
+                          "initialize": helper, "lookup": None}}}
+
+
 def action_context_data(step="CancelProject", *, site=None, domain="objc-exception", error="io"):
     action, kind, panel_id, call_site = {
         "CancelProject": ("project-cancel", "project", 1, "project-cancel"),
@@ -8722,6 +8742,135 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
 
 class ShippingVaultHelperAquaDataTests(unittest.TestCase):
     """SOURCE/parser/custody DATA, never native Keychain or helper qualification."""
+
+    def test_first_unknown_sample_preserves_partial_null_and_historical_data_without_finality(self):
+        good = vault_failure_context_data()
+        before = deepcopy(good)
+        before["vault"]["snapshot"].update(operationId=None, operationPhase=None, operationReason=None,
+                                            operationSettlement=None, state=None, storage=None, initialize=None)
+        historical = deepcopy(good); del historical["vault"]
+        for case in M.VAULT_HELPER_CASES:
+            for value in (good, before, historical):
+                row = project_selection_row(value, "vault-finality-contract", "Vault(Initialized)")
+                self.assertEqual(M.failure_context(b"", row, case), value)
+                with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+                    M.parse_result(captured(M.expected_result(BINDING, case)), row, BINDING, case)
+        # Retain every closed partial outcome, not only provider-success and
+        # provider-negative subsets used by successful result parsing.
+        provider = (PATH.parents[1] / "src-tauri/src/vault_keyring_macos.rs").read_text()
+        for name, field in (("outcome", "addOutcome"), ("problem", "firstFailure")):
+            body = provider.split(f"fn {name}(value:", 1)[1].split("} }", 1)[0]
+            labels = M.re.findall(r'=>"([a-z-]+)"', body)
+            self.assertEqual(len(labels), 18 if name == "outcome" else 12)
+            for label in labels:
+                value = deepcopy(good); value["vault"]["snapshot"]["initialize"][field] = label
+                self.assertEqual(M.failure_context(b"", project_selection_row(value, "vault-finality-contract", "Vault(Initialized)"),
+                                                 M.VAULT_HELPER_CASES[0]), value)
+
+    def test_first_unknown_sample_rejects_open_shapes_types_and_invented_partial_facts(self):
+        good = vault_failure_context_data()
+        variants = []
+        for key, bad in (("unknown", False), ("documentUnknown", 1), ("originals", True), ("originals", 8),
+                         ("originals", -1), ("operationId", True), ("operationId", 0), ("operationId", 5),
+                         ("operationId", None), ("operationPhase", None), ("operationPhase", "PRIVATE"),
+                         ("operationReason", "PRIVATE"), ("operationSettlement", "complete"), ("state", "PRIVATE"),
+                         ("storage", {"reservation": [True, 1], "header": [False, False], "durability": [False, False]})):
+            value = deepcopy(good); value["vault"]["snapshot"][key] = bad; variants.append(value)
+        value = deepcopy(good); value["vault"]["snapshot"]["documentUnknown"] = False; variants.append(value)
+        for path in (("vault",), ("vault", "snapshot"), ("vault", "snapshot", "initialize"), ("vault", "snapshot", "storage")):
+            for missing in (False, True):
+                value = deepcopy(good); target = value
+                for key in path: target = target[key]
+                if missing: del target[next(iter(target))]
+                else: target["privatePath"] = "PRIVATE"
+                variants.append(value)
+        for key, bad in (("go", 1), ("authSettled", 0), ("exitSuccess", "false"), ("pipeClosed", [True, True]),
+                         ("pipeClosed", [True, True, 1]), ("addEffect", True), ("addEffect", -1), ("addEffect", 2**32),
+                         ("addOutcome", "PRIVATE"), ("firstFailure", "PRIVATE")):
+            value = deepcopy(good); value["vault"]["snapshot"]["initialize"][key] = bad; variants.append(value)
+        value = deepcopy(good); value["vault"]["snapshot"]["lookup"] = {}; variants.append(value)
+        for value in variants:
+            with self.subTest(value=value):
+                self.assertIsNone(M.failure_context(b"", project_selection_row(value, "vault-finality-contract", "Vault(Initialized)"),
+                                                  M.VAULT_HELPER_CASES[0]))
+
+    def test_first_unknown_sample_is_bound_to_the_original_case_step_reason_and_record(self):
+        good = vault_failure_context_data()
+        for case, reason, step in ((None, "vault-finality-contract", "Vault(Initialized)"),
+                                   ("first-save", "vault-finality-contract", "Vault(Initialized)"),
+                                   (M.VAULT_HELPER_CASES[0], "observer-deadline", "Vault(Initialized)"),
+                                   (M.VAULT_HELPER_CASES[0], "vault-finality-contract", "Vault(Unlocked)"),
+                                   (M.VAULT_HELPER_CASES[0], "vault-finality-contract", "ProjectSettled")):
+            self.assertIsNone(M.failure_context(b"", project_selection_row(good, reason, step), case))
+        for path, bad in ((["snapshotSource"], "prearm-open-progress"), (["snapshotSource"], None),
+                          (["vault", "source"], "later-record"), (["vault", "step"], "Vault(Unlocked)"),
+                          (["vault", "observationOnly"], 1), (["vault", "snapshot"], None)):
+            value = deepcopy(good); target = value
+            for key in path[:-1]: target = target[key]
+            target[path[-1]] = bad
+            self.assertIsNone(M.failure_context(b"", project_selection_row(value, "vault-finality-contract", "Vault(Initialized)"),
+                                              M.VAULT_HELPER_CASES[0]))
+        row = project_selection_row(good, "vault-finality-contract", "Vault(Initialized)")
+        for malformed in (context_row(good), row + context_row(good), row.replace(b'"originals":4', b'"originals":4,"originals":4')):
+            self.assertIsNone(M.failure_context(b"", malformed, M.VAULT_HELPER_CASES[0]))
+
+    def test_full_first_unknown_envelope_fits_existing_limits_with_both_helpers_and_picker_facts(self):
+        case = M.VAULT_HELPER_CASES[0]
+        native = M.expected_result(BINDING, case)["native"]
+        value = vault_failure_context_data()
+        value.update(nativeHandler={"step": "OpenProject", "entered": True, "returned": True}, nativeAction=None,
+                     pending={"kind": "dom", "step": "Vault(Initialized)"},
+                     lastPanel={"step": "OpenProject", "id": 1, "kind": "project", "parentPresent": True,
+                                "panelPresent": True, "parentReferencesPanel": True, "panelReferencesParent": True,
+                                "panelVisible": True, "directoryBound": True, "directoryReturned": True,
+                                "directoryReady": True, "directoryReadiness": "ready", "waitLocation": None},
+                     originalWindow=native["originalWindow"], accessibility=native["projectOpenInput"],
+                     accessibilityBinding=native["projectOpenBinding"], completionSelection=native["projectCompletionSelection"],
+                     dom={"evaluations": 160, "lastProjectChooser": {"step": "ChooseProject", "sequence": 160,
+                          "dashboardSelected": True, "buttonDisabled": True, "reason": "project-recovery"}})
+        snapshot = value["vault"]["snapshot"]
+        snapshot.update(originals=7, operationId=7, operationPhase="assessing", operationReason="vault-provider-unsupported",
+                        operationSettlement="late-known", state="uninitialized")
+        # false is the longest Boolean encoding, including nullable facts;
+        # use maximal fixed-width counters and longest original vocabularies.
+        helper = M._expected_vault_original("initialize")
+        for key, item in list(helper.items()):
+            if item is None or type(item) is bool: helper[key] = False
+        helper.update(addOutcome="authentication-failed", firstFailure="unsupported-provider", addEffect=2**32-1,
+                      pipeClosed=[False, False, False])
+        snapshot.update(initialize=helper, lookup=deepcopy(helper),
+                        storage={key: [False, False] for key in ("reservation", "header", "durability")})
+        row = project_selection_row(value, "vault-finality-contract", "Vault(Initialized)")
+        self.assertLessEqual(len(json.dumps(value, separators=(",", ":")).encode("ascii")), 8192)
+        self.assertLessEqual(len(row), 8448)
+        self.assertEqual(M.failure_context(b"", row, case), value)
+
+    def test_unknown_source_keeps_first_winner_sample_and_original_success_gates(self):
+        root = PATH.parents[1] / "src-tauri/src"
+        vault = (root / "installed_shell_observation_macos_vault.rs").read_text()
+        observer = (root / "installed_shell_observation_macos.rs").read_text()
+        document = (root / "asset_session.rs").read_text()
+        latch = vault.split("fn latch_unknown(", 1)[1].split("#[derive(Default)]", 1)[0]
+        self.assertIn('snapshot.unknown && super::latch_failure(first, failed, "vault-finality-contract")', latch)
+        self.assertIn("*detail = Some(FailureSample { step, snapshot });", latch)
+        tick = vault.split("pub(super) fn vault_tick(", 1)[1].split("if !snapshot.originals_settled", 1)[0]
+        order = ("document.installed_macos_vault_snapshot()", "if snapshot.unknown", "self.record.lock()",
+                 "if r.step == super::Step::Vault(step)", "&mut r.vault_failure, step, snapshot")
+        self.assertEqual([tick.index(v) for v in order], sorted(tick.index(v) for v in order))
+        self.assertEqual(tick.count("document.installed_macos_vault_snapshot()"), 1)
+        sample = document.split("pub(crate) fn installed_macos_vault_snapshot(", 1)[1].split("fn macos_vault_selected(", 1)[0]
+        self.assertEqual(sample.count("state.lifetime.original_bound()"), 1)
+        self.assertIn("|| !original_bound", sample)
+        self.assertIn("document_unknown:state.unknown,exhausted:state.exhausted,lost_observed:state.lost_observed,original_bound", sample)
+        frame = observer.split("struct FailureSnapshot", 1)[1].split("fn failure_context(", 1)[0]
+        self.assertIn("vault: r.vault_failure", frame)
+        self.assertIn("self.vault = None;", frame.split("fn at_expiry(", 1)[1].split("fn frame(", 1)[0])
+        self.assertIn('reason != "vault-finality-contract"', frame)
+        self.assertIn("self.step != Step::Vault(sample.step)", frame)
+        self.assertIn("if detail.is_none_or(|s|s.step!=Step::Initialized", vault)
+        self.assertIn('super::latch_failure(&first,&failed,"observer-deadline")', vault)
+        for forbidden in ("Instant::now", "try_lock", "run_on_main_thread", "thread::spawn"):
+            self.assertNotIn(forbidden, latch)
 
     def test_enabled_candidate_selector_is_reported_honestly_without_native_finality_substitution(self):
         root = PATH.parents[2]

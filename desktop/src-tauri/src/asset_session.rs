@@ -5343,8 +5343,13 @@ mod installed_macos_observation {
                 && facts.release_queued && facts.released) { return None; }
         Some(witness)
     }
+    #[derive(Clone, Copy, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub(crate) struct VaultSnapshot {
         pub(crate) unknown: bool, pub(crate) originals: usize, pub(crate) originals_settled: bool, pub(crate) empty: bool,
+        pub(crate) document_unknown: bool, pub(crate) exhausted: bool, pub(crate) lost_observed: bool, pub(crate) original_bound: bool,
+        pub(crate) operation_id: Option<u32>, pub(crate) operation_phase: Option<Phase>,
+        pub(crate) operation_reason: Option<Reason>, pub(crate) operation_settlement: Option<&'static str>,
         pub(crate) state: Option<&'static str>, pub(crate) key_present: bool, pub(crate) initialize_preview: bool,
         pub(crate) preview_consumed: bool, pub(crate) storage: Option<vault::QualificationStorage>,
         pub(crate) initialize: Option<crate::vault_keyring_macos::QualificationSnapshot>,
@@ -5451,7 +5456,12 @@ mod installed_macos_observation {
                     let (observed, consumed) = vault::qualification_storage(owner)?; storage = Some(observed); preview_consumed = consumed;
                 } else if *kind == Some(Operation::Unlock) { lookup = owner.keyring.try_lock().ok()?.qualification_snapshot(); }
             }
-            Some(VaultSnapshot { unknown:state.unknown || state.exhausted || state.lost_observed || !state.lifetime.original_bound(),
+            let original_bound = state.lifetime.original_bound();
+            Some(VaultSnapshot { unknown:state.unknown || state.exhausted || state.lost_observed || !original_bound,
+                document_unknown:state.unknown,exhausted:state.exhausted,lost_observed:state.lost_observed,original_bound,
+                operation_id:state.slot.as_ref().map(|s|s.owner.id),operation_phase:state.slot.as_ref().map(|s|s.phase),
+                operation_reason:state.slot.as_ref().map(|s|s.reason),operation_settlement:state.slot.as_ref().map(|s|match s.settlement {
+                    Settlement::Pending=>"pending",Settlement::Known=>"known",Settlement::Unknown=>"unknown",Settlement::LateKnown=>"late-known" }),
                 originals:book.originals.len(),originals_settled:book.originals.iter().all(|(o,_)|session_original_settled(&self.inner,o)),
                 empty:quiet(&state) && session_data_empty(&state) && state.vault.is_none(),state:vault_state,key_present,
                 initialize_preview:state.slot.as_ref().is_some_and(|slot|slot.preview.as_ref().is_some_and(|p|vault::initialize_preview_valid(&state,slot,p))),

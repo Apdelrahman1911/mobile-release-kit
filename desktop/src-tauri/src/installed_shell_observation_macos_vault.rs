@@ -144,6 +144,20 @@ impl Registration {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step { Open, Opened, Prepare, Prepared, Initialize, Initialized, Lock, Locked, Reopen, Reopened, Unlock, Unlocked, Relock, Relocked }
+#[derive(Clone, Copy)]
+pub(super) struct FailureSample { pub(super) step: Step, snapshot: InstalledMacVaultSnapshot }
+impl FailureSample {
+    pub(super) fn value(self) -> Value {
+        json!({"source":"first-original-vault-snapshot", "step":format!("Vault({:?})", self.step),
+            "observationOnly":true, "snapshot":self.snapshot})
+    }
+}
+fn latch_unknown(first: &AtomicU8, failed: &AtomicBool, detail: &mut Option<FailureSample>, step: Step,
+    snapshot: InstalledMacVaultSnapshot) {
+    if snapshot.unknown && super::latch_failure(first, failed, "vault-finality-contract") {
+        *detail = Some(FailureSample { step, snapshot });
+    }
+}
 #[derive(Default)]
 pub(super) struct Record {
     opened: bool, preview_consumed: bool, initialized: bool, locked: bool, reopened: bool, unlocked: bool,
@@ -173,7 +187,16 @@ impl Observation {
             r.step = super::Step::Vault(next); return;
         }
         let Some(snapshot) = document.installed_macos_vault_snapshot() else { return; };
-        if snapshot.unknown { self.fail_with("vault-finality-contract"); return; }
+        if snapshot.unknown {
+            // Preserve only this original sample, before the successful-join
+            // gate. Missing custody remains unknown; this does not reconcile,
+            // retry, clean up, or supply an original finality receipt.
+            let Ok(mut r) = self.record.lock() else { self.fail_with("vault-finality-contract"); return; };
+            if r.step == super::Step::Vault(step) {
+                latch_unknown(&self.failure_reason, &self.failed, &mut r.vault_failure, step, snapshot);
+            } else { self.fail_with("vault-finality-contract"); }
+            return;
+        }
         if !snapshot.originals_settled { return; }
         let Some(mut r) = self.record() else { return; };
         if r.step != super::Step::Vault(step) { self.fail_with("vault-original-contract"); return; }
@@ -291,12 +314,29 @@ pub(super) fn data_checks() -> bool {
     if control.finish(6) || !control.finish(4) || control.finish(4) || control.quit_id()!=5 { return false; }
     let mut record=Record {original_count:4,..Record::default()};
     let mut snapshot=InstalledMacVaultSnapshot {unknown:false,originals:5,originals_settled:true,empty:true,state:None,
+        document_unknown:false,exhausted:false,lost_observed:false,original_bound:true,
+        operation_id:None,operation_phase:None,operation_reason:None,operation_settlement:None,
         key_present:false,initialize_preview:false,preview_consumed:true,storage:None,initialize:None,lookup:None};
     if !record.final_originals(&snapshot,&control) { return false; }
     snapshot.unknown=true;if record.final_originals(&snapshot,&control) { return false; }snapshot.unknown=false;
     snapshot.originals_settled=false;if record.final_originals(&snapshot,&control) { return false; }snapshot.originals_settled=true;
     snapshot.empty=false;if record.final_originals(&snapshot,&control) { return false; }snapshot.empty=true;
     snapshot.originals=6;if record.final_originals(&snapshot,&control) { return false; }
+    let first=AtomicU8::new(0);let failed=AtomicBool::new(false);let mut detail=None;
+    latch_unknown(&first,&failed,&mut detail,Step::Initialized,snapshot);
+    if detail.is_some() || failed.load(Ordering::SeqCst) { return false; }
+    snapshot.unknown=true;snapshot.document_unknown=true;
+    latch_unknown(&first,&failed,&mut detail,Step::Initialized,snapshot);
+    let Some(sample)=detail else { return false; };
+    if sample.step!=Step::Initialized || !sample.snapshot.unknown || !sample.snapshot.document_unknown
+        || super::first_failure_reason(&first)!=Some("vault-finality-contract") { return false; }
+    snapshot.document_unknown=false;snapshot.lost_observed=true;
+    latch_unknown(&first,&failed,&mut detail,Step::Unlocked,snapshot);
+    if detail.is_none_or(|s|s.step!=Step::Initialized || !s.snapshot.document_unknown || s.snapshot.lost_observed) { return false; }
+    let first=AtomicU8::new(0);let failed=AtomicBool::new(false);let mut absent=None;
+    super::latch_failure(&first,&failed,"observer-deadline");
+    latch_unknown(&first,&failed,&mut absent,Step::Initialized,snapshot);
+    if absent.is_some() || super::first_failure_reason(&first)!=Some("observer-deadline") { return false; }
     let roundtrip=inert(Case::RoundTrip,7);
     roundtrip.finish(6) && roundtrip.quit_id()==7 && crate::vault_keyring_macos::qualification_data_checks()
         && Action::Open.previous_original() == 1 && Action::Initialize.previous_original() == 3

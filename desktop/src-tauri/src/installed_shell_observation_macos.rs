@@ -916,6 +916,7 @@ struct OpenHistory { sample: OpenInputSample, identity: IdentitySample, completi
 struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
     bootstrap_failure: Option<BootstrapSample>,
+    vault_failure: Option<vault::FailureSample>,
     last_project_chooser: Option<ProjectChooserSample>,
     original_window: Option<OriginalWindowSample>,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -997,6 +998,7 @@ impl Record {
 struct FailureSnapshot {
     source: &'static str, step: Step, pending: Option<Pending>, native_dispatch: Option<NativeDispatch>,
     bootstrap: Option<BootstrapSample>,
+    vault: Option<vault::FailureSample>,
     dom: Option<(u16, Option<ProjectChooserSample>)>,
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -1007,7 +1009,7 @@ struct FailureSnapshot {
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
-            bootstrap: r.bootstrap_failure,
+            bootstrap: r.bootstrap_failure, vault: r.vault_failure,
             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
             project_selection: r.project_selection, completion_selection: r.completion_selection,
@@ -1024,6 +1026,7 @@ impl FailureSnapshot {
         self.source = "prearm-open-progress";
         self.dom = None; // No fresh DOM/counter observation at this cached expiry.
         self.bootstrap = None; // A pre-arm cache is not the first failure's Record sample.
+        self.vault = None; // Never attach a later original vault sample to an earlier cache.
         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.completion_selection = None;
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
@@ -1035,6 +1038,8 @@ impl FailureSnapshot {
         if self.project_selection.is_some() && (self.source != "record" || !project_selection_failure_reason(reason)
             || !matches!(self.step, Step::OpenProject | Step::ProjectSettled)) { return None; }
         if self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason)) { return None; }
+        if self.vault.is_some_and(|sample| self.source != "record" || reason != "vault-finality-contract"
+            || self.step != Step::Vault(sample.step)) { return None; }
         let context = edit::bounded(&failure_context(&self), 8192).ok()?;
         if !context.is_ascii() { return None; }
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
@@ -1075,6 +1080,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     // Only this nested sample belongs to the first failure. The rest of this
     // context still describes the later report snapshot, not that earlier time.
     if let Some(sample) = r.bootstrap { value["bootstrap"] = sample.value(); }
+    if let Some(sample) = r.vault { value["vault"] = sample.value(); }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some((i,data,name)) = r.field_preparation {
@@ -1165,7 +1171,7 @@ impl Observation {
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
-                bootstrap_failure: None,
+                bootstrap_failure: None, vault_failure: None,
                 last_project_chooser: None, original_window: None,
                 native_dispatch: None, last_panel: None, native_action: None,
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
@@ -3616,7 +3622,7 @@ fn bootstrap_diagnostic_data_checks() -> bool {
     latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
     if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
     let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None,
-        bootstrap: Some(sample), dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
+        bootstrap: Some(sample), vault: None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
         accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()
         || (FailureSnapshot { source: "prearm-open-progress", ..snapshot }).frame("bootstrap-info-available-count").is_some() { return false; }
