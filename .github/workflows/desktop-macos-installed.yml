@@ -1388,7 +1388,7 @@ jobs:
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
             -resultBundlePath "$MRK_MACOS_WORK/normal-ui/test.xcresult" \
             -only-testing:MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit \
-            -parallel-testing-enabled NO -test-iterations 1 -test-timeouts-enabled YES \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 60 \
             -disableAutomaticPackageResolution \
             > "$MRK_MACOS_WORK/normal-ui/test.log" 2>&1
@@ -1516,7 +1516,7 @@ jobs:
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
             -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
             -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
-            -parallel-testing-enabled NO -test-iterations 1 -test-timeouts-enabled YES \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
             -disableAutomaticPackageResolution \
             > "$MRK_MACOS_WORK/normal-ui/project-test.log" 2>&1

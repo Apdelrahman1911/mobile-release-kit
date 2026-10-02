@@ -3690,7 +3690,7 @@ class IOSAquaDataTests(unittest.TestCase):
             self.assertNotIn(forbidden, normal)
         for name in ("IOS_SIGNED_NATIVE_QUALIFIED", "IOS_RECOVERY_NATIVE_QUALIFIED"):
             self.assertIn(f"const {name}: bool = false;", owner)
-        qualified = owner.split("fn qualified(&self)", 1)[1].split("fn lock(&self)", 1)[0]
+        qualified = owner.split("fn qualified(", 1)[1].split("fn lock(&self)", 1)[0]
         self.assertIn("if let Some(observation) = book.as_ref()", qualified)
         self.assertIn("return self.runtime.ios_archive_installed_profile_available()", qualified)
         self.assertIn("[ios_wire::Operation::IOSSignedExport, ios_wire::Operation::IOSLocalRecovery]", qualified)
@@ -3753,7 +3753,13 @@ class IOSAquaDataTests(unittest.TestCase):
         self.assertEqual(finish.count(".report(normal_registered)"), 2)
         self.assertIn("r.session_record.as_ref().is_some_and(|record| record.report(normal_registered).is_some())", finish)
         self.assertIn('report["signingInputs"] = r.session_record.as_ref()?.report(normal_registered)?;', finish)
-        self.assertNotIn("record.report().is_some()", finish)
+        ios_arm_start, ios_arm_end = "Case::Ios(case) =>", "\n        };"
+        self.assertEqual(finish.count(ios_arm_start), 1)
+        ios_tail = finish.split(ios_arm_start, 1)[1]
+        self.assertEqual(ios_tail.count(ios_arm_end), 1)
+        ios_finish = ios_tail.split(ios_arm_end, 1)[0]
+        self.assertTrue(ios_finish.strip())
+        self.assertNotIn("record.report().is_some()", ios_finish)
         self.assertIn('"schemaVersion":2,"oneUseOriginalDocumentRegistration":normal_registered', producer)
         self.assertIn('"selection":"ordinary-installed-macos-session"', producer)
         self.assertIn("if !normal_registered ||", producer)
@@ -6418,6 +6424,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Download only the exact accepted M archive (no rebuild or fallback)",
             "Reuse accepted Mac supplier and prepare only the current source payload",
+            "Build and sign the separate fixed vault helper before binding the app",
             "Compile the fixed debug actual-main observer and normal embedded frontend once",
             "Assemble the instrumented engineering app; ad-hoc sign only the app",
             "Bind this signed app and current-source runtime into fresh Installer DATA",
@@ -6425,6 +6432,10 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Application installation uses only standard privileged Installer; app and Python stay nonroot",
             "Nonroot byte/mode readback, not a headless GUI substitute",
             "Verify source stayed unchanged; retire only disposable owned build output",
+        }
+        toolchain = {
+            "Prepare the pinned Apple Instant clock toolchain":
+                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private')",
         }
         classifiers = {
             "Classify installed Xcode originals without preparing or selecting a toolchain":
@@ -6444,17 +6455,21 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Prepare only the fixed disposable Xcode ancestor before any worker": "ios-current-synthetic",
             "One project-field Aqua journey through the reviewed original invocation owner": "project-fields",
             "One Android-input Aqua journey through the reviewed original invocation owner": "android-inputs",
+            "Three serial shipping-helper journeys through the original document and invocation owner": "vault-helper-shipping",
+            "One installation-inspection Aqua journey through the reviewed original invocation owner": "installation-inspection",
             "Nine serial current-iOS Aqua cases through the reviewed original invocation owner": "ios-current-synthetic",
         }
         legacy_exports = {
             "Export bounded diagnostics without altering original command evidence",
             "Preserve bounded original evidence; upload alone is not an Aqua pass",
         }
-        self.assertEqual(set(steps), admitted | legacy | set(classifiers) | set(private) | set(scoped) | legacy_exports)
+        self.assertEqual(set(steps), admitted | legacy | set(toolchain) | set(classifiers) | set(private) | set(scoped) | legacy_exports)
         for name, body in steps.items():
             gates = [line.strip() for line in body.splitlines() if line.startswith("        if:")]
             if name in admitted:
                 expected = []
+            elif name in toolchain:
+                expected = ["if: " + toolchain[name]]
             elif name in classifiers:
                 expected = ["if: " + classifiers[name]]
             elif name in private:
@@ -6463,12 +6478,18 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                 selection = "env.MRK_MACOS_AQUA_SCOPE == " + repr(scoped[name])
                 if scoped[name] in ("project-fields", "android-inputs"):
                     selection = "(" + selection + " || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs')"
+                elif scoped[name] in ("vault-helper-shipping", "installation-inspection"):
+                    selection = "(" + selection + " || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')"
                 expected = ["if: success() && " + selection]
             else:
                 prefix = "always() && steps.work.outputs.root != ''" if name in legacy_exports else "success()"
-                expected = ["if: " + prefix + " && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs')"]
+                expected = ["if: " + prefix + " && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')"]
             with self.subTest(step=name):
                 self.assertEqual(gates, expected)
+        clock = steps["Prepare the pinned Apple Instant clock toolchain"]
+        self.assertNotIn("xcode-installed-classification", clock)
+        self.assertIn("timeout-minutes: 4", clock)
+        self.assertIn("rustup toolchain install 1.98.1 --profile minimal --target aarch64-apple-darwin --no-self-update", clock)
         classify = steps["Classify installed Xcode originals without preparing or selecting a toolchain"]
         self.assertIn("timeout-minutes: 2", classify)
         self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", classify)
@@ -6508,7 +6529,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
-            "          - vault-helper-shipping\n"
+            "          - vault-helper-shipping-installation-inspection\n"
             "    runs-on: macos-26\n"
             "    timeout-minutes: 75\n"
         )
@@ -6597,8 +6618,16 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         compiler = "Compile the fixed debug actual-main observer and normal embedded frontend once"
         p2 = "One project-field Aqua journey through the reviewed original invocation owner"
         android = "One Android-input Aqua journey through the reviewed original invocation owner"
+        helper = "Three serial shipping-helper journeys through the original document and invocation owner"
+        installation = "One installation-inspection Aqua journey through the reviewed original invocation owner"
         self.assertLess(names.index(compiler), names.index(p2))
         self.assertLess(names.index(p2), names.index(android))
+        self.assertLess(names.index(compiler), names.index(helper))
+        self.assertLess(names.index(helper), names.index(installation))
+        for once in (compiler, "Assemble the instrumented engineering app; ad-hoc sign only the app",
+                     "Build the fixed one-shot root Installer and scripts-only package",
+                     "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
+            self.assertEqual(workflow.count("      - name: " + once + "\n"), 1)
         build = steps[compiler]
         self.assertEqual(build.count("cargo test --locked"), 1)
         self.assertEqual(build.count("npm run build"), 1)
@@ -6608,18 +6637,32 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertLess(build.index(rejected), build.index('exit "$status"'))
         self.assertLess(build.index('exit "$status"'), build.index("<<'PY_BUILD'"))
         self.assertNotEqual(BINDING.root(project_fields=True), BINDING.root())
+        self.assertNotEqual(BINDING.root(vault_helper=True), BINDING.root(installation_inspection=True))
+        self.assertEqual(M.case_timeout("installation-inspection"), 95)
         self.assertEqual(M.case_timeout("project-fields"), 60)
         self.assertEqual(M.case_timeout("android-inputs"), 60)
-        for name, scope, prefix in ((p2, "project-fields", "aqua-project-fields"),
-                                     (android, "android-inputs", "aqua-android-inputs")):
+        for name, scope, prefix, paired, minutes in (
+                (p2, "project-fields", "aqua-project-fields", "project-fields-android-inputs", 3),
+                (android, "android-inputs", "aqua-android-inputs", "project-fields-android-inputs", 3),
+                (helper, "vault-helper-shipping", "aqua-vault-helper", "vault-helper-shipping-installation-inspection", 8),
+                (installation, "installation-inspection", "aqua-installation-inspection", "vault-helper-shipping-installation-inspection", 3)):
             step = steps[name]
-            self.assertIn("timeout-minutes: 3", step)
+            self.assertIn("timeout-minutes: " + str(minutes), step)
             self.assertIn("if: success() && (env.MRK_MACOS_AQUA_SCOPE == " + repr(scope)
-                          + " || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs')", step)
+                          + " || env.MRK_MACOS_AQUA_SCOPE == " + repr(paired) + ")", step)
             self.assertEqual(step.count("macos_aqua_qualification.py --scope " + scope), 1)
             for forbidden in ("continue-on-error", "|| true", "--timeout", "rm -"):
                 self.assertNotIn(forbidden, step)
-            self.assertIn('"$MRK_MACOS_WORK/' + prefix + '.status"', step)
+            status_write = 'printf \'%s\\n\' "$status" > "$MRK_MACOS_WORK/' + prefix + '.status"'
+            self.assertLess(step.index("status=$?"), step.index(status_write))
+            self.assertLess(step.index(status_write), step.index("[[ $status == 0 ]]"))
+            for leaf in (prefix + "-results.jsonl", prefix + "-failure.jsonl", prefix + ".status"):
+                self.assertIn('${{ steps.work.outputs.root }}/' + leaf + "\n", workflow)
+        for paired in ("project-fields-android-inputs", "vault-helper-shipping-installation-inspection"):
+            with self.assertRaises(M.Refused):
+                M.argument_scope(["--scope", paired])
+            with self.assertRaises(M.Refused):
+                M.selected_cases(paired)
         binding = steps["Record exact source and actual tool bindings only after route admission"]
         script = binding.split("<<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0]
         tree = ast.parse(textwrap.dedent(script))
@@ -6628,9 +6671,11 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                   and node.targets[0].id == "scope_cases"]
         self.assertEqual(len(tables), 1)
         cases = ast.literal_eval(tables[0].value)
-        self.assertEqual(set(cases), {"project-fields", "android-inputs", "ios-current-synthetic", "project-fields-android-inputs", M.VAULT_HELPER_SCOPE})
+        self.assertEqual(set(cases), {"project-fields", "android-inputs", "ios-current-synthetic", "project-fields-android-inputs", M.VAULT_HELPER_SCOPE, "installation-inspection", "vault-helper-shipping-installation-inspection"})
         self.assertEqual(cases["project-fields-android-inputs"][1], ["project-fields", "android-inputs"])
-        selection = 'selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else [aqua_scope]'
+        self.assertEqual(cases["installation-inspection"][1], ["installation-inspection"])
+        self.assertEqual(cases["vault-helper-shipping-installation-inspection"][1], [*M.VAULT_HELPER_CASES, "installation-inspection"])
+        selection = 'selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else ["vault-helper-shipping", "installation-inspection"] if aqua_scope == "vault-helper-shipping-installation-inspection" else [aqua_scope]'
         diagnostic = steps["Export bounded diagnostics without altering original command evidence"]
         for step in (binding, diagnostic):
             self.assertIn(selection, step)
@@ -8716,11 +8761,11 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    steps:\n", 1)[0]
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
-        self.assertIn("        scope:\n          - vault-helper-shipping\n", header)
+        self.assertIn("        scope:\n          - vault-helper-shipping-installation-inspection\n", header)
         self.assertNotIn("          - project-fields", header)
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         run = blocks["Three serial shipping-helper journeys through the original document and invocation owner"]
-        self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping'", run)
+        self.assertIn("if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')", run)
         self.assertEqual(run.count("macos_aqua_qualification.py --scope vault-helper-shipping"), 1)
         self.assertIn("[[ $status == 0 ]]", run)
         for forbidden in ("security unlock", "create-keychain", "default-keychain", "list-keychains", "continue-on-error"):

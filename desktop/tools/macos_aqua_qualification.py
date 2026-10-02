@@ -35,6 +35,7 @@ FILE_NATIVE_PANELS = {case: {f"Session(Native({index}))": identifier for index, 
 IOS_CURRENT_CASES = IOS_CASES + ("ios-signing-inputs", *IOS_SIGNED_CASES, "ios-recovery-empty")
 IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty",)
 PROJECT_FIELDS_CASE = "project-fields"
+INSTALLATION_INSPECTION_CASE = "installation-inspection"
 VAULT_HELPER_SCOPE = "vault-helper-shipping"
 VAULT_HELPER_CASES = ("vault-helper-roundtrip", "vault-helper-stop-before-go", "vault-helper-stop-after-add")
 PROJECT_FIELD_CHOICES = (
@@ -51,7 +52,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES
+ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE,)
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -87,6 +88,9 @@ FAILURE_STEPS |= frozenset(f"ProjectFields({name}({i}))" for name in (
     f"ProjectFields({name})" for name in ("PreviewPage Preview Previewed Done").split())
 FAILURE_STEPS |= frozenset(f"Vault({name})" for name in (
     "Open Opened Prepare Prepared Initialize Initialized Lock Locked Reopen Reopened Unlock Unlocked Relock Relocked"
+).split())
+FAILURE_STEPS |= frozenset(f"Installation({name})" for name in (
+    "StartCancelled WaitFirstRead Cancel WaitCancelled StartMatching WaitMatching"
 ).split())
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
@@ -125,7 +129,9 @@ FAILURE_REASONS = frozenset((
     "session-request-contract session-result-contract session-original-contract session-dom-contract "
     "project-fields-request-contract project-fields-result-contract project-fields-original-contract "
     "project-fields-fixture-contract project-fields-dom-contract "
-    "vault-request-contract vault-result-contract vault-original-contract vault-finality-contract"
+    "vault-request-contract vault-result-contract vault-original-contract vault-finality-contract "
+    "installation-request-contract installation-status-contract installation-first-read-contract "
+    "installation-original-contract installation-finality-contract"
 ).split())
 PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
 PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
@@ -585,10 +591,12 @@ class Binding:
         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
         return self
 
-    def root(self, *, project_fields=False, vault_helper=False):
+    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False):
         self.checked()
-        need(type(project_fields) is bool and type(vault_helper) is bool and not (project_fields and vault_helper), "scope-not-supported")
-        suffix = "-project-fields" if project_fields else "-vault-helper" if vault_helper else ""
+        flags = (project_fields, vault_helper, installation_inspection)
+        need(all(type(flag) is bool for flag in flags) and sum(flags) <= 1, "scope-not-supported")
+        suffix = ("-project-fields" if project_fields else "-vault-helper" if vault_helper
+                  else "-installation-inspection" if installation_inspection else "")
         return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}{suffix}"
 
     def public(self):
@@ -619,10 +627,10 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE), "scope-not-supported")
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE), "scope-not-supported")
     if scope == VAULT_HELPER_SCOPE:
         return VAULT_HELPER_CASES
-    if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE):
+    if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, INSTALLATION_INSPECTION_CASE):
         return (scope,)
     if scope == "ios-current-synthetic":
         return IOS_CURRENT_CASES
@@ -635,13 +643,14 @@ def argument_scope(argv):
                                or argv == ["--scope", "ios-current-synthetic"]
                                or argv == ["--scope", PROJECT_FIELDS_CASE]
                                or argv == ["--scope", ANDROID_INPUT_CASE]
-                               or argv == ["--scope", VAULT_HELPER_SCOPE]), "arguments-not-supported")
+                               or argv == ["--scope", VAULT_HELPER_SCOPE]
+                               or argv == ["--scope", INSTALLATION_INSPECTION_CASE]), "arguments-not-supported")
     return argv[1] if argv else None
 
 
 def case_timeout(case):
     need(type(case) is str and case in ALL_CASES, "case-binding")
-    return 325 if case in IOS_OPERATION_CASES else 135 if case in VAULT_HELPER_CASES else 60
+    return 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES else 135 if case in VAULT_HELPER_CASES else 60
 
 
 def ios_config(case):
@@ -1109,9 +1118,70 @@ def vault_fixture_path(binding, home, case):
             f"mrk-macos-aqua-vault-{binding.source}-{binding.run}-{binding.attempt}" / case / "dev.mobile-release-kit.desktop")
 
 
+def _expected_installation_report():
+    # Literal parser-test DATA only, never an observed read or a missing-receipt
+    # replacement. _installation_report requires every actual field separately.
+    def row(identifier, revision, final_revision, cancelled):
+        start = {"schemaVersion": 1, "statusRevision": revision, "available": True, "canStart": False,
+                 "operationId": identifier, "phase": "checking", "reason": "none", "settlement": "pending", "assessment": None}
+        status = {**start, "statusRevision": final_revision, "canStart": True,
+                  "phase": "refused" if cancelled else "observed", "reason": "cancelled" if cancelled else "none",
+                  "settlement": "known", "assessment": None if cancelled else {
+                      "files": 3, "bytes": 19, "assurance": "read-only-correspondence", "maintenance": "unavailable"}}
+        return {"start": start, "firstRead": {"verifiedFiles": 1, "verifiedBytes": 7},
+                "cancelRequestedOnce": cancelled, "cancelReturned": cancelled, "status": status,
+                "originals": {"normalCoordinatorJoined": True, "normalChildJoined": True, "nativeSettled": True,
+                              "storageDisposed": True, "resourcesSettled": True, "stopped": cancelled}}
+    return {"mechanism": "original-document-ordinary-installation-v1", "recordKind": "ordinary",
+            "projectSelected": False, "firstReadCancellationBoundary": "completed-file-read-before-exact-original-stop",
+            "cancelled": row(1, 1, 3, True), "matching": row(2, 4, 5, False),
+            "normalQuit": {"operationId": 3, "inspectionId": 2, "noProjectFinality": True},
+            "limits": {"readOnly": True, "maintenance": "unavailable", "network": "not-part-of-this-operation",
+                       "credentials": "not-part-of-this-operation"}}
+
+
+def _installation_report(value):
+    """Closed actual returned facts; no expected file/byte/revision fallback."""
+    label = "installation-inspection-report"
+    expected = _expected_installation_report()
+    need(type(value) is dict and set(value) == set(expected), label)
+    revisions = []
+    for name in ("cancelled", "matching"):
+        actual, target = value[name], expected[name]
+        need(type(actual) is dict and set(actual) == set(target), label)
+        first = actual["firstRead"]
+        need(type(first) is dict and set(first) == {"verifiedFiles", "verifiedBytes"}, label)
+        need(type(first["verifiedFiles"]) is int and 1 <= first["verifiedFiles"] <= 2048
+             and type(first["verifiedBytes"]) is int and 1 <= first["verifiedBytes"] <= 512 * 1024 * 1024, label)
+        target["firstRead"] = first
+        for kind in ("start", "status"):
+            status = actual[kind]
+            need(type(status) is dict and set(status) == set(target[kind]), label)
+            revision = status["statusRevision"]
+            need(type(revision) is int and 0 < revision < 2**32 - 1, label)
+            revisions.append(revision)
+            target[kind]["statusRevision"] = revision
+        if name == "matching":
+            assessment = actual["status"]["assessment"]
+            need(type(assessment) is dict and set(assessment) == {"files", "bytes", "assurance", "maintenance"}, label)
+            need(type(assessment["files"]) is int and 1 <= assessment["files"] <= 2048
+                 and type(assessment["bytes"]) is int and 1 <= assessment["bytes"] <= 512 * 1024 * 1024
+                 and first["verifiedFiles"] <= assessment["files"] and first["verifiedBytes"] <= assessment["bytes"], label)
+            target["status"]["assessment"].update(files=assessment["files"], bytes=assessment["bytes"])
+    need(all(left < right for left, right in zip(revisions, revisions[1:])), label)
+    _exact(value, expected, ("installationInspection",))
+    return value
+
+
 def expected_result(binding, case):
     binding.checked()
     need(case in ALL_CASES, "case-binding")
+    if case == INSTALLATION_INSPECTION_CASE:
+        value = expected_result(binding, "picker-loss")
+        value.update(case=case, installationInspection=_expected_installation_report())
+        value["native"]["panelAttachments"] = [False, True, False, False]
+        value["reload"] = dict.fromkeys(value["reload"], False)
+        return value
     if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) or case in VAULT_HELPER_CASES:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
@@ -1282,6 +1352,14 @@ RESULT_LOCATION_KEYS |= frozenset((
 ).split())
 
 
+RESULT_LOCATION_KEYS |= frozenset((
+    "installationInspection recordKind projectSelected firstReadCancellationBoundary cancelled matching normalQuit "
+    "inspectionId noProjectFinality limits readOnly maintenance network credentials firstRead verifiedFiles verifiedBytes "
+    "cancelRequestedOnce cancelReturned statusRevision available canStart phase settlement normalCoordinatorJoined "
+    "normalChildJoined nativeSettled storageDisposed resourcesSettled stopped"
+).split())
+
+
 def _result_location(parts):
     if type(parts) is not tuple or not 1 <= len(parts) <= 12 or type(parts[0]) is not str:
         return None
@@ -1336,6 +1414,9 @@ def parse_result(stdout, stderr, binding, case):
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
+    if case == INSTALLATION_INSPECTION_CASE:
+        need(type(value) is dict and "installationInspection" in value, "installation-inspection-report")
+        expected["installationInspection"] = _installation_report(value["installationInspection"])
     if case == PROJECT_FIELDS_CASE:
         _project_field_selection_histories(value, expected)
     if case in VAULT_HELPER_CASES:
@@ -1350,7 +1431,7 @@ def parse_result(stdout, stderr, binding, case):
         if case in IOS_SIGNED_CASES:
             _exact(value["iosArchive"]["context"]["signing"], _signing_policy_from_inputs(value["signingInputs"]),
                    ("iosArchive", "context", "signing"))
-    if case != "picker-loss":
+    if case not in ("picker-loss", INSTALLATION_INSPECTION_CASE):
         need(type(value) is dict and type(value.get("native")) is dict, "native-object")
         identity = _accessibility_binding_context(value["native"].get("projectOpenBinding"), case)
         need(identity is not None and identity["start"]["result"] == "ok" and identity["binding"] is not None
@@ -1444,7 +1525,7 @@ def _field_open_step(case, identifier):
 
 
 def _open_sample_kind(case, identifier, *, allow_files=False):
-    if type(case) is not str or case not in ALL_CASES or case == "picker-loss" or type(identifier) is not int:
+    if type(case) is not str or case not in ALL_CASES or case in ("picker-loss", INSTALLATION_INSPECTION_CASE) or type(identifier) is not int:
         return None
     if identifier == (2 if case == "first-save" else 1):
         return "project"
@@ -1463,7 +1544,9 @@ def _native_action_context(value, native, panel, *, case=None):
         need(all(type(value[key]) is str for key in ("step", "action", "domain", "site", "error"))
              and type(value["id"]) is int, "native-action-data")
         spec = NATIVE_ACTION_STEPS.get(value["step"])
-        if value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
+        if case == INSTALLATION_INSPECTION_CASE:
+            spec = ("quit-confirm", "quit", (3,), 16) if value["step"] == "Quit" else None
+        elif value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
             spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
         elif value["step"] == "Quit" and case in VAULT_HELPER_CASES:
             spec = ("quit-confirm", "quit", (5, 7) if case == VAULT_HELPER_CASES[0] else (5,), 16)
@@ -2383,7 +2466,7 @@ def failure_context(stdout, stderr, case=None):
             value["projectFieldPreparation"] = _field_preparation_context(value["projectFieldPreparation"], case, failure_step(stdout, stderr))
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
         file_panels, field_panels = _file_native_panels(case), _field_native_panels(case)
-        native_steps = NATIVE_STEPS | file_panels.keys() | field_panels.keys()
+        native_steps = {"Quit"} if case == INSTALLATION_INSPECTION_CASE else NATIVE_STEPS | file_panels.keys() | field_panels.keys()
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
                  and type(pending["kind"]) is str, "failure-context")
@@ -2408,7 +2491,9 @@ def failure_context(stdout, stderr, case=None):
                  and native is not None and native["entered"] and panel["step"] == native["step"]
                  and type(panel["id"]) is int and type(panel["kind"]) is str
                  and type(panel["parentPresent"]) is bool and type(panel["panelPresent"]) is bool, "failure-context")
-            if panel["kind"] in {choice[1] for choice in PROJECT_FIELD_CHOICES} or panel["step"] in field_panels:
+            if case == INSTALLATION_INSPECTION_CASE:
+                need((panel["step"], panel["id"], panel["kind"]) == ("Quit", 3, "quit"), "failure-context")
+            elif panel["kind"] in {choice[1] for choice in PROJECT_FIELD_CHOICES} or panel["step"] in field_panels:
                 need(panel["step"] in field_panels and (panel["id"], panel["kind"]) == field_panels[panel["step"]], "failure-context")
             elif panel["kind"] == "file" or panel["step"] in file_panels:
                 need(panel["kind"] == "file" and panel["step"] in file_panels
@@ -2709,7 +2794,8 @@ class Fixtures:
     def __init__(self, binding, uid, gid, scope=None):
         self.binding, self.uid, self.gid = binding, uid, gid
         self.cases = selected_cases(scope)
-        self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE))
+        self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE))
         self.fds = set()
         self.close_errors = 0
         self.first_close_error = None
@@ -3265,7 +3351,8 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     not_executed = []
     for case in cases:
         fixtures.before_call(case)
-        state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE)) / "state" / case
+        state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE)) / "state" / case
         argv = [EXECUTABLE, case]
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
