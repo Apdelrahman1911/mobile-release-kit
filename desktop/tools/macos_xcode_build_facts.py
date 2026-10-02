@@ -6,11 +6,13 @@ Crash time/toolchain matches are correlations, not process ownership or finality
 Only the fixed disposable hosted workflow calls main. Tests call the pure parser.
 """
 import datetime
+import hashlib
 import heapq
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import resource
 import stat
 import sys
@@ -26,6 +28,42 @@ MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_REPORTS = 8
 MAX_ENTRIES = 8192
 SCOPE = "same-XCTRunner-build-infrastructure-only"
+SETTINGS_OPTIONS = frozenset(("-showBuildSettings", "-json", "-project", "-workspace", "-scheme", "-target",
+                              "-configuration", "-destination", "-destination-timeout", "-derivedDataPath",
+                              "-disableAutomaticPackageResolution", "-sdk", "-arch", "-help", "-usage"))
+
+
+def closed_settings_facts(stdout, stderr, status, bash_version):
+    """Finite facts about original streams, never raw stderr or arbitrary options."""
+    if (type(stdout) is not bytes or len(stdout) > 1024 * 1024
+            or type(stderr) is not bytes or len(stderr) > 65536
+            or type(status) is not int or not 0 <= status <= 255
+            or type(bash_version) is not list or len(bash_version) != 3
+            or any(type(v) is not int or not 0 <= v <= 999 for v in bash_version)):
+        raise ValueError("settings diagnostic shape")
+    text = stderr.decode("utf-8", "strict")
+    errors = [line.strip() for line in text.splitlines() if line.strip().startswith("xcodebuild: error:")]
+    message = "\n".join(errors)
+    usage = re.search(r"(?im)^\s*usage:\s*xcodebuild\b", text) is not None
+    patterns = {
+        "invalid-option": r"\b(?:invalid|unknown|unrecognized|unrecognised) (?:option|argument|flag)\b",
+        "conflicting-arguments": r"\b(?:mutually exclusive|conflicting|incompatible)\b|\b(?:cannot|can't|may not|must not)\b[^\n]*\b(?:with|together|both)\b",
+        "missing-argument": r"\b(?:requires?|missing|expected)\b[^\n]*\bargument\b|\bargument\b[^\n]*\brequired\b",
+        "unsupported-option": r"\b(?:not supported|unsupported|only supported)\b",
+    }
+    kinds = sorted(key for key, pattern in patterns.items() if re.search(pattern, message, re.I))
+    if errors and not kinds:
+        kinds = ["unclassified"]
+    elif not errors and text.strip():
+        kinds = ["usage" if usage else "unclassified"]
+    mentioned = sorted(option for option in SETTINGS_OPTIONS
+                       if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(option) + r"(?![A-Za-z0-9_-])", message))
+    return {"schemaVersion": 1, "scope": "same-XCTRunner-settings-command-only",
+            "originalSettingsExit": status, "bashVersion": bash_version,
+            "stdoutBytes": len(stdout), "stdoutSha256": hashlib.sha256(stdout).hexdigest(),
+            "stderrBytes": len(stderr), "stderrSha256": hashlib.sha256(stderr).hexdigest(),
+            "errorLineCount": len(errors), "usagePresent": usage, "errorKinds": kinds,
+            "mentionedOptions": mentioned, "rawOutputIncluded": False, "productQualified": False}
 
 
 def compiler_file_budget(pair):
@@ -319,8 +357,8 @@ def emit(fd, name, value):
 
 def main():
     if (sys.platform != "darwin" or os.getuid() == 0 or os.getuid() != os.geteuid()
-            or len(sys.argv) < 3 or sys.argv[1] not in ("before", "after", "late")
-            or len(sys.argv) != {"before": 3, "after": 4, "late": 6}[sys.argv[1]]):
+            or len(sys.argv) < 3 or sys.argv[1] not in ("before", "after", "late", "settings")
+            or len(sys.argv) != {"before": 3, "after": 4, "late": 6, "settings": 7}[sys.argv[1]]):
         raise ValueError("diagnostic scope")
     phase, root = sys.argv[1], Path(sys.argv[2])
     if root.parent != Path("/Users/runner/work/_temp") or not root.name.startswith("mrk-macos-ui-host."):
@@ -376,6 +414,15 @@ def main():
                           "crashes": crash_snapshot(begin, end, contents, deadline),
                           "derivedData": derived_sizes(root_fd, before["shellChildLimits"]["RLIMIT_FSIZE"][0], deadline)}
                 emit(evidence, "build-infrastructure-after.json", result)
+            elif phase == "settings":
+                status = int(sys.argv[3])
+                if read_at(evidence, "settings.status", 4, (os.getuid(),)) != (str(status) + "\n").encode("ascii"):
+                    raise ValueError("original settings status mismatch")
+                result = closed_settings_facts(
+                    read_at(root_fd, "settings.json", 1024 * 1024, (os.getuid(),)),
+                    read_at(root_fd, "settings.stderr", 65536, (os.getuid(),)), status,
+                    [int(value) for value in sys.argv[4:7]])
+                emit(evidence, "settings-command.json", result)
             else:
                 # These originals remain inputs only. A delayed report is not a
                 # new build, a changed build result, or process-finality evidence.

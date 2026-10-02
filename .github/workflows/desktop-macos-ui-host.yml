@@ -25,14 +25,14 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
-          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-ui-host && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-ui-host.yml@$GITHUB_REF" ]]
-          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
-          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]]
-          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]]
-          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]] || exit 1
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-ui-host && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-ui-host.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]] || exit 1
+          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]] || exit 1
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
       - name: Check out exact source without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         env:
@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && -z "$(git status --porcelain=v1)" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && -z "$(git status --porcelain=v1)" ]] || exit 1
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-ui-host.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           printf 'MRK_UI_HOST_WORK=%s\n' "$root" >> "$GITHUB_ENV"
@@ -59,6 +59,18 @@ jobs:
           git rev-parse 'HEAD^{tree}' > "$root/evidence/source-tree.txt"
           printf '%s/%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$root/evidence/run-attempt.txt"
           /usr/bin/stat -f '%d:%i:%u' "$root" > "$root/original-directory.txt"
+          # Apple Bash 3.2 does not make a standalone [[...]] an errexit gate.
+          # This fixed child uses only builtins: no app, files, network or tools.
+          set +e
+          guard_output=$(/usr/bin/env -i PATH=/usr/bin:/bin /bin/bash --noprofile --norc -c 'set -e; [[ false == true ]] || exit 77; printf "%s\n" MRK_UNREACHABLE')
+          guard_status=$?
+          set -e
+          [[ "$guard_status" == 77 && -z "$guard_output" ]] || exit 1
+          for value in "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${BASH_VERSINFO[2]}"; do
+            [[ "$value" =~ ^(0|[1-9][0-9]{0,2})$ ]] || exit 1
+          done
+          printf '{"schemaVersion":1,"bashVersion":[%s,%s,%s],"explicitFalseGuardExit":77,"sentinelAbsent":true,"productQualified":false}\n' \
+            "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${BASH_VERSINFO[2]}" > "$root/evidence/bash-guard-facts.json"
           clean() {
             /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
               "TMPDIR=$root/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
@@ -126,7 +138,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && -z "$(git status --porcelain=v1)" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" && -z "$(git status --porcelain=v1)" ]] || exit 1
           tree=$(git rev-parse 'HEAD^{tree}')
           # Separate observation only: never overwrite before/after/status or
           # change the failed compiler result, command, environment or limit.
@@ -158,23 +170,40 @@ jobs:
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_UI_HOST_WORK/DerivedData" -disableAutomaticPackageResolution \
             COMPILER_INDEX_STORE_ENABLE=NO > "$MRK_UI_HOST_WORK/settings.json" 2> "$MRK_UI_HOST_WORK/settings.stderr"
-          status=$?
+          settings_status=$?
+          printf '%s\n' "$settings_status" > "$MRK_UI_HOST_WORK/evidence/settings.status"
+          settings_publication_status=$?
           set -e
-          printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/settings.status"
-          [[ "$status" == 0 ]]
+          if [[ "$settings_publication_status" != 0 ]]; then
+            # No helper may read a stale/colliding status; no helper ran here.
+            [[ "$settings_status" == 0 ]] || exit "$settings_status"
+            exit "$settings_publication_status"
+          fi
+          # Preserve closed diagnostics before the original failure terminates.
+          # No fallback query; unavailable diagnostics cannot authorize inspection.
+          set +e
+          clean /usr/bin/python3 -I -S -B desktop/tools/macos_xcode_build_facts.py settings "$MRK_UI_HOST_WORK" \
+            "$settings_status" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${BASH_VERSINFO[2]}"
+          diagnostic_status=$?
+          printf '%s\n' "$diagnostic_status" > "$MRK_UI_HOST_WORK/evidence/settings-diagnostic.status"
+          diagnostic_publication_status=$?
+          set -e
+          [[ "$settings_status" == 0 ]] || exit "$settings_status"
+          [[ "$diagnostic_status" == 0 ]] || exit "$diagnostic_status"
+          [[ "$diagnostic_publication_status" == 0 ]] || exit "$diagnostic_publication_status"
           runner="$MRK_UI_HOST_WORK/DerivedData/Build/Products/Debug/MRKNormalAppUITests-Runner.app"
           test_bundle="$runner/Contents/PlugIns/MRKNormalAppUITests.xctest"
           for kind in runner test-bundle; do
             bundle="$runner"
             if [[ "$kind" == test-bundle ]]; then bundle="$test_bundle"; fi
-            [[ -d "$bundle" && ! -L "$bundle" ]]
+            [[ -d "$bundle" && ! -L "$bundle" ]] || exit 1
             set +e
             clean /usr/bin/codesign --display --entitlements :- "$bundle" \
               > "$MRK_UI_HOST_WORK/$kind.entitlements.plist" 2> "$MRK_UI_HOST_WORK/$kind.codesign.stderr"
             status=$?
             set -e
             printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/$kind-codesign.status"
-            [[ "$status" == 0 ]]
+            [[ "$status" == 0 ]] || exit "$status"
           done
           clean /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_INSPECT'
           import json, os, pathlib, plistlib, stat, sys
@@ -274,7 +303,7 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$status" > "$MRK_UI_HOST_WORK/evidence/summary.status"
-          [[ "$status" == 0 ]]
+          [[ "$status" == 0 ]] || exit "$status"
           clean /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_SUMMARY'
           import json, os, pathlib, re, stat, sys
           root = pathlib.Path(sys.argv[1])
@@ -301,7 +330,7 @@ jobs:
           facts = re.findall(r"^MRK_MACOS_UI_HOST_FACTS=os=\d+\.\d+\.\d+;nonroot=(?:true|false);sameUid=(?:true|false);sameGid=(?:true|false);runnerName=(?:true|false);fixedHome=(?:true|false)$", log, re.M)
           env_facts = re.findall(r"^MRK_MACOS_UI_HOST_ENV_FACTS=homeIsRunner=(?:true|false);userIsRunner=(?:true|false);lognameIsRunner=(?:true|false);fixedHomePresent=(?:true|false);versionCompatPresent=(?:true|false)$", log, re.M)
           if len(facts) != 1 or len(env_facts) != 1: raise ValueError("missing or repeated closed native observations")
-          statuses = {key: int(read("evidence/" + key + ".status", 16)) for key in ("build", "settings", "runner-codesign", "test-bundle-codesign", "test", "summary")}
+          statuses = {key: int(read("evidence/" + key + ".status", 16)) for key in ("build", "settings", "settings-diagnostic", "runner-codesign", "test-bundle-codesign", "test", "summary")}
           passed = counts["passedTests"] == 1 and all(v == 0 for v in statuses.values())
           result = {"schemaVersion": 1, "scope": "HOST_ADMISSION_DIAGNOSTIC_ONLY", "platform": "macOS26-arm64",
                     "harnessSourceCommit": read("evidence/source-commit.txt", 41).decode().strip(),

@@ -1,5 +1,6 @@
 """Pure DATA parser coverage, not macOS/Xcode execution or product evidence."""
 import ast
+import hashlib
 import importlib.util
 import json
 import pathlib
@@ -348,6 +349,104 @@ class XcodeBuildFactsDataTests(unittest.TestCase):
             self.assertTrue(result["cachingSettingPresent"])
             self.assertIs(result["cachingEnabled"], expected)
             self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_settings_error_projection_keeps_original_status_without_raw_text(self):
+        stderr = (b"xcodebuild: error: invalid option '-destination-timeout' PRIVATE-MUST-NOT-LEAVE\n"
+                  b"Usage: xcodebuild -project /PRIVATE/project.xcodeproj -scheme PRIVATE\n")
+        result = M.closed_settings_facts(b"", stderr, 64, [3, 2, 57])
+        self.assertEqual(result["originalSettingsExit"], 64)
+        self.assertEqual(result["bashVersion"], [3, 2, 57])
+        self.assertEqual(result["errorKinds"], ["invalid-option"])
+        self.assertEqual(result["mentionedOptions"], ["-destination-timeout"])
+        self.assertTrue(result["usagePresent"])
+        self.assertEqual(result["errorLineCount"], 1)
+        self.assertEqual(result["stderrSha256"], hashlib.sha256(stderr).hexdigest())
+        self.assertEqual(result["stderrBytes"], len(stderr))
+        self.assertFalse(result["rawOutputIncluded"] or result["productQualified"])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        self.assertEqual(set(result), {"schemaVersion", "scope", "originalSettingsExit", "bashVersion",
+                         "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256", "errorLineCount",
+                         "usagePresent", "errorKinds", "mentionedOptions", "rawOutputIncluded", "productQualified"})
+
+    def test_settings_projection_distinguishes_usage_conflict_and_unknown_messages(self):
+        result = M.closed_settings_facts(b"", b"xcodebuild: error: -json cannot be used with -target\n", 64, [3, 2, 57])
+        self.assertEqual(result["errorKinds"], ["conflicting-arguments"])
+        self.assertEqual(result["mentionedOptions"], ["-json", "-target"])
+        self.assertFalse(result["usagePresent"])
+        result = M.closed_settings_facts(b"", b"Usage: xcodebuild -PRIVATE\n", 64, [3, 2, 57])
+        self.assertEqual(result["errorKinds"], ["usage"])
+        self.assertEqual(result["mentionedOptions"], [])
+        self.assertTrue(result["usagePresent"])
+        for raw in (b"PRIVATE", b"xcodebuild: error: PRIVATE -json-private\n"):
+            result = M.closed_settings_facts(b"PRIVATE", raw, 64, [3, 2, 57])
+            self.assertEqual(result["errorKinds"], ["unclassified"])
+            self.assertEqual(result["mentionedOptions"], [])
+            self.assertNotIn("PRIVATE", json.dumps(result))
+        result = M.closed_settings_facts(b"[]", b"", 0, [5, 2, 0])
+        self.assertEqual(result["errorKinds"], [])
+        self.assertEqual(result["originalSettingsExit"], 0)
+        self.assertFalse(result["productQualified"])
+
+    def test_settings_diagnostic_refuses_unbounded_or_malformed_inputs(self):
+        for stdout, stderr, status, version in (
+                (b"x" * (1024 * 1024 + 1), b"", 64, [3, 2, 57]),
+                (b"", b"x" * 65537, 64, [3, 2, 57]),
+                (b"", b"\xff", 64, [3, 2, 57]),
+                ("not-bytes", b"", 64, [3, 2, 57]),
+                (b"", b"", True, [3, 2, 57]), (b"", b"", 256, [3, 2, 57]),
+                (b"", b"", 64, [3, 2]), (b"", b"", 64, [3, True, 57]),
+                (b"", b"", 64, [3, 2, 1000])):
+            with self.assertRaises(ValueError):
+                M.closed_settings_facts(stdout, stderr, status, version)
+        result = M.closed_settings_facts(b"x" * (1024 * 1024), b"x" * 65536, 64, [3, 2, 57])
+        self.assertEqual(result["errorKinds"], ["unclassified"])
+        self.assertEqual((result["stdoutBytes"], result["stderrBytes"]), (1024 * 1024, 65536))
+
+    def test_account_workflow_explicit_guards_preserve_settings_failure_and_query(self):
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-ui-host.yml").read_text()
+        guards = [line.strip() for line in workflow.splitlines() if line.strip().startswith("[[")]
+        self.assertGreaterEqual(len(guards), 18)
+        for guard in guards:
+            self.assertRegex(guard, r'^\[\[.*\]\] \|\| exit (?:1|"\$[a-z_]+")$')
+        self.assertIn('[[ "$guard_status" == 77 && -z "$guard_output" ]] || exit 1', workflow)
+        self.assertIn("/bin/bash --noprofile --norc -c 'set -e; [[ false == true ]] || exit 77; printf \"%s\\n\" MRK_UNREACHABLE'", workflow)
+        self.assertIn('[[ "$value" =~ ^(0|[1-9][0-9]{0,2})$ ]] || exit 1', workflow)
+        self.assertLess(workflow.index("bash-guard-facts.json"), workflow.index("xcodebuild build-for-testing"))
+        self.assertEqual(workflow.count("ulimit -f 33554432"), 1)
+        self.assertEqual(workflow.count("ulimit -f 32768"), 2)
+        body = workflow.split("        id: inspection\n", 1)[1].split("      - name:", 1)[0]
+        query = body[body.index("clean /usr/bin/xcodebuild -showBuildSettings"):body.index("\n          settings_status=$?")]
+        expected = r'''clean /usr/bin/xcodebuild -showBuildSettings -json \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_UI_HOST_WORK/DerivedData" -disableAutomaticPackageResolution \
+            COMPILER_INDEX_STORE_ENABLE=NO > "$MRK_UI_HOST_WORK/settings.json" 2> "$MRK_UI_HOST_WORK/settings.stderr"'''
+        self.assertEqual([line.strip() for line in query.splitlines()], [line.strip() for line in expected.splitlines()])
+        original = body.rindex('[[ "$settings_status" == 0 ]] || exit "$settings_status"')
+        diagnostic = body.index('[[ "$diagnostic_status" == 0 ]] || exit "$diagnostic_status"')
+        published = body.index('[[ "$diagnostic_publication_status" == 0 ]] || exit "$diagnostic_publication_status"')
+        # A failed create-only status publication must not replace real exit64
+        # or let the helper read a stale/colliding original status file.
+        first_capture = body.index("settings_status=$?")
+        first_publication = body.index("settings_publication_status=$?")
+        self.assertNotIn("set -e", body[first_capture:first_publication])
+        before_publication = body[:first_publication]
+        self.assertGreater(before_publication.rindex("set +e"), before_publication.rindex("set -e"))
+        branch = body.split('if [[ "$settings_publication_status" != 0 ]]; then', 1)[1].split("          fi", 1)[0]
+        self.assertIn('[[ "$settings_status" == 0 ]] || exit "$settings_status"', branch)
+        self.assertIn('exit "$settings_publication_status"', branch)
+        self.assertLess(branch.index('exit "$settings_status"'), branch.index('exit "$settings_publication_status"'))
+        self.assertNotIn("diagnostic", branch)
+        helper = body.index("macos_xcode_build_facts.py settings")
+        before_helper = body[:helper]
+        self.assertGreater(before_helper.rindex("set +e"), before_helper.rindex("set -e"))
+        self.assertNotIn("set -e", body[helper:body.index("diagnostic_publication_status=$?")])
+        self.assertLess(body.index("evidence/settings.status"), body.index("macos_xcode_build_facts.py settings"))
+        self.assertLess(body.index("evidence/settings-diagnostic.status"), original)
+        self.assertLess(original, diagnostic)
+        self.assertLess(diagnostic, published)
+        self.assertLess(published, body.index('runner="$MRK_UI_HOST_WORK/DerivedData'))
+        self.assertIn('("build", "settings", "settings-diagnostic", "runner-codesign"', workflow)
 
 
 if __name__ == "__main__":
