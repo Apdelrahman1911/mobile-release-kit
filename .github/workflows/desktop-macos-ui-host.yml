@@ -75,7 +75,14 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          ulimit -f 1048576
+          # Sparse CAS arena capacity is a per-file logical size, not disk/RAM
+          # allocation. Raise only this compiler phase to a finite 32 GiB.
+          set +e
+          ulimit -f 33554432
+          file_limit_status=$?
+          set -e
+          printf '%s\n' "$file_limit_status" > "$MRK_UI_HOST_WORK/evidence/build-file-limit.status"
+          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
           clean() {
             /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
               "TMPDIR=$MRK_UI_HOST_WORK/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
@@ -83,7 +90,11 @@ jobs:
           set +e
           clean /usr/bin/python3 -I -S -B desktop/tools/macos_xcode_build_facts.py before "$MRK_UI_HOST_WORK"
           before_status=$?
+          set -e
           printf '%s\n' "$before_status" > "$MRK_UI_HOST_WORK/evidence/build-diagnostic-before.status"
+          # Require actual equal soft/hard byte observations before compiling.
+          [[ "$before_status" == 0 ]] || exit "$before_status"
+          set +e
           clean /usr/bin/xcodebuild build-for-testing \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
@@ -168,6 +179,18 @@ jobs:
           clean /usr/bin/python3 -I -S -B - "$MRK_UI_HOST_WORK" <<'PY_INSPECT'
           import json, os, pathlib, plistlib, stat, sys
           root = pathlib.Path(sys.argv[1])
+          def compilation_cache_facts(settings, derived):
+              value = settings.get("COMPILATION_CACHE_CAS_PATH")
+              classification = "unavailable"
+              if type(value) is str and 0 < len(value) <= 4096:
+                  path, base = pathlib.PurePosixPath(value), pathlib.PurePosixPath(derived)
+                  if path.is_absolute() and ".." not in path.parts and base.is_absolute() and ".." not in base.parts:
+                      classification = ("lexically-within-owned-derived-data" if len(path.parts) > len(base.parts)
+                                        and path.parts[:len(base.parts)] == base.parts else "outside-owned-derived-data")
+              caching = settings.get("COMPILATION_CACHE_ENABLE_CACHING")
+              return {"casPathClassification": classification, "pathOwnershipEstablished": False,
+                      "cachingSettingPresent": "COMPILATION_CACHE_ENABLE_CACHING" in settings,
+                      "cachingEnabled": (caching == "YES") if type(caching) is str and caching in ("YES", "NO") else None}
           def read(name, limit):
               path = root / name
               identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
@@ -199,7 +222,8 @@ jobs:
                   raise ValueError("unexpected entitlement type")
               signed[kind] = {"hasEntitlements": bool(raw.strip()), "booleans": facts}
           result = {"schemaVersion": 1, "scope": "same-XCTRunner-read-only-inspection", "resolvedSettings": settings,
-                    "signedEntitlements": signed, "productQualified": False}
+                    "signedEntitlements": signed, "compilationCache": compilation_cache_facts(selected[0], root / "DerivedData"),
+                    "productQualified": False}
           with (root / "evidence/inspection.json").open("x") as stream:
               json.dump(result, stream, sort_keys=True); stream.write("\n")
           PY_INSPECT

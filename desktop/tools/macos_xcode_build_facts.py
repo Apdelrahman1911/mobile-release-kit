@@ -28,6 +28,27 @@ MAX_ENTRIES = 8192
 SCOPE = "same-XCTRunner-build-infrastructure-only"
 
 
+def compiler_file_budget(pair):
+    """Measured shell-child bytes only, not a service inheritance claim."""
+    return (type(pair) is list and len(pair) == 2
+            and all(type(value) is int and value == 32 * 1024**3 for value in pair))
+
+
+def cas_role(relative):
+    """Fixed source-supported CAS names; no path resolution or file reads."""
+    parts = relative.split("/")
+    if (len(parts) not in (3, 4) or parts[0] != "CompilationCache.noindex"
+            or parts[1] not in ("generic", "builtin")
+            or parts[-1] not in ("index.v1", "data.v1", "actions.v1")):
+        return None
+    if len(parts) == 4:
+        generation = parts[2][3:] if parts[2].startswith("v1.") else ""
+        if (not 1 <= len(generation) <= 20 or not generation.isascii()
+                or not generation.isdecimal() or int(generation) >= 2**64):
+            return None
+    return parts[1], parts[-1].split(".", 1)[0]
+
+
 def identity(s):
     return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
             s.st_size, s.st_mtime_ns, s.st_ctime_ns)
@@ -161,8 +182,14 @@ def read_at(directory_fd, name, limit, owners):
 
 
 def derived_sizes(root_fd, file_limit, deadline):
+    rows = {(family, role): {"family": family, "role": role, "files": 0,
+                            "logicalBytes": 0, "allocatedBytes": 0,
+                            "largestLogicalBytes": 0, "refused": 0}
+            for family in ("generic", "builtin") for role in ("index", "data", "actions")}
+    cas = {"snapshotOnly": True, "supportedLayoutObserved": False, "complete": True,
+           "unclassifiedEntries": 0, "roles": list(rows.values())}
     result = {"entries": 0, "files": 0, "bytes": 0, "atShellFileLimit": 0,
-              "largestFiles": [], "complete": True}
+              "largestFiles": [], "complete": True, "casBackingFiles": cas}
     largest = []
     def visit(fd, prefix, depth):
         if depth > 24:
@@ -174,11 +201,40 @@ def derived_sizes(root_fd, file_limit, deadline):
                     raise ValueError("tree bound")
                 s = entry.stat(follow_symlinks=False)
                 relative = prefix + entry.name
-                if s.st_dev != os.fstat(fd).st_dev:
+                if s.st_dev != original.st_dev:
                     raise ValueError("different output volume")
+                role = cas_role(relative)
+                if role is not None:
+                    row = rows[role]
+                    try:
+                        if (not stat.S_ISREG(s.st_mode) or s.st_uid != original.st_uid
+                                or s.st_nlink != 1 or s.st_mode & 0o022
+                                or type(s.st_size) is not int or not 0 <= s.st_size < 2**63
+                                or type(s.st_blocks) is not int or not 0 <= s.st_blocks < 2**63):
+                            raise ValueError("CAS backing metadata shape")
+                        after = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                        if (identity(s) != identity(after) or s.st_blocks != after.st_blocks
+                                or time.monotonic() >= deadline):
+                            raise ValueError("CAS backing metadata changed or late")
+                    except (OSError, ValueError):
+                        row["refused"] += 1
+                        cas["complete"] = False
+                        result["complete"] = False
+                        continue
+                    row["files"] += 1
+                    row["logicalBytes"] += s.st_size
+                    row["allocatedBytes"] += s.st_blocks * 512
+                    row["largestLogicalBytes"] = max(row["largestLogicalBytes"], s.st_size)
+                    cas["supportedLayoutObserved"] = True
+                elif relative.startswith("CompilationCache.noindex/") and not stat.S_ISDIR(s.st_mode):
+                    cas["unclassifiedEntries"] += 1
                 if stat.S_ISDIR(s.st_mode):
+                    if s.st_uid != original.st_uid or s.st_mode & 0o022:
+                        raise ValueError("output directory owner")
                     child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
                     try:
+                        if identity(os.fstat(child)) != identity(s):
+                            raise ValueError("output directory changed")
                         visit(child, relative + "/", depth + 1)
                     finally:
                         os.close(child)
@@ -192,8 +248,14 @@ def derived_sizes(root_fd, file_limit, deadline):
                     if len(largest) > 12:
                         heapq.heappop(largest)
     try:
+        original = os.fstat(root_fd)
+        named = os.stat("DerivedData", dir_fd=root_fd, follow_symlinks=False)
         fd = os.open("DerivedData", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
         try:
+            held = os.fstat(fd)
+            if (identity(held) != identity(named) or held.st_dev != original.st_dev
+                    or held.st_uid != original.st_uid or held.st_mode & 0o022):
+                raise ValueError("original output directory changed")
             visit(fd, "", 0)
         finally:
             os.close(fd)
@@ -203,6 +265,7 @@ def derived_sizes(root_fd, file_limit, deadline):
     # Enumeration/last-entry handling can finish after the shared endpoint,
     # including an empty directory. Keep partial facts, never claim completeness.
     result["complete"] = result["complete"] and time.monotonic() < deadline
+    cas["complete"] = cas["complete"] and result["complete"]
     return result
 
 
@@ -279,6 +342,7 @@ def main():
             if phase == "before":
                 limits = {name: list(resource.getrlimit(getattr(resource, name)))
                           for name in ("RLIMIT_FSIZE", "RLIMIT_AS", "RLIMIT_DATA", "RLIMIT_NOFILE")}
+                admitted = compiler_file_budget(limits["RLIMIT_FSIZE"])
                 disk = os.fstatvfs(root_fd)
                 try:
                     pages, page_size = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
@@ -288,9 +352,12 @@ def main():
                 emit(evidence, "build-infrastructure-before.json", {
                     "schemaVersion": 1, "scope": SCOPE, "originalDirectory": expected,
                     "beginEpochSeconds": time.time(), "shellChildLimits": limits,
+                    "compilerFileBudgetBytes": 32 * 1024**3, "compilerFileBudgetAdmitted": admitted,
                     "serviceLimitsObserved": False, "diskAvailableBytes": disk.f_bavail * disk.f_frsize,
                     "physicalMemoryBytes": memory,
                     "productQualified": False})
+                if not admitted:
+                    raise ValueError("compiler shell-child file budget mismatch")
             elif phase == "after":
                 status = int(sys.argv[3]) if len(sys.argv) == 4 else -1
                 before = json.loads(read_at(evidence, "build-infrastructure-before.json", 65536, (os.getuid(),)), object_pairs_hook=pairs)
