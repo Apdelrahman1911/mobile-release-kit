@@ -1,4 +1,4 @@
-import { installationError, parseInstallationReveal } from './installation.ts';
+import { installationError, installationCheckError, parseInstallationReveal, parseInstallationCancel, parseInstallationStatus } from './installation.ts';
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
 import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
@@ -256,6 +256,32 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!result) throw { code: 'installation_reveal_unconfirmed' };
         return result;
       } catch (error) { throw installationError(error); }
+    },
+    installationStatus: async () => {
+      try {
+        if (mode !== 'native') throw { code: 'installation_check_unavailable' };
+        const result = parseInstallationStatus(await invoke<unknown>('installation_status', {}));
+        if (!result) throw { code: 'installation_check_unconfirmed' };
+        return result;
+      } catch (error) { throw installationCheckError(error); }
+    },
+    inspectInstallation: async () => {
+      try {
+        if (mode !== 'native') throw { code: 'installation_check_unavailable' };
+        const result = parseInstallationStatus(await invoke<unknown>('inspect_installation', {}));
+        if (!result) throw { code: 'installation_check_unconfirmed' };
+        return result;
+      } catch (error) { throw installationCheckError(error); }
+    },
+    cancelInstallation: async (input) => {
+      try {
+        if (mode !== 'native') throw { code: 'installation_check_unavailable' };
+        const args = parseInstallationCancel(input);
+        if (!args) throw { code: 'installation_check_unconfirmed' };
+        const result = parseInstallationStatus(await invoke<unknown>('cancel_installation', args));
+        if (!result) throw { code: 'installation_check_unconfirmed' };
+        return result;
+      } catch (error) { throw installationCheckError(error); }
     },
     chooseProject: () => call<ProjectReference | null>('choose_project'),
     chooseProjectPath: async (input) => {

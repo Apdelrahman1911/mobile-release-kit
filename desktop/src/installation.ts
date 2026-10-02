@@ -69,3 +69,109 @@ export const installationLocationHelp: HelpContent = {
   format: 'A fixed folder location, not a project path. Do not move or copy the app to select another runtime.',
   failure: 'A moved or copied app cannot use this installed runtime. This card describes the layout; it does not check installation integrity or signing.',
 };
+
+
+export type InstallationCheckPhase = 'not-checked' | 'checking' | 'stopping' | 'observed' | 'refused' | 'unknown';
+export type InstallationCheckReason = 'none' | 'unavailable-profile' | 'busy' | 'document-unavailable' | 'wrong-location'
+  | 'missing' | 'incomplete' | 'record-mismatch' | 'payload-mismatch' | 'protection' | 'bounds' | 'native'
+  | 'cancelled' | 'deadline' | 'cleanup-unknown';
+export interface InstallationMatching {
+  files: number; bytes: number; assurance: 'read-only-correspondence'; maintenance: 'unavailable';
+}
+export interface InstallationStatus {
+  schemaVersion: 1; statusRevision: number; available: boolean; canStart: boolean; operationId: number | null;
+  phase: InstallationCheckPhase; reason: InstallationCheckReason;
+  settlement: 'not-started' | 'pending' | 'known' | 'unknown' | 'late-known';
+  assessment: InstallationMatching | null;
+}
+const CHECK_REASONS: readonly InstallationCheckReason[] = ['none', 'unavailable-profile', 'busy', 'document-unavailable',
+  'wrong-location', 'missing', 'incomplete', 'record-mismatch', 'payload-mismatch', 'protection', 'bounds', 'native',
+  'cancelled', 'deadline', 'cleanup-unknown'];
+function counter(value: unknown, positive = false): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= (positive ? 1 : 0) && value <= 0xffffffff;
+}
+export function parseInstallationCancel(value: unknown): { operationId: number } | null {
+  const row = record(value, ['operationId']);
+  return row && counter(row.operationId, true) ? { operationId: row.operationId } : null;
+}
+export function parseInstallationStatus(value: unknown): InstallationStatus | null {
+  const row = record(value, ['schemaVersion', 'statusRevision', 'available', 'canStart', 'operationId', 'phase', 'reason', 'settlement', 'assessment']);
+  if (!row || row.schemaVersion !== 1 || !counter(row.statusRevision)
+    || typeof row.available !== 'boolean' || typeof row.canStart !== 'boolean' || (!row.available && row.canStart)
+    || (row.operationId !== null && !counter(row.operationId, true))
+    || !['not-checked', 'checking', 'stopping', 'observed', 'refused', 'unknown'].includes(row.phase as string)
+    || !CHECK_REASONS.includes(row.reason as InstallationCheckReason)
+    || !['not-started', 'pending', 'known', 'unknown', 'late-known'].includes(row.settlement as string)) return null;
+  let assessment: InstallationMatching | null = null;
+  if (row.assessment !== null) {
+    const matching = record(row.assessment, ['files', 'bytes', 'assurance', 'maintenance']);
+    if (!matching || !counter(matching.files, true) || matching.files > 2048
+      || !counter(matching.bytes) || matching.bytes > 512 * 1024 * 1024
+      || matching.assurance !== 'read-only-correspondence' || matching.maintenance !== 'unavailable') return null;
+    assessment = { files: matching.files, bytes: matching.bytes, assurance: matching.assurance, maintenance: matching.maintenance };
+  }
+  if ((row.phase === 'not-checked') !== (row.operationId === null)
+    || (row.phase === 'not-checked') !== (row.settlement === 'not-started')
+    || (row.phase === 'observed') !== (assessment !== null)
+    || row.phase === 'observed' && (row.reason !== 'none' || row.settlement !== 'known')
+    || row.phase === 'refused' && (row.reason === 'none' || row.settlement !== 'known')
+    || ['checking', 'stopping'].includes(row.phase as string) && row.settlement !== 'pending'
+    || row.phase === 'checking' && row.reason !== 'none'
+    || ['stopping', 'unknown'].includes(row.phase as string) && row.reason === 'none'
+    || row.phase === 'unknown' && !['unknown', 'late-known'].includes(row.settlement as string)
+    || ['checking', 'stopping', 'unknown'].includes(row.phase as string) && row.canStart) return null;
+  return { schemaVersion: 1, statusRevision: row.statusRevision, available: row.available, canStart: row.canStart,
+    operationId: row.operationId as number | null, phase: row.phase as InstallationCheckPhase, reason: row.reason as InstallationCheckReason,
+    settlement: row.settlement as InstallationStatus['settlement'], assessment };
+}
+export function sameInstallationStatus(a: InstallationStatus, b: InstallationStatus): boolean {
+  return a.schemaVersion === b.schemaVersion && a.statusRevision === b.statusRevision
+    && a.available === b.available && a.canStart === b.canStart && a.operationId === b.operationId
+    && a.phase === b.phase && a.reason === b.reason && a.settlement === b.settlement
+    && (a.assessment === null ? b.assessment === null : b.assessment !== null
+      && a.assessment.files === b.assessment.files && a.assessment.bytes === b.assessment.bytes
+      && a.assessment.assurance === b.assessment.assurance && a.assessment.maintenance === b.assessment.maintenance);
+}
+export function installationCheckActive(status: InstallationStatus | null): boolean {
+  return !!status && (status.phase === 'checking' || status.phase === 'stopping'
+    || status.phase === 'unknown' && status.settlement !== 'late-known');
+}
+export function installationCheckError(error: unknown): ApiError {
+  let code: unknown;
+  try {
+    const descriptor = typeof error === 'object' && error !== null ? Object.getOwnPropertyDescriptor(error, 'code') : undefined;
+    if (descriptor && 'value' in descriptor) code = descriptor.value;
+  } catch { /* Do not retain arbitrary rejection details. */ }
+  if (code === 'installation_check_unavailable') return { code, message: 'Installation checking is available only in the normal installed macOS app. This is not evidence that an installation is missing.', retryable: false };
+  if (code === 'installation_check_busy' || code === 'busy') return { code: 'installation_check_busy', message: 'Finish or cancel the current native action or quit confirmation, then check again.', retryable: false };
+  if (code === 'installation_check_bounds') return { code, message: 'The retained session cannot safely fit this check. Finish active work, lock the credential session, and clear retained Android tool selections, then try again.', retryable: false };
+  if (code === 'installation_check_stale') return { code, message: 'That check is no longer current. Refresh the installation status; no other operation was cancelled.', retryable: false };
+  if (code === 'cleanup_unknown') return { code, message: 'Cleanup is unconfirmed. Keep the app open to observe the original check; do not start a replacement or delete installed files.', retryable: false };
+  if (code === 'installation_document_unavailable' || code === 'shutting_down') return { code: 'installation_document_unavailable', message: 'The original app window is closing or unavailable. No new installation check was admitted.', retryable: false };
+  return { code: 'installation_check_unconfirmed', message: 'The installation-check reply could not be confirmed. Refresh status before taking another action; the app has not automatically started another check.', retryable: false };
+}
+export const installationCheckHelp: HelpContent = {
+  label: 'Check installation', requiredness: 'optional', requiredWhen: 'Use when troubleshooting this installed macOS application.',
+  what: 'A read-only comparison of the installed app and bundled runtime against this package’s protected installation records.',
+  why: 'It can identify missing records, incomplete installation or changed payload without changing the installation.',
+  where: 'Open the normal installed app in the fixed location shown above, then choose Check installation. No project or credential is required.',
+  format: 'No paths, signing inputs or commands to enter. The check reads only this fixed installation, with a 30-second work limit.',
+  failure: 'Keep partial-installation evidence and the existing protected files. A mismatch does not authorize repair, deletion, another administrator run or a public release. This check is not signing/notarization verification or release readiness.',
+};
+export const INSTALLATION_CHECK_GUIDANCE: Record<InstallationCheckReason, string> = {
+  none: 'This is a point-in-time read-only observation, not an update, signing check or release-readiness decision.',
+  'unavailable-profile': 'Use the normal installed macOS app. Browser preview and other runtime profiles cannot perform this check.',
+  busy: 'Finish or cancel the original native operation before checking again.',
+  'document-unavailable': 'The original app window is unavailable. Do not treat its previous result as current.',
+  'wrong-location': 'Open the original app at the displayed fixed location. A moved or copied app cannot select a different runtime.',
+  missing: 'The protected installation root was not present. Keep available installer evidence; this card does not install or recover files.',
+  incomplete: 'A required installed component or record is missing. Keep the partial installation intact for diagnosis; do not delete it to make a retry pass.',
+  'record-mismatch': 'The installation records do not match this app’s package bindings. Preserve them and obtain a matching supported package; this app cannot adopt or overwrite the tree.',
+  'payload-mismatch': 'An installed file or directory does not match the package inventory. Preserve the installation and evidence; do not use this result to approve a release.',
+  protection: 'The installation’s location, ownership, permissions or filesystem protection could not be accepted. Do not change permissions to bypass this check.',
+  bounds: 'The check reached a safe size or resource limit. Finish other session work before retrying; if it persists, preserve the installation for diagnosis.',
+  native: 'A native read or filesystem observation failed. Keep the original result; check status before starting another operation.',
+  cancelled: 'The original check was cancelled. Known cleanup means its resources settled, not that the installation passed.',
+  deadline: 'The original check exceeded its fixed work limit. Cleanup is separate; a late result cannot turn this into a pass.',
+  'cleanup-unknown': 'Resource cleanup is unconfirmed. Keep the app open to observe the original owner; no new check or maintenance is authorized.',
+};

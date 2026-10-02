@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Fixed passive queries and fixed macOS installation-location Finder requests; finite local configuration, workflows, public metadata and saved-version edits; reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build tools can execute trusted project code only under native runtime/tool custody. No general HTTP, remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
+  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; finite local configuration, workflows, public metadata and saved-version edits; reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build tools can execute trusted project code only under native runtime/tool custody. No general HTTP, remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
   "windows": ["main"],
   "local": true,
   "permissions": [
-    "allow-app-info", "allow-reveal-installation", "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",
+    "allow-app-info", "allow-reveal-installation", "allow-installation-status", "allow-inspect-installation", "allow-cancel-installation", "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",
     "allow-environment-requirements", "allow-release-version-observe",
     "allow-artifact-evidence-choose", "allow-artifact-evidence-status", "allow-artifact-evidence-observe", "allow-artifact-evidence-cancel",
     "allow-release-evidence-choose", "allow-release-evidence-status", "allow-release-evidence-observe", "allow-release-evidence-cancel",

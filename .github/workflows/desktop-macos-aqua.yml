@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         scope:
-          - project-fields
+          - vault-helper-shipping
     runs-on: macos-26
     timeout-minutes: 75
     env:

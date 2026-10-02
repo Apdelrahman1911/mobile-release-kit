@@ -6508,7 +6508,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
-            "          - project-fields\n"
+            "          - vault-helper-shipping\n"
             "    runs-on: macos-26\n"
             "    timeout-minutes: 75\n"
         )
@@ -8716,8 +8716,8 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    steps:\n", 1)[0]
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
-        self.assertIn("        scope:\n          - project-fields\n", header)
-        self.assertNotIn("          - vault-helper-shipping", header)
+        self.assertIn("        scope:\n          - vault-helper-shipping\n", header)
+        self.assertNotIn("          - project-fields", header)
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         run = blocks["Three serial shipping-helper journeys through the original document and invocation owner"]
         self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping'", run)

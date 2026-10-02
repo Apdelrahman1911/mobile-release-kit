@@ -844,3 +844,41 @@ mod tests {
         assert!(private_accepts(&value));
     }
 }
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl Status {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        for value in [&self.capability.storage, &self.facts.repository_actions_settings_observation, &self.facts.environment_observation, &self.facts.secret_observation, &self.facts.variable_observation, &self.facts.protection_observation, &self.facts.runner_observation, &self.facts.template_compatibility, &self.facts.release_readiness] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        for value in [&self.account.observed_at, &self.repository.observed_at, &self.automation.observed_at] {
+            bytes = bytes.checked_add(value.as_ref().map_or(0, String::capacity))?;
+        }
+        if let Some(session) = &self.session {
+            for value in [&session.id, &session.project_id, &session.target_repository] {
+                bytes = bytes.checked_add(value.capacity())?;
+            }
+            bytes = bytes.checked_add(session.expires_at.as_ref().map_or(0, String::capacity))?;
+        }
+        if let Some(operation) = &self.operation { bytes = bytes.checked_add(operation.id.capacity())?; }
+        if let Some(account) = &self.account.value {
+            bytes = bytes.checked_add(account.id.capacity())?.checked_add(account.login.capacity())?;
+        }
+        if let Some(repository) = &self.repository.value {
+            for value in [&repository.id, &repository.full_name, &repository.default_branch] {
+                bytes = bytes.checked_add(value.capacity())?;
+            }
+        }
+        if let Some(automation) = &self.automation.value {
+            if automation.workflows.len() > 4 { return None; }
+            bytes = bytes.checked_add(automation.workflows.capacity().checked_mul(std::mem::size_of::<Workflow>())?)?;
+            for workflow in &automation.workflows {
+                bytes = bytes.checked_add(workflow.remote_id.as_ref().map_or(0, String::capacity))?;
+            }
+        }
+        Some(bytes)
+    }
+}

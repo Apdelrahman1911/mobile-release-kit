@@ -1,4 +1,4 @@
-import { installationError } from './installation.ts';
+import { installationError, installationCheckError } from './installation.ts';
 import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
@@ -140,6 +140,9 @@ export const previewApi: DesktopApi = {
     projectPathSelection: { available: false, reason: 'Browser preview has no native project-path picker.' },
   }),
   revealInstallation: async () => { throw installationError({ code: 'installation_reveal_unavailable' }); },
+  installationStatus: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
+  inspectInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
+  cancelInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
   // No invented relative path or successful native selection in design mode.
   chooseProjectPath: async () => { throw projectPathError({ code: 'project_path_unavailable' }); },

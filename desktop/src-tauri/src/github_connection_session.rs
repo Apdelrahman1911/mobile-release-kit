@@ -1209,3 +1209,82 @@ impl ConnectionState {
         if retirement.is_some() { self.complete_retirement(); }
     }
 }
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl ConnectionState {
+    pub(crate) fn retained_heap_bytes_if_quiescent(&self) -> Option<usize> {
+        if self.unknown || self.exhausted || self.native_work_pending()
+            || self.status.capability.reason == Reason::CleanupUnknown
+            || [self.status.account.reason, self.status.repository.reason, self.status.automation.reason].contains(&Reason::CleanupUnknown)
+            || self.status.session.as_ref().is_some_and(|session| matches!(session.state,
+                SessionState::Checking | SessionState::Disconnecting | SessionState::CleanupUnknown))
+            || self.status.operation.as_ref().is_some_and(|operation|
+                operation.phase != Phase::Settled || operation.reason == Reason::CleanupUnknown) {
+            return None;
+        }
+        let mut bytes = self.status.retained_heap_bytes()?
+            .checked_add(self.preflight.retained_heap_bytes_if_quiescent()?)?
+            .checked_add(self.release.retained_heap_bytes_if_quiescent()?)?;
+        if let Some(private) = &self.private {
+            if private.ticket.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
+            // Borrow the private original. Never clone its token or print bytes.
+            for value in [&private.id, &private.project_id, &private.repository, &private.stop_id,
+                &private.unknown_id, &private.clock.display] {
+                bytes = bytes.checked_add(value.capacity())?;
+            }
+            for value in [&private.token, &private.account_pin, &private.repository_pin] {
+                bytes = bytes.checked_add(value.as_ref().map_or(0, String::capacity))?;
+            }
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg(test)]
+mod installation_memory_capacity_tests {
+    use super::*;
+    #[test]
+    fn private_original_and_both_journal_capacities_are_borrowed_not_cloned() {
+        let mut state = ConnectionState::new(); let before = state.retained_heap_bytes_if_quiescent().unwrap();
+        let now = Instant::now();
+        let private = PrivateSession { id: String::with_capacity(17), project_id: String::with_capacity(19),
+            repository: String::with_capacity(23), generation: 0, stop_id: String::with_capacity(29), unknown_id: String::with_capacity(31),
+            clock: CredentialClock { admitted: now, wall: UNIX_EPOCH, end: now, display: String::with_capacity(37) },
+            token: Some(String::with_capacity(4097)), account_pin: Some(String::with_capacity(41)),
+            repository_pin: Some(String::with_capacity(43)), ticket: None, retirement: None, remove_after_settlement: false };
+        let extra = private.id.capacity() + private.project_id.capacity() + private.repository.capacity()
+            + private.stop_id.capacity() + private.unknown_id.capacity() + private.clock.display.capacity()
+            + private.token.as_ref().unwrap().capacity() + private.account_pin.as_ref().unwrap().capacity()
+            + private.repository_pin.as_ref().unwrap().capacity();
+        let original = private.token.as_ref().unwrap().as_ptr();
+        state.private = Some(private);
+        assert_eq!(state.retained_heap_bytes_if_quiescent(), Some(before + extra));
+        state.preflight.view.pending.reserve_exact(2); state.release.view.pending.reserve_exact(3);
+        let journals = state.preflight.view.pending.capacity() * std::mem::size_of::<crate::github_preflight_protocol::PendingRecord>()
+            + state.release.view.pending.capacity() * std::mem::size_of::<crate::github_release_protocol::PendingRecord>();
+        assert_eq!(state.retained_heap_bytes_if_quiescent(), Some(before + extra + journals));
+        assert_eq!(state.private.as_ref().unwrap().token.as_ref().unwrap().as_ptr(), original);
+        state.unknown = true;
+        assert!(state.retained_heap_bytes_if_quiescent().is_none());
+        assert!(state.unknown && state.private.as_ref().unwrap().token.is_some());
+    }
+    #[test]
+    fn connection_status_nested_spare_cells_and_strings_are_retained_data() {
+        let mut status = ConnectionState::new().status; let before = status.retained_heap_bytes().unwrap();
+        let account = Account { id: String::with_capacity(17), login: String::with_capacity(97) };
+        let account_bytes = account.id.capacity() + account.login.capacity();
+        status.account.value = Some(account); status.account.observed_at = Some(String::with_capacity(31));
+        let automation = Automation { coverage: wire::Coverage::Complete, workflows: Vec::with_capacity(4) };
+        let automation_bytes = automation.workflows.capacity() * std::mem::size_of::<wire::Workflow>();
+        status.automation.value = Some(automation);
+        assert_eq!(status.retained_heap_bytes(), Some(before + account_bytes
+            + status.account.observed_at.as_ref().unwrap().capacity() + automation_bytes));
+        status.operation = Some(Operation { id: String::with_capacity(53), kind: OperationKind::Connect,
+            phase: Phase::Running, reason: Reason::None });
+        let mut state = ConnectionState::new(); state.status = status;
+        assert!(state.retained_heap_bytes_if_quiescent().is_none());
+        assert_eq!(state.status.operation.as_ref().unwrap().phase, Phase::Running);
+    }
+}

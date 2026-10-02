@@ -205,7 +205,7 @@ fn main() {
     #[cfg(feature = "desktop-shell")]
     {
         const COMMANDS: &[&str] = &[
-            "app_info", "reveal_installation", "choose_project", "choose_project_path", "project_snapshot", "catalog",
+            "app_info", "reveal_installation", "installation_status", "inspect_installation", "cancel_installation", "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",

@@ -393,6 +393,15 @@ class MacInstalledData(unittest.TestCase):
         for error in (TOOL.Refused(), TOOL.Refused("/private/credential=value"), TOOL.Refused(NoReflection()),
                       TOOL.Refused("scripts-root-owner-mode", "/private/extra"), ValueError("scripts-root-owner-mode")):
             self.assertEqual(TOOL.package_refusal_message(error), TOOL.GENERIC_REFUSAL)
+        for reason, expected in (("output-mode", "MRK_MACOS_PACKAGE_REFUSED=output-mode\n" + TOOL.GENERIC_REFUSAL),
+                                 ("/private/credential=value", TOOL.GENERIC_REFUSAL)):
+            stderr = io.StringIO()
+            with self.subTest(reason=reason), mock.patch.object(TOOL, "app_command", side_effect=TOOL.Refused(reason)), \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
+                TOOL.main(["app", "--binary", "/inert/app", "--vault-helper", "/inert/helper",
+                           "--expected-vault-helper", "a" * 64, "--output", "/inert/output"])
+            self.assertEqual(stopped.exception.code, 1)
+            self.assertEqual(stderr.getvalue(), expected + "\n")
 
     def test_postinstall_accepts_only_fixed_entry_and_preserves_exec_boundary(self):
         stub = (Path(__file__).absolute().parents[2] / "desktop/macos-installed-inputs/postinstall").read_text(encoding="utf-8")
@@ -1570,6 +1579,49 @@ def cargo_lines(*items):
 
 @unittest.skipUnless(TOOL is not None, "POSIX DATA definitions only")
 class MacNormalPreviewData(unittest.TestCase):
+    def test_real_app_copy_preserves_signed_helper_mode_bytes_and_normal_binding(self):
+        # Real isolated filesystem copy; the bounded synthetic Mach-O is DATA,
+        # never executable signing/launch/Keychain qualification.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary).resolve(strict=True)
+            target, binary, item, body = normal_cargo_fixture(work / "cargo-target")
+            binary.parent.mkdir(parents=True, mode=0o700)
+            binary.write_bytes(body)
+            helper = work / "signed-helper-data"
+            helper.write_bytes(body)
+            helper.chmod(0o555)
+            messages = cargo_lines(item, {"reason": "build-finished", "success": True})
+            cargo = work / "cargo.jsonl"
+            cargo.write_bytes(messages)
+            originals = {path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                         for path in (binary, helper, cargo)}
+            output = work / "Mobile Release Kit.app"
+            result = TOOL.app_command(SimpleNamespace(binary=binary, output=output,
+                normal_cargo_messages=cargo, normal_cargo_target_dir=target,
+                vault_helper=helper, expected_vault_helper=TOOL.digest(body)))
+            expected = {TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
+                        "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/Info.plist").read_bytes(), 0o644),
+                        "Contents/PkgInfo": (b"APPL????", 0o644),
+                        "Contents/Resources/icon.png": ((TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes(), 0o644)}
+            self.assertEqual(TOOL.tree(output), expected)
+            self.assertEqual(result["vaultHelperSha256"], TOOL.digest(body))
+            self.assertEqual(result["normalCargoArtifact"], TOOL.normal_cargo_artifact(messages, binary, target, body))
+            for path, original in originals.items():
+                self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), original)
+            for path in (output, output / "Contents", output / "Contents/Helpers", output / "Contents/MacOS"):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+
+    def test_app_copy_mode_exception_is_only_the_fixed_readonly_helper(self):
+        cases = ((TOOL.VAULT_HELPER, 0o755), (TOOL.VAULT_HELPER, 0o644),
+                 (TOOL.VAULT_HELPER, 0o444), ("Contents/Helpers/other", 0o555))
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary).resolve(strict=True)
+            for number, (name, mode) in enumerate(cases):
+                output = work / ("refused-" + str(number))
+                with self.subTest(name=name, mode=mode), self.assertRaisesRegex(TOOL.Refused, "^output-mode$"):
+                    TOOL.write_tree(output, {name: (b"inert-copy-data", mode)}, root_mode=0o755, app_signing=True)
+                self.assertFalse((output / name).exists())
+
     def test_only_complete_normal_main_bin_receives_original_byte_binding(self):
         target, binary, item, body = normal_cargo_fixture()
         messages = cargo_lines(item, {"reason": "build-finished", "success": True})

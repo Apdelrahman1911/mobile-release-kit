@@ -50,6 +50,10 @@ pub(crate) use ios_signing::{IOSSigningMaterial, MATERIAL_PREFIX as IOS_MATERIAL
 // never become credential records or private-vault material.
 #[path = "asset_session_images.rs"]
 mod images;
+#[path = "asset_session_installation.rs"]
+mod installation;
+#[path = "asset_session_installation_memory.rs"]
+mod installation_memory;
 
 // Explicitly ignored component fixture only: no installed window, persistent
 // provider admission or renderer command is enabled by compiling this module.
@@ -169,14 +173,15 @@ impl SafeAssessment { fn permits(&self) -> bool { self.0.permits_session_preview
 pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing, Preview, Mutating, Stopping, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseImages, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
+enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
     OpenVault, PrepareInitialize, Initialize, Unlock }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
     fn android_source(self) -> bool { self == Self::ChooseAndroidSource }
     fn images(self) -> bool { self == Self::ChooseImages }
-    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.android_source() || self.images() || self.evidence() }
+    fn installation(self) -> bool { self == Self::InspectInstallation }
+    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.project_path() || self.android_source() || self.images() || self.installation() || self.evidence() }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -279,6 +284,7 @@ pub(crate) struct OriginalWork {
     pub(crate) id: u32, stop: AtomicBool, ended: AtomicBool, deadline: Mutex<Option<Instant>>,
     cleanup_end: Mutex<Option<Instant>>,
     image_failure: Mutex<images::FailureLatch>,
+    installation: Option<installation::Work>,
     pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
     source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
     retirement: Mutex<Retirement>, retired: AtomicBool,
@@ -295,9 +301,20 @@ pub(crate) struct OriginalWork {
 }
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
-        Arc::new_cyclic(|owner| Self { id, stop: AtomicBool::new(false), ended: AtomicBool::new(false), deadline: Mutex::new(Some(Instant::now() + WORK)),
-            cleanup_end: Mutex::new(None),
+        Self::construct(id, gui_needed, document, false)
+    }
+    fn new_installation(id: u32, document: Weak<Inner>) -> Arc<Self> {
+        Self::construct(id, false, document, true)
+    }
+    fn construct(id: u32, gui_needed: bool, document: Weak<Inner>, inspect: bool) -> Arc<Self> {
+        let admitted = Instant::now();
+        let end = admitted + if inspect { installation::WORK_TIME } else { WORK };
+        Arc::new_cyclic(|owner| Self { id, stop: AtomicBool::new(false), ended: AtomicBool::new(false), deadline: Mutex::new(Some(end)),
+            // Ceiling is owned from admission; Slot.cleanup_end remains None
+            // until actual STOP. These are not the same lifecycle flag.
+            cleanup_end: Mutex::new(inspect.then_some(end + CLEANUP)),
             image_failure: Mutex::new(images::FailureLatch::default()),
+            installation: inspect.then(|| installation::Work::new(end)),
             wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
@@ -330,9 +347,20 @@ impl OriginalWork {
             && self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
     }
     pub(crate) fn stopped(&self) -> bool { self.stop.load(Ordering::SeqCst) }
-    fn stop(&self) { self.stop.store(true, Ordering::SeqCst); self.wake.notify_one(); self.gui.wake.notify_one(); }
-    pub(crate) fn endpoint(&self) -> Option<Instant> { match self.deadline.lock() { Ok(end) => *end, Err(_) => Some(Instant::now()) } }
-    pub(crate) fn set_endpoint(&self, end: Option<Instant>) { match self.deadline.lock() { Ok(mut value) => *value = end, Err(_) => self.stop() } }
+    fn signal_stop(&self) { self.stop.store(true, Ordering::SeqCst); self.wake.notify_one(); self.gui.wake.notify_one(); }
+    fn stop(&self) {
+        if self.installation.is_some() { installation::failure(self, crate::installation::CheckReason::Cancelled, Instant::now()); }
+        else { self.signal_stop(); }
+    }
+    pub(crate) fn endpoint(&self) -> Option<Instant> {
+        if let Some(work) = &self.installation { return Some(work.end); }
+        match self.deadline.lock() { Ok(end) => *end, Err(_) => Some(Instant::now()) }
+    }
+    pub(crate) fn set_endpoint(&self, end: Option<Instant>) {
+        // Reconciliation's generic None never erases this admitted clock.
+        if self.installation.is_some() { return; }
+        match self.deadline.lock() { Ok(mut value) => *value = end, Err(_) => self.stop() }
+    }
     pub(crate) fn interrupted(&self) -> bool { self.stopped() || self.endpoint().is_some_and(|end| Instant::now() >= end) }
     fn join_if_ended(&self) -> Option<bool> {
         if !self.ended.load(Ordering::SeqCst) { return None; }
@@ -367,6 +395,7 @@ impl OriginalWork {
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let keyring = true;
         coordinator && child && source && self.gui.settled() && keyring
+            && self.installation.as_ref().is_none_or(installation::Work::settled)
     }
     fn original_resources_settled(&self) -> bool {
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -382,6 +411,7 @@ impl OriginalWork {
             && self.gui.selected_images.try_lock().is_ok_and(|paths| paths.is_none())
     }
     fn lookup_allocations_allowed(&self) -> bool {
+        if self.installation.as_ref().is_some_and(|work| !work.settled()) { return false; }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -585,11 +615,14 @@ struct Slot {
     evidence: Option<EvidenceBinding>, project_path: Option<Arc<ProjectPathBinding>>, path_result: Option<commands::ProjectPathResult>,
     android_source: Option<Arc<AndroidSourceBinding>>,
     images: Option<Arc<images::Binding>>, image_batch: Option<asset_source::CapturedPublicImageBatch>,
+    installation_result: Option<crate::installation::Matching>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault: vault::SlotData,
 }
 impl Slot {
     fn stop(&mut self, reason: Reason, at: Instant) {
+        let at = if self.operation.installation() { installation::stop_at(&self.owner, reason, at) } else { at };
+        self.installation_result = None;
         self.selection = None; self.preview = None; self.path_result = None; self.discard = true;
         if self.reason == Reason::None { self.reason = reason; }
         // A native result can report an earlier failure after a concurrent
@@ -614,6 +647,7 @@ struct DocumentState {
     github: ConnectionState,
     evidence: EvidenceRegistry,
     images: images::Registry,
+    installation: installation::Registry,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     vault: Option<vault::Session>,
 }
@@ -621,9 +655,12 @@ fn project_path_pending(state: &DocumentState) -> bool {
     state.slot.as_ref().is_some_and(|slot| (slot.operation.project_path() || slot.operation.android_source())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled()))
 }
+fn credential_discard_operation(operation: Operation) -> bool {
+    !operation.evidence() && !operation.project_path() && !operation.android_source() && !operation.images() && !operation.installation()
+}
 fn credential_lock_gate(state: &DocumentState) -> Result<(), AssetError> {
     if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
-    if project_path_pending(state) || images::pending(state) {
+    if project_path_pending(state) || images::pending(state) || installation::pending(state) {
         return Err(AssetError::new(if state.unknown { Reason::CleanupUnknown } else { Reason::Busy }));
     }
     Ok(())
@@ -1408,7 +1445,7 @@ mod lookup_memory {
                 Staged::Delete(tokens) => self.tokens(tokens),
                 Staged::Committed { bind } => { if let Some(token) = bind { self.token(token)?; } Ok(()) },
                 Staged::Bound(value) => self.token(&value.record_id),
-                Staged::Refused(_) => Ok(()),
+                Staged::Refused(_) | Staged::Installation(_) => Ok(()),
                 Staged::Vault(value) => self.add(value.retained_bytes().ok_or(Problem::Capacity)?),
                 Staged::Images { batch, binding } => {
                     self.add(batch.retained_bytes().ok_or(Problem::Capacity)?)?;
@@ -1467,6 +1504,9 @@ mod lookup_memory {
         fn owner(&mut self, owner: &Arc<OriginalWork>) -> Result<(), Problem> {
             if !self.owners.insert(owner)? { return Ok(()); }
             self.arc_cells::<OriginalWork>()?; self.arc_cells::<GuiCall>()?;
+            if let Some(work) = &owner.installation {
+                self.add(work.retained_bytes_if_settled().ok_or(Problem::CleanupUnknown)?)?;
+            }
             let vault = owner.vault.try_lock().map_err(|_| Problem::CleanupUnknown)?;
             if let Some(store) = vault.store_ref() { self.vault_store(store)?; }
             if let Some(key) = vault.key_ref() { self.vault_key(key)?; }
@@ -1526,7 +1566,7 @@ mod lookup_memory {
         let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
         if coordinator.receipt != JoinReceipt::Pending || coordinator.handle.is_none() || !child_joined(&child)
             || !(source.not_started() || source.settled()) || owner.large_work_started.load(Ordering::SeqCst)
-            || !book.can_begin() { return Err(Problem::CleanupUnknown); }
+            || owner.installation.is_some() || !book.can_begin() { return Err(Problem::CleanupUnknown); }
         let live = live_bytes(state, owner, &source, &retirement)?;
         // Child/parser originals are positively joined; credential_format drops
         // arenas before ChildEnd. Non-Token child/R1/Value work has NEVER
@@ -1678,7 +1718,7 @@ fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     // The caller still holds this same document mutex through Supervisor claim.
     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
     if state.stopping { return Err(BridgeError::shutdown()); }
-    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) {
+    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) {
         return Err(BridgeError::new("busy", "Finish the original native operation first."));
     }
     Ok(())
@@ -1701,7 +1741,7 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
     owner_gate()?;
-    if state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
+    if state.compatibility_picker_pending || installation::pending(state) { return Err(AssetError::new(Reason::Busy)); }
     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.images())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
@@ -1835,7 +1875,7 @@ impl DocumentBinding {
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2036,6 +2076,8 @@ impl DocumentBinding {
     }
     fn bump(&self, state: &mut DocumentState) {
         images::observe_failure(state);
+        installation::observe_failure(state);
+        installation::remember(state);
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::observe_stop(state, Instant::now());
         if state.exhausted { return; }
@@ -3018,7 +3060,7 @@ impl DocumentBinding {
         // Display changes advance the existing native revision. This is
         // capability DATA, not a fabricated asset cleanup result, and does
         // not block original discard/retirement/quit behind new admission.
-        let mut changed = images::observe_failure(state) | observe_session_owner_reason(state, owner_reason);
+        let mut changed = images::observe_failure(state) | installation::observe_failure(state) | observe_session_owner_reason(state, owner_reason);
         if let Some(slot) = state.slot.as_mut().filter(|slot| slot.operation.android_source()) {
             if let Some((reason, at)) = self.inner.bridge.android_build.source_stop(&slot.owner) {
                 let before = slot.cleanup_end; slot.stop(reason, at); changed |= before != slot.cleanup_end;
@@ -3086,11 +3128,11 @@ impl DocumentBinding {
         let operation = state.slot.as_ref().map(|slot| OperationStatus { operation_id: slot.owner.id, operation: slot.operation,
             phase: slot.phase, reason: slot.reason, source: slot.source, settlement: slot.settlement,
             storage_outcome: storage_status(slot),
-            selection_token: if private_redacted || slot.operation.images() { None } else { slot.selection.clone() },
-            assessment: if private_redacted || slot.operation.images() || !slot.assessment_context_revision.is_some_and(|revision| state.context.as_ref().is_some_and(|context| context.revision == revision)) {
+            selection_token: if private_redacted || slot.operation.images() || slot.operation.installation() { None } else { slot.selection.clone() },
+            assessment: if private_redacted || slot.operation.images() || slot.operation.installation() || !slot.assessment_context_revision.is_some_and(|revision| state.context.as_ref().is_some_and(|context| context.revision == revision)) {
                 None
             } else { slot.assessment.clone() },
-            preview: if redacted || slot.operation.images() || asset_mode(state) == "closed" { None } else { slot.preview.as_ref().filter(|preview| (!private_redacted || preview.action == Action::Initialize)
+            preview: if redacted || slot.operation.images() || slot.operation.installation() || asset_mode(state) == "closed" { None } else { slot.preview.as_ref().filter(|preview| (!private_redacted || preview.action == Action::Initialize)
                 && preview_subject_valid(state, slot, preview)).map(|preview| PreviewStatus {
                 token: preview.token.clone(), action: preview.action, subject: preview.subject.clone(),
                 expires_in_ms: u32::try_from(slot.review_end.map_or(Duration::ZERO, |end| end.saturating_duration_since(Instant::now())).as_millis()).unwrap_or(u32::MAX) }) } });
@@ -3174,7 +3216,7 @@ impl DocumentBinding {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
         if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
         if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
-        let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.images()).ok_or_else(AssetError::invalid)?;
+        let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && credential_discard_operation(slot.operation)).ok_or_else(AssetError::invalid)?;
         if !preserve_storage_operation(slot) { slot.operation = Operation::Discard; }
         slot.stop(Reason::UserCancelled, Instant::now());
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -3194,7 +3236,7 @@ impl DocumentBinding {
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::revoke_all(&mut state);
         if let Some(slot) = state.slot.as_mut() {
-            if !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.images() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
+            if !slot.operation.evidence() && !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.images() && !slot.operation.installation() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
             slot.stop(Reason::UserCancelled, Instant::now());
         }
         self.bump(&mut state); drop(state); Ok(self.status())
@@ -3308,6 +3350,8 @@ fn retire_context_authority(state: &mut DocumentState, at: Instant) -> Option<Ar
     let completed_receipt = false;
     invalidate_all(state);
     let slot = state.slot.as_mut()?;
+    // An already settled installation result has no project context to retire.
+    if slot.operation.installation() && slot.phase == Phase::Idle && slot.owner.resources_settled() && slot.context.is_none() { return None; }
     if completed_receipt {
         // Retain the successful operation/storage receipt and exact lease.
         // Old-context DATA is disposed under context()'s existing retirement
@@ -3335,6 +3379,7 @@ fn target(state: &DocumentState, reference: Option<commands::RecordRef<'_>>, kin
 }
 
 enum ChildJob {
+    Installation,
     Tokens, Capture { path: std::path::PathBuf, roots: Vec<asset_source::RegisteredRoot>, kind: credential_format::FileKind },
     Probe { path: std::path::PathBuf, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { path: std::path::PathBuf, binding: Arc<ProjectPathBinding> },
@@ -3348,6 +3393,7 @@ enum ChildJob {
 }
 enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
     Images(asset_source::CapturedPublicImageBatch),
+    Installation(Result<crate::installation::Matching, crate::installation::CheckReason>),
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     Vault(vault::ChildResult),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3356,6 +3402,7 @@ enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::Pro
     KeyringHelper(Result<(), keyring::Problem>),
 }
 enum Staged {
+    Installation(crate::installation::Matching),
     Selected { payload: Arc<Payload>, tokens: TokenBatch }, Prepared { result: Result<SafeAssessment, CommandError>, tokens: TokenBatch },
     Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
     ProjectPath { proof: asset_source::ProjectPathProbe, binding: Arc<ProjectPathBinding> },
@@ -3368,6 +3415,7 @@ enum Staged {
 }
 #[cfg(feature = "desktop-shell")]
 enum Job {
+    Installation,
     Choose { app: tauri::AppHandle, kind: Kind, roster: ProjectRoster },
     Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { app: tauri::AppHandle, binding: Arc<ProjectPathBinding> },
@@ -3382,7 +3430,7 @@ enum Job {
 
 async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Reason> {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6, ChildJob::Images { .. } => 7 };
+    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6, ChildJob::Images { .. } => 7, ChildJob::Installation => 8 };
     let mut book = owner.child.lock().await;
     let mut failed_cleanup = false;
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -3425,6 +3473,7 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
     let mut stop = || owner.interrupted();
     if stop() && !cleanup_child(&job) { return ChildEnd::Refused(Reason::UserCancelled); }
     match job {
+        ChildJob::Installation => ChildEnd::Installation(installation::execute(owner)),
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         ChildJob::KeyringHelper(document) => ChildEnd::KeyringHelper(keyring_macos::execute(&document, owner)),
         ChildJob::Tokens => match random_tokens(&mut stop) { Ok(tokens) => ChildEnd::Tokens(tokens), Err(reason) => ChildEnd::Refused(reason) },
@@ -3560,7 +3609,7 @@ impl Slot {
         Self { owner, operation, phase: Phase::Admitting, reason: Reason::None, source: SourceState::NotRun, settlement: Settlement::Pending,
             context, target, review_end, cleanup_end: None, candidate: None, selection: None, assessment: None, preview: None,
             assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None,
-            evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None,
+            evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None, installation_result: None,
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: vault::SlotData::default() }
     }
@@ -3657,9 +3706,15 @@ impl DocumentBinding {
     /// cleanup-only continuation; GO is opened only after releasing this gate.
     /// No native syscall, picker, assessment or new work authority runs here.
     fn reconcile(&self) { self.reconcile_scope(None); }
-    fn reconcile_scope(&self, evidence_family: Option<bool>) {
+    fn reconcile_scope(&self, evidence_family: Option<bool>) { self.reconcile_checked(evidence_family, None); }
+    fn reconcile_installation(&self, id: u32) { self.reconcile_checked(None, Some(id)); }
+    fn reconcile_checked(&self, evidence_family: Option<bool>, installation_id: Option<u32>) {
         let mut release: Option<Arc<OriginalWork>> = None;
         let mut state = self.lock();
+        // Status may have waited while its old idle slot was replaced. Never
+        // route that request through an unrelated original or start its cleanup.
+        if installation_id.is_some_and(|id| !state.slot.as_ref().is_some_and(|slot|
+            slot.operation.installation() && slot.owner.id == id)) { return; }
         // A request may have waited for this mutex since its initial route
         // check. Never expire/join the other family's newly installed owner.
         // Both families still use this one original reconciliation algorithm.
@@ -3964,6 +4019,7 @@ impl DocumentBinding {
             slot.stop(error.reason, Instant::now()); return;
         }
         match staged {
+            Staged::Installation(matching) => installation::publish(state, slot, matching),
             Staged::Images { batch, binding } => images::publish(self, state, slot, batch, binding),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Staged::Vault(result) => vault::publish(self, state, slot, result),
@@ -4200,14 +4256,15 @@ impl DocumentBinding {
         // An already-late-settled unrelated path remains Unknown. Only the
         // revoked vault lease's finite Release may retain/retire that old slot;
         // this is never permission to replace a live path or start new work.
-        if (project_path_pending(state) || images::pending(state)) && !retired_cleanup { return Err(AssetError::new(Reason::Busy)); }
+        if (project_path_pending(state) || images::pending(state) || installation::pending(state)) && !retired_cleanup { return Err(AssetError::new(Reason::Busy)); }
         lookup_allocation_gate(state)?;
         // Public images share lifecycle custody, not a private credential
         // session/lease. Their raw allowance already charges retained vault
         // DATA without attaching or consuming the vault's use authority.
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-        if !slot.operation.images() { vault::attach_asset_slot(state, &mut slot)?; }
+        if !slot.operation.images() && !slot.operation.installation() { vault::attach_asset_slot(state, &mut slot)?; }
         settle_evidence_status(state);
+        installation::remember(state);
         let owner = slot.owner.clone();
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         self.installed_record_original(&owner, Some(slot.operation))?;
@@ -4360,6 +4417,7 @@ impl DocumentBinding {
 async fn run_job(document: DocumentBinding, owner: Arc<OriginalWork>, job: Job) {
     if !owner.release_retirement() {
         // No GUI dispatch has happened on this original path yet.
+        installation::failure(&owner, crate::installation::CheckReason::CleanupUnknown, Instant::now());
         owner.gui.not_created(Reason::CleanupUnknown);
         document.stage(&owner, Staged::Refused(Reason::CleanupUnknown)); return;
     }
@@ -4376,7 +4434,7 @@ async fn run_job(document: DocumentBinding, owner: Arc<OriginalWork>, job: Job) 
         }
     };
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-    vault::after_job(&document, &owner, &staged).await;
+    if owner.installation.is_none() { vault::after_job(&document, &owner, &staged).await; }
     document.stage(&owner, staged);
 }
 
@@ -4386,6 +4444,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
     if matches!(&job, Job::Vault(vault::Job::Release)) { return vault::run(document, owner, vault::Job::Release).await; }
     if owner.interrupted() { owner.gui.not_created(Reason::UserCancelled); return Staged::Refused(Reason::UserCancelled); }
     match job {
+        Job::Installation => installation::run(owner).await,
         Job::Images { app, binding } => images::run(document, owner, app, binding).await,
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Job::Vault(job) => vault::run(document, owner, job).await,
@@ -5661,6 +5720,39 @@ mod installed_macos_observation {
         pub(crate) fn installed_macos_project_lost(&self, witness: &ProjectWitness) -> bool {
             self.inner.state.try_lock().is_ok_and(|state| self.macos_project_loss(&state, witness))
         }
+        pub(crate) fn installed_macos_installation_final(&self, quit_id: u32, inspection_id: u32) -> bool {
+            let Ok(state) = self.inner.state.try_lock() else { return false; };
+            let Some(quit) = &state.quit else { return false; };
+            let Some(slot) = &state.slot else { return false; };
+            // Dedicated no-project journey only. It observes the real ordinary
+            // Quit originals without admitting any project/picker witness.
+            if inspection_id.checked_add(1) != Some(quit_id)
+                || !quiet(&state) || !state.stopping || !state.quit_accepted
+                || !state.lifetime.original_bound() || state.lost_observed
+                || state.next_operation != quit_id || quit.id != quit_id
+                || state.quit_cleanup_end.is_none() || !quit.stopped()
+                || !assets_can_exit_locked(&state) || !state.evidence.revoked
+                || slot.operation != Operation::InspectInstallation || slot.owner.id != inspection_id
+                || slot.phase != Phase::Idle || slot.settlement != Settlement::Known
+                || slot.reason != Reason::Shutdown || !slot.owner.stopped() || slot.cleanup_end.is_none()
+                || !slot.discard || slot.installation_result.is_some() || slot.staged.is_some()
+                || slot.context.is_some() || slot.candidate.is_some() || slot.project.is_some()
+                || slot.evidence.is_some() || slot.project_path.is_some() || slot.images.is_some()
+                || slot.owner.installation.as_ref().is_none_or(|work| !work.settled())
+                || !slot.owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                || !slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
+                || !completed(&self.inner, quit, NativeResponse::Accept, false, true).is_some_and(|response| response.selected.is_none())
+                || !self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty()) { return false; }
+            let Some(edit) = self.inner.bridge.edits.installed_macos_document() else { return false; };
+            self.inner.bridge.edits.installed_macos_document_live(&edit)
+                && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+                && !self.inner.bridge.diagnostics.disabled() && !self.inner.bridge.preflight.disabled()
+                && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !self.inner.bridge.ios_archive.disabled()
+                && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+                && self.inner.bridge.preflight.can_exit() && self.inner.bridge.android_build.can_exit()
+                && self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit()
+        }
         pub(crate) fn installed_macos_final(&self, id: u32, project: Option<&ProjectWitness>, picker: Option<&PickerWitness>, lost: bool) -> bool {
             let Ok(state) = self.inner.state.try_lock() else { return false; }; let Some(quit) = &state.quit else { return false; };
             // quit_pending is a UI admission flag. The normal exit observer
@@ -6396,7 +6488,7 @@ pub(crate) fn assert_project_path_document_contracts() {
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -6529,7 +6621,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -6626,7 +6718,7 @@ mod tests {
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -7678,3 +7770,16 @@ pub(crate) fn assert_installation_reveal_document_gate_contract() {
 fn installation_reveal_requires_original_document_and_blocks_pending_lifecycle() {
     assert_installation_reveal_document_gate_contract();
 }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    feature = "macos-installed-observation", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use installation::{ReadObservation as InstallationReadObservation, OriginalFacts as InstallationOriginalFacts};
+
+#[cfg(test)]
+pub(crate) fn assert_installation_owner_contracts() { installation::assert_owner_contracts(); }
+
+#[cfg(test)]
+#[test]
+fn installation_original_clock_routing_and_finality_contract() { assert_installation_owner_contracts(); }

@@ -18,6 +18,9 @@ pub(crate) use android_tools::{AndroidToolchainSlots, AndroidCatalogSlots};
 #[path = "android_runtime_macos.rs"]
 mod android_runtime;
 pub(crate) use android_runtime::{AndroidBuildRuntimeSlots, AndroidBuildInstalledRuntime};
+#[path = "installation_observation_macos.rs"]
+mod installation_observation;
+pub(crate) use installation_observation::{InstallationSlots, native_problem as installation_native_problem};
 
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

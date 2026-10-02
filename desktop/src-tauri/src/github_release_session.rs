@@ -126,3 +126,94 @@ impl State {
         self.view.pending.push(record); Ok(())
     }
 }
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl State {
+    pub(crate) fn retained_heap_bytes_if_quiescent(&self) -> Option<usize> {
+        // A native ticket is opaque even if a copied status looks terminal.
+        // Conversely a remote uncertain effect does not erase its journal.
+        if self.active.is_some() || self.exhausted || self.view.reason == wire::Reason::CleanupUnknown
+            || self.view.operation.as_ref().is_some_and(|operation|
+                operation.phase != wire::Phase::Settled || operation.reason == wire::Reason::CleanupUnknown) {
+            return None;
+        }
+        let mut bytes = self.view.retained_heap_bytes()?;
+        if let Some(consent) = &self.consent {
+            // This is a separate owned Prepared, not an alias of view.prepared.
+            bytes = bytes.checked_add(consent.prepared.retained_heap_bytes()?)?
+                .checked_add(consent.session_id.capacity())?.checked_add(consent.project_id.capacity())?
+                .checked_add(consent.root.path.capacity())?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+mod installation_memory_capacity_tests {
+    use super::*;
+    // Invalid path/empty review text is intentional inert allocation DATA. It
+    // cannot pass a wire/domain gate and constructs no native ticket or permit.
+    fn prepared(cap: usize) -> wire::Prepared { wire::Prepared { target: wire::Target { project_binding: String::with_capacity(cap), repository: String::with_capacity(cap), account_id: String::with_capacity(cap), repository_id: String::with_capacity(cap), branch: String::with_capacity(cap), tooling_repository: String::with_capacity(cap), tooling_sha: String::with_capacity(cap), marker: String::with_capacity(cap), platform: wire::Platform::Android, selection: wire::Selection { stage: wire::Stage::Candidate, candidate_run_id: None, external_run_id: None, recovery_run_id: None, original_source_sha: None, original_version: None } }, source_sha: String::with_capacity(cap), source_tree: String::with_capacity(cap), workflow_id: String::with_capacity(cap), workflow_path: String::with_capacity(cap), caller_sha256: String::with_capacity(cap), observed_at: String::with_capacity(cap), expected_ref: String::with_capacity(cap), display_title: String::with_capacity(cap), config_sha256: String::with_capacity(cap), version_source: String::with_capacity(cap), version_sha256: String::with_capacity(cap), environment: String::with_capacity(cap), confirmation: String::with_capacity(cap), original_assurance: String::with_capacity(cap), current_version: wire::Version { name: String::with_capacity(cap), build: 1 },
+            destination: wire::Destination { application_id: String::with_capacity(cap), destination: String::with_capacity(cap), assurance: String::with_capacity(cap) },
+            checklist: Vec::with_capacity(4) } }
+    #[test]
+    fn consent_journal_and_run_all_keep_their_distinct_capacity_charges() {
+        let mut state = State::new(); state.view.prepared = Some(prepared(17));
+        let before = state.retained_heap_bytes_if_quiescent().unwrap();
+        let consent = Consent { prepared: prepared(29), end: Instant::now(),
+            session_id: String::with_capacity(91), project_id: String::with_capacity(93), generation: 0,
+            root: RegisteredRoot { path: std::path::PathBuf::with_capacity(4097),
+                identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } };
+        let consent_bytes = consent.prepared.retained_heap_bytes().unwrap() + consent.session_id.capacity()
+            + consent.project_id.capacity() + consent.root.path.capacity();
+        state.consent = Some(consent);
+        assert_eq!(state.retained_heap_bytes_if_quiescent(), Some(before + consent_bytes));
+        let row = wire::PendingRecord { prepared: prepared(47), run_id: Some(String::with_capacity(97)) };
+        let row_bytes = row.prepared.retained_heap_bytes().unwrap() + row.run_id.as_ref().unwrap().capacity();
+        state.view.pending.reserve_exact(3); state.view.pending.push(row);
+        let journal = state.view.pending.capacity() * std::mem::size_of::<wire::PendingRecord>() + row_bytes;
+        assert_eq!(state.retained_heap_bytes_if_quiescent(), Some(before + consent_bytes + journal));
+        let mut run = wire::Run { id: String::with_capacity(101), attempt: 1, status: wire::RunStatus::Queued,
+            conclusion: None, observed_at: String::with_capacity(103), jobs: Vec::with_capacity(3),
+            url: String::with_capacity(107), assurance: String::with_capacity(109) };
+        run.jobs.push(wire::Job { id: String::with_capacity(113), kind: wire::JobKind::InputGuard,
+            status: wire::RunStatus::Queued, conclusion: None });
+        let run_bytes = run.id.capacity() + run.observed_at.capacity() + run.url.capacity()
+            + run.assurance.capacity() + run.jobs.capacity() * std::mem::size_of::<wire::Job>() + run.jobs[0].id.capacity();
+        state.view.run = Some(run);
+        assert_eq!(state.retained_heap_bytes_if_quiescent(), Some(before + consent_bytes + journal + run_bytes));
+    }
+    #[test]
+    fn release_selection_options_and_checklist_rows_are_not_flat_wire_sizes() {
+        let mut value = prepared(7); let before = value.retained_heap_bytes().unwrap();
+        value.target.selection.candidate_run_id = Some(String::with_capacity(17));
+        value.target.selection.external_run_id = Some(String::with_capacity(19));
+        value.target.selection.recovery_run_id = Some(String::with_capacity(23));
+        value.target.selection.original_source_sha = Some(String::with_capacity(29));
+        value.target.selection.original_version = Some(wire::Version { name: String::with_capacity(31), build: 1 });
+        let selection = [&value.target.selection.candidate_run_id, &value.target.selection.external_run_id,
+            &value.target.selection.recovery_run_id, &value.target.selection.original_source_sha].iter()
+            .map(|entry| entry.as_ref().unwrap().capacity()).sum::<usize>()
+            + value.target.selection.original_version.as_ref().unwrap().name.capacity();
+        let row = wire::Requirement { name: String::with_capacity(37), kind: String::with_capacity(41), reason: String::with_capacity(43) };
+        let row_bytes = row.name.capacity() + row.kind.capacity() + row.reason.capacity();
+        value.checklist.push(row); // Uses its pre-existing spare allocation.
+        assert_eq!(value.retained_heap_bytes(), Some(before + selection + row_bytes));
+    }
+    #[test]
+    fn remote_uncertain_effect_is_counted_but_cleanup_unknown_is_not_promoted() {
+        let mut state = State::new();
+        state.view.operation = Some(wire::Operation { id: String::with_capacity(31), kind: wire::Kind::Dispatch,
+            phase: wire::Phase::Settled, reason: wire::Reason::UnresolvedRun, effect: wire::Effect::PotentiallyApplied });
+        state.view.pending.push(wire::PendingRecord { prepared: prepared(19), run_id: None });
+        assert!(state.retained_heap_bytes_if_quiescent().is_some());
+        state.view.operation.as_mut().unwrap().phase = wire::Phase::CleanupUnknown;
+        assert!(state.retained_heap_bytes_if_quiescent().is_none());
+        assert_eq!(state.view.pending.len(), 1);
+        assert_eq!(state.view.operation.as_ref().unwrap().effect, wire::Effect::PotentiallyApplied);
+        state.view.operation.as_mut().unwrap().phase = wire::Phase::Settled;
+        state.exhausted = true; assert!(state.retained_heap_bytes_if_quiescent().is_none());
+    }
+}

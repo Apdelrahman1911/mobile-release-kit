@@ -16,6 +16,11 @@ impl Default for Sources {
         active: None, last: None, phase: wire::Phase::Idle, reason: wire::Reason::NotInspected } }
 }
 impl Sources {
+    // The installation census cannot see these retained roots/original Arcs
+    // through DocumentState. Empty BTreeMap/None keep only fixed control DATA.
+    fn installation_custody_empty(&self) -> bool {
+        !self.unknown && self.binding.is_none() && self.selected.is_empty() && self.active.is_none()
+    }
     pub(super) fn busy(&self) -> bool { self.active.is_some() }
     pub(super) fn unknown(&self) -> bool { self.unknown }
     pub(super) fn registration_matches(&self, registration: u32) -> bool {
@@ -53,6 +58,17 @@ impl Sources {
     }
 }
 impl SavedCommandOwner {
+    /// Read-only admission precondition, not a memory/finality receipt. Called
+    /// under the original Document gate: never block, reconcile, clear selected
+    /// roots, borrow native books or infer empty custody from poison/contention.
+    pub(crate) fn installation_source_custody_empty(&self) -> bool {
+        self.inner.domain == SavedCommandDomain::AndroidBuild
+            && !self.inner.poisoned.load(Ordering::SeqCst)
+            && self.inner.registry.try_lock().is_ok_and(|registry| {
+                !registry.disabled && !registry.exhausted && !registry.stopping
+                    && !registry.document_lost && registry.android_sources.installation_custody_empty()
+            })
+    }
     fn android_sources_gate(&self, registry: &Registry, gate: Availability) -> Availability {
         if registry.disabled || registry.exhausted || registry.android_sources.unknown() || registry.android_catalog.unknown()
             || self.inner.poisoned.load(Ordering::SeqCst) || gate == Availability::CleanupUnknown { return Availability::CleanupUnknown; }

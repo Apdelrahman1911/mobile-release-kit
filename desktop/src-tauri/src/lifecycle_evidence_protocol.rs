@@ -251,3 +251,53 @@ mod tests {
         assert!(Status::unavailable(u64::MAX).checked().is_ok());
     }
 }
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl Observation {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.documents.len() > 10 || self.history.len() > 3 { return None; }
+        let mut bytes = self.documents.capacity().checked_mul(std::mem::size_of::<Document>())?
+            .checked_add(self.history.capacity().checked_mul(std::mem::size_of::<History>())?)?
+            .checked_add(self.guidance.code.capacity())?.checked_add(self.guidance.message.capacity())?
+            .checked_add(self.assurance.retained_heap_bytes()?)?
+            .checked_add(self.summary.as_ref().map_or(Some(0), Summary::retained_heap_bytes)?)?;
+        for document in &self.documents { bytes = bytes.checked_add(document.path.capacity())?; }
+        for row in &self.history {
+            bytes = bytes.checked_add(row.recorded_readback.capacity())?
+                .checked_add(row.recorded_runs.retained_heap_bytes()?)?
+                .checked_add(row.receipt_sha256.capacity())?.checked_add(row.intent_sha256.capacity())?
+                .checked_add(row.previous_receipt_sha256.as_ref().map_or(0, String::capacity))?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg(test)]
+mod installation_memory_capacity_tests {
+    use super::*;
+    #[test]
+    fn lifecycle_spare_document_history_and_guidance_backing_is_counted() {
+        // Bounded inert DTO fixture, not serializer-based memory sizing.
+        let assurance: Assurance = serde_json::from_str(r#"{"level":"local-document-consistency","documentsOnly":true,"artifactBytesVerified":false,"workflowAuthenticated":false,"storeStateObserved":false,"comparedWithSourceProject":false,"releaseReady":false,"recoveryAuthorized":false}"#).unwrap();
+        let assurance_bytes = assurance.retained_heap_bytes().unwrap();
+        let mut observation = Observation { schema_version: 1, stage: Stage::Candidate, outcome: Outcome::Incomplete,
+            documents: Vec::with_capacity(10), summary: None, history: Vec::with_capacity(3),
+            guidance: Guidance { code: String::with_capacity(97), message: String::with_capacity(1027) }, assurance };
+        let base = observation.documents.capacity() * std::mem::size_of::<Document>()
+            + observation.history.capacity() * std::mem::size_of::<History>()
+            + observation.guidance.code.capacity() + observation.guidance.message.capacity() + assurance_bytes;
+        assert_eq!(observation.retained_heap_bytes(), Some(base));
+        observation.documents.push(Document { path: String::with_capacity(4097), state: DocumentState::Missing });
+        let runs: Runs = serde_json::from_str(r#"{"authorizedBy":{"runId":"1","attempt":"1"},"executedBy":{"runId":"2","attempt":"1"},"producedBy":{"runId":"3","attempt":"1"}}"#).unwrap();
+        let history = History { stage: Stage::Candidate, recorded_outcome: RecordedOutcome::Mutated,
+            recorded_readback: String::with_capacity(131), recorded_runs: runs, receipt_sha256: String::with_capacity(137),
+            intent_sha256: String::with_capacity(139), previous_receipt_sha256: Some(String::with_capacity(149)) };
+        let extra = observation.documents[0].path.capacity() + history.recorded_readback.capacity()
+            + history.recorded_runs.retained_heap_bytes().unwrap() + history.receipt_sha256.capacity()
+            + history.intent_sha256.capacity() + history.previous_receipt_sha256.as_ref().unwrap().capacity();
+        observation.history.push(history);
+        assert_eq!(observation.retained_heap_bytes(), Some(base + extra));
+    }
+}

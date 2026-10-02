@@ -80,6 +80,9 @@ impl AndroidBuildOwner {
     pub(crate) fn can_exit(&self) -> bool { self.saved.can_exit() }
     pub(crate) fn busy(&self) -> bool { self.saved.busy() }
     pub(crate) fn ensure_idle(&self) -> Result<(), BridgeError> { self.saved.ensure_idle() }
+    pub(crate) fn installation_source_custody_empty(&self) -> bool {
+        self.saved.installation_source_custody_empty()
+    }
     pub(crate) fn prepared_project(&self, operation: &str, generation: &str) -> Result<String, BridgeError> {
         self.saved.prepared_project(operation, generation)
     }

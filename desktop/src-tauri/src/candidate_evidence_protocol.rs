@@ -450,3 +450,72 @@ mod tests {
         status.problem = Some(Problem::Deadline); assert!(status.checked().is_err());
     }
 }
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl Runs {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        for run in [&self.authorized_by, &self.executed_by, &self.produced_by] {
+            bytes = bytes.checked_add(run.run_id.capacity())?.checked_add(run.attempt.capacity())?;
+        }
+        Some(bytes)
+    }
+}
+impl Summary {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.artifacts.len() > 5 { return None; }
+        let mut bytes = self.artifacts.capacity().checked_mul(std::mem::size_of::<Artifact>())?;
+        for value in [&self.platform, &self.application_id, &self.version.marketing, &self.source.commit, &self.source.tree, &self.document_payload_sha256.manifest, &self.document_payload_sha256.receipt, &self.document_payload_sha256.intent] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        for artifact in &self.artifacts {
+            bytes = bytes.checked_add(artifact.logical_name.capacity())?.checked_add(artifact.declared_bytes.capacity())?
+                .checked_add(artifact.sha256.capacity())?;
+        }
+        bytes.checked_add(self.recorded_runs.retained_heap_bytes()?)
+    }
+}
+impl Assurance {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> { Some(self.level.capacity()) }
+}
+impl Observation {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.documents.len() > 3 { return None; }
+        self.documents.capacity().checked_mul(std::mem::size_of::<Document>())?
+            .checked_add(self.summary.as_ref().map_or(Some(0), Summary::retained_heap_bytes)?)?
+            .checked_add(self.assurance.retained_heap_bytes()?)
+    }
+}
+
+#[cfg(test)]
+mod installation_memory_capacity_tests {
+    use super::*;
+    fn run(cap: usize) -> RecordedRun { RecordedRun { run_id: String::with_capacity(cap), attempt: String::with_capacity(cap + 1) } }
+    #[test]
+    fn candidate_capacity_walk_includes_all_nested_owned_projections() {
+        let runs = Runs { authorized_by: run(17), executed_by: run(19), produced_by: run(23) };
+        let runs_bytes = [&runs.authorized_by, &runs.executed_by, &runs.produced_by].iter()
+            .map(|run| run.run_id.capacity() + run.attempt.capacity()).sum::<usize>();
+        assert_eq!(runs.retained_heap_bytes(), Some(runs_bytes));
+        let mut summary = Summary { platform: String::new(), application_id: String::new(),
+            version: Version { marketing: String::new(), build: 1 }, source: Source { commit: String::new(), tree: String::new() },
+            artifacts: Vec::with_capacity(5), recorded_runs: runs,
+            document_payload_sha256: Digests { manifest: String::new(), receipt: String::new(), intent: String::new() } };
+        let before = summary.retained_heap_bytes().unwrap();
+        assert_eq!(before, runs_bytes + summary.artifacts.capacity() * std::mem::size_of::<Artifact>());
+        let artifact = Artifact { logical_name: String::with_capacity(31), declared_bytes: String::with_capacity(67), sha256: String::with_capacity(71) };
+        let extra = artifact.logical_name.capacity() + artifact.declared_bytes.capacity() + artifact.sha256.capacity();
+        summary.artifacts.push(artifact);
+        assert_eq!(summary.retained_heap_bytes(), Some(before + extra));
+        let assurance = Assurance { level: String::with_capacity(101), documents_only: true,
+            artifact_bytes_verified: false, workflow_authenticated: false, store_state_observed: false,
+            compared_with_source_project: false, release_ready: false, recovery_authorized: false };
+        let assurance_bytes = assurance.level.capacity();
+        let observation = Observation { schema_version: 1, outcome: Outcome::Incomplete,
+            documents: Vec::with_capacity(3), summary: Some(summary), assurance };
+        assert_eq!(observation.retained_heap_bytes(), Some(before + extra + assurance_bytes
+            + observation.documents.capacity() * std::mem::size_of::<Document>()));
+    }
+}

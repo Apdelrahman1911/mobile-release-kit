@@ -528,7 +528,7 @@ fn android_unselected_stale_and_stopped_intents_refuse_before_any_native_book() 
         }
         if scenario != "stale-registration" {
             if let Some(document) = &document { assert!(!owner.android_normal_selected(document)); }
-            else { assert!(!owner.inner.android_installed_selected(None)); }
+            else { assert!(!owner.inner.android_installed_selected(None, None)); }
             // A bad selection cannot hide behind the later executor check.
             assert!(owner.prepare(context(SavedCommandDomain::AndroidBuild), 1, project(), Availability::Available).is_err());
         }

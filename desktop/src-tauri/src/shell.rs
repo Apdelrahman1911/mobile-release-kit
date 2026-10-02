@@ -160,6 +160,27 @@ fn reveal_installation(webview: Webview, request: tauri::ipc::Request<'_>, state
     state.document.reveal_installation()
 }
 #[tauri::command]
+fn installation_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::CheckStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    crate::installation::inspect_request(request_body(&request)?)?;
+    state.document.installation_status()
+}
+#[tauri::command]
+fn inspect_installation(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::CheckStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    crate::installation::inspect_request(request_body(&request)?)?;
+    state.document.inspect_installation()
+}
+#[tauri::command]
+fn cancel_installation(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::CheckStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let id = crate::installation::cancel_inspection_request(request_body(&request)?)?;
+    state.document.cancel_installation(id)
+}
+#[tauri::command]
 async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=catalog-enter\n");
     fixture_command!(state, Catalog, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -3097,7 +3118,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
                 tauri::generate_handler![
-            app_info, reveal_installation, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
+            app_info, reveal_installation, installation_status, inspect_installation, cancel_installation, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             release_evidence_choose, release_evidence_status, release_evidence_observe, release_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,

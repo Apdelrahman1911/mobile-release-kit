@@ -1,4 +1,4 @@
-import type { InstallationDescription, InstallationRevealResult } from './installation.ts';
+import type { InstallationDescription, InstallationRevealResult, InstallationStatus } from './installation.ts';
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
@@ -392,6 +392,9 @@ export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitH
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   revealInstallation(): Promise<InstallationRevealResult>;
+  installationStatus(): Promise<InstallationStatus>;
+  inspectInstallation(): Promise<InstallationStatus>;
+  cancelInstallation(input: { operationId: number }): Promise<InstallationStatus>;
   chooseProject(): Promise<ProjectReference | null>;
   chooseProjectPath(request: ProjectPathRequest): Promise<ProjectPathSelection | null>;
   snapshot(projectId: string): Promise<ProjectSnapshot>;

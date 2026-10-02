@@ -715,3 +715,24 @@ mod tests {
         assert_eq!(refused.code, "asset_source_refused"); assert!(!refused.retryable);
     }
 }
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl ProjectPathResult {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        self.project_id.capacity().checked_add(self.relative_path.capacity())
+    }
+}
+
+#[cfg(test)]
+mod installation_memory_capacity_tests {
+    use super::*;
+    #[test]
+    fn project_path_result_counts_empty_spare_string_allocations() {
+        let value = ProjectPathResult { project_id: String::with_capacity(103), field: ProjectPathField::VersionSource,
+            relative_path: String::with_capacity(4103) };
+        assert_eq!(value.retained_heap_bytes(), value.project_id.capacity().checked_add(value.relative_path.capacity()));
+        assert!(value.project_id.is_empty() && value.relative_path.is_empty());
+    }
+}

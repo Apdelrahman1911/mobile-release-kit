@@ -81,3 +81,6 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/edit_owner.rs"] mod edit_owner;
 #[path = "../src/shell.rs"] mod shell;
 fn main() -> std::process::ExitCode { shell::installed_observation::main() }
+
+#[test]
+fn installation_inspection_closed_wire_contract() { installation::assert_installation_inspection_wire_contract(); }

@@ -109,6 +109,7 @@ class Refused(Exception):
 
 GENERIC_REFUSAL = "Mac package staging/observation refused; preserve original outputs, no automatic cleanup or retry."
 PACKAGE_REFUSALS = {
+    "output-mode": "MRK_MACOS_PACKAGE_REFUSED=output-mode",
     "compressed-data-bound": "MRK_MACOS_PACKAGE_REFUSED=compressed-data-bound",
     "xar-header-bound": "MRK_MACOS_PACKAGE_REFUSED=xar-header-bound",
     "xar-member-encoding": "MRK_MACOS_PACKAGE_REFUSED=xar-member-encoding",
@@ -394,7 +395,10 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
                 with parent(Path(output) / directory) as (fd, leaf):
                     os.mkdir(leaf, 0o700, dir_fd=fd)
             for path, (body, mode) in sorted(files.items()):
-                need(mode in ((0o644, 0o755) if app_signing else (0o444, 0o555)), "output-mode")
+                # The separately signed nested helper is copied unchanged and
+                # stays read-only. Only the containing app is signed afterward.
+                allowed_modes = ((0o555,) if path == VAULT_HELPER else (0o644, 0o755)) if app_signing else (0o444, 0o555)
+                need(mode in allowed_modes, "output-mode")
                 with parent(Path(output) / path) as (fd, leaf):
                     opened = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=fd)
                     try:
@@ -1946,7 +1950,7 @@ def main(argv=None):
     try:
         result = action(args)
     except Refused as error:
-        if args.command in ("package-format-input", "prepare-package", "audit-package"):
+        if args.command in ("app", "package-format-input", "prepare-package", "audit-package"):
             print(package_refusal_message(error), file=sys.stderr)
             raise SystemExit(1)
         raise

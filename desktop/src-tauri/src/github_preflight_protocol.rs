@@ -371,3 +371,54 @@ mod tests {
         assert!(encode_go("preflight-1", &digest, Some(&"\\".repeat(4096)), Kind::Dispatch).is_err());
     }
 }
+
+// Read-only retained DATA capacities for the document installation census.
+// Inline structs are charged by their owner. No clone, serializer, authority,
+// credential copy, allocation, native call or settlement transition occurs here.
+impl Target {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        for value in [&self.project_binding, &self.repository, &self.account_id, &self.repository_id, &self.branch, &self.tooling_repository, &self.tooling_sha, &self.marker] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        Some(bytes)
+    }
+}
+impl Prepared {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.target.retained_heap_bytes()?;
+        for value in [&self.source_sha, &self.workflow_id, &self.workflow_path, &self.caller_sha256, &self.observed_at, &self.expected_ref, &self.display_title, &self.confirmation] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        Some(bytes)
+    }
+}
+impl Run {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.jobs.len() > 3 { return None; }
+        let mut bytes = self.jobs.capacity().checked_mul(std::mem::size_of::<Job>())?;
+        for value in [&self.id, &self.observed_at, &self.url, &self.assurance] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        for row in &self.jobs { bytes = bytes.checked_add(row.id.capacity())?; }
+        Some(bytes)
+    }
+}
+impl Status {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        if self.pending.len() > RECORD_LIMIT { return None; }
+        let mut bytes = self.pending.capacity().checked_mul(std::mem::size_of::<PendingRecord>())?
+            .checked_add(self.session_id.as_ref().map_or(0, String::capacity))?
+            .checked_add(self.consent_expires_at.as_ref().map_or(0, String::capacity))?;
+        if let Some(operation) = &self.operation { bytes = bytes.checked_add(operation.id.capacity())?; }
+        if let Some(prepared) = &self.prepared { bytes = bytes.checked_add(prepared.retained_heap_bytes()?)?; }
+        // A PotentiallyApplied remote journal entry remains retained DATA, not
+        // native cleanup Unknown. Every entry and spare vector cell is charged.
+        for row in &self.pending {
+            bytes = bytes.checked_add(row.prepared.retained_heap_bytes()?)?
+                .checked_add(row.run_id.as_ref().map_or(0, String::capacity))?;
+        }
+        if let Some(run) = &self.run { bytes = bytes.checked_add(run.retained_heap_bytes()?)?; }
+        Some(bytes)
+    }
+}

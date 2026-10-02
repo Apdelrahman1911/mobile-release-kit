@@ -1288,7 +1288,7 @@ test('CredentialSession renders choose-images only as passive status without a s
   assert.ok(passive.includes('original image operation in Metadata'));
   assert.doesNotMatch(passive, /onClick=|controller\.(discard|lock|choose)|selectionToken|assessment|preview\.token/);
   assert.ok(component.includes('nativeAvailable && writable && guide && !projectPathActive && !imageActive'));
-  assert.equal((component.match(/disabled=\{!!state\.busy \|\| projectPathActive \|\| imageActive\}/g) ?? []).length, 2);
+  assert.equal((component.match(/disabled=\{!!state\.busy \|\| projectPathActive \|\| imageActive \|\| installationActive\}/g) ?? []).length, 2);
   assert.ok(component.includes('nativeBusyReason !== null || imageActive'));
 });
 
@@ -1304,5 +1304,49 @@ test('image retirement never auto-submits a deferred credential context even wit
     h.controller.submitContext(); await settle(); assert.equal(h.calls.length, before + 1);
     h.latest('context').resolve(vaultStatus(3, { operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) }));
     await settle(); assert.equal(h.controller.getSnapshot().contextCurrent, true);
+  } finally { h.controller.dispose(); }
+});
+
+test('installation status is foreign closed DATA, never credential selection, storage or preview authority', () => {
+  const op = operation({ operation: 'inspect-installation', phase: 'capturing', source: 'not-run',
+    settlement: 'pending', assessment: null, preview: null, selectionToken: null });
+  const frame = status(2, { operation: op });
+  assert.deepEqual(parseAssetStatus(frame), frame);
+  for (const patch of [{ phase: 'selected' }, { phase: 'picking' }, { phase: 'preview' },
+    { selectionToken: A }, { assessment: assessment() }, { preview: operation().preview },
+    { storageOutcome: { effect: 'known-none', durability: 'not-run', cleanup: 'known' } }]) {
+    assert.equal(parseAssetStatus({ ...frame, operation: { ...op, ...patch } }), null);
+  }
+  assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind: 'inspect-installation', replacement: null }), false);
+});
+
+test('installation originals block credential routes and queued contexts; known retirement is not an implicit context update', async () => {
+  const h = harness();
+  try {
+    await ready(h); const before = h.calls.length, scope = h.controller.getSnapshot().scope;
+    const op = operation({ operation: 'inspect-installation', phase: 'capturing', source: 'not-run',
+      settlement: 'pending', assessment: null, preview: null, selectionToken: null });
+    h.emit(status(2, { operation: op }));
+    assert.match(assetSessionReason(h.controller.getSnapshot()), /installation check/);
+    assert.match(assetCancellationReason(h.controller.getSnapshot()), /exact original check in Environment/);
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    h.controller.setScope({ platform: 'ios', stage: 'production', purpose: 'store' });
+    assert.deepEqual(h.controller.getSnapshot().scope, scope);
+    h.controller.submitContext();
+    assert.equal(h.controller.choose('android-keystore'), false);
+    assert.equal(h.controller.prepareScalar('google-wif', fields), false);
+    assert.equal(h.controller.prepareSelection({}), false);
+    assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), false);
+    assert.equal(h.controller.prepareDelete({ recordId: C, expectedRevision: 1 }), false);
+    assert.equal(h.controller.confirmPreview(A, 'save'), false);
+    assert.equal(h.controller.discard(), false); assert.equal(h.controller.lock(), false);
+    h.setProject({ ...h.selected(), revision: 2 }); await settle();
+    assert.equal(h.calls.length, before);
+    h.emit(status(3, { operation: { ...op, phase: 'idle', settlement: 'known' } })); await settle();
+    assert.equal(h.calls.length, before, 'settlement is passive, not new credential intent');
+    h.controller.submitContext(); await settle();
+    assert.equal(h.calls.length, before + 1);
+    h.latest('context').resolve(status(4, { context: { ...context, revision: 2 },
+      operation: { ...op, phase: 'idle', settlement: 'known' } })); await settle();
   } finally { h.controller.dispose(); }
 });
