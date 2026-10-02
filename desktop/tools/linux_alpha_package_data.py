@@ -664,6 +664,46 @@ def static_edges(initial, provider):
     return {"objects": objects, "edges": sorted(edges, key=lambda row: (row["from"], row["needed"], row["to"]))}
 
 
+def os_libraries(graph, host_files):
+    """Index OS SONAMEs without mistaking bound aliases for distinct originals."""
+    libraries = {}
+    for row in graph["objects"].values():
+        soname = row["elf"]["soname"]
+        if row["domain"] != "os" or soname is None:
+            continue
+        path = row["file"]["selectedPath"]
+        D.need(path in host_files, "OS provider lacks its original binding")
+        bound = host_files[path]
+        D.need(D.same(row["file"], U.shell_file_projection(bound)),
+               "OS provider differs from its original file projection")
+        previous = libraries.get(soname)
+        if previous is not None:
+            original = host_files[previous["file"]["selectedPath"]]
+            D.need(D.same(bound["path"], original["path"]), "OS provider SONAME has distinct canonical paths")
+            D.need(D.same(bound["identity"], original["identity"]), "OS provider SONAME original identities differ")
+            D.need(D.same([row["file"][key] for key in ("size", "sha256", "mode")],
+                          [previous["file"][key] for key in ("size", "sha256", "mode")]),
+                   "OS provider SONAME bytes/mode differ")
+            D.need(D.same(row["elf"], previous["elf"]), "OS provider SONAME ELF metadata differs")
+            D.need(D.same(row["package"], previous["package"]), "OS provider SONAME canonical owners differ")
+        # A module-only SONAME has no incoming resolver edge. Keep a real,
+        # deterministic observed member, but leave every alias in the graph.
+        if previous is None or path < previous["file"]["selectedPath"]:
+            libraries[soname] = row
+    selected = {}
+    for edge in graph["edges"]:
+        row = graph["objects"][edge["to"]]
+        if row["domain"] != "os":
+            continue
+        soname, path = edge["needed"], row["file"]["selectedPath"]
+        D.need(soname in libraries and row["elf"]["soname"] == soname, "OS provider edge SONAME differs")
+        D.need(soname not in selected or selected[soname] == path, "OS provider edges select different aliases")
+        selected[soname] = path
+        # Preserve the actual resolver spelling required by shell_private_search.
+        libraries[soname] = row
+    return libraries
+
+
 def os_package_inputs(command):
     """One actual distro query context shared by pre/post compile admission."""
     host_files, package_files, packages = {}, {}, {}
@@ -838,11 +878,7 @@ def dependency_inputs(source, work, compiler, runtime, policy, command, *, suppo
         return "os:" + path, native(path)
 
     graph = static_edges(initial, provider)
-    libraries = {row["elf"]["soname"]: row for row in graph["objects"].values()
-                 if row["domain"] == "os" and row["elf"]["soname"] is not None}
-    D.need(len(libraries) == len({row["file"]["selectedPath"] for row in graph["objects"].values()
-                                if row["domain"] == "os" and row["elf"]["soname"] is not None}),
-           "OS provider SONAME is ambiguous")
+    libraries = os_libraries(graph, host_files)
     loader = host("/lib64/ld-linux-x86-64.so.2")
     D.need(loader["path"] == libraries["ld-linux-x86-64.so.2"]["file"]["path"],
            "Every shipped PT_INTERP must resolve to the actual OS loader")

@@ -283,6 +283,77 @@ class CompilerAndDependencyContracts(unittest.TestCase):
             A.static_edges({"private-app": private, "gui": system},
                 lambda requester, name: ("colliding-provider", providers[requester["domain"]]))
 
+        # One protected original may be observed as a module and a SONAME alias.
+        soname = "libfixture.so.1"
+        selected = A.U.shell_provider_path("/fixture-gui", None, soname)
+        module = A.U.SHELL_LIBRARY_ROOT + "/dri/fixture_dri.so"
+        canonical = A.U.SHELL_LIBRARY_ROOT + "/libfixture.so.1.2"
+        bindings, rows = {}, {}
+        for index, path in enumerate((module, selected), 3):
+            bindings[path] = {**pin(canonical, b"fixture"), "selectedPath": path,
+                "identity": [1, 2, stat.S_IFREG | 0o644, 1, 7, 11, 12],
+                "links": [[path, [1, index, stat.S_IFLNK | 0o777, 1, len(canonical), 13, 14], canonical]],
+                "ancestry": {"/": [1, 1, stat.S_IFDIR | 0o755, 0, 0]}}
+            rows[path] = {**elf_row("os", name=soname),
+                "file": A.U.shell_file_projection(bindings[path]), "package": "libfixture1:amd64"}
+        private_alias = elf_row("private-runtime", name=soname)
+        aliases = A.static_edges(
+            {"os:" + module: rows[module], "gui": elf_row("shipped", needed=[soname]),
+             "private-app": elf_row("private-runtime", needed=[soname])},
+            lambda requester, name: ("private", private_alias) if requester["domain"] == "private-runtime"
+            else ("os:" + selected, rows[selected]))
+        originals = copy.deepcopy((aliases, bindings))
+        libraries = A.os_libraries(aliases, bindings)
+        self.assertEqual(set(libraries), {soname})
+        self.assertIs(libraries[soname], rows[selected])
+        self.assertLess(module, selected)  # An arbitrary first/sorted alias is not the resolver target.
+        self.assertEqual((aliases, bindings), originals)
+        singleton = {"objects": {"os:" + selected: rows[selected]}, "edges": []}
+        self.assertIs(A.os_libraries(singleton, bindings)[soname], rows[selected])
+        modules = {"objects": {key: row for key, row in aliases["objects"].items()
+                              if not row["elf"]["needed"]}, "edges": []}
+        self.assertIs(A.os_libraries(modules, bindings)[soname], rows[module])
+        modules["objects"] = dict(reversed(list(modules["objects"].items())))
+        self.assertIs(A.os_libraries(modules, bindings)[soname], rows[module])
+
+        for field, value, message in (
+                ("path", canonical + ".other", "distinct canonical paths"),
+                ("size", 8, "bytes/mode differ"), ("sha256", "1" * 64, "bytes/mode differ")):
+            with self.subTest(provider_field=field):
+                changed, bound = copy.deepcopy((aliases, bindings))
+                bound[module][field] = value
+                changed["objects"]["os:" + module]["file"] = A.U.shell_file_projection(bound[module])
+                with self.assertRaisesRegex(ValueError, message):
+                    A.os_libraries(changed, bound)
+        # Every original identity field matters, not just device/inode or bytes.
+        for index in range(len(bindings[module]["identity"])):
+            with self.subTest(original_identity_field=index):
+                changed, bound = copy.deepcopy((aliases, bindings))
+                bound[module]["identity"][index] += 1
+                changed["objects"]["os:" + module]["file"] = A.U.shell_file_projection(bound[module])
+                with self.assertRaisesRegex(ValueError, "original identities differ"):
+                    A.os_libraries(changed, bound)
+        for field, value, message in (
+                ("elf", {**rows[module]["elf"], "versionDefinitions": ["OTHER_1"]}, "ELF metadata differs"),
+                ("package", "another-fixture:amd64", "canonical owners differ")):
+            with self.subTest(provider_metadata=field):
+                changed = copy.deepcopy(aliases)
+                changed["objects"]["os:" + module][field] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    A.os_libraries(changed, bindings)
+        with self.assertRaisesRegex(ValueError, "lacks its original binding"):
+            A.os_libraries(aliases, {selected: bindings[selected]})
+        changed = copy.deepcopy(aliases)
+        changed["objects"]["os:" + module]["file"]["sha256"] = "2" * 64
+        with self.assertRaisesRegex(ValueError, "original file projection"):
+            A.os_libraries(changed, bindings)
+        changed = copy.deepcopy(aliases)
+        changed["objects"]["other-gui"] = elf_row("shipped", needed=[soname])
+        changed["edges"].append({"from": "other-gui", "needed": soname, "to": "os:" + module, "versions": []})
+        with self.assertRaisesRegex(ValueError, "edges select different aliases"):
+            A.os_libraries(changed, bindings)
+        self.assertEqual((aliases, bindings), originals)
+
     def test_actual_dependency_floors_allow_security_supersession_not_unbound_packages(self):
         packages = {
             "libc6:amd64": {"binaryPackage": "libc6:amd64", "version": "2.39-0ubuntu8.6"},
