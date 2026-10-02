@@ -253,7 +253,7 @@ struct Manifest { schema_version: u32, protocol: u32, core_version: String, targ
 #[serde(deny_unknown_fields)]
 struct PayloadFile { path: String, sha256: String, size: u64 }
 
-// Two distinct sealed input types and slot types; no passive→edit conversion.
+// Distinct sealed input and slot types; no passive→edit or cross-domain conversion.
 // The whole registered Book is moved only by the existing owner's transfer.
 macro_rules! slots {
     ($slots:ident, $capability:ident, $profile:ty) => {
@@ -309,7 +309,11 @@ macro_rules! slots {
     }
 }
 slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
+slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
 slots!(ConfigurationRuntimeSlots, ConfigurationInstalledRuntime, runtime::ConfigurationInstalledProfile);
+slots!(GitHubWorkflowRuntimeSlots, GitHubWorkflowInstalledRuntime, runtime::GitHubWorkflowInstalledProfile);
+slots!(MetadataTextRuntimeSlots, MetadataTextInstalledRuntime, runtime::MetadataTextInstalledProfile);
+slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
 
 // The iOS owner lends its original, first-failure-shortened cleanup endpoint.

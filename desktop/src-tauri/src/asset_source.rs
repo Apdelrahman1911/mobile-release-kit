@@ -12,9 +12,9 @@ pub(crate) const DESCRIPTOR_LIMIT: usize = 512;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, gid: u32 }
 impl DirectoryIdentity {
-    // Only the private store's actual held Linux directory observation calls
+    // Only a private store's actual held Linux/macOS directory observation calls
     // this bridge. It is not renderer input, a synthetic source or write lease.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     pub(crate) fn vault_original(dev: u64, ino: u64, mode: u32, uid: u32, gid: u32) -> Self {
         Self { dev, ino, mode, uid, gid }
     }
@@ -68,9 +68,9 @@ pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity
 /// Produced only by a completed original project-directory roster probe. When
 /// the vault does not exist yet, its owner must additionally compare these
 /// roots with its held existing ancestors before creating either private edge.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 pub(crate) struct VaultAbsentExclusion { project_roots: Vec<DirectoryIdentity> }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 impl VaultAbsentExclusion { pub(crate) fn roots(&self) -> &[DirectoryIdentity] { &self.project_roots } }
 
 /// Test-only registration from an actually held fixture directory. This is not
@@ -1101,7 +1101,7 @@ pub(crate) use linux::assert_project_path_source_contracts;
 #[path = "asset_source_macos.rs"]
 mod macos;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 #[path = "asset_source_windows.rs"]

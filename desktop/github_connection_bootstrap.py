@@ -1,4 +1,4 @@
-"""Fixed Linux GitHub read-only entry; no mode, host, trust or token arguments.
+"""Fixed Linux/macOS GitHub read-only entry; no mode, host, trust or token arguments.
 
 This source does not qualify a development or packaged runtime. The native
 original owner must separately admit the interpreter, imports and sibling CA.
@@ -12,7 +12,7 @@ def main() -> int:
     started = time.monotonic()  # Includes the service/HTTP/TLS import cost.
     if (len(sys.argv) != 2 or not sys.flags.isolated or not sys.flags.no_site
             or not sys.dont_write_bytecode or sys.version_info < (3, 11)
-            or sys.platform != "linux" or not os.path.isabs(sys.argv[1])
+            or sys.platform not in ("linux", "darwin") or not os.path.isabs(sys.argv[1])
             or not os.path.isabs(__file__)):
         return 78
     # The original native owner supplies this fixed core, never a project path.

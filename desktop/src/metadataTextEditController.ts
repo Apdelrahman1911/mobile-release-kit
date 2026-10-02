@@ -106,7 +106,7 @@ function usable(state: MetadataOwnerState): boolean {
 }
 const availabilityCopy: Record<EditAvailability, string> = {
   available: 'The separate native metadata writer is available; only explicit confirmation can submit the reviewed bundle.',
-  unsupported_platform: 'Text saving needs the separately qualified Linux x86_64 GNU writer. Windows and macOS text mutation are unavailable.',
+  unsupported_platform: 'Text saving is unavailable on this platform. It requires a supported, source-bound native writer; browser preview cannot save files.',
   runtime_unqualified: 'Text saving is disabled in this build. Loading, editing and validation do not mean the separate text-file writer has been verified.',
   cleanup_unknown: 'Original native cleanup is unverified. Keep the draft and operation evidence; no competing edit or repeated Apply is permitted.',
   shutdown: 'The native application is stopping. No new text edit can be opened.',

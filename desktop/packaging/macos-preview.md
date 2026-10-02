@@ -39,11 +39,18 @@ Keep the app in that protected location: the runtime is installed beside it
 under a versioned directory. Do not move the app to Applications or elsewhere.
 No Applications shortcut, drag-install or relocation support is claimed.
 
-**Automatic window-open and normal-Quit verification are unexecuted.** The
-preview workflow deliberately does not use an unproved process-ID lookup to
-control a running application. Successful build/Installer/readback is not
-evidence that the window opened, that a screen works or that a user journey
-completed. Physical/manual observations of this exact package remain pending.
+The package-export receipt is intentionally a **build/Installer/readback
+snapshot**: its automatic-open and normal-Quit fields remain unexecuted at that
+stage. The same hosted job subsequently runs one external XCTest scenario
+against the exact ordinary app, without instrumentation: launch/render, Cancel
+the genuine Quit sheet, navigate safely, then genuinely Quit. Look for the
+separate exact-source `normal-ui/result.json` engineering evidence; only an
+actual successful test/count receipt establishes that narrow UI observation.
+A missing, failed or skipped check is not a pass.
+
+This check does not prove POSIX exit status or every worker's finality, Finder/
+Installer interaction, Gatekeeper or full feature journeys. Physical/manual
+observations of this exact package and the checklist below remain separate.
 
 ## What this source currently exposes on macOS
 
@@ -54,6 +61,9 @@ Subject to the existing per-request runtime, document and ownership checks:
   suggestions and change previews, environment requirements, GitHub setup
   proposals, and saved release-version observation.
 - Configuration review/Save through its existing transaction owner.
+- Local GitHub workflow preview/Apply, metadata/localization text editing and
+  release-version editing through the existing scoped transaction owners.
+- Evidence-folder selection and session-only GitHub read-only integration.
 - Supported session-only signing-input selection/assessment.
 - The unsigned iOS archive path, which still needs a compatible Xcode/build
   environment and all existing admission checks.
@@ -62,11 +72,13 @@ This is source-selected scope, **not acceptance of those journeys on this new
 normal binary**. External Android/iOS build tools are not bundled; tool
 requirements and native qualification still apply.
 
-Not enabled/qualified here: project-relative field pickers; evidence/image
-pickers; writing GitHub workflows; authenticated GitHub operations; metadata or
-release-version writers; active doctor; offline preflight; project recovery;
-signed iOS export and iOS recovery. No Store mutation, public release,
-promotion, complete Android/iOS lifecycle or full feature parity is claimed.
+The newly integrated edit/evidence/GitHub paths above still need real normal-app
+journey verification; source integration and Linux checks are not Mac acceptance.
+Still unavailable or not qualified here: project-relative field-picker journeys;
+image selection/import; persistent credentials; authenticated release dispatch;
+active doctor; offline preflight; project recovery; signed iOS export and iOS
+recovery. No Store mutation, public release, promotion, complete Android/iOS
+lifecycle or full feature parity is claimed.
 
 ## Small manual acceptance checklist
 

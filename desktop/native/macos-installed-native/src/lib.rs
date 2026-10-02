@@ -5,6 +5,7 @@
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
 // Unwired wrapping-key primitive; no availability or execution authority.
 pub mod wrapping_keychain;
+pub mod vault_filesystem;
 use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
     os::{fd::{AsRawFd, BorrowedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, ptr::NonNull, rc::Rc};
 
@@ -107,11 +108,11 @@ pub fn publish_directory(from: BorrowedFd<'_>, source: &str, to: BorrowedFd<'_>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot }
+pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder }
 impl PanelKind {
     fn code(self) -> c_int { match self {
         Self::Project => 1, Self::Quit => 2, Self::File => 3, Self::VersionSource => 4,
-        Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7,
+        Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7, Self::EvidenceFolder => 8,
     } }
     fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
 }
@@ -460,7 +461,7 @@ mod observation {
             |p| p.close_attempted = true, |p| p.dismissed = true, |p| p.closed = true,
         ];
         for change in invalid { let mut sample = fresh(); change(&mut sample); if sample.version_source_name_ready() { return false; } }
-        for kind in [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot] {
+        for kind in [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot, PanelKind::EvidenceFolder] {
             let mut sample = fresh(); sample.kind = kind; if sample.version_source_name_ready() { return false; }
         }
         let sample = fresh().version_source_parent_ready.unwrap();
@@ -524,7 +525,7 @@ mod observation {
                 }
             }
         }
-        for kind in [PanelKind::Project, PanelKind::File, PanelKind::Quit] {
+        for kind in [PanelKind::Project, PanelKind::File, PanelKind::Quit, PanelKind::EvidenceFolder] {
             if project_field_initial(kind, Path::new("/Users/owner/project")).is_ok()
                 || project_field_preparation(0, 511 | 4096, 0).succeeded(kind, false) { return false; }
         }
@@ -2147,14 +2148,14 @@ mod observation {
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
         action_diagnostics_data_check() && identity_data_check() && semantic_data_check() && original_window_data_check()
-            && project_field_data_check()
+            && project_field_data_check() && evidence_folder_abi_data_check()
             && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x2200c, 0x4200c, 0x6201c, 0x7ffff, 0x9f00f, 0x15f00f, 0x17f01f]
                 .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x1ffff, 0x20000,
                 0x22008, 0x22004, 0x6001c, 0x6200c, 0x2201c, 0x4201c, 0x80000, 0x100000, 0x1df00f, 0x15f01f, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
             && [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::VersionSource,
-                PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot].into_iter().all(|kind| {
+                PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot, PanelKind::EvidenceFolder].into_iter().all(|kind| {
                 observation_directory_readiness(kind, 0) == Some("not-ready")
                     && observation_directory_readiness(kind, 0x2200c)
                         == (!matches!(kind, PanelKind::Quit)).then_some("directory-not-matched")
@@ -2283,6 +2284,7 @@ mod observation {
             let parsed = (|| {
                 let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit, 3 => PanelKind::File,
                     4 => PanelKind::VersionSource, 5 => PanelKind::IosProject, 6 => PanelKind::IosWorkspace, 7 => PanelKind::MetadataRoot,
+                    8 => PanelKind::EvidenceFolder,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
                 let directory_readiness = observation_directory_readiness(kind, flags).ok_or(io::ErrorKind::InvalidData)?;
                 if !observation_name_sample_valid(kind, flags, name_sample) { return Err(io::ErrorKind::InvalidData.into()); }
@@ -2335,6 +2337,18 @@ mod observation {
             }
         }
     }
+}
+
+#[cfg(any(test, feature = "installed-observation"))]
+fn evidence_folder_abi_data_check() -> bool {
+    // Shared by libtest and the existing observer DATA entry; no FFI call.
+    [(PanelKind::Project, 1), (PanelKind::Quit, 2), (PanelKind::File, 3),
+        (PanelKind::VersionSource, 4), (PanelKind::IosProject, 5), (PanelKind::IosWorkspace, 6),
+        (PanelKind::MetadataRoot, 7), (PanelKind::EvidenceFolder, 8)]
+        .into_iter().all(|(kind, code)| kind.code() == code)
+        && !PanelKind::EvidenceFolder.project_field()
+        && ["/inert/project", "/", "relative"].into_iter()
+            .all(|root| project_field_initial(PanelKind::EvidenceFolder, Path::new(root)).is_err())
 }
 
 #[cfg(test)]
@@ -2419,6 +2433,10 @@ mod tests {
         }
     }
     #[test]
+    fn evidence_folder_is_a_distinct_non_project_field_abi_purpose() {
+        assert!(evidence_folder_abi_data_check());
+    }
+    #[test]
     fn only_explicit_user_appkit_responses_can_be_accept_or_decline() {
         // Calls the SAME pure C classifier used by the real completion. These
         // definitions construct no NSWindow, fake callback or native permit.
@@ -2429,6 +2447,10 @@ mod tests {
             (5, 1, PanelResponse::Accept), (5, 0, PanelResponse::Decline),
             (6, 1, PanelResponse::Accept), (6, 0, PanelResponse::Decline),
             (7, 1, PanelResponse::Accept), (7, 0, PanelResponse::Decline),
+            (8, 1, PanelResponse::Accept), (8, 0, PanelResponse::Decline),
+            (8, -1000, PanelResponse::Other), (8, -1001, PanelResponse::Other),
+            (8, 1000, PanelResponse::Other), (8, 1001, PanelResponse::Other),
+            (8, i64::MIN, PanelResponse::Other), (9, 1, PanelResponse::Other),
             (4, -1000, PanelResponse::Other), (7, 1001, PanelResponse::Other),
             (3, -1000, PanelResponse::Other), (3, 1001, PanelResponse::Other),
             (2, 1001, PanelResponse::Accept), (2, 1000, PanelResponse::Decline),

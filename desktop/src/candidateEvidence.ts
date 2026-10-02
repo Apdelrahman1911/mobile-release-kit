@@ -179,7 +179,7 @@ export function parseEvidenceStatus(value: unknown): EvidenceStatus | null {
 
 const messages: Record<string, string> = {
   artifact_evidence_invalid: 'The evidence request has an unsupported shape or identity.',
-  artifact_evidence_unavailable: 'Evidence-folder inspection is unavailable in this build. It requires a qualified native Linux adapter and admitted bundled runtime; macOS and Windows support are not yet implemented.',
+  artifact_evidence_unavailable: 'Evidence-folder inspection is unavailable in this build or runtime profile. It requires a supported native folder adapter and admitted bundled runtime; local documents do not establish release readiness or authorize recovery.',
   artifact_evidence_busy: 'Another original native operation is still active. Wait for it to settle before trying this action.',
   artifact_evidence_cancelled: 'The original evidence operation was cancelled. No new document observation was accepted.',
   artifact_evidence_stale_selection: 'The evidence selection or original operation changed. Check its current status; do not reuse an earlier selection.',

@@ -112,7 +112,7 @@ class LifecycleLayoutTests(unittest.TestCase):
                 with self.assertRaises(ApiError) as refused:
                     execute("release.evidence.observe", value)
                 self.assertEqual(refused.exception.code, "invalid_params")
-        for host in ("darwin", "win32", "freebsd"):
+        for host in ("win32", "freebsd", "darwin-extra"):
             with patch.object(sys, "platform", host), patch.object(os, "open", side_effect=AssertionError("unexpected IO")):
                 with self.assertRaises(ApiError) as refused:
                     execute("release.evidence.observe", valid)
@@ -120,18 +120,35 @@ class LifecycleLayoutTests(unittest.TestCase):
                 self.assertFalse(next(row for row in execute("capabilities", {})["methods"] if row["method"] == "release.evidence.observe")["available"])
 
 
-@unittest.skipUnless(candidate.candidate_evidence_observation_available(), "Linux descriptor reader required")
+@unittest.skipUnless(candidate.candidate_evidence_observation_available(), "Supported POSIX descriptor reader required")
 class LifecycleEvidenceTests(unittest.TestCase):
     def assert_limit(self, root: Path, stage: str):
         with self.assertRaises(ApiError) as refused:
             observe(root, stage)
         self.assertEqual(refused.exception.code, "artifacts_limit")
 
+    def test_darwin_routes_every_stage_through_the_original_shared_reader(self):
+        # A host-reader routing regression, not native Mac execution evidence.
+        for stage in ("candidate", "external-testing", "production-submit"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve(strict=True)
+                documents = populate(root, stage)
+                with patch.object(sys, "platform", "darwin"), \
+                     patch.object(candidate, "_observe_selected_evidence", wraps=candidate._observe_selected_evidence) as reader:
+                    self.assertTrue(candidate.candidate_evidence_observation_available())
+                    result = observe(root, stage)
+                self.assertEqual(reader.call_count, 1)
+                self.assertEqual(reader.call_args.args[0], str(root))
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(result["outcome"], "consistent")
+                self.assertEqual(result["assurance"], ASSURANCE)
+                self.assertEqual([row["path"] for row in result["documents"]], list(documents))
+
     def test_three_real_layouts_reuse_policy_and_never_upgrade_authority(self):
         docs = fixture_chain()
         for stage, count in (("candidate", 1), ("external-testing", 2), ("production-submit", 3)):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 values = populate(root, stage)
                 with patch.object(lifecycle, "validate_receipt_chain", wraps=lifecycle.validate_receipt_chain) as validate:
                     result = observe(root, stage)
@@ -152,7 +169,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
         expected = json.loads((Path(__file__).resolve().parents[2] / "desktop/tests/fixtures/lifecycle-evidence.json").read_text())
         for name, (stage, docs) in fixture_variants().items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 populate(root, stage, docs)
                 result = observe(root, stage)
                 self.assertEqual(result, expected[name])
@@ -174,7 +191,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
             receipt[key] = "ios" if key == "platform" else "candidate" if key == "stage" else "f" * 64
             fixture_seal(receipt)
             with self.subTest(key=key), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 populate(root, "external-testing", docs)
                 result = observe(root, "external-testing")
                 self.assertIn(result["outcome"], ("invalid", "inconsistent"))
@@ -184,7 +201,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
     def test_missing_invalid_and_inconsistent_never_export_history(self):
         for state in ("incomplete", "invalid", "inconsistent"):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 values = populate(root, "external-testing")
                 path = "external-testing-receipt.json"
                 if state == "incomplete":
@@ -204,7 +221,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
 
     def test_repeated_candidate_bytes_must_match_without_claiming_bundle_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, "production-submit")
             path = root / "operation/external/operation/candidate/candidate-manifest.json"
             path.write_text(path.read_text() + "\n")  # Same sealed value, different selected bytes.
@@ -214,7 +231,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
 
     def test_exact_document_and_aggregate_limits_require_real_eof(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             values = populate(root, "candidate")
             for path, document in values.items():
                 raw = json.dumps(document).encode()
@@ -227,7 +244,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
 
     def test_zero_remaining_refuses_next_nonempty_file_even_after_invalid_values(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             paths = list(populate(root, "production-submit"))
             for path in paths[:3]:
                 put(root, path, b"null" + b" " * (lifecycle.MAX_DOCUMENT_BYTES - 4))
@@ -235,7 +252,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
 
     def test_rejected_arrays_are_charged_before_top_level_kind_rejection(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             for path in bundle("production-submit"):
                 put(root, path, [0] * 14999)  # Exactly15,000 nodes; fifth decoded copy exceeds60k.
             with patch.object(candidate, "_decoded_document", wraps=candidate._decoded_document) as decode:
@@ -244,7 +261,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
 
     def test_symlink_changed_and_original_cleanup_failures_withhold_results(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, "candidate")
             path = root / "candidate-manifest.json"
             path.rename(root / "other.json")
@@ -270,7 +287,7 @@ class LifecycleEvidenceTests(unittest.TestCase):
 
     def test_observation_does_not_write_launch_or_contact_services(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             populate(root, "production-submit")
             with patch.object(os, "mkdir", side_effect=AssertionError("write")), \
                  patch.object(os, "write", side_effect=AssertionError("write")), \

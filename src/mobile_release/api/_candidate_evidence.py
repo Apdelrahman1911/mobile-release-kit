@@ -84,8 +84,8 @@ def _refuse(code: str) -> NoReturn:
 
 
 def candidate_evidence_observation_available() -> bool:
-    # A new narrow Linux reader, not an opt-in to another staged native profile.
-    return sys.platform.startswith("linux") and _snapshot.posix_snapshot_available()
+    # Original named POSIX reader only; native selection/runtime admission is separate.
+    return (sys.platform.startswith("linux") or sys.platform == "darwin") and _snapshot.posix_snapshot_available()
 
 
 def _params(params: object) -> tuple[str, tuple[int, ...]]:

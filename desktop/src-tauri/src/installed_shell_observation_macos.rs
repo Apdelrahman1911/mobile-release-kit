@@ -613,7 +613,8 @@ impl PanelSample {
             kind: match native.kind { mrk_macos_installed_native::PanelKind::Project => "project",
                 mrk_macos_installed_native::PanelKind::Quit => "quit", mrk_macos_installed_native::PanelKind::File => "file",
                 mrk_macos_installed_native::PanelKind::VersionSource => "version-source", mrk_macos_installed_native::PanelKind::IosProject => "ios-project",
-                mrk_macos_installed_native::PanelKind::IosWorkspace => "ios-workspace", mrk_macos_installed_native::PanelKind::MetadataRoot => "metadata-root" },
+                mrk_macos_installed_native::PanelKind::IosWorkspace => "ios-workspace", mrk_macos_installed_native::PanelKind::MetadataRoot => "metadata-root",
+                mrk_macos_installed_native::PanelKind::EvidenceFolder => "evidence-folder" },
             parent_present: native.parent_present, panel_present: native.panel_present,
             parent_references_panel: native.parent_references_panel,
             panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible,
@@ -1108,7 +1109,7 @@ impl Observation {
                 | mrk_macos_installed_native::PanelKind::IosProject | mrk_macos_installed_native::PanelKind::IosWorkspace
                 | mrk_macos_installed_native::PanelKind::MetadataRoot => self.case.field_index(id).is_some_and(|i|
                     project_fields::accepts(i) && project_fields::kind(i) == Some(kind)),
-            mrk_macos_installed_native::PanelKind::Quit => false,
+            mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder => false,
         }
     }
     pub(super) fn open_identity_target(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> Option<&Path> {
@@ -1119,7 +1120,7 @@ impl Observation {
             mrk_macos_installed_native::PanelKind::VersionSource
                 | mrk_macos_installed_native::PanelKind::IosProject | mrk_macos_installed_native::PanelKind::IosWorkspace
                 | mrk_macos_installed_native::PanelKind::MetadataRoot => self.field_paths.get(usize::from(self.case.field_index(id)?)).map(PathBuf::as_path),
-            mrk_macos_installed_native::PanelKind::Quit => None,
+            mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder => None,
         }
     }
     pub(super) fn completion_returned(&self, id: u32, returned: mrk_macos_installed_native::CompletionReturn) {
@@ -3521,11 +3522,24 @@ fn observer_data_checks() -> bool {
     if !project_chooser_data_checks() { return false; }
     crate::asset_session::assert_project_selection_gate_contract();
     crate::runtime::assert_installed_session_selection_contract();
+    // This target has harness=false; run these inert contracts explicitly.
+    // They prove routing/refusal DATA only, not native Apply or worker finality.
+    crate::runtime::assert_installed_workflow_profile_contract();
+    crate::runtime::assert_installed_macos_text_version_profile_contract();
+    crate::edit_owner::assert_installed_workflow_owner_contract();
+    crate::edit_owner::assert_installed_metadata_owner_contract();
+    crate::edit_owner::assert_installed_version_owner_contract();
+    crate::runtime::macos_github_readonly_profile_contract();
+    crate::supervisor::macos_github_readonly_original_contract();
+    crate::asset_session::assert_installed_evidence_gate_contract();
+    crate::bridge::assert_native_capability_intersection_contract();
+    if !crate::runtime::installed_macos_evidence_profile_data_check()
+        || !super::owned_macos::evidence_folder_routing_data_check() { return false; }
     // Compiled profile DATA only: this inert path is never resolved or opened.
     // The real builder must still establish every installed/native original.
     let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));
     if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available() != crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED
-        || profile.evidence_selection_profile_available() { return false; }
+        || !profile.evidence_selection_profile_available() { return false; }
     if !mrk_macos_installed_native::installed_observation_flags_data_check()
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
         || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks()
@@ -3756,6 +3770,13 @@ pub(crate) fn main() -> std::process::ExitCode {
     }
     let mut args = std::env::args_os().skip(1);
     let case = match args.next().as_deref() {
+        Some(v) if v == OsStr::new("data-contracts") && args.next().is_none() => {
+            // This test-only main returns before fixture, native admission or UI entry.
+            let mut out = std::io::stdout().lock();
+            return if out.write_all(b"MRK_MACOS_DATA_CONTRACTS=passed\n").and_then(|_| out.flush()).is_ok() {
+                std::process::ExitCode::SUCCESS
+            } else { std::process::ExitCode::FAILURE };
+        },
         Some(v) if v == OsStr::new("first-save") => Case::FirstSave, Some(v) if v == OsStr::new("noop-stale") => Case::NoopStale,
         Some(v) if v == OsStr::new("picker-loss") => Case::PickerLoss, Some(v) if v == OsStr::new("save-loss") => Case::SaveLoss,
         Some(v) if v == OsStr::new(project_fields::NAME) => Case::ProjectFields,

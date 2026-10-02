@@ -416,8 +416,9 @@ class InitRootLease:
             raise _failure("custody_unknown", error, unknown=True) from None
         if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
             raise _failure("unsupported_platform")
-        if (self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
-                             TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES)
+        # Mac workflow/text/version edits use this same registered original
+        # lease, not Configuration authority. Image admission stays closed.
+        if (self._profile is TypedEditProfile.METADATA_IMAGES
                 and not sys.platform.startswith("linux")):
             raise _failure("unsupported_platform")
         try:

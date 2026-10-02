@@ -3,7 +3,7 @@
 No real root lease, file transaction, process, signal handler or native API is
 acquired by WorkflowTransactionProfileTests. Its filesystem entry points are
 traps; observations are in-memory. The separately selected
-WorkflowUpdateFilesystemTests uses genuine Linux custody/transactions and must
+WorkflowUpdateFilesystemTests uses genuine Linux/macOS custody/transactions and must
 run only inside the independently admitted task-owned native execution boundary.
 """
 from __future__ import annotations
@@ -112,7 +112,9 @@ def workspace(profile=PROFILE):
     owner = tx.InitWorkspace(Path("/inert-not-opened"))
     owner._typed_profile = profile
     owner._guard = InertGuard()
-    owner._scope = object()
+    # Match the current ordinary (non-image-recovery) lease contract without
+    # creating a real lease or weakening the production recovery guard.
+    owner._scope = SimpleNamespace(lease=SimpleNamespace(_image_recovery_mode=False))
     owner._checkpoint = lambda: None
     owner._root_check = lambda: None
     owner.root_identity = dict(device=9, inode=10, mode=0o750)
@@ -184,6 +186,74 @@ class WorkflowTransactionProfileTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     with owner._parent(PROFILE.paths[0], planning=True):
                         self.fail("inconsistent descendant was accepted")
+
+    @unittest.skipUnless(os.name == "posix", "lease platform matrix uses POSIX path DATA")
+    def test_platform_admission_reuses_original_lease_and_keeps_other_domains_closed(self):
+        with inert_custody() as custody:
+            for platform in ("linux", "darwin", "win32", "freebsd"):
+                for profile in tx.TypedEditProfile:
+                    with self.subTest(platform=platform, profile=profile):
+                        guard = InertGuard()
+                        guard._activated = True
+                        guard._borrowable = guard.check = lambda: None
+                        registered = None if profile is tx.TypedEditProfile.CONFIGURATION else dict(ROOT)
+                        with patch.object(custody, "sys", SimpleNamespace(platform=platform)), \
+                                patch.object(InertDirectory, "acquire") as acquire, \
+                                patch.object(os, "fstat", return_value=stat_value()) as fstat:
+                            lease = custody.InitRootLease(Path("/inert-not-opened"), cancellation=guard,
+                                                          profile=profile, registered_identity=registered)
+                            admitted = platform == "linux" or (platform == "darwin" and profile in (
+                                tx.TypedEditProfile.CONFIGURATION, PROFILE, tx.TypedEditProfile.METADATA_TEXT,
+                                tx.TypedEditProfile.RELEASE_VERSION))
+                            if admitted:
+                                lease.acquire()
+                                self.assertTrue(lease._acquired)
+                                acquire.assert_called_once_with()
+                                if registered is None:
+                                    fstat.assert_not_called()
+                                else:
+                                    fstat.assert_called_once_with(401)
+                                    self.assertEqual(lease._registered_identity, tuple(sorted(ROOT.items())))
+                            else:
+                                with self.assertRaises(tx.InitOperationFailure) as caught:
+                                    lease.acquire()
+                                self.assertEqual(caught.exception.outcome.reason, "unsupported_platform")
+                                self.assertFalse(lease._acquired)
+                                acquire.assert_not_called()
+                                fstat.assert_not_called()
+                            self.assertTrue(lease._acquire_claimed)
+                            with self.assertRaises(tx.InitOperationFailure) as repeated:
+                                lease.acquire()
+                            self.assertEqual(repeated.exception.outcome.reason, "invalid_params")
+                            self.assertEqual(acquire.call_count, int(admitted))
+
+    @unittest.skipUnless(os.name == "posix", "lease platform matrix uses POSIX path DATA")
+    def test_darwin_workflow_admission_still_requires_the_registered_original_root(self):
+        with inert_custody() as custody, patch.object(custody, "sys", SimpleNamespace(platform="darwin")):
+            for registered in (None, {}, {**ROOT, "mode": 0o750}, {**ROOT, "uid": True}):
+                with self.subTest(malformed=registered), patch.object(InertDirectory, "acquire") as acquire, \
+                        patch.object(os, "fstat") as fstat:
+                    with self.assertRaises(tx.InitOperationFailure) as caught:
+                        custody.InitRootLease(Path("/inert-not-opened"), cancellation=InertGuard(),
+                                              profile=PROFILE, registered_identity=registered)
+                    self.assertEqual(caught.exception.outcome.reason, "invalid_params")
+                    acquire.assert_not_called()
+                    fstat.assert_not_called()
+            for field, different in (("device", 99), ("inode", 99), ("mode", stat.S_IFDIR | 0o700),
+                                     ("uid", 99), ("gid", 99)):
+                with self.subTest(foreign_field=field), patch.object(InertDirectory, "acquire") as acquire, \
+                        patch.object(os, "fstat", return_value=stat_value()) as fstat:
+                    guard = InertGuard()
+                    guard._activated = True
+                    guard._borrowable = guard.check = lambda: None
+                    lease = custody.InitRootLease(Path("/inert-not-opened"), cancellation=guard,
+                                                  profile=PROFILE, registered_identity={**ROOT, field: different})
+                    with self.assertRaises(tx.InitOperationFailure) as caught:
+                        lease.acquire()
+                    self.assertEqual(caught.exception.outcome.reason, "stale_revision")
+                    self.assertTrue(lease._acquire_claimed)
+                    acquire.assert_called_once_with()
+                    fstat.assert_called_once_with(401)
 
     def test_registered_root_compares_full_mode_uid_gid_and_original_descriptor(self):
         with inert_custody() as custody:
@@ -521,21 +591,22 @@ class WorkflowTransactionProfileTests(unittest.TestCase):
 
 
 class WorkflowUpdateFilesystemTests(unittest.TestCase):
-    """Actual Linux filesystem cases, separately admitted from the inert class."""
+    """Actual Linux/macOS filesystem cases, separately admitted from inert tests."""
 
     def _run_update(self, fail_after_first):
         import tempfile
         from mobile_release.cancellation import CleanupScope, DefaultCancellation
         from mobile_release.init_workspace_custody import InitRootLease
 
-        self.assertTrue(sys.platform.startswith("linux"), "workflow mutation profile is Linux-only")
+        self.assertTrue(sys.platform.startswith("linux") or sys.platform == "darwin",
+                        "workflow mutation requires the separately admitted Linux/macOS filesystem boundary")
         resource_raw, resource = setup._resource()
         old = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "old/toolkit", "a" * 40)
                     for identity, _ in tx.WORKFLOWS)
         new = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "new/toolkit", "b" * 40)
                     for identity, _ in tx.WORKFLOWS)
         with tempfile.TemporaryDirectory(prefix="mrk-workflow-update-") as directory_name:
-            root = Path(directory_name); callers = root / ".github" / "workflows"; callers.mkdir(parents=True)
+            root = Path(directory_name).resolve(); callers = root / ".github" / "workflows"; callers.mkdir(parents=True)
             initial = (old[0], None, new[2], old[3]); modes = (0o640, None, 0o644, 0o604)
             for path, data, mode in zip(PROFILE.paths, initial, modes):
                 if data is not None:

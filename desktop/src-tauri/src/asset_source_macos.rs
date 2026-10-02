@@ -436,18 +436,30 @@ pub(crate) fn capture(book: &mut SourceBook, path: PathBuf, roots: &[RegisteredR
 
 pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>],
     stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
+    probe_project_excluding_vault(book,path,origins,None,stop)
+}
+pub(crate) fn probe_project_excluding_vault(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>],
+    vault: Option<&RegisteredRoot>, stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
     if origins.len() > 32 { return Err(Reason::Capacity); }
     let project_parts = parts(&path)?;
     let mut origin_parts = Vec::new(); origin_parts.try_reserve_exact(origins.len()).map_err(|_| Reason::Capacity)?;
     for origin in origins { origin_parts.push(parts(&origin.path)?); }
+    let vault_parts=vault.map(|root| parts(&root.path)).transpose()?;
     let capacity = roster_limit(std::iter::once(project_parts.len()).chain(origin_parts.iter()
-        .map(|parts| parts.len().saturating_sub(1) + source_extra(&parts[..parts.len().saturating_sub(1)]))), usize::from(!origins.is_empty()))?;
+        .map(|parts| parts.len().saturating_sub(1) + source_extra(&parts[..parts.len().saturating_sub(1)])))
+        .chain(vault_parts.iter().map(Vec::len)), usize::from(!origins.is_empty()))?;
     book.begin(capacity, origins.len(), origins.len())?;
     let result = (|| {
         book.root(stop)?;
         if !origins.is_empty() { book.anchor_private(stop)?; }
-        let (chain, _) = book.chain(&project_parts, false, stop)?;
-        let project = book.directory(*chain.last().ok_or(Reason::SourceRefused)?)?;
+        let (project_chain, _) = book.chain(&project_parts, false, stop)?;
+        let project = book.directory(*project_chain.last().ok_or(Reason::SourceRefused)?)?;
+        if let (Some(vault),Some(components))=(vault,&vault_parts) {
+            let (vault_chain,_)=book.chain(components,false,stop)?;
+            let current=book.directory(*vault_chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+            if ProjectIdentity::Posix(current) != vault.identity { return Err(Reason::ExclusionUnconfirmed); }
+            reject_ancestry_overlap(book,&project_chain,&vault_chain,stop)?;
+        }
         for (origin, components) in origins.iter().zip(&origin_parts) {
             let (leaf_name, parents) = components.split_last().ok_or(Reason::ExclusionUnconfirmed)?;
             let (chain, alias) = book.chain(parents, true, stop)?;
@@ -471,6 +483,55 @@ pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc
         Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project) })
     })();
     book.finish(result, stop)
+}
+
+
+// Original physical identity, not path text or a cached registry generation.
+// APFS firmlink/case spellings may differ while the same device/inode overlaps.
+fn reject_ancestry_overlap(book: &SourceBook, project: &[usize], vault: &[usize],
+    stop: &mut dyn FnMut() -> bool) -> Result<(),Reason> {
+    let project_root=book.directory(*project.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+    let vault_root=book.directory(*vault.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+    for index in project {
+        checkpoint(stop)?;
+        if book.directory(*index)?.same_object(vault_root) { return Err(Reason::ProjectOverlap); }
+    }
+    for index in vault {
+        checkpoint(stop)?;
+        if book.directory(*index)?.same_object(project_root) { return Err(Reason::ProjectOverlap); }
+    }
+    checkpoint(stop)
+}
+pub(crate) fn probe_vault_exclusion(book: &mut SourceBook, vault: Option<&RegisteredRoot>,
+    projects: &[RegisteredRoot], stop: &mut dyn FnMut() -> bool) -> Result<VaultAbsentExclusion,Reason> {
+    if projects.len() > 32 { return Err(Reason::Capacity); }
+    let vault_parts=vault.map(|root| parts(&root.path)).transpose()?;
+    let mut project_parts=Vec::new(); project_parts.try_reserve_exact(projects.len()).map_err(|_| Reason::Capacity)?;
+    for project in projects { project_parts.push(parts(&project.path)?); }
+    let capacity=roster_limit(vault_parts.iter().map(Vec::len).chain(project_parts.iter().map(Vec::len)),0)?;
+    book.begin(capacity,0,0)?;
+    let result=(|| {
+        book.root(stop)?;
+        let vault_chain=if let (Some(vault),Some(components))=(vault,&vault_parts) {
+            let (chain,_)=book.chain(components,false,stop)?;
+            if ProjectIdentity::Posix(book.directory(*chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?) != vault.identity {
+                return Err(Reason::ExclusionUnconfirmed);
+            }
+            Some(chain)
+        } else { None };
+        let mut project_roots=Vec::new(); project_roots.try_reserve_exact(projects.len()).map_err(|_| Reason::Capacity)?;
+        for (project,components) in projects.iter().zip(&project_parts) {
+            let (chain,_)=book.chain(components,false,stop)?;
+            let current=book.directory(*chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+            if ProjectIdentity::Posix(current) != project.identity { return Err(Reason::ExclusionUnconfirmed); }
+            if let Some(vault_chain)=&vault_chain { reject_ancestry_overlap(book,&chain,vault_chain,stop)?; }
+            project_roots.push(current);
+        }
+        Ok(VaultAbsentExclusion { project_roots })
+    })();
+    // Terminal same-held/name checks and actual one-use closes precede this
+    // probe's return. The existing document owner separately requires child join.
+    book.finish(result,stop)
 }
 
 struct ProjectPathSpelling<'a> { components: Vec<&'a [u8]>, root_depth: usize, relative_path: String }
@@ -530,6 +591,22 @@ pub(crate) fn probe_project_path(book: &mut SourceBook, root: &RegisteredRoot, p
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn vault_exclusion_compares_both_physical_ancestries_not_spellings() {
+        let identity=|dev,ino| DirectoryIdentity { dev,ino,mode:0o40700,uid:501,gid:20 };
+        let mut book=SourceBook::new(); book.begin(6,0,0).unwrap();
+        for (dev,ino) in [(1,2),(2,10),(2,20),(2,30),(3,20),(2,40)] {
+            let at=book.reserve(None,b"inert").unwrap();
+            book.slots[at].identity=Some(Identity::Directory(identity(dev,ino)));
+        }
+        assert_eq!(reject_ancestry_overlap(&book,&[0,1,2],&[0,1,2,3],&mut || false),Err(Reason::ProjectOverlap));
+        assert_eq!(reject_ancestry_overlap(&book,&[0,1,2,3],&[0,1,2],&mut || false),Err(Reason::ProjectOverlap));
+        assert_eq!(reject_ancestry_overlap(&book,&[0,1,2],&[0,1,5],&mut || false),Ok(()));
+        assert_eq!(reject_ancestry_overlap(&book,&[0,1,2],&[0,4],&mut || false),Ok(()));
+        assert_eq!(reject_ancestry_overlap(&book,&[0,1,2],&[0,1,5],&mut || true),Err(Reason::UserCancelled));
+        assert!(book.close_all()); // Reserved DATA slots only: no close syscall.
+    }
+
     #[test]
     fn project_fields_are_strict_descendant_data_not_credential_capture() {
         let root = Path::new("/inert/project");

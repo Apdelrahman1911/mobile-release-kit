@@ -1,4 +1,4 @@
-//! Native project/private-input/Quit panel adapter for the existing OriginalWork, not rfd's
+//! Native project/evidence/private-input/Quit panel adapter for the existing OriginalWork, not rfd's
 //! compatibility future. The actual panel and completion live on the main loop.
 use super::*;
 use std::{cell::RefCell, path::PathBuf};
@@ -580,11 +580,12 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool,
     call.changed(); result
 }
 
-// Pure request routing only; source suffix, capture and original native custody
-// still decide whether a chosen private file can be used.
+// Pure request routing only. Folder probes and private-file capture remain
+// separate; original native custody still decides whether either can be used.
 fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) -> Result<PanelKind, Reason> {
     match (choice, initial_folder) {
         (DialogChoice::Project, None) => Ok(PanelKind::Project),
+        (DialogChoice::EvidenceFolder, None) => Ok(PanelKind::EvidenceFolder),
         (DialogChoice::File(crate::credential_format::FileKind::AppleP12
             | crate::credential_format::FileKind::AppleProfile | crate::credential_format::FileKind::IosFirebase
             | crate::credential_format::FileKind::AscP8 | crate::credential_format::FileKind::AndroidKeystore
@@ -686,6 +687,21 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
 }
 
 #[cfg(test)]
+pub(crate) fn evidence_folder_routing_data_check() -> bool {
+    // Pure routing through the actual adapter function. No Panel, GuiCall,
+    // native callback, filesystem read or substitute original is constructed.
+    if !matches!(panel_kind(DialogChoice::EvidenceFolder, None), Ok(PanelKind::EvidenceFolder)) { return false; }
+    for root in ["/inert/project", "/inert/../project", "relative", "/"] {
+        if !matches!(panel_kind(DialogChoice::EvidenceFolder, Some(std::path::Path::new(root))),
+            Err(Reason::UnsupportedPlatform)) { return false; }
+    }
+    for choice in [DialogChoice::Project, DialogChoice::Quit, DialogChoice::PublicImages] {
+        if matches!(panel_kind(choice, None), Ok(PanelKind::EvidenceFolder)) { return false; }
+    }
+    true
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -700,13 +716,15 @@ mod tests {
         }
         assert!(matches!(panel_kind(DialogChoice::Project, None), Ok(PanelKind::Project)));
         assert!(matches!(panel_kind(DialogChoice::Quit, None), Ok(PanelKind::Quit)));
-        for choice in [DialogChoice::PublicImages, DialogChoice::EvidenceFolder] {
-            assert!(matches!(panel_kind(choice, None), Err(Reason::UnsupportedPlatform)));
-        }
+        assert!(matches!(panel_kind(DialogChoice::PublicImages, None), Err(Reason::UnsupportedPlatform)));
         let field = DialogChoice::ProjectPath(crate::asset_commands::ProjectPathField::VersionSource);
         assert!(matches!(panel_kind(field, None), Err(Reason::SourceRefused)));
         assert!(matches!(panel_kind(field, Some(Path::new("/inert/../project"))), Err(Reason::SourceRefused)));
         assert!(matches!(panel_kind(field, Some(Path::new("/inert/project"))), Ok(PanelKind::VersionSource)));
+    }
+    #[test]
+    fn evidence_folder_has_its_own_purpose_without_a_project_initial_root() {
+        assert!(evidence_folder_routing_data_check());
     }
     #[test]
     fn native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal() {

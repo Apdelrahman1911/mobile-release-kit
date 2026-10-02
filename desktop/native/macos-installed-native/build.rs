@@ -21,6 +21,7 @@ fn main() {
         println!("cargo:rustc-cfg=mrk_wrapping_keychain_qualification_native");
     }
     println!("cargo:rerun-if-changed=src/native.m");
+    println!("cargo:rerun-if-changed=src/vault_filesystem.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain_fixture.m");
     let mut build = cc::Build::new();
@@ -32,7 +33,7 @@ fn main() {
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION", Some("1"));
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION_DEBUG", Some("1"));
     }
-    build.file("src/native.m").file("src/wrapping_keychain.m").flag("-fno-objc-arc").flag("-fblocks")
+    build.file("src/native.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").flag("-fno-objc-arc").flag("-fblocks")
         .flag("-mmacosx-version-min=26.0").warnings(true).compile("mrk_macos_installed_native");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=Foundation");

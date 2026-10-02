@@ -188,7 +188,7 @@ export class ReleaseVersionEditController {
     if (!edit.listening || !edit.initialized || !edit.status) return 'Loading the separate version-writer capability and original status…';
     if (!edit.status.capability.available) return edit.status.capability.reason === 'other_edit_active' ?
       'Another edit domain owns the shared service. Finish or close that original edit first.' :
-      'Version saving is unavailable in this build. A newly source-bound runtime and separate Linux writer evidence are required; Windows, macOS and recovery remain closed.';
+      'Version saving is unavailable in this build. It requires a supported, source-bound native writer; this status does not authorize recovery.';
     if (edit.status.statusRevision >= U32_MAX) return 'The original native status counter is exhausted.';
     if (!this.state.help) return 'Load the compatible saved-version help catalogue before editing.';
     return this.configReason() ?? this.context.otherEditReason(this.state.projectId ?? '') ?? this.context.otherOperationReason();

@@ -207,7 +207,7 @@ int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
 // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
 // exercised by narrow native-crate test definitions; no panel is fabricated.
 static BOOL mrk_panel_project_field(int kind) { return kind >= 4 && kind <= 7; }
-static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || mrk_panel_project_field(kind); }
+static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || mrk_panel_project_field(kind); }
 int mrk_panel_response(int kind, int64_t code, int programmatic) {
     if (programmatic) return 0;
     if (mrk_panel_open_kind(kind)) {
@@ -375,12 +375,13 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
         s->parent = [main retain];
         if (mrk_panel_open_kind(kind)) {
             NSOpenPanel *panel = [NSOpenPanel openPanel]; s->window = [panel retain];
-            NSString *title = kind == 1 ? @"Choose a mobile project folder" : kind == 3 ? @"Choose a signing or iOS build-input file"
+            NSString *title = kind == 1 ? @"Choose a mobile project folder" : kind == 8 ? @"Choose a release evidence folder"
+                : kind == 3 ? @"Choose a signing or iOS build-input file"
                 : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
                 : kind == 6 ? @"Choose an existing Xcode workspace directory" : @"Choose an existing metadata directory inside the project";
             [panel setTitle:title];
             [panel setCanChooseFiles:kind == 3 || kind == 4];
-            [panel setCanChooseDirectories:kind == 1 || (kind >= 5 && kind <= 7)];
+            [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7)];
             [panel setAllowsMultipleSelection:NO]; [panel setCanCreateDirectories:NO];
             [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:kind >= 5 && kind <= 7];
         } else {

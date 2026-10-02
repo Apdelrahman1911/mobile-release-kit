@@ -23,8 +23,10 @@ use crate::{error::BridgeError, github_connection_protocol::{self as github_prot
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{AdmissionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+use crate::installed_runtime::GitHubReadOnlyRuntimeSlots;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-use crate::installed_runtime::{GitHubReadOnlyRuntimeSlots, GitHubPreflightRuntimeSlots, GitHubReleaseRuntimeSlots};
+use crate::installed_runtime::{GitHubPreflightRuntimeSlots, GitHubReleaseRuntimeSlots};
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 use crate::installed_runtime_windows::{InspectionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 
@@ -449,7 +451,7 @@ struct Resources {
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     github_readonly: Option<Arc<Mutex<GitHubReadOnlyRuntimeSlots>>>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_preflight: Option<Arc<Mutex<GitHubPreflightRuntimeSlots>>>,
@@ -776,7 +778,7 @@ impl Supervisor {
                 passive: if passive_selected(profile) {
                     Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())))
                 } else { None },
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 github_readonly: if github_installed_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())))
                 } else { None },
@@ -1237,7 +1239,7 @@ fn passive_selected(profile: Profile) -> bool {
         && matches!(profile, Profile::Passive(_))
 }
 fn github_installed_selected(profile: Profile) -> bool {
-    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
         not(all(feature = "development-runtime", debug_assertions))))
         && matches!(profile, Profile::GitHubReadOnly)
 }
@@ -1295,7 +1297,7 @@ fn passive_worker_lost(resources: &Resources) {
     if let Some(native) = &resources.passive {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if let Some(native) = &resources.github_readonly {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
@@ -1429,7 +1431,7 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 enum InstalledSettlementSlots {
     Passive(Arc<Mutex<PassiveRuntimeSlots>>),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     GitHubReadOnly(Arc<Mutex<GitHubReadOnlyRuntimeSlots>>),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     GitHubPreflight(Arc<Mutex<GitHubPreflightRuntimeSlots>>),
@@ -1438,14 +1440,19 @@ enum InstalledSettlementSlots {
 }
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if github_installed_selected(profile) {
-            if resources.passive.is_some() || resources.github_preflight.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
+            if resources.passive.is_some() { return Err(BridgeError::cleanup_unknown()); }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if resources.github_preflight.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
             return resources.github_readonly.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubReadOnly(slots.clone())))
                 .ok_or_else(BridgeError::cleanup_unknown);
         }
         if resources.github_readonly.is_some() { return Err(BridgeError::cleanup_unknown()); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
         if github_preflight_selected(profile) {
             if resources.passive.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
             return resources.github_preflight.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubPreflight(slots.clone())))
@@ -1471,7 +1478,7 @@ impl InstalledSettlementSlots {
     fn no_child_state(&self) -> Option<(bool, bool)> {
         match self {
             Self::Passive(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubReadOnly(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubPreflight(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
@@ -1485,7 +1492,7 @@ impl InstalledSettlementSlots {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubReadOnly(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
@@ -1505,7 +1512,7 @@ impl InstalledSettlementSlots {
     fn settled(&self) -> bool {
         match self {
             Self::Passive(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::GitHubReadOnly(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubPreflight(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
@@ -1518,7 +1525,7 @@ impl InstalledSettlementSlots {
 fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
     match installed_settlement_slots(resources, owner.profile)? {
         Some(InstalledSettlementSlots::Passive(_)) => transfer_passive(resources, inner, owner),
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Some(InstalledSettlementSlots::GitHubReadOnly(native)) => {
             let (inspection, acquisition) = passive_borrows(resources);
             if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
@@ -1561,7 +1568,7 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
         None => Ok(()),
     }
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubReadOnlyRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     // THIS retained original acquisition borrows the domain-fixed book. Nothing
@@ -1574,6 +1581,10 @@ fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex
     command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
         .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    // Fixed Darwin environment preparation precedes the serialized original
+    // claim; no native call or environment allocation is added after it.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !github_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
         &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
@@ -1585,7 +1596,7 @@ fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex
     // opaque spawn error is NOT proof no child/pipe existed: retain Unknown.
     command.spawn().map_err(AcquisitionError::returned_spawn)
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_github_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubReadOnlyRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub read-only runtime is unavailable in this profile"))
@@ -1805,7 +1816,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let profile = owner.profile;
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_native = resources.passive.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let inspection_github = resources.github_readonly.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let inspection_preflight = resources.github_preflight.clone();
@@ -1838,7 +1849,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 config.resolve(endpoint)?
             },
             Profile::GitHubReadOnly => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 if github_installed_selected(profile) {
                     let native = inspection_github.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
@@ -1927,7 +1938,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let acquiring_inner = inner.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let acquisition_native = resources.passive.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let acquisition_github = resources.github_readonly.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let acquisition_preflight = resources.github_preflight.clone();
@@ -1959,7 +1970,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             };
             return acquire_passive_original(&acquiring_inner, &acquiring_owner, &native);
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if github_installed_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_github else {
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
@@ -2239,11 +2250,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     DriverEnd::Ready(result)
 }
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
 mod github_installed_contract_tests {
     use super::*;
-    #[test]
-    fn github_final_claim_never_accepts_passive_or_late_failed_stopping_owner() {
+    pub(super) fn original_claim_contract() {
         let now = Instant::now();
         let mut state = OwnerState::new(now + OPERATION_TIME, None);
         let clear = |state: &OwnerState, original, profile, at, stopping, disabled, stop|
@@ -2266,8 +2276,7 @@ mod github_installed_contract_tests {
         assert!(!clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
     }
     #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
-    #[test]
-    fn github_settlement_requires_exactly_its_original_book_not_a_passive_substitute() {
+    pub(super) fn exact_original_book_contract() {
         let mut resources = Resources::default();
         assert!(installed_settlement_slots(&resources, Profile::GitHubReadOnly).is_err());
         resources.passive = Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())));
@@ -2276,13 +2285,46 @@ mod github_installed_contract_tests {
         assert!(installed_settlement_slots(&resources, Profile::GitHubReadOnly).is_err());
         assert!(installed_settlement_slots(&resources, Profile::Passive(Method::Capabilities)).is_err());
         resources.passive = None;
-        assert!(matches!(installed_settlement_slots(&resources, Profile::GitHubReadOnly), Ok(Some(InstalledSettlementSlots::GitHubReadOnly(_)))));
-        assert!(installed_settlement_slots(&resources, Profile::Passive(Method::Capabilities)).is_err());
+        let selected = match installed_settlement_slots(&resources, Profile::GitHubReadOnly).unwrap() {
+            Some(InstalledSettlementSlots::GitHubReadOnly(slots)) => slots,
+            _ => panic!("the selected original read-only book is required"),
+        };
+        assert!(Arc::ptr_eq(&selected, resources.github_readonly.as_ref().unwrap()));
+        for profile in [Profile::Passive(Method::Capabilities), Profile::GitHubPreflight, Profile::GitHubRelease] {
+            assert!(installed_settlement_slots(&resources, profile).is_err());
+        }
         passive_worker_lost(&resources); // Original returned error only; no worker/native effect here.
         let slots = resources.github_readonly.as_ref().unwrap().lock().unwrap();
         assert!(!slots.never_started() && !slots.settled());
     }
+    #[test]
+    fn github_final_claim_never_accepts_passive_or_late_failed_stopping_owner() {
+        original_claim_contract();
+    }
+    #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+    #[test]
+    fn github_settlement_requires_exactly_its_original_book_not_a_passive_substitute() {
+        exact_original_book_contract();
+    }
 }
+
+// Explicit inert Mac observer entry. Empty Books and original state DATA only;
+// mark_interrupted below represents a returned worker error, not a native call.
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn macos_github_readonly_original_contract() {
+    github_installed_contract_tests::original_claim_contract();
+    assert_eq!(github_installed_selected(Profile::GitHubReadOnly),
+        !cfg!(all(feature = "development-runtime", debug_assertions)));
+    for profile in [Profile::Passive(Method::Capabilities), Profile::GitHubPreflight, Profile::GitHubRelease] {
+        assert!(!github_installed_selected(profile));
+    }
+    assert!(!github_preflight_selected(Profile::GitHubPreflight) && !github_release_selected(Profile::GitHubRelease));
+    #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+    github_installed_contract_tests::exact_original_book_contract();
+}
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn macos_github_readonly_original_data_contract() { macos_github_readonly_original_contract(); }
 
 // Finite hosted fixtures only. Nothing in this module selects a runtime, grants
 // custody, changes the command, or substitutes for an original join/close.
