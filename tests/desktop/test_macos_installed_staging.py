@@ -16,6 +16,7 @@ import struct
 from subprocess import CompletedProcess
 import sys
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -148,6 +149,39 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             elif failure == "finish": changed[-1]["success"] = False
             with self.subTest(failure=failure), self.assertRaises(module.Refused):
                 module.artifact(self.encoded(changed), checkout, target)
+
+        # Bind the real headless workspace too: a copied UI lock plus a new
+        # helper root can satisfy every synthetic compiler-artifact assertion.
+        source = Path(__file__).absolute().parents[2]
+        helper_manifest = tomllib.loads((source / module.WORKSPACE / "Cargo.toml").read_text(encoding="utf-8"))
+        helper_lock = tomllib.loads((source / module.WORKSPACE / "Cargo.lock").read_text(encoding="utf-8"))
+        app_manifest = tomllib.loads((source / "desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+        app_lock = tomllib.loads((source / "desktop/src-tauri/Cargo.lock").read_text(encoding="utf-8"))
+        self.assertEqual(helper_manifest["workspace"], {})
+        self.assertEqual(helper_manifest["dependencies"], {
+            "mobile-release-kit-desktop": {"path": "../../src-tauri", "default-features": False,
+                                           "features": ["macos-android-registration-helper"]}})
+        helper_package = helper_manifest["package"]
+        app_package = app_manifest["package"]
+        self.assertEqual([package for package in helper_lock["package"] if package["name"] == helper_package["name"]], [{
+            "name": helper_package["name"], "version": helper_package["version"], "dependencies": [app_package["name"]]}])
+        app_rows = [package for package in helper_lock["package"] if package["name"] == app_package["name"]]
+        self.assertEqual(len(app_rows), 1)
+        self.assertEqual(app_rows[0]["version"], app_package["version"])
+        self.assertNotIn("source", app_rows[0])
+        shell_dependencies = {feature.removeprefix("dep:") for feature in app_manifest["features"]["desktop-shell"]
+                              if feature.startswith("dep:")}
+        self.assertTrue(shell_dependencies)
+        self.assertTrue(shell_dependencies.isdisjoint(package["name"] for package in helper_lock["package"]))
+        self.assertTrue(shell_dependencies.isdisjoint(dependency.split()[0] for dependency in app_rows[0]["dependencies"]))
+        # Pruning optional GUI edges must not refresh any surviving supplier.
+        pin_fields = ("name", "version", "source", "checksum")
+        app_pins = {tuple(package.get(field) for field in pin_fields) for package in app_lock["package"]}
+        registry_packages = [package for package in helper_lock["package"] if "source" in package]
+        self.assertTrue(registry_packages)
+        for package in registry_packages:
+            with self.subTest(registry_package=package["name"], version=package["version"]):
+                self.assertIn(tuple(package.get(field) for field in pin_fields), app_pins)
 
     def test_actual_copy_and_staged_checks_bind_final_bytes_and_retire_each_owned_target(self):
         module = ANDROID_HELPER
