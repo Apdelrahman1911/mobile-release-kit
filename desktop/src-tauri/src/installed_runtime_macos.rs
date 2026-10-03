@@ -14,7 +14,7 @@ use crate::{error::BridgeError, protocol::{strict_json, PROTOCOL}, runtime::{sel
 
 #[path = "android_toolchain_macos.rs"]
 mod android_tools;
-pub(crate) use android_tools::{AndroidToolchainSlots, AndroidCatalogSlots};
+pub(crate) use android_tools::AndroidToolchainSlots;
 #[cfg(not(feature = "macos-android-registration-helper"))]
 #[path = "android_leased_toolchain_macos.rs"]
 mod android_leased;
