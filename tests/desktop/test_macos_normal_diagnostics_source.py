@@ -1,4 +1,4 @@
-"""SOURCE-only bindings for one ordinary Mac build-tool diagnostics UI journey.
+"""SOURCE-only bindings for ordinary Mac diagnostics, saved offline checks and Idle inspection.
 
 These methods read first-party bytes and AST/literals only. They do not launch
 XCTest, import product code, qualify native resources, or stand in for the
@@ -24,14 +24,37 @@ SOURCE_METHODS = ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceT
  'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result']
 ORIGINAL_SWIFT_SHA256 = "376817b2c3617e8324bff0dbdc9929f63ed5ed395286e6d919f23de291c0f631"
 DIAGNOSTICS_INSERTION_SHA256 = "7b5aeb18210ac3862362e59602adb024040b7232dee12a64e98a534ffc42b44a"
-ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
+ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
+ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
 BLOCK_PINS = {'normal_ui_result': 'cad0ea48888071634eac7834632e4057e71ae482f93814974c8d5c6501629657',
  'normal_project_ui_test': '161d12ffaada989d866466ec297dd17ed64de10ac6b84bc9cc1973e76d7d07fb',
  'normal_project_ui_result': '20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d',
  'normal_persistence_ui_test': '01bded1ba9c28bff4d9ce7a224665cc8e2a1bcb1327a2f097da4bde50fec390e',
  'normal_persistence_ui_result': 'a90cb1adc4c4e39109b73c9cedb531e46e55e910dca1ec962f44452674b27eb9',
  'normal_diagnostics_ui_test': '8ee2d21556928969d8fd12b5e92d4a5e7a7321df70ce224e122e76e7a0138453',
- 'normal_diagnostics_ui_result': '5987afe38eaac0e72dce32aed908f1276b3fe7572c831e43935f09f24896096f'}
+ 'normal_diagnostics_ui_result': '5987afe38eaac0e72dce32aed908f1276b3fe7572c831e43935f09f24896096f',
+ 'normal_saved_checks_ui_test': '29f86497371526a04dd2aaad704c5b3be57b3b071560e77d1ded3a60d36c37b7',
+ 'normal_saved_checks_ui_result': '7a28b53e92362616f6839d0c2dd75fe758f74ba91ff253b2830916febf3b43d0'}
+# One added source regression covers the two deliberately separate GUI scopes.
+# The workflow appends only this method after the unchanged original81 selection.
+SAVED_CHECKS_SOURCE_METHOD = 'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'
+SAVED_CHECKS_BEGIN = "    // Ordinary saved offline checks and empty project-recovery inspection only.\n"
+SAVED_CHECKS_END = "    // End ordinary saved offline and empty recovery journeys.\n\n"
+SAVED_CHECKS_INSERTION_SHA256 = "a75a2ea182b6ca1df531ffc6c3d38b4ac396e69c9966c4d7eb79fe4eaf13062e"
+SAVED_CHECKS_SOURCE_REFS = [
+    'desktop/src/components/OfflinePreflight.tsx',
+    'desktop/src/components/ProjectRecovery.tsx',
+    'desktop/src/components/Common.tsx',
+    'desktop/src/offlinePreflight.ts',
+    'desktop/src/projectRecoveryController.ts',
+    'desktop/src/offlinePreflightProtocol.ts',
+    'desktop/src/projectRecoveryProtocol.ts',
+    'src/mobile_release/desktop_preflight.py',
+    'src/mobile_release/desktop_project_recovery.py',
+    'src/mobile_release/build_inputs.py',
+    'src/mobile_release/discovery.py',
+]
+
 SOURCE_REFS = ['tests/desktop/test_macos_normal_diagnostics_source.py',
  'desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift',
  'desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json',
@@ -80,8 +103,199 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def checked_saved_checks_block(self, swift: str) -> str:
+        # Do not broadly strip added methods or accept a self-reported boundary.
+        # Both callers validate this single independently pinned closed block.
+        self.assertEqual(swift.count(SAVED_CHECKS_BEGIN), 1)
+        self.assertEqual(swift.count(SAVED_CHECKS_END), 1)
+        begin = swift.index(SAVED_CHECKS_BEGIN)
+        end = swift.index(SAVED_CHECKS_END) + len(SAVED_CHECKS_END)
+        self.assertLess(begin, end)
+        self.assertEqual(swift[end:end + len("    // One ordinary current diagnostics run,")],
+                         "    // One ordinary current diagnostics run,")
+        block = swift[begin:end]
+        self.assertEqual(digest(block.encode()), SAVED_CHECKS_INSERTION_SHA256)
+        self.assertEqual(re.findall(r'@MainActor func (test\w+)\(\) throws', block),
+                         ['testSyntheticProjectSavedOfflineChecks', 'testSyntheticProjectEmptyBuildInputInspection'])
+        for fragment, count in (
+            ('executionTimeAllowance = 300', 2),
+            ('journeyDeadline = ProcessInfo.processInfo.systemUptime + 300', 2),
+            ('launchForJourney()', 2), ('let fixture = LocalFixture()', 2), ('try fixture.prepare()', 2),
+            ('start.click()', 1), ('acknowledgement.click()', 1), ('inspect.click()', 1),
+            ('let sheet = try quitSheet(app, window)', 2), ('normalQuitObserved = true', 2),
+            ('try fixture.closeOriginals()', 2), ('ownedFixture = nil', 2),
+        ):
+            self.assertEqual(block.count(fragment), count, fragment)
+        for fragment in (
+            '!run.isEnabled', '(acknowledgement.value as? String) == "0"',
+            '(acknowledgement.value as? String) == "1"',
+            'labels[start + 1] == "complete"', 'labels[start] == "Outcome: complete"',
+            '"Original operation settled"', '"This invocation only"', '"Historical / stale context"',
+            'panel.staticTexts.matching(identifier: unconfirmed).count == 0',
+            'counts["MISSING", default: 0] >= 2 && counts["SKIP", default: 0] >= 1',
+            '"Complete is not PASS or release readiness."',
+            '"No pending build-input record observed"', '!review.isEnabled && panel.checkBoxes.count == 0',
+            'panel.buttons.matching(identifier: "Recover reviewed build inputs").count == 0',
+            'panel.buttons.matching(identifier: "Retire reviewed metadata").count == 0',
+            'for label in [unconfirmed, historical, "Recorded session:",',
+            'mutationRecovery=not-run;projectCleanliness=not-established',
+        ):
+            self.assertIn(fragment, block, fragment)
+        self.assertGreaterEqual(block.count('try fixture.assertUnchanged()'), 11)
+        for forbidden in ('app.launch()', 'app.terminate()', 'fixture.accept(', 'persistentCredentials',
+                          'admitDefaultVault(', 'evaluateJavaScript', 'invoke(', 'Process()',
+                          'FileManager', 'write(to:', 'Check original status', 'screenshot()', 'debugDescription'):
+            self.assertNotIn(forbidden, block, forbidden)
+        return block
+
+    def test_normal_saved_offline_and_empty_recovery_use_original_gui_only(self):
+        swift = (ROOT / SWIFT).read_text()
+        block = self.checked_saved_checks_block(swift)
+        offline = block.split('@MainActor func testSyntheticProjectSavedOfflineChecks() throws {', 1)[1]
+        offline, recovery = offline.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {', 1)
+        for journey, prefix in ((offline, 'offline'), (recovery, 'recovery-idle')):
+            for stage in ('launch', 'fixture', 'project-open', 'original-report', 'readback-and-quit'):
+                self.assertEqual(journey.count('stage("' + prefix + '-' + stage + '")'), 1)
+            for fragment in ('try goToFolder(sheet, path: fixture.projectPath)', 'try nativeOpen(sheet)',
+                             'matching(identifier: fixture.projectPath)', 'matching(identifier: "org.fixture.app")',
+                             'try savedOperationComplete(panel)', 'timeout: try remaining(10)',
+                             'cleanExitStatus=unavailable;allWorkerFinality=unavailable'):
+                self.assertIn(fragment, journey)
+        for fragment in (
+            'named(renderer, "Review the saved inputs and project-code effects")\n'
+            '                .containing(.button, identifier: "Refresh saved configuration observation")',
+            'try press(panel, "Refresh saved configuration observation"',
+            'try press(panel, "Review offline checks"', 'named(panel, "Confirm this saved offline-check intent")',
+            'let savedBytes = try fixture.text(LocalFixture.config).utf8.count',
+            'Saved comparison: \\(savedBytes) bytes.',
+            'matching(identifier: "Awaiting explicit consent")',
+            'let run = try unique(consent.buttons.matching(identifier: "Run saved offline checks")',
+            'let acknowledgement = try unique(consent.checkBoxes',
+            'let start = try waitElement(consent.buttons.matching(identifier: "Run saved offline checks")',
+            'enabled: true, timeout: 5, failures: failures', 'timeout: 90, failures: failures',
+            'let report = try unique(named(panel, "Saved offline check findings")',
+            'let counts = try savedOfflineCounts(report)',
+            'panel.staticTexts.matching(identifier: historical).count == 0',
+            'report.staticTexts.matching(identifier: "Historical / stale context").count == 0',
+            'named(panel, "Confirm this saved offline-check intent").count == 0',
+            'panel.buttons.matching(identifier: "Run saved offline checks").count == 0',
+            'ordinary-ui-observed-saved-offline-report-and-settled-projection',
+            'releaseReadiness=not-assessed', 'this is not zero-command evidence',
+        ):
+            self.assertIn(fragment, offline, fragment)
+        self.assertLess(offline.index('!run.isEnabled'), offline.index('acknowledgement.click()'))
+        self.assertLess(offline.index('(acknowledgement.value as? String) == "0"'), offline.index('acknowledgement.click()'))
+        self.assertLess(offline.index('(acknowledgement.value as? String) == "1"'), offline.index('start.click()'))
+        self.assertLess(offline.index('start.click()'), offline.index('stage("offline-original-report")'))
+        self.assertEqual(offline.count('try press(panel, "Review offline checks"'), 1)
+        self.assertEqual(offline.count('let failures = ["No new offline-check outcome was confirmed", "Original cleanup unknown"]'), 1)
+        self.assertNotIn('unconfirmed', offline.split('let failures = ', 1)[1].split('\n', 1)[0])
+        for fragment in (
+            'named(renderer, "Inspect first, then review what can safely be recovered")\n'
+            '                .containing(.button, identifier: "Help: Project build-input recovery")',
+            'let inspect = try waitElement(panel.buttons.matching(identifier: "Inspect build-input state")',
+            'timeout: 135, failures: failures',
+            'This is a build-input observation only. It does not mean the whole project, a previous file edit, signing account or Store release is clean.',
+            '"Reviewed build-input session recovered."', '"Reviewed terminal metadata retired."',
+            '"Pending build-input session", "Only terminal recovery metadata remains"] + failures',
+            'panel.staticTexts.matching(identifier: label).count == 0',
+            'ordinary-ui-observed-empty-build-input-inspection-and-settled-projection',
+        ):
+            self.assertIn(fragment, recovery, fragment)
+        self.assertNotIn('start.click()', recovery)
+        self.assertNotIn('acknowledgement.click()', recovery)
+        self.assertLess(recovery.index('!review.isEnabled'), recovery.index('inspect.click()'))
+        self.assertLess(recovery.index('inspect.click()'), recovery.index('stage("recovery-idle-original-report")'))
+        self.assertEqual(recovery.count('let failures = ["No new recovery outcome was confirmed", "Original cleanup unknown"]'), 1)
+        self.assertNotIn('unconfirmed', recovery.split('let failures = ', 1)[1].split('\n', 1)[0])
+        for fragment in ('statuses = ["PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE"]',
+                         'starts.count == 1', 'start + statuses.count * 2 <= labels.count',
+                         '(0...128).contains(count), value == String(count)', 'let total = counts.values.reduce(0, +)',
+                         '0 omitted from that list. Counts below include every reported finding.',
+                         '"Android module configuration.", "Android Gradle wrapper policy.", "Core early-exit or remaining-check policy."'):
+            self.assertIn(fragment, block)
+
+        # The original fixture is unchanged; no copied recovery journal, service
+        # credentials, wrapper or configured arbitrary command is added for a pass.
+        raw = (ROOT / FIXTURE).read_bytes()
+        self.assertEqual(digest(raw), 'ea9b004f0026c053bc1a12607cc70bd0a6f7e07afe9f33cf2a17506de62d512c')
+        fixture = json.loads(raw)
+        files = {name: base64.b64decode(value, validate=True) for name, value in fixture['files'].items()}
+        expected = {'project/release/mobile-release.json', 'project/release/version.properties', 'project/.gitignore',
+                    'project/README-user.txt', 'project/.github/workflows/keep-user.yml', 'sources/01.png', 'sources/02.png'}
+        expected.update('project/release/store/android/' + locale + '/' + name + '.txt'
+                        for locale in ('en-US', 'fr-FR') for name in ('title', 'short_description', 'full_description'))
+        self.assertEqual(set(files), expected)
+        config = json.loads(files['project/release/mobile-release.json'])
+        self.assertEqual(config['android'], {'applicationId': 'org.fixture.app', 'enabled': True, 'identityStatus': 'unverified'})
+        self.assertEqual(config['ios'], {'enabled': False})
+        self.assertEqual(config['services'], {'androidFirebase': 'disabled', 'iosFirebase': 'disabled'})
+        self.assertEqual(config['projectChecks'], {'preflight': [], 'androidArtifact': [], 'iosArtifact': []})
+        fixture_helper = swift.split('private final class LocalFixture {', 1)[1].split('@MainActor private var ownedFixture:', 1)[0]
+        unchanged = fixture_helper.split('func assertUnchanged() throws {', 1)[1].split('func accept(', 1)[0]
+        self.assertIn('old.bytes == observed.bytes && old.facts == observed.facts', unchanged)
+        self.assertIn('try checkRoster()', unchanged)
+
+        sources = {name: (ROOT / name).read_text() for name in SAVED_CHECKS_SOURCE_REFS}
+        offline_ui = sources['desktop/src/components/OfflinePreflight.tsx']
+        recovery_ui = sources['desktop/src/components/ProjectRecovery.tsx']
+        for fragment in ('<section className="card offline-preflight" aria-labelledby={label}>',
+                         '<h3 id={label}>Review the saved inputs and project-code effects</h3>',
+                         '>Refresh saved configuration observation</button>',
+                         'aria-label="Confirm this saved offline-check intent"', 'disabled={runReason !== null}',
+                         "terminal: 'Original operation settled'", 'aria-label="Saved offline check findings"',
+                         "historical ? 'Historical / stale context' : 'This invocation only'", 'Complete is not PASS or release readiness.'):
+            self.assertIn(fragment, offline_ui)
+        for fragment in ('<h3 id={label}>Inspect first, then review what can safely be recovered</h3>',
+                         "label: 'Project build-input recovery'", "controller.prepare('inspect')", "controller.prepare('recover')",
+                         'disabled={recoverReason !== null}', "idle: 'No pending build-input record observed'",
+                         "terminal: 'Original operation settled'", 'value.status === \'idle\''):
+            self.assertIn(fragment, recovery_ui)
+        self.assertIn('aria-label={`Help: ${content.label}`}', sources['desktop/src/components/Common.tsx'])
+        offline_controller = sources['desktop/src/offlinePreflight.ts']
+        for fragment in ('savedConfig: parseSavedConfigContent(project.savedConfigContent)',
+                         'attempt.identity = id(op); attempt.prepareReply = true;',
+                         'attempt.startSent = true; attempt.startAfter = attempt.observer.status?.statusRevision ?? 0;',
+                         'consent: null, pending: \'start\', originalUnconfirmed: true, historical: false',
+                         'historical: !attempt || !matched || attempt.retired || !this.matches(attempt)',
+                         'originalUnconfirmed: finished || startObserved ? false : this.state.originalUnconfirmed',
+                         "sameOfflineIdentity(status.operation, attempt.identity) || status.operation.phase === 'awaiting-consent'"):
+            self.assertIn(fragment, offline_controller)
+        recovery_controller = sources['desktop/src/projectRecoveryController.ts']
+        for fragment in ("acknowledged: action === 'inspect'", "if (action === 'inspect') await this.start(op.operationId, op.ownerGeneration);",
+                         "op.phase !== 'terminal' || op.outcome !== 'complete'", 'this.state.historical',
+                         "return recoveryEligible(inspected) ? null : 'The inspection has no eligible pending build-input session to recover.'"):
+            self.assertIn(fragment, recovery_controller)
+        self.assertIn("op.outcome === 'complete' ? !result(op.result) || !sameSavedConfig(op.result.usedConfig, op.context.savedConfig) : op.result !== null",
+                      sources['desktop/src/offlinePreflightProtocol.ts'])
+        self.assertIn("if (!result(op.result, op.context) || op.effect !== (op.context.action === 'inspect' ? 'inspection' : 'recovery-attempted')) return null;",
+                      sources['desktop/src/projectRecoveryProtocol.ts'])
+        service = sources['src/mobile_release/desktop_preflight.py']
+        for fragment in ('mode="offline", platforms=("android",)', 'run_builds=False,', 'artifacts=None, credentials_file=None',
+                         'credentials_from_env=False, require_tools=False', 'signing_lease=None, invocation=invocation'):
+            self.assertIn(fragment, service)
+        self.assertNotIn('invocation.materialization(', service)
+        discovery = sources['src/mobile_release/discovery.py']
+        for fragment in ('"GIT_CONFIG_NOSYSTEM": "1"', '"GIT_CONFIG_GLOBAL": os.devnull', '"GIT_OPTIONAL_LOCKS": "0"',
+                         '"GIT_NO_LAZY_FETCH": "1"', '"GIT_ALLOW_PROTOCOL": ""', '"core.fsmonitor=false"',
+                         '"core.hooksPath=" + os.devnull', '"protocol.allow=never"', 'timeout=10'):
+            self.assertIn(fragment, discovery)
+        recovery_service = sources['src/mobile_release/desktop_project_recovery.py']
+        self.assertIn('_desktop_inspect_build_inputs(', recovery_service)
+        inputs = sources['src/mobile_release/build_inputs.py']
+        inspection = inputs.split('def _desktop_inspect_build_inputs(', 1)[1].split('def _desktop_recover_build_inputs(', 1)[0]
+        self.assertIn('if project.meta.number is None or _stat(project.meta.number, _PENDING) is None:', inspection)
+        self.assertIn('return _DesktopRecoveryInspection("idle")', inspection)
+        self.assertNotIn('ensure_meta(', inspection)
+        finish = inputs.split('    def _finish(self) -> None:', 1)[1].split('    def cleanup(self) -> None:', 1)[0]
+        self.assertLess(finish.index('_consumer_idle(self.cancellation)'), finish.index('self.quiescence = "original"'))
+        self.assertLess(finish.index('self.quiescence = "original"'), finish.index('self._checkpoint()'))
+        self.assertNotIn('operator', block.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection()', 1)[1])
+
     def test_normal_diagnostics_observes_original_complete_report_and_settled_projection(self):
         swift = (ROOT / SWIFT).read_text()
+        added = self.checked_saved_checks_block(swift)
+        swift = swift.replace(added, "", 1)
         start = "    // One ordinary current diagnostics run, not full doctor or project-code execution.\n"
         end = "    override func tearDown() async throws {\n"
         self.assertEqual(swift.count(start), 1)
@@ -163,7 +377,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         ids, blocks = steps(workflow)
         order = ['normal_ui_result', 'normal_project_ui_test', 'normal_project_ui_result',
                  'normal_persistence_ui_test', 'normal_persistence_ui_result',
-                 'normal_diagnostics_ui_test', 'normal_diagnostics_ui_result']
+                 'normal_diagnostics_ui_test', 'normal_diagnostics_ui_result',
+                 'normal_saved_checks_ui_test', 'normal_saved_checks_ui_result']
         begin = ids.index(order[0])
         self.assertEqual(ids[begin:begin + len(order)], order)
         for ident, pin in BLOCK_PINS.items():
@@ -227,20 +442,130 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         data = blocks['data_contracts']
         names = ast.literal_eval(re.search(r'          names = (\[\n.*?\n          \])\n', data, re.S)[1])
         selected_digest = lambda values: digest(json.dumps(values, separators=(',', ':')).encode())
-        self.assertEqual(len(names), 81)
-        self.assertEqual(len(set(names)), 81)
+        self.assertEqual(len(names), 82)
+        self.assertEqual(len(set(names)), 82)
         self.assertEqual(selected_digest(names[:79]), '81ca0c9325763f3aaf2a181e521d7b6adde06b7c0321eecacfc2b93a78c3c051')
-        self.assertEqual(names[79:], SOURCE_METHODS)
+        self.assertEqual(names[79:81], SOURCE_METHODS)
+        self.assertEqual(selected_digest(names[:81]), ORIGINAL_ROSTER_SHA256)
+        self.assertEqual(names[81:], [SAVED_CHECKS_SOURCE_METHOD])
         self.assertEqual(selected_digest(names), ROSTER_SHA256)
         self.assertEqual(data.count(ROSTER_SHA256), 2)
         sources = ast.literal_eval(re.search(r'          source_names = (\(\n.*?\n          \))\n', data, re.S)[1])
+        self.assertEqual(len(sources), 64)
         self.assertEqual(len(sources), len(set(sources)))
+        self.assertEqual(selected_digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
+        self.assertEqual(list(sources[53:]), SAVED_CHECKS_SOURCE_REFS)
         self.assertTrue(set(SOURCE_REFS).issubset(sources))
-        for fragment in ('len(names) != 81 or len(set(names)) != 81', 'suite.countTestCases() != 81',
-                         'facts["testsRun"] == 81', 'counts.get("testsRun") != 81', '"pythonExpectedCount": 81',
-                         '"githubActionCount": 22, "normalDiagnosticsSourceCount": 2',
+        for fragment in ('len(names) != 82 or len(set(names)) != 82', 'suite.countTestCases() != 82',
+                         'facts["testsRun"] == 82', 'counts.get("testsRun") != 82', '"pythonExpectedCount": 82',
+                         '"githubActionCount": 22, "normalDiagnosticsSourceCount": 3',
                          '"test_macos_normal_diagnostics_source") or not method.startswith("test_")'):
             self.assertIn(fragment, data, fragment)
+
+
+        # One already-built runner invocation contains precisely these two independent journeys.
+        saved_test = blocks['normal_saved_checks_ui_test']
+        saved_result = blocks['normal_saved_checks_ui_result']
+        saved_methods = ['testSyntheticProjectSavedOfflineChecks', 'testSyntheticProjectEmptyBuildInputInspection']
+        saved_identifiers = ['MRKNormalAppUITests/NormalAppUITests/' + name for name in saved_methods]
+        self.assertEqual(workflow.count('/usr/bin/xcodebuild build-for-testing'), 1)
+        self.assertEqual(workflow.count('/usr/bin/xcodebuild test-without-building'), 5)
+        self.assertEqual(saved_test.count('/usr/bin/xcodebuild test-without-building'), 1)
+        self.assertEqual(re.findall(r'-only-testing:MRKNormalAppUITests/NormalAppUITests/(test[A-Za-z0-9_]+)', saved_test), saved_methods)
+        for identifier in saved_identifiers:
+            self.assertEqual(workflow.count('-only-testing:' + identifier), 1)
+        self.assertIn("steps.normal_diagnostics_ui_result.outcome == 'success'", saved_test)
+        self.assertIn("steps.normal_saved_checks_ui_test.outcome == 'success'", saved_result)
+        for fragment in ('timeout-minutes: 12', 'ulimit -f 1048576', 'resource.getrlimit(resource.RLIMIT_FSIZE)',
+                         'admitted = actual == (expected, expected)', '"phase": "saved-checks-test"',
+                         '[[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"',
+                         '[[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"',
+                         '-project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI',
+                         "-configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15",
+                         '-derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData"',
+                         '-resultBundlePath "$MRK_MACOS_WORK/normal-ui/saved-checks-test.xcresult"',
+                         '-parallel-testing-enabled NO -test-timeouts-enabled YES',
+                         '-default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300',
+                         'TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64',
+                         'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA',
+                         'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA',
+                         '[[ "$test_status" == 0 ]] || exit "$test_status"'):
+            self.assertIn(fragment, saved_test, fragment)
+        self.assertLess(saved_test.index('[[ "$file_budget_status" == 0 ]]'), saved_test.index('/usr/bin/xcodebuild test-without-building'))
+        saved_budget = inline_python(saved_test, 'PY_UI_FILE_BUDGET')
+        saved_safe = inline_python(saved_test, 'PY_SAVED_CHECKS_SAFE_FACTS')
+        saved_result_source = inline_python(saved_result, 'PY_SAVED_CHECKS_RESULT')
+        for code in (saved_budget, saved_safe, saved_result_source):
+            self.assertIn('os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC', code)
+            self.assertIn('os.fsync(', code)
+            self.assertIn('finally: os.close(fd)', code)
+        stages = next(node.value for node in ast.parse(saved_safe).body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'stages' for target in node.targets))
+        self.assertEqual(ast.literal_eval(stages), {
+            'offline-launch', 'offline-fixture', 'offline-project-open', 'offline-review-and-start',
+            'offline-original-report', 'offline-readback-and-quit',
+            'recovery-idle-launch', 'recovery-idle-fixture', 'recovery-idle-project-open', 'recovery-idle-inspect',
+            'recovery-idle-original-report', 'recovery-idle-readback-and-quit'})
+        for fragment in ('"nativeSuccessInferred": False, "rawTextExported": False', 'if len(events) > 64:',
+                         'before.st_size <= 16 * 1024 * 1024', 'before.st_size - 262144'):
+            self.assertIn(fragment, saved_safe)
+        assignments = {target.id: node.value for node in ast.parse(saved_result_source).body if isinstance(node, ast.Assign)
+                       for target in node.targets if isinstance(target, ast.Name)}
+        self.assertEqual(ast.literal_eval(assignments['prior_expected']),
+                         {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0})
+        self.assertEqual(ast.literal_eval(assignments['expected']),
+                         {"totalTestCount": 2, "passedTests": 2, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0})
+        fields = {key.value: value for key, value in zip(assignments['result'].keys, assignments['result'].values)}
+        self.assertEqual(ast.literal_eval(fields['testIdentifiers']), saved_identifiers)
+        self.assertEqual(ast.literal_eval(fields['scope']), 'ordinary-ui-observed-saved-offline-and-empty-build-input-inspection')
+        journeys = ast.literal_eval(fields['journeys'])
+        self.assertEqual(list(journeys), ['savedOfflineChecks', 'emptyBuildInputInspection'])
+        for journey, identifier in zip(journeys.values(), saved_identifiers):
+            self.assertEqual(journey['testIdentifier'], identifier)
+            self.assertEqual(journey['coreOutcomeObserved'], 'complete')
+            self.assertEqual(journey['nativeProjectionObserved'], {"phase": "settled", "finality": "settled"})
+            self.assertEqual(journey['fixtureReadback'], 'unchanged-before-and-after-normal-quit')
+            self.assertEqual(journey['applicationStateAfterNormalQuit'], 'notRunning')
+        offline_result = journeys['savedOfflineChecks']
+        self.assertEqual(offline_result['scope'], 'ordinary-ui-observed-saved-offline-report-and-settled-projection')
+        self.assertEqual(offline_result['savedOfflineReportAndSettledProjectionUI'], 'passed')
+        self.assertEqual(offline_result['negativeFindingsAssertion'],
+                         {"missingAtLeast": 2, "skippedAtLeast": 1, "moduleWrapperAndEarlyExitObserved": True})
+        idle_result = journeys['emptyBuildInputInspection']
+        self.assertEqual(idle_result['scope'], 'ordinary-ui-observed-empty-build-input-inspection-and-settled-projection')
+        self.assertEqual(idle_result['emptyBuildInputInspectionAndSettledProjectionUI'], 'passed')
+        self.assertEqual(idle_result['inspectionStatusObserved'], 'idle')
+        self.assertIs(idle_result['mutationRecoveryExecuted'], False)
+        self.assertIs(idle_result['projectCleanlinessEstablished'], False)
+        for name in ('result.json', 'project-result.json', 'persistence-result.json', 'diagnostics-result.json'):
+            self.assertIn('("' + name + '", ', saved_result_source)
+        for fragment in ('source != os.environ["MRK_EXPECTED_SHA"]', 'prior["sourceTree"] != preview["sourceTree"]',
+                         'prior["signedAppBinarySha256"] != preview["signedAppBinarySha256"]',
+                         'prior["runtimeManifestSha256"] != preview["runtimeManifestSha256"]',
+                         'prior["applicationStateAfterNormalQuit"] != "notRunning"',
+                         'type(prior["testCounts"][key]) is not int', 'type(summary.get(key)) is not int or summary[key] != value',
+                         'json.loads(summary_bytes, object_pairs_hook=unique)',
+                         'set(budget) != set(expected_budget)', 'type(budget[key]) is not type(value)', '"hardBytes": 1073741824',
+                         '"safeFactsSha256": hashlib.sha256(facts_bytes).hexdigest()',
+                         'normal-saved-offline-and-empty-recovery-ui-diagnostics-only'):
+            self.assertIn(fragment, saved_result_source, fragment)
+        self.assertIs(ast.literal_eval(fields['cleanExitStatus']), None)
+        self.assertEqual(ast.literal_eval(fields['allWorkerFinality']), 'not-established-by-XCTest-UI-state')
+        self.assertEqual(ast.literal_eval(fields['applicationStateAfterBothNormalQuits']), 'notRunning')
+        for field in ('independentOwnerResourceProof', 'fullDoctorExecuted', 'mutationRecoveryExecuted', 'zeroCommandEvidence',
+                      'networkIsolationEstablished', 'releaseReadinessEstablished', 'fullUIQualified', 'distributionQualified', 'productReady'):
+            self.assertIs(ast.literal_eval(fields[field]), False, field)
+        for field in ('offlinePreflightExecuted', 'projectRecoveryInspectionExecuted'):
+            self.assertIs(ast.literal_eval(fields[field]), True, field)
+        for leaf in ('saved-checks-test-file-limit.status', 'saved-checks-test-file-budget.status', 'saved-checks-test-file-budget.json',
+                     'saved-checks-test.status', 'saved-checks-safe-facts.json', 'saved-checks-summary.status', 'saved-checks-result.json'):
+            self.assertEqual(evidence.count('${{ steps.work.outputs.root }}/normal-ui/' + leaf + '\n'), 1)
+        for suffix in ('saved-checks-test.log', 'saved-checks-summary.raw.json', 'saved-checks-summary.stderr',
+                       'saved-checks-test.xcresult', 'saved-checks-test.tail.txt'):
+            self.assertNotIn('/normal-ui/' + suffix, evidence)
+        self.assertIn("steps.normal_saved_checks_ui_result.outcome == 'success'", cleanup.split('        run: |', 1)[0])
+        self.assertIn('root / "normal-ui/saved-checks-test.xcresult"', cleanup)
+        self.assertIn('"saved-checks-test.log", "saved-checks-summary.raw.json", "saved-checks-summary.stderr"', cleanup)
 
 
 if __name__ == '__main__':

@@ -1564,6 +1564,268 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
+    // Ordinary saved offline checks and empty project-recovery inspection only.
+    // This block reuses the ordinary app/fixture/helpers. It is not a producer of
+    // recovery records, an alternate invocation route or native finality evidence.
+    @MainActor private func savedOperationComplete(_ panel: XCUIElement) throws {
+        let texts = panel.staticTexts.allElementsBoundByIndex
+        try require(!texts.isEmpty && texts.count <= 512, "saved-operation presentation exceeds its finite bound")
+        try require(texts.allSatisfy { $0.label.utf8.count <= 4096 }, "saved-operation text exceeds its finite bound")
+        let labels = texts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let anchors = labels.indices.filter { labels[$0].hasPrefix("Outcome:") }
+        try require(anchors.count == 1, "original saved-operation outcome is missing or ambiguous")
+        let start = anchors[0]
+        // WebKit can expose the shipped <strong> label and following value as
+        // separate static texts or one text. Admit only those two exact shapes.
+        if labels[start] == "Outcome:" {
+            try require(start + 1 < labels.count && labels[start + 1] == "complete",
+                        "the original saved-operation outcome is not complete")
+        } else {
+            try require(labels[start] == "Outcome: complete", "the original saved-operation outcome is not complete")
+        }
+        _ = try unique(panel.staticTexts.matching(identifier: "Original operation settled"),
+                       "the original saved-operation projection is not settled")
+    }
+
+    @MainActor private func savedOfflineCounts(_ report: XCUIElement) throws -> [String: Int] {
+        let texts = report.staticTexts.allElementsBoundByIndex
+        try require(!texts.isEmpty && texts.count <= 512, "offline report exceeds its finite presentation bound")
+        try require(texts.allSatisfy { $0.label.utf8.count <= 4096 }, "offline report text exceeds its finite bound")
+        let labels = texts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let statuses = ["PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE"]
+        let starts = labels.indices.filter { start in
+            start + statuses.count * 2 <= labels.count
+                && statuses.enumerated().allSatisfy { labels[start + $0.offset * 2] == $0.element }
+        }
+        try require(starts.count == 1, "the nine original status-count rows are missing or ambiguous")
+        let start = starts[0]
+        var counts: [String: Int] = [:]
+        for (offset, status) in statuses.enumerated() {
+            let value = labels[start + offset * 2 + 1]
+            guard let count = Int(value), (0...128).contains(count), value == String(count) else {
+                throw Refusal.condition("the small fixed fixture returned a noncanonical or unbounded count")
+            }
+            counts[status] = count
+        }
+        let total = counts.values.reduce(0, +)
+        try require((1...128).contains(total) && counts["MISSING", default: 0] >= 2 && counts["SKIP", default: 0] >= 1,
+                    "the fixture's missing module/wrapper and early-exit findings were not retained")
+        let summary = "\(total) total findings · \(total) included in the returned list · 0 omitted from that list. Counts below include every reported finding."
+        _ = try unique(report.staticTexts.matching(identifier: summary), "original offline count totals or omission state differ")
+        for label in ["Android module configuration.", "Android Gradle wrapper policy.", "Core early-exit or remaining-check policy."] {
+            _ = try unique(report.staticTexts.matching(identifier: label), "the expected negative-report finding is missing or repeated")
+        }
+        return counts
+    }
+
+    @MainActor func testSyntheticProjectSavedOfflineChecks() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("offline-launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary offline launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("offline-fixture") { try fixture.prepare() }
+        try stage("offline-project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath)
+            try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "offline project path is not exact")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        let failures = ["No new offline-check outcome was confirmed", "Original cleanup unknown"]
+        let unconfirmed = "The original command acknowledgement is unconfirmed. Do not repeat Start. A status observation can help cancel or settle that original operation, but cannot create consent."
+        let historical = "This is retained original-operation data, not permission for the current editor or project context."
+        var selected: XCUIElement?
+        try stage("offline-review-and-start") {
+            try press(renderer, "Releases", renderer: renderer)
+            let panel = try waitElement(named(renderer, "Review the saved inputs and project-code effects")
+                .containing(.button, identifier: "Refresh saved configuration observation"), in: renderer)
+            selected = panel
+            try require(named(panel, "Saved offline check findings").count == 0
+                        && panel.staticTexts.matching(identifier: "Original operation settled").count == 0
+                        && panel.buttons.matching(identifier: "Run saved offline checks").count == 0,
+                        "a prior offline operation cannot supply this journey")
+            try press(panel, "Refresh saved configuration observation", renderer: renderer, failures: failures, timeout: 10)
+            try press(panel, "Review offline checks", renderer: renderer, failures: failures, timeout: 10)
+            let consent = try waitElement(named(panel, "Confirm this saved offline-check intent"), in: panel,
+                                          timeout: 10, failures: failures)
+            let savedBytes = try fixture.text(LocalFixture.config).utf8.count
+            let comparison = "Saved comparison: \(savedBytes) bytes. This review expires no later than five minutes after its original preparation; checking status never extends it."
+            _ = try unique(consent.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", comparison)),
+                           "the visible review is not bound to this fixture's exact saved-byte count")
+            _ = try unique(panel.staticTexts.matching(identifier: "Awaiting explicit consent"), "offline intent is not awaiting consent")
+            let run = try unique(consent.buttons.matching(identifier: "Run saved offline checks"), "offline Run is ambiguous")
+            let acknowledgement = try unique(consent.checkBoxes, "offline acknowledgement is missing or ambiguous")
+            try require(!run.isEnabled, "offline Run began enabled before acknowledgement")
+            try require((acknowledgement.value as? String) == "0" || (acknowledgement.value as? NSNumber)?.intValue == 0,
+                        "offline acknowledgement began checked")
+            try require(named(panel, "Saved offline check findings").count == 0, "review alone produced an offline report")
+            try fixture.assertUnchanged()
+            try reveal(acknowledgement, in: renderer)
+            acknowledgement.click()
+            let start = try waitElement(consent.buttons.matching(identifier: "Run saved offline checks"), in: panel,
+                                        enabled: true, timeout: 5, failures: failures)
+            try require((acknowledgement.value as? String) == "1" || (acknowledgement.value as? NSNumber)?.intValue == 1,
+                        "the exact offline acknowledgement was not retained")
+            try reveal(start, in: renderer)
+            try fixture.assertUnchanged()
+            start.click() // The sole Start; the existing native1800/1810 clocks are unchanged.
+        }
+        guard let panel = selected else { throw Refusal.condition("original offline section is missing") }
+        var missing = 0, skipped = 0
+        try stage("offline-original-report") {
+            // A transient unconfirmed acknowledgement is normal while awaiting
+            // the original reply. It cannot be present in the accepted result.
+            _ = try waitElement(panel.staticTexts.matching(identifier: "Original operation settled"), in: panel,
+                                timeout: 90, failures: failures)
+            try savedOperationComplete(panel)
+            _ = try unique(panel.staticTexts.matching(identifier:
+                "No lifecycle failure has been reported. Individual findings retain their own core status."),
+                "offline operation did not settle without a lifecycle failure")
+            let report = try unique(named(panel, "Saved offline check findings"), "the original offline report is missing or ambiguous")
+            _ = try unique(report.staticTexts.matching(identifier: "Returned offline-check report"), "returned offline report heading is missing")
+            _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report is not current to this invocation")
+            _ = try unique(report.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Complete is not PASS or release readiness.")),
+                           "offline completion was misrepresented as readiness")
+            for label in ["Offline selects the core checking mode. It is not network isolation or a sandbox.",
+                          "Core-managed builds were disabled; configured checks can still perform their own builds.",
+                          "Release readiness was not assessed. A returned report is not a release candidate or publication authority."] {
+                _ = try unique(report.staticTexts.matching(identifier: label), "offline report lost a required scope limit")
+            }
+            let counts = try savedOfflineCounts(report)
+            missing = counts["MISSING", default: 0]; skipped = counts["SKIP", default: 0]
+            try require(panel.staticTexts.matching(identifier: unconfirmed).count == 0
+                        && panel.staticTexts.matching(identifier: historical).count == 0
+                        && report.staticTexts.matching(identifier: "Historical / stale context").count == 0
+                        && panel.staticTexts.matching(NSPredicate(format: "label IN %@", failures)).count == 0
+                        && named(panel, "Confirm this saved offline-check intent").count == 0
+                        && panel.buttons.matching(identifier: "Run saved offline checks").count == 0,
+                        "original offline report remains unconfirmed, stale, failed or rearmed")
+            try fixture.assertUnchanged()
+            try savedOperationComplete(panel)
+            _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report changed during readback")
+        }
+        try stage("offline-readback-and-quit") {
+            try require(missing >= 2 && skipped >= 1, "no actual negative offline report was observed")
+            try fixture.assertUnchanged()
+            try savedOperationComplete(panel)
+            let report = try unique(named(panel, "Saved offline check findings"), "offline report disappeared before normal Quit")
+            _ = try unique(report.staticTexts.matching(identifier: "This invocation only"),
+                           "offline report ceased to be current before normal Quit")
+            for label in [unconfirmed, historical] + failures {
+                try require(panel.staticTexts.matching(identifier: label).count == 0, "offline state changed before normal Quit")
+            }
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal offline Quit unavailable")
+            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal offline Quit did not reach notRunning")
+            normalQuitObserved = true
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        // The fixture has no configured checks/build wrapper. The shared core
+        // still performs fixed Git queries; this is not zero-command evidence.
+        print("MRK_MACOS_NORMAL_OFFLINE_UI=ordinary-ui-observed-saved-offline-report-and-settled-projection;missing=\(missing);skipped=\(skipped);releaseReadiness=not-assessed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
+    @MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("recovery-idle-launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary empty-recovery launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("recovery-idle-fixture") { try fixture.prepare() }
+        try stage("recovery-idle-project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath)
+            try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery inspection project path is not exact")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        let failures = ["No new recovery outcome was confirmed", "Original cleanup unknown"]
+        let unconfirmed = "The original acknowledgement is unconfirmed. Do not repeat the recovery action. Check its original status; a status observation never creates consent."
+        let historical = "This retained observation is historical; it is not recovery permission for the current context."
+        var selected: XCUIElement?
+        try stage("recovery-idle-inspect") {
+            try press(renderer, "Recovery", renderer: renderer)
+            let panel = try waitElement(named(renderer, "Inspect first, then review what can safely be recovered")
+                .containing(.button, identifier: "Help: Project build-input recovery"), in: renderer)
+            selected = panel
+            try require(panel.staticTexts.matching(identifier: "No pending build-input record observed").count == 0
+                        && panel.staticTexts.matching(identifier: "Original operation settled").count == 0,
+                        "a prior recovery inspection cannot supply this journey")
+            let review = try unique(panel.buttons.matching(identifier: "Review recovery attempt"), "recovery Review is ambiguous")
+            try require(!review.isEnabled && named(panel, "Confirm the exact build-input recovery attempt").count == 0,
+                        "recovery mutation was offered before inspection")
+            let inspect = try waitElement(panel.buttons.matching(identifier: "Inspect build-input state"), in: panel,
+                                          enabled: true, timeout: 10, failures: failures)
+            try reveal(inspect, in: renderer)
+            try fixture.assertUnchanged()
+            inspect.click() // This sole click authorizes the controller's inspect-only prepare/start, not Recover.
+        }
+        guard let panel = selected else { throw Refusal.condition("original project-recovery section is missing") }
+        try stage("recovery-idle-original-report") {
+            _ = try waitElement(panel.staticTexts.matching(identifier: "Original operation settled"), in: panel,
+                                timeout: 135, failures: failures)
+            try savedOperationComplete(panel)
+            _ = try unique(panel.staticTexts.matching(identifier: "No pending build-input record observed"),
+                           "the actual original build-input inspection was not Idle")
+            _ = try unique(panel.staticTexts.matching(identifier:
+                "No lifecycle failure was reported. This operation concerns project build inputs only, not release readiness."),
+                "the original inspection has a lifecycle failure")
+            _ = try unique(panel.staticTexts.matching(identifier:
+                "This is a build-input observation only. It does not mean the whole project, a previous file edit, signing account or Store release is clean."),
+                "Idle inspection lost its limited absence-only meaning")
+            let review = try unique(panel.buttons.matching(identifier: "Review recovery attempt"), "settled recovery Review is ambiguous")
+            try require(!review.isEnabled && panel.checkBoxes.count == 0
+                        && named(panel, "Confirm the exact build-input recovery attempt").count == 0
+                        && panel.buttons.matching(identifier: "Recover reviewed build inputs").count == 0
+                        && panel.buttons.matching(identifier: "Retire reviewed metadata").count == 0,
+                        "Idle inspection enabled a recovery mutation or invented a recovery intent")
+            for label in [unconfirmed, historical, "Recorded session:", "Reviewed build-input session recovered.",
+                          "Reviewed terminal metadata retired.", "Pending build-input session", "Only terminal recovery metadata remains"] + failures {
+                try require(panel.staticTexts.matching(identifier: label).count == 0,
+                            "empty inspection contains unconfirmed, historical, pending or mutation-result data")
+            }
+            try fixture.assertUnchanged() // Includes the closed directory roster: no new hidden recovery metadata.
+            try savedOperationComplete(panel)
+        }
+        try stage("recovery-idle-readback-and-quit") {
+            try fixture.assertUnchanged()
+            try savedOperationComplete(panel)
+            _ = try unique(panel.staticTexts.matching(identifier: "No pending build-input record observed"),
+                           "original Idle inspection disappeared before normal Quit")
+            for label in [unconfirmed, historical] + failures {
+                try require(panel.staticTexts.matching(identifier: label).count == 0, "inspection state changed before normal Quit")
+            }
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal empty-recovery Quit unavailable")
+            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal empty-recovery Quit did not reach notRunning")
+            normalQuitObserved = true
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        // No producer-finality receipt or pending journal is fabricated. A real
+        // mutation-recovery journey still needs its own genuine eligible producer.
+        print("MRK_MACOS_NORMAL_RECOVERY_IDLE_UI=ordinary-ui-observed-empty-build-input-inspection-and-settled-projection;mutationRecovery=not-run;projectCleanliness=not-established;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+    // End ordinary saved offline and empty recovery journeys.
+
     // One ordinary current diagnostics run, not full doctor or project-code execution.
     // No new observer, IPC, app hook or fixture bytes; queries use shipped AX content.
     @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement) throws -> Int {

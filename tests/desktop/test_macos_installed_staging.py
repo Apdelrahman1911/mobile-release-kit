@@ -1480,18 +1480,22 @@ class MacCurrentRuntimeData(unittest.TestCase):
         data = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
         names = ast.literal_eval(TOOL.re.search(r"          names = (\[\n.*?\n          \])\n", data, TOOL.re.S).group(1))
         digest = lambda selected: TOOL.digest(TOOL.json.dumps(selected, separators=(",", ":")).encode())
-        self.assertEqual(len(names), 81)
-        self.assertEqual(len(set(names)), 81)
+        self.assertEqual(len(names), 82)
+        self.assertEqual(len(set(names)), 82)
         self.assertEqual(digest(names[:57]), "4a5c62f00838d17f54e0970c209fc44a2b5708314e39437dbb156a25ac42ffa6")
         self.assertEqual(digest(names[57:79]), "f14c3263aadbdaeb0e7d21c821784902289552eb431ce3448726c6631064bfd5")
-        self.assertEqual(digest(names), "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4")
+        self.assertEqual(digest(names[:81]), "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4")
+        self.assertEqual(digest(names), "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65")
         self.assertEqual(data.count(digest(names)), 2)
-        self.assertEqual(names[79:], [
+        self.assertEqual(names[79:81], [
             'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
             'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result',
         ])
+        self.assertEqual(names[81:], ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'])
         sources = ast.literal_eval(TOOL.re.search(r"          source_names = (\(\n.*?\n          \))\n", data, TOOL.re.S).group(1))
+        self.assertEqual(len(sources), 64)
         self.assertEqual(len(sources), len(set(sources)))
+        self.assertEqual(digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
         for name in names[57:]:
             module, cls, method = name.split(".")
             path = "tests/desktop/" + module + ".py"
@@ -1499,12 +1503,12 @@ class MacCurrentRuntimeData(unittest.TestCase):
             definitions = ast.parse((root / path).read_text())
             owner = next(node for node in definitions.body if isinstance(node, ast.ClassDef) and node.name == cls)
             self.assertIn(method, [node.name for node in owner.body if isinstance(node, ast.FunctionDef)])
-        for fragment in ('len(names) != 81 or len(set(names)) != 81', 'suite.countTestCases() != 81',
-                         'facts["testsRun"] == 81', 'counts.get("testsRun") != 81', '"pythonExpectedCount": 81',
+        for fragment in ('len(names) != 82 or len(set(names)) != 82', 'suite.countTestCases() != 82',
+                         'facts["testsRun"] == 82', 'counts.get("testsRun") != 82', '"pythonExpectedCount": 82',
                          '"workflowFilesystemCount": 2', '"imageFilesystemCount": 18', '"evidenceReaderCount": 37',
                          '"githubActionCount": 22', '"test_github_preflight_frames", "test_github_preflight", "test_github_release"'):
             self.assertIn(fragment, data)
-        self.assertIn('"normalDiagnosticsSourceCount": 2', data)
+        self.assertIn('"normalDiagnosticsSourceCount": 3', data)
         self.assertIn('"test_macos_normal_diagnostics_source"', data)
         for path in ("desktop/github_preflight_bootstrap.py", "desktop/github_release_bootstrap.py",
                      "src/mobile_release/github_preflight.py", "src/mobile_release/github_release.py",
