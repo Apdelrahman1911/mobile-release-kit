@@ -853,7 +853,17 @@ def environment_native_profile(scope: str) -> dict:
 
 BOUNDARY_PHASES = ("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss",
                    "config-owner-delta", "config-transaction-eof", "config-core", "clean")
+# New fixed inputs read by every app-crate build, not macOS execution authority.
+# Historical frozen native/supplier source rosters remain separate.
+APP_BUILD_SELECTION_SOURCES = (
+    "desktop/macos-installed-inputs/build-release.json",
+    "desktop/src-tauri/src/macos_build_release.rs",
+    "desktop/src-tauri/src/macos_install_fixed_paths.rs",
+    "desktop/src-tauri/src/macos_install_paths.rs",
+    "desktop/src-tauri/tauri.conf.json",
+)
 GTK_COMPILE_SOURCES = (
+    *APP_BUILD_SELECTION_SOURCES,
     ".github/workflows/desktop-environment-diagnostics-native.yml",
     "desktop/environment_bootstrap.py",
     "desktop/github_connection_bootstrap.py",
@@ -1648,6 +1658,7 @@ WINDOWS_INSTALLED_PASSIVE_APP_INERT = (
     "supervisor::windows_passive_tests::fixed_probe_and_candidate_are_bounded_and_nonshipping",
 )
 WINDOWS_INSTALLED_SOURCES = tuple(sorted((
+    *APP_BUILD_SELECTION_SOURCES,
     ".github/workflows/desktop-foundation.yml", "desktop/tools/ci_foundation.py",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
     "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
@@ -1684,6 +1695,7 @@ WINDOWS_SDK_HEADERS = tuple(sorted((
     "um/securitybaseapi.h", "um/aclapi.h",
 )))
 WINDOWS_SNAPSHOT_SOURCES = tuple(sorted((
+    *APP_BUILD_SELECTION_SOURCES,
     "src/mobile_release/api/_snapshot_windows_native.py", "src/mobile_release/api/_snapshot_windows.py",
     "src/mobile_release/api/_snapshot.py", "src/mobile_release/api/__init__.py",
     "tests/desktop/test_windows_snapshot.py", "tests/desktop/test_api.py", "docs/desktop.md",
@@ -8326,7 +8338,7 @@ def validate_environment_inputs(value: object) -> dict:
     core = validate_environment_inventory(value["coreFiles"], maximum=32 * 1024 * 1024)
     validate_gtk_core_inventory(core)  # The same complete core package DATA, not a GTK invocation.
     by_path = {row["path"]: row for row in sources}
-    required = {ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", profile["bootstrap"],
+    required = {*APP_BUILD_SELECTION_SOURCES, ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", profile["bootstrap"],
         "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
         "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
         "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs", "tests/native_desktop_environment.py",

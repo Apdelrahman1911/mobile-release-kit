@@ -640,6 +640,11 @@ jobs:
               "src/mobile_release/desktop_project_recovery.py",
               "src/mobile_release/build_inputs.py",
               "src/mobile_release/discovery.py",
+              "desktop/macos-installed-inputs/build-release.json",
+              "desktop/src-tauri/src/macos_build_release.rs",
+              "desktop/src-tauri/src/macos_install_fixed_paths.rs",
+              "desktop/src-tauri/src/macos_install_paths.rs",
+              "desktop/src-tauri/tauri.conf.json",
           )
           source_bodies = {}
           for name in source_names:

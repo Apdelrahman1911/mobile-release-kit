@@ -1,4 +1,4 @@
-#[path = "../../src-tauri/src/macos_install_paths.rs"]
+#[path = "../../src-tauri/src/macos_install_fixed_paths.rs"]
 mod installed_paths;
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");

@@ -45,7 +45,7 @@ def binding_environment(event: str = "push", attempt: str = "1", *, platform: st
 def native_inputs(platform: str = "linux", *, ref: str | None = None) -> dict:
     binding = helper.environment_native_binding(binding_environment(platform=platform, ref=ref))
     core = [{"path": name, "sha256": "4" * 64, "size": 1} for name in helper.GTK_CORE_PATHS]
-    names = {helper.ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/environment_bootstrap.py",
+    names = {*helper.APP_BUILD_SELECTION_SOURCES, helper.ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/environment_bootstrap.py",
         "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
         "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
         "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs", "tests/native_desktop_environment.py",

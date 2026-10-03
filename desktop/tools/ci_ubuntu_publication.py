@@ -3048,6 +3048,8 @@ def shell_source_manifest(source):
     D.need(config["build"] == {"frontendDist": "../dist"} and config["bundle"]["active"] is False,
            "Shell must embed the fixed frontend, without a dev server or bundle build")
     paths = ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
+             "desktop/macos-installed-inputs/build-release.json", "desktop/src-tauri/src/macos_build_release.rs",
+             "desktop/src-tauri/src/macos_install_fixed_paths.rs", "desktop/src-tauri/src/macos_install_paths.rs",
              "desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs",
              "desktop/src-tauri/src/error.rs", "desktop/src-tauri/src/protocol.rs", "desktop/src-tauri/src/installed_runtime.rs",
              "desktop/src-tauri/src/passive_management_tests.rs", "desktop/src-tauri/src/credential_assessment.rs",

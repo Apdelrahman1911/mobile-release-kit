@@ -60,6 +60,7 @@ pub mod runtime;
 // Pure fixed-layout DATA is also used by portable contract tests.
 pub mod macos_install_paths;
 pub mod macos_install_record;
+pub mod macos_install_maintenance;
 // Protected original books. The retained Android launch path is wired but
 // qualification-disabled; legacy inspection-only DATA remains separate.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

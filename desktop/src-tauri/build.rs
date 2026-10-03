@@ -1,6 +1,23 @@
 use std::env;
 use std::{fs, path::Path};
 use sha2::{Digest, Sha256};
+#[path = "src/macos_build_release.rs"]
+mod macos_build_release;
+
+fn macos_build_release_data() {
+    // Every app-crate target needs the same facade, including headless and
+    // actual-main observer builds. This is deliberately not feature/OS gated.
+    println!("cargo:rerun-if-changed=../macos-installed-inputs/build-release.json");
+    println!("cargo:rerun-if-changed=src/macos_build_release.rs");
+    println!("cargo:rerun-if-changed=tauri.conf.json");
+    let release = macos_build_release::BuildRelease::parse(include_bytes!("../macos-installed-inputs/build-release.json"))
+        .expect("fixed macOS build-release DATA refused");
+    release.check_projections(&env::var("CARGO_PKG_VERSION").expect("Cargo package version required"),
+        include_bytes!("tauri.conf.json")).expect("fixed macOS build-release version projections differ");
+    let out = std::path::PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR required"));
+    fs::write(out.join("mrk-macos-build-release.rs"), release.declarations())
+        .expect("fixed macOS build-release declaration write failed");
+}
 
 const ANDROID_INPUT: &str = "MRK_ANDROID_OS_CONTRACT_INPUT";
 const ANDROID_SELECTORS: [&str; 3] = [
@@ -157,6 +174,7 @@ fn github_release_tooling() {
 }
 
 fn main() {
+    macos_build_release_data();
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEVELOPMENT_RUNTIME");
     println!("cargo:rerun-if-env-changed=PROFILE");
     if env::var_os("CARGO_FEATURE_DEVELOPMENT_RUNTIME").is_some()

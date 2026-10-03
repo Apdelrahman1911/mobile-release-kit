@@ -2807,7 +2807,7 @@ mod tests {
         let (_sender, stop) = tokio::sync::watch::channel(true);
         if let Ok(profile) = selected {
             let data = profile.selection().unwrap();
-            let root = PathBuf::from("/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-project-draft-01/runtime");
+            let root = crate::macos_install_paths::runtime_root();
             assert_eq!(data.python, root.join("python/bin/python3"));
             assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
             assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);

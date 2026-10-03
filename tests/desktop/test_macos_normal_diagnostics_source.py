@@ -24,6 +24,10 @@ SOURCE_METHODS = ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceT
  'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result']
 ORIGINAL_SWIFT_SHA256 = "376817b2c3617e8324bff0dbdc9929f63ed5ed395286e6d919f23de291c0f631"
 DIAGNOSTICS_INSERTION_SHA256 = "7b5aeb18210ac3862362e59602adb024040b7232dee12a64e98a534ffc42b44a"
+DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; observations are non-atomic.\n'
+DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
+DASHBOARD_QUERY_ORIGINAL = '        _ = try unique(heading, "dashboard heading is ambiguous")\n'
+DASHBOARD_QUERY_DIAGNOSTICS_SHA256 = "4a0f78d6468535805756ea785f0cdf5fbcede31c38d276635485a476b9fb6ad6"
 ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
 ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
 BLOCK_PINS = {'normal_ui_result': 'cad0ea48888071634eac7834632e4057e71ae482f93814974c8d5c6501629657',
@@ -103,6 +107,48 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def restored_dashboard_query(self, swift: str) -> str:
+        # Validate this exact diagnostic allowance before reconstructing the old
+        # singleton line for the unchanged whole-original-source pin below.
+        self.assertEqual(swift.count(DASHBOARD_QUERY_BEGIN), 1)
+        self.assertEqual(swift.count(DASHBOARD_QUERY_END), 1)
+        begin = swift.index(DASHBOARD_QUERY_BEGIN)
+        end = swift.index(DASHBOARD_QUERY_END) + len(DASHBOARD_QUERY_END)
+        self.assertLess(begin, end)
+        block = swift[begin:end]
+        dashboard = swift.split('    @MainActor private func dashboard(_ renderer: XCUIElement) throws {', 1)[1].split(
+            '    @MainActor private func quitSheet(', 1)[0]
+        self.assertEqual(dashboard.count(block), 1)
+        for fragment in (
+            'let observedCount = heading.count',
+            'if observedCount != 1 {\n            print(',
+            'if observedCount > 1 && observedCount <= 4 {\n                for property in [',
+            'for property in ["identifier", "title", "label", "value", "placeholderValue"] {',
+            'heading.matching(NSPredicate(format: "%K == %@", property, "Good releases start here.")).count',
+            'heading.containing(.staticText, identifier: "Good releases start here.").count',
+            'try require(observedCount == 1, "dashboard heading is ambiguous")',
+        ):
+            self.assertEqual(block.count(fragment), 1, fragment)
+        for value in ('observedCount', 'matches', 'containing'):
+            self.assertEqual(block.count('min(' + value + ', 5)'), 1)
+            self.assertEqual(block.count(value + ' > 4 ? 1 : 0'), 1)
+        self.assertEqual(block.count('.count'), 3)
+        self.assertEqual(block.count('print('), 3)
+        self.assertEqual(block.count('MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation='), 3)
+        self.assertEqual(block.count(';nonAtomic=1"'), 3)
+        self.assertLess(block.index('let observedCount = heading.count'), block.index('if observedCount != 1'))
+        self.assertLess(block.index('observation=initial'), block.index('if observedCount > 1 && observedCount <= 4'))
+        self.assertLess(block.index('if observedCount > 1 && observedCount <= 4'), block.index('heading.matching('))
+        self.assertLess(block.index('heading.containing('), block.index('try require(observedCount == 1'))
+        self.assertIn('            }\n        }\n        // Later diagnostic observations cannot repair the original singleton refusal.\n'
+                      '        try require(observedCount == 1, "dashboard heading is ambiguous")\n', block)
+        for forbidden in ('firstMatch', 'element(', 'allElements', 'snapshot(', 'debugDescription',
+                          'waitFor', 'sleep(', 'while ', 'return', 'try?', 'catch', '.click(',
+                          'evaluateJavaScript', 'app.', 'Process()', 'FileManager', 'write('):
+            self.assertNotIn(forbidden, block, forbidden)
+        self.assertEqual(digest(block.encode()), DASHBOARD_QUERY_DIAGNOSTICS_SHA256)
+        return swift.replace(block, DASHBOARD_QUERY_ORIGINAL, 1)
+
     def checked_saved_checks_block(self, swift: str) -> str:
         # Do not broadly strip added methods or accept a self-reported boundary.
         # Both callers validate this single independently pinned closed block.
@@ -294,6 +340,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_normal_diagnostics_observes_original_complete_report_and_settled_projection(self):
         swift = (ROOT / SWIFT).read_text()
+        swift = self.restored_dashboard_query(swift)
         added = self.checked_saved_checks_block(swift)
         swift = swift.replace(added, "", 1)
         start = "    // One ordinary current diagnostics run, not full doctor or project-code execution.\n"
@@ -451,10 +498,17 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(selected_digest(names), ROSTER_SHA256)
         self.assertEqual(data.count(ROSTER_SHA256), 2)
         sources = ast.literal_eval(re.search(r'          source_names = (\(\n.*?\n          \))\n', data, re.S)[1])
-        self.assertEqual(len(sources), 64)
+        self.assertEqual(len(sources), 69)
         self.assertEqual(len(sources), len(set(sources)))
         self.assertEqual(selected_digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
-        self.assertEqual(list(sources[53:]), SAVED_CHECKS_SOURCE_REFS)
+        self.assertEqual(list(sources[53:64]), SAVED_CHECKS_SOURCE_REFS)
+        self.assertEqual(list(sources[64:]), [
+            "desktop/macos-installed-inputs/build-release.json",
+            "desktop/src-tauri/src/macos_build_release.rs",
+            "desktop/src-tauri/src/macos_install_fixed_paths.rs",
+            "desktop/src-tauri/src/macos_install_paths.rs",
+            "desktop/src-tauri/tauri.conf.json",
+        ])
         self.assertTrue(set(SOURCE_REFS).issubset(sources))
         for fragment in ('len(names) != 82 or len(set(names)) != 82', 'suite.countTestCases() != 82',
                          'facts["testsRun"] == 82', 'counts.get("testsRun") != 82', '"pythonExpectedCount": 82',

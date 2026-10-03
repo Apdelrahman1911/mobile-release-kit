@@ -199,6 +199,31 @@ class MacInstalledData(unittest.TestCase):
             with self.assertRaises(TOOL.Refused):
                 TOOL.decode(body)
 
+    def test_build_release_data_is_closed_and_source_selected_without_fallback(self):
+        valid = {"schemaVersion": 1, "packageVersion": "1.2.3", "release": "macos26-arm64-example-02"}
+        body = TOOL.canonical(valid)
+        self.assertEqual(TOOL.build_release_data(body), valid)
+        for field, replacement in (
+            ("schemaVersion", True), ("schemaVersion", 1.0), ("schemaVersion", 2), ("extra", False),
+            ("packageVersion", None), ("packageVersion", "01.2.3"), ("packageVersion", "1.2.3.4"),
+            ("packageVersion", "1.2.-3"), ("packageVersion", "4294967296.2.3"),
+            ("packageVersion", "1.2.3-beta"), ("release", "macos26-arm64-"),
+            ("release", "macos26-arm64-example/02"), ("release", "macos26-arm64-example."),
+            ("release", "macos26-arm64-UPPER"), ("release", "macos26-arm64-" + "a" * 128),
+        ):
+            with self.subTest(field=field, value=replacement), self.assertRaises(TOOL.Refused):
+                TOOL.build_release_data(TOOL.canonical({**valid, field: replacement}))
+        for raw in (b"", b"[]", b"{}", b"null", b" " * (TOOL.BUILD_RELEASE_LIMIT + 1), body + b" {}",
+                    body[:-1] + b',"release":"macos26-arm64-example-02"}'):
+            with self.subTest(raw=raw[:80]), self.assertRaises(TOOL.Refused):
+                TOOL.build_release_data(raw)
+        with mock.patch.object(TOOL, "read", return_value=body) as read:
+            self.assertEqual(TOOL.source_build_release(), ("1.2.3", "macos26-arm64-example-02"))
+            read.assert_called_once_with(TOOL.BUILD_RELEASE_INPUT, TOOL.BUILD_RELEASE_LIMIT)
+        with mock.patch.object(TOOL, "read", side_effect=FileNotFoundError):
+            with self.assertRaises(FileNotFoundError):
+                TOOL.source_build_release()
+
     def test_manifest_digest_and_original_roster_are_separate_checks(self):
         files = [{"path": name, "sha256": "1" * 64, "size": 1} for name in sorted(TOOL.BOOTSTRAPS | {"core.zip", "github-ca.pem", "python/bin/python3"})]
         manifest = {"schemaVersion": 1, "protocol": 1, "coreVersion": "DATA-only", "target": "aarch64-apple-darwin",
@@ -1080,10 +1105,19 @@ class MacInstallationMetadataData(unittest.TestCase):
         self.assertEqual(info["CFBundleIdentifier"], TOOL.BUNDLE_ID)
         self.assertEqual(info["CFBundleVersion"], TOOL.PACKAGE_VERSION)
         self.assertEqual(info["CFBundleShortVersionString"], TOOL.PACKAGE_VERSION)
-        paths = (source / "desktop/src-tauri/src/macos_install_paths.rs").read_text(encoding="utf-8")
+        paths = (source / "desktop/src-tauri/src/macos_install_fixed_paths.rs").read_text(encoding="utf-8")
         for key, value in (("PACKAGE_ID", TOOL.PACKAGE_ID), ("FIXTURE_PACKAGE_ID", TOOL.PACKAGE_ID + "-fixture"),
-                           ("PACKAGE_VERSION", TOOL.PACKAGE_VERSION), ("BUNDLE_ID", TOOL.BUNDLE_ID)):
+                           ("BUNDLE_ID", TOOL.BUNDLE_ID)):
             self.assertIn(f'pub const {key}: &str = "{value}";', paths)
+        selected = TOOL.build_release_data(TOOL.BUILD_RELEASE_INPUT.read_bytes())
+        self.assertEqual(selected["packageVersion"], TOOL.PACKAGE_VERSION)
+        self.assertEqual(selected["release"], TOOL.RELEASE)
+        self.assertEqual(TOOL.HISTORICAL_SUPPLIER_RELEASE, "macos26-arm64-project-draft-01")
+        staging = (source / "desktop/tools/stage_macos_installed.py").read_text()
+        supplier = ast.parse(staging)
+        reused = next(node for node in supplier.body if isinstance(node, ast.FunctionDef) and node.name == "reused_runtime")
+        self.assertIn("HISTORICAL_SUPPLIER_RELEASE", {node.id for node in ast.walk(reused) if isinstance(node, ast.Name)})
+        self.assertNotIn("RELEASE", {node.id for node in ast.walk(reused) if isinstance(node, ast.Name)})
 
 
 
@@ -1909,7 +1943,9 @@ class MacNormalPreviewData(unittest.TestCase):
 
     def test_installer_input_requires_the_same_helper_and_rejects_other_executables(self):
         _, _, _, body = normal_cargo_fixture()
-        info = b"inert-info-data"
+        info = TOOL.plistlib.dumps({"CFBundleExecutable": "mobile-release-kit-desktop", "LSMinimumSystemVersion": "26.0",
+                                   "CFBundleIdentifier": TOOL.BUNDLE_ID, "CFBundleShortVersionString": TOOL.PACKAGE_VERSION,
+                                   "CFBundleVersion": TOOL.PACKAGE_VERSION})
         args = SimpleNamespace(runtime=Path("/inert/runtime"), expected_manifest="c" * 64,
             current_runtime=True, app=Path("/inert/app"), expected_vault_helper=TOOL.digest(body),
             output=Path("/inert/output"))
@@ -1941,6 +1977,13 @@ class MacNormalPreviewData(unittest.TestCase):
                 with self.subTest(reason=reason), self.assertRaisesRegex(TOOL.Refused, reason):
                     TOOL.input_command(args)
                 output.assert_not_called()
+            # Direct input staging must validate the source plist projection too;
+            # callers cannot bypass it by skipping the earlier app-copy command.
+            tree.return_value = app
+            output.reset_mock()
+            with mock.patch.object(TOOL, "PACKAGE_VERSION", "99.0.0"), self.assertRaisesRegex(TOOL.Refused, "app-info-binding"):
+                TOOL.input_command(args)
+            output.assert_not_called()
 
     def test_helper_is_separate_signed_before_digest_bound_app_and_not_a_qualification(self):
         root = Path(__file__).absolute().parents[2]

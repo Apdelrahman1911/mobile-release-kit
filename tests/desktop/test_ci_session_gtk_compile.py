@@ -114,7 +114,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         self.assertNotIn("len(SOURCES) == 228", driver)
         self.assertNotIn("len(SOURCES) == 268", driver)
         self.assertEqual(driver.count("len(SOURCES) == 290"), 2)
-        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 73)
+        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 78)
         for relative in (
                 "desktop/offline_preflight_bootstrap.py",
                 "desktop/src-tauri/src/offline_preflight_owner.rs",

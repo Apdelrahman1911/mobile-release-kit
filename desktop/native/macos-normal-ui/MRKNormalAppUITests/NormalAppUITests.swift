@@ -32,7 +32,22 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func dashboard(_ renderer: XCUIElement) throws {
         let heading = renderer.staticTexts.matching(identifier: "Good releases start here.")
         try require(heading.element(boundBy: 0).waitForExistence(timeout: 5), "dashboard heading did not render")
-        _ = try unique(heading, "dashboard heading is ambiguous")
+        // Fixed dashboard query diagnostics only; observations are non-atomic.
+        let observedCount = heading.count
+        if observedCount != 1 {
+            print("MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=initial;matches=\(min(observedCount, 5));exceedsFour=\(observedCount > 4 ? 1 : 0);nonAtomic=1")
+            if observedCount > 1 && observedCount <= 4 {
+                for property in ["identifier", "title", "label", "value", "placeholderValue"] {
+                    let matches = heading.matching(NSPredicate(format: "%K == %@", property, "Good releases start here.")).count
+                    print("MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=\(property);matches=\(min(matches, 5));exceedsFour=\(matches > 4 ? 1 : 0);nonAtomic=1")
+                }
+                let containing = heading.containing(.staticText, identifier: "Good releases start here.").count
+                print("MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=containingSameStaticText;matches=\(min(containing, 5));exceedsFour=\(containing > 4 ? 1 : 0);nonAtomic=1")
+            }
+        }
+        // Later diagnostic observations cannot repair the original singleton refusal.
+        try require(observedCount == 1, "dashboard heading is ambiguous")
+        // End fixed dashboard query diagnostics.
         let open = try unique(renderer.buttons.matching(identifier: "Open project folder"),
                               "ordinary first-party project control is missing or ambiguous")
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true AND hittable == true"), object: open)

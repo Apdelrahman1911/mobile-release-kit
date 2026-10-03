@@ -32,7 +32,10 @@ import zipfile
 import zlib
 
 DESKTOP = Path(__file__).absolute().parents[1]
-RELEASE = "macos26-arm64-project-draft-01"
+BUILD_RELEASE_INPUT = DESKTOP / "macos-installed-inputs/build-release.json"
+BUILD_RELEASE_LIMIT = 4096
+# Provenance label for the immutable historical supplier, not active selection.
+HISTORICAL_SUPPLIER_RELEASE = "macos26-arm64-project-draft-01"
 INSTALL_ROOT = Path("/Library/Application Support/MobileReleaseKit")
 APP_NAME = "Mobile Release Kit.app"
 APP_BINARY = "Contents/MacOS/mobile-release-kit-desktop"
@@ -48,7 +51,6 @@ ANDROID_SUPPORT_LAYOUT = (
      ("NOTICE",)),
 )
 PACKAGE_ID = "dev.mobile-release-kit.desktop.installed"
-PACKAGE_VERSION = "0.1.0"
 BUNDLE_ID = "dev.mobile-release-kit.desktop"
 INSTALLATION_INVENTORY_NAME = "install-inventory.json"
 INSTALLATION_RECORD_NAME = "installation-v1.json"
@@ -202,6 +204,25 @@ def decode(body):
     return value
 
 
+def build_release_data(body):
+    """The same closed fixed build DATA consumed by src-tauri/build.rs."""
+    need(type(body) is bytes and 0 < len(body) <= BUILD_RELEASE_LIMIT, "build-release-size")
+    try:
+        value = decode(body)
+    except (ValueError, RecursionError, OverflowError) as error:
+        raise Refused("build-release-shape") from error
+    need(type(value) is dict and set(value) == {"schemaVersion", "packageVersion", "release"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1, "build-release-shape")
+    version, release = value["packageVersion"], value["release"]
+    need(type(version) is str and len(version) <= 32
+         and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is not None
+         and all(int(part) <= 0xffffffff for part in version.split('.')), "build-release-version")
+    need(type(release) is str and len(release) <= 128 and release.startswith("macos26-arm64-")
+         and len(release) > len("macos26-arm64-") and re.fullmatch(r"[a-z0-9_.-]*[a-z0-9]", release) is not None,
+         "build-release-identity")
+    return value
+
+
 def safe_path(value):
     if type(value) is not str or not value or len(value) > 512 or not value.isascii():
         return False
@@ -305,6 +326,13 @@ def read_at(fd, name, limit, *, zero_flags=False):
 def read(path, limit=MAX_BYTES):
     with parent(path) as (fd, name):
         return read_at(fd, name, limit)[0]
+
+
+def source_build_release():
+    # No argument, installed record, environment override or discovered package
+    # selects this DATA. The complete source projection is separately admitted.
+    value = build_release_data(read(BUILD_RELEASE_INPUT, BUILD_RELEASE_LIMIT))
+    return value["packageVersion"], value["release"]
 
 
 def directories(files):
@@ -513,7 +541,7 @@ def reused_runtime(archive_path):
     successor["files"] = [{"path": name, "sha256": digest(body), "size": len(body)} for name, body in sorted(payload.items()) if name != "manifest.json"]
     successor["inventorySha256"] = digest(canonical(successor["files"]))
     payload["manifest.json"] = canonical(successor) + b"\n"
-    result = {"schemaVersion": 1, "release": RELEASE, "acceptedArchiveSha256": ZIP_SHA, "acceptedTarSha256": TAR_SHA,
+    result = {"schemaVersion": 1, "release": HISTORICAL_SUPPLIER_RELEASE, "acceptedArchiveSha256": ZIP_SHA, "acceptedTarSha256": TAR_SHA,
               "originalManifestSha256": ORIGINAL_MANIFEST, "successorManifestSha256": digest(payload["manifest.json"]),
               "protocolSha256": PROTOCOL, "unchangedOriginalFileCount": len(original_rows), "addedNotices": sorted(NOTICES),
               "qualification": "description-only-not-build-or-install-authority"}
@@ -975,6 +1003,15 @@ def android_support_command(args):
             "qualification": "original-archive-and-notice-data-only-no-vendor-execution"}
 
 
+def source_app_info():
+    info = read(DESKTOP / "macos-installed-inputs/Info.plist", 16384)
+    parsed = plistlib.loads(info)
+    need(parsed["CFBundleExecutable"] == "mobile-release-kit-desktop" and parsed["LSMinimumSystemVersion"] == "26.0"
+         and parsed["CFBundleIdentifier"] == BUNDLE_ID
+         and parsed["CFBundleShortVersionString"] == parsed["CFBundleVersion"] == PACKAGE_VERSION, "app-info-binding")
+    return info
+
+
 def app_command(args):
     cargo_messages = getattr(args, "normal_cargo_messages", None)
     cargo_target = getattr(args, "normal_cargo_target_dir", None)
@@ -987,11 +1024,7 @@ def app_command(args):
     macho(helper, system_only=True)
     normal = (normal_cargo_artifact(read(cargo_messages, 8 * 1024 * 1024), args.binary, cargo_target, body)
               if cargo_messages is not None else None)
-    info = read(DESKTOP / "macos-installed-inputs/Info.plist", 16384)
-    parsed = plistlib.loads(info)
-    need(parsed["CFBundleExecutable"] == "mobile-release-kit-desktop" and parsed["LSMinimumSystemVersion"] == "26.0"
-         and parsed["CFBundleIdentifier"] == BUNDLE_ID
-         and parsed["CFBundleShortVersionString"] == parsed["CFBundleVersion"] == PACKAGE_VERSION, "app-info-binding")
+    info = source_app_info()
     files = {APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555), "Contents/Info.plist": (info, 0o644),
              "Contents/PkgInfo": (b"APPL????", 0o644),
              "Contents/Resources/icon.png": (read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024), 0o644)}
@@ -1024,7 +1057,7 @@ def input_command(args):
     runtime = runtime_tree(args.runtime, args.expected_manifest, current=args.current_runtime)
     app = tree(args.app)
     need(APP_BINARY in app and VAULT_HELPER in app and "Contents/Info.plist" in app and "Contents/_CodeSignature/CodeResources" in app
-         and app["Contents/Info.plist"][0] == read(DESKTOP / "macos-installed-inputs/Info.plist", 16384), "signed-app-roster")
+         and app["Contents/Info.plist"][0] == source_app_info(), "signed-app-roster")
     macho(app[APP_BINARY][0])
     macho(app[VAULT_HELPER][0], system_only=True)
     need(sha(args.expected_vault_helper) and digest(app[VAULT_HELPER][0]) == args.expected_vault_helper,
@@ -2060,7 +2093,12 @@ def main(argv=None):
 
 if __name__ == "__main__":
     try:
+        PACKAGE_VERSION, RELEASE = source_build_release()
         raise SystemExit(main())
     except (Refused, OSError, ValueError, KeyError, TypeError, RecursionError, OverflowError, zipfile.BadZipFile, tarfile.TarError, ET.ParseError):
         print(GENERIC_REFUSAL, file=sys.stderr)
         raise SystemExit(1)
+else:
+    # Contract consumers use the same fixed source selection. No payload is
+    # imported or executed; only this bounded source DATA is read once.
+    PACKAGE_VERSION, RELEASE = source_build_release()
