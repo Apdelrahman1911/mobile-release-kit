@@ -278,7 +278,7 @@ impl Record {
     }
 }
 impl Observation {
-    pub(super) fn attach_recovery(self: &Arc<Self>, document: &DocumentBinding, owner: &ProjectRecoveryOwner) -> Result<(), BridgeError> {
+    pub(crate) fn attach_recovery(self: &Arc<Self>, document: &DocumentBinding, owner: &ProjectRecoveryOwner) -> Result<(), BridgeError> {
         if let Some(control) = &self.recovery { control.attach(self, document, owner)?; } Ok(())
     }
     pub(crate) fn recovery_request(&self, command: Command, body: &Value) {

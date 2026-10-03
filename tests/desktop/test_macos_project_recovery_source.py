@@ -67,6 +67,10 @@ class MacProjectRecoverySourceTests(unittest.TestCase):
         self.assertIn('claimed: AtomicBool', ios)
         self.assertIn('self.claimed.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)', ios)
         recovery = (MAC / "installed_shell_observation_macos_recovery.rs").read_text()
+        # The implementation is two modules below the shell caller, not one.
+        self.assertEqual(recovery.count('    pub(crate) fn attach_recovery('), 1)
+        parent = (MAC / "installed_shell_observation_macos.rs").read_text()
+        self.assertIn('#[path = "installed_shell_observation_macos_recovery.rs"]\npub(crate) mod recovery;', parent)
         attach = recovery.split('    fn attach(', 1)[1].split('    pub(crate) fn permits', 1)[0]
         self.assertLess(attach.index('owner.observe_installed_selection()?'), attach.index('document.admit_installed_recovery('))
         permits = recovery.split('    pub(crate) fn permits(', 1)[1].split('    pub(crate) fn claim', 1)[0]
@@ -74,6 +78,11 @@ class MacProjectRecoverySourceTests(unittest.TestCase):
         for forbidden in ('tauri::command', 'Command::new(', 'std::process', '.cancel_case(', 'prepare_hold('):
             self.assertNotIn(forbidden, recovery)
         shell = (MAC / "shell.rs").read_text()
+        observer_cfg = shell.split('\npub(crate) mod installed_observation;', 1)[0].splitlines()[-4:]
+        self.assertIn('#[cfg_attr(target_os = "macos", path = "installed_shell_observation_macos.rs")]', observer_cfg)
+        for condition in ('all(test, debug_assertions', 'feature = "macos-installed-observation"',
+                          'not(feature = "macos-installed-installer")'):
+            self.assertIn(condition, observer_cfg[0])
         self.assertEqual(shell.count('q.attach_recovery(&document, &bridge.project_recovery)?'), 1)
         for command in ('Prepare', 'Start', 'Status', 'Cancel'):
             self.assertEqual(shell.count(f'installed_recovery_request!(state, {command}, &value);'), 1)
