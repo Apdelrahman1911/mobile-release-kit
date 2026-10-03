@@ -1018,38 +1018,59 @@ class CommandContractTests(unittest.TestCase):
             factory.assert_not_called()
 
     def test_outer_wait_only_pauses_without_progress_and_rechecks_before_success(self):
-        for ending in ("ready", "delayed", "eof-ready", "eof-incomplete", "cancelled", "expired"):
+        for ending in ("ready", "delayed", "eof-ready", "eof-incomplete", "eof-output-pending", "cancelled", "expired"):
             with self.subTest(ending=ending):
                 ctx = self.context()
                 engine = command._Outer.__new__(command._Outer)
-                engine.ctx, engine.wire = ctx, SimpleNamespace(eof=False, reader=_InertLease())
+                engine.ctx, engine.wire = ctx, SimpleNamespace(eof=False, poisoned=False, reader=_InertLease())
+                engine.phase, engine.terminal = "RUNNING", None
+                engine.protocol_failed = engine.output_failed = False
                 engine.readers, engine.output_eof = [_InertLease(102), _InertLease(103)], [False, True]
                 state = {"ready": False, "pumps": 0, "now": time.monotonic_ns()}
                 interruption = KeyboardInterrupt()
                 def pump():
                     state["pumps"] += 1
                     self.assertLessEqual(state["pumps"], 2)
-                    state["ready"] = ending != "eof-incomplete" and not (
+                    state["ready"] = ending not in ("eof-incomplete", "eof-output-pending") and not (
                         ending == "delayed" and state["pumps"] == 1)
                     engine.wire.eof = ending.startswith("eof-")
+                    if ending == "eof-output-pending": engine.terminal = {"inert": True}
                     if ending == "cancelled": ctx.primary = interruption
                     if ending == "expired": state["now"] = ctx.run
                 engine._pump = pump
+                guard_states = []
+                def call():
+                    try:
+                        engine._until(lambda: state["ready"])
+                    except BaseException as error:
+                        trace = error.__traceback__
+                        while trace is not None:
+                            if trace.tb_frame.f_code is command._Outer._until.__code__:
+                                guard_states.append(trace.tb_frame.f_locals.get("_wait_guard_state"))
+                            trace = trace.tb_next
+                        raise
                 with patch.object(command.time, "monotonic_ns", side_effect=lambda: state["now"]), \
                      patch.object(command, "_pause") as pause:
                     if ending == "cancelled":
                         with self.assertRaises(KeyboardInterrupt) as caught:
-                            engine._until(lambda: state["ready"])
+                            call()
                         self.assertIs(caught.exception, interruption)
-                    elif ending in ("expired", "eof-incomplete"):
+                    elif ending in ("expired", "eof-incomplete", "eof-output-pending"):
                         with self.assertRaises(owned.ProcessError):
-                            engine._until(lambda: state["ready"])
+                            call()
                     else:
-                        engine._until(lambda: state["ready"])
+                        call()
                     if ending == "delayed":
                         pause.assert_called_once_with(ctx.run, readers=(engine.wire.reader, engine.readers[0]))
                     else: pause.assert_not_called()
                 self.assertEqual(state["pumps"], 2 if ending == "delayed" else 1)
+                if ending in ("eof-incomplete", "eof-output-pending"):
+                    self.assertEqual(guard_states, [("RUNNING", True, True, False,
+                                     ending == "eof-output-pending", False, True, False, False)])
+                elif ending in ("cancelled", "expired"):
+                    self.assertEqual(guard_states, [None])  # Successful guard state was cleared.
+                else:
+                    self.assertEqual(guard_states, [])
 
     def test_fence_checkpoint_only_pauses_for_incomplete_send_or_unavailable_ack(self):
         for ending in ("ready", "partial", "eagain", "delayed-ack", "lost", "expired"):

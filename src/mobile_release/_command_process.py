@@ -3244,7 +3244,15 @@ class _Outer:
         while not predicate():
             self.ctx.check()
             self._pump()
+            # Immutable diagnostic DATA for this exact guard, not finality.
+            # Clear after a successful guard so later failures cannot reuse it.
+            _wait_guard_state = (self.phase, self.wire is not None,
+                                 self.wire.eof if self.wire is not None else False,
+                                 self.wire.poisoned if self.wire is not None else False,
+                                 self.terminal is not None, self.output_eof[0], self.output_eof[1],
+                                 self.protocol_failed, self.output_failed)
             _require(self.wire is not None and (not self.wire.eof or predicate()))
+            _wait_guard_state = None
             self.ctx.check()
             if not predicate():
                 readers = tuple(reader for reader, eof in (

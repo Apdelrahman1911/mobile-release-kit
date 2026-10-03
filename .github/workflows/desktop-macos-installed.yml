@@ -144,8 +144,11 @@ jobs:
           set -uo pipefail
           set -o noclobber
           umask 077
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare > "$MRK_MACOS_WORK/helper-entry.stdout" 2> "$MRK_MACOS_WORK/helper-entry.stderr"
-          status=$?
+          if "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare > "$MRK_MACOS_WORK/helper-entry.stdout" 2> "$MRK_MACOS_WORK/helper-entry.stderr"; then
+            status=0
+          else
+            status=$?
+          fi
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/helper-entry.status" || exit 125
           exit "$status"
       - name: Recheck original source and preserve only bounded helper diagnostics

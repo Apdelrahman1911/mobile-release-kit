@@ -141,10 +141,12 @@ def original_failure(error, owner, checkout, timeout, limit):
                 "owned command produced incomplete output": "incomplete-output",
             }.get(arguments[0], "unclassified")
     # load_owner admitted these exact SOURCE files before the original call.
-    # No basename/normalization aliases, filesystem reads or frame locals here.
+    # No basename/normalization aliases or filesystem reads. The sole local
+    # exception below is the exact guard's immutable, closed diagnostic tuple.
     sources = {str(checkout / "src/mobile_release" / name): "src/mobile_release/" + name
                for name in ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py")}
     frames, visited, foreign = [], 0, 0
+    wait_guard, wait_sites = None, 0
     trace = BaseException.__traceback__.__get__(error)
     while trace is not None and visited < 32:
         visited += 1
@@ -159,12 +161,31 @@ def original_failure(error, owner, checkout, timeout, limit):
             if len(frames) == 8:
                 frames.pop(0)
             frames.append({"source": source, "function": function, "line": line})
+            following = trace.tb_next
+            if (error_type == "ProcessError" and classification == "protocol-or-original-ownership"
+                    and source == "src/mobile_release/_command_process.py"
+                    and code.co_qualname == "_Outer._until" and function == "_until"
+                    and following is not None and following.tb_next is None
+                    and following.tb_frame.f_code.co_filename == filename
+                    and following.tb_frame.f_code.co_name == following.tb_frame.f_code.co_qualname == "_require"):
+                wait_sites += 1
+                # Never inspect the engine/predicate or enumerate frame locals.
+                value = trace.tb_frame.f_locals.get("_wait_guard_state")
+                if (type(value) is tuple and len(value) == 9 and type(value[0]) is str
+                        and value[0] in ("STARTING", "PREPARING", "WAIT_READY", "RUNNING")
+                        and all(type(item) is bool for item in value[1:])):
+                    wait_guard = dict(zip(("phase", "wirePresent", "wireEof", "wirePoisoned",
+                                           "terminalPresent", "stdoutEof", "stderrEof",
+                                           "protocolFailed", "outputFailed"), value))
+                    if not value[1]:
+                        wait_guard["wireEof"] = wait_guard["wirePoisoned"] = None
         trace = trace.tb_next
     result = {"schemaVersion": 1, "available": True, "ownerErrorType": error_type,
               "classification": classification, "timeoutSeconds": timeout,
               "outputLimitBytes": limit, "captureMode": "bytes", "frames": frames,
               "visitedFrames": visited, "omittedFrames": visited - len(frames),
-              "foreignFrames": foreign, "tracebackTruncated": trace is not None}
+              "foreignFrames": foreign, "tracebackTruncated": trace is not None,
+              "waitGuard": wait_guard if wait_sites == 1 and trace is None else None}
     need(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")) <= 2048,
          "original-failure-diagnostic-bound")
     return result

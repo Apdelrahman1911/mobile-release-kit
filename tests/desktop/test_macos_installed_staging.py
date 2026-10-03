@@ -338,6 +338,50 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         for function, line in (("PRIVATE\nframe", 1), ("x" * 65, 1), ("data_frame", 1000001)):
             self.assertEqual(trace_data(exact, function=function, line=line)["frames"], [])
 
+        # Only the direct, source-bound guard's immutable tuple is diagnostic.
+        # These are inert Python code objects, never a command/native owner.
+        def require_template(condition, error):
+            if not condition:
+                raise error
+
+        def until_template(value, require, error, clear):
+            _wait_guard_state = value
+            if clear:
+                require(True, error)
+                _wait_guard_state = None
+            require(False, error)
+
+        def wait_data(value, *, filename=exact, qualified="_Outer._until", guard="_require", clear=False):
+            guard_code = require_template.__code__.replace(co_filename=filename, co_name=guard, co_qualname=guard)
+            until_code = until_template.__code__.replace(co_filename=filename, co_name="_until", co_qualname=qualified)
+            try:
+                FunctionType(until_code, {})(value, FunctionType(guard_code, {}),
+                    ProcessErrorData("owned command protocol or original ownership is incomplete"), clear)
+            except ProcessErrorData as error:
+                return module.original_failure(error, owner, checkout, 480, 4 * 1024 * 1024)
+            self.fail("inert wait guard was not raised")
+
+        state = ("RUNNING", True, True, False, False, False, True, False, False)
+        missing = wait_data(state)
+        pending = wait_data((*state[:4], True, *state[5:]))
+        self.assertFalse(missing["waitGuard"]["terminalPresent"])
+        self.assertTrue(pending["waitGuard"]["terminalPresent"])
+        self.assertFalse(pending["waitGuard"]["stdoutEof"])
+        self.assertTrue(pending["waitGuard"]["stderrEof"])
+        absent = wait_data(("STARTING", False, False, False, False, False, False, False, False))
+        self.assertIsNone(absent["waitGuard"]["wireEof"])
+        self.assertIsNone(absent["waitGuard"]["wirePoisoned"])
+        for invalid in (None, list(state), state[:-1], (*state, True),
+                        ("PRIVATE", *state[1:]), ("RUNNING", 1, *state[2:]),
+                        ("RUNNING", object(), *state[2:])):
+            diagnostic = wait_data(invalid)
+            self.assertIsNone(diagnostic["waitGuard"])
+            self.assertNotIn("PRIVATE", json.dumps(diagnostic))
+        for options in ({"filename": "/unrelated/_command_process.py"},
+                        {"qualified": "NotOuter._until"}, {"guard": "other_guard"}, {"clear": True}):
+            self.assertIsNone(wait_data(state, **options)["waitGuard"])
+        self.assertLessEqual(len(json.dumps(pending, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+
         # Even diagnostic inspection failure must re-raise the identical owner
         # exception and leave the uncertain target; this is still a DATA double.
         with tempfile.TemporaryDirectory() as temporary:
