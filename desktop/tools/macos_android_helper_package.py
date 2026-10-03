@@ -118,6 +118,58 @@ def build_environment(environment, work):
     return selected
 
 
+def original_failure(error, owner, checkout, timeout, limit):
+    """Bounded original exception DATA; never output, completion or custody proof."""
+    need(type(timeout) is int and 0 < timeout < 2 ** 31
+         and type(limit) is int and 0 < limit < 2 ** 31, "diagnostic-request-bound")
+    error_type = next((name for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
+                       if type(error) is getattr(owner, name, None)), "other")
+    classification = "unclassified"
+    if error_type != "other":
+        # Bypass subclass properties; never render an arbitrary exception.
+        arguments = BaseException.args.__get__(error)
+        if type(arguments) is tuple and len(arguments) == 1 and type(arguments[0]) is str and len(arguments[0]) <= 128:
+            classification = {
+                "owned command output exceeds its bound": "output-bound",
+                "owned command exceeded its original deadline": "deadline",
+                "owned command protocol or original ownership is incomplete": "protocol-or-original-ownership",
+                "owned command original parent ended": "original-parent-ended",
+                "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+                "owned command failed, timed out, or produced incomplete output": "failed-timeout-or-incomplete-output",
+                "owned command executable could not be started": "exec-rejected",
+                "owned command was stopped before execution": "stopped-before-execution",
+                "owned command produced incomplete output": "incomplete-output",
+            }.get(arguments[0], "unclassified")
+    # load_owner admitted these exact SOURCE files before the original call.
+    # No basename/normalization aliases, filesystem reads or frame locals here.
+    sources = {str(checkout / "src/mobile_release" / name): "src/mobile_release/" + name
+               for name in ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py")}
+    frames, visited, foreign = [], 0, 0
+    trace = BaseException.__traceback__.__get__(error)
+    while trace is not None and visited < 32:
+        visited += 1
+        code = trace.tb_frame.f_code
+        filename, function, line = code.co_filename, code.co_name, trace.tb_lineno
+        source = sources.get(filename) if type(filename) is str and len(filename) <= 4096 else None
+        if source is None:
+            foreign += 1
+        elif (type(function) is str and len(function) <= 64
+              and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|<(?:module|lambda|listcomp|setcomp|dictcomp|genexpr)>", function)
+              and type(line) is int and 0 < line <= 1000000):
+            if len(frames) == 8:
+                frames.pop(0)
+            frames.append({"source": source, "function": function, "line": line})
+        trace = trace.tb_next
+    result = {"schemaVersion": 1, "available": True, "ownerErrorType": error_type,
+              "classification": classification, "timeoutSeconds": timeout,
+              "outputLimitBytes": limit, "captureMode": "bytes", "frames": frames,
+              "visitedFrames": visited, "omittedFrames": visited - len(frames),
+              "foreignFrames": foreign, "tracebackTruncated": trace is not None}
+    need(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")) <= 2048,
+         "original-failure-diagnostic-bound")
+    return result
+
+
 class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
@@ -224,6 +276,14 @@ class Operation:
             for field in ("dispatched", "contained", "cleanup_complete"):
                 value = getattr(error, field, None)
                 record[field] = value if type(value) is bool else None
+            try:
+                record["originalFailure"] = original_failure(error, self.owner, self.checkout, timeout, limit)
+            except BaseException:
+                # Diagnostic failure must never replace the original exception.
+                try:
+                    record["originalFailure"] = {"schemaVersion": 1, "available": False}
+                except BaseException:
+                    pass
             raise
         need(type(result) is subprocess.CompletedProcess and type(result.returncode) is int
              and type(result.args) in (list, tuple) and tuple(result.args) == tuple(argv)

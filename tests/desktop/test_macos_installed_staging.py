@@ -17,7 +17,7 @@ from subprocess import CompletedProcess
 import sys
 import tempfile
 import tomllib
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -75,7 +75,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
     def encoded(self, rows):
         return b"\n".join(json.dumps(row).encode("ascii") for row in rows) + b"\n"
 
-    def fixture(self, root, failure=None):
+    def fixture(self, root, failure=None, owner_error=None):
         module = ANDROID_HELPER
         checkout, work = root / "checkout", root / "work"
         checkout.mkdir(mode=0o700); work.mkdir(mode=0o700)
@@ -105,6 +105,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 else:
                     os.link(binary, alias)
                 if failure == "owner":
+                    if owner_error is not None:
+                        raise owner_error
                     raise RuntimeError("DATA double original result unavailable")
                 output = self.encoded(self.cargo_rows(checkout, target))
                 return CompletedProcess(argv, 0, output.decode() if failure == "malformed" else output, b"")
@@ -238,6 +240,126 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 if failure == "close":
                     self.assertEqual(len(injected), 1)
                     self.assertFalse(receipt["originalClosesKnown"])
+
+        class ProcessErrorData(RuntimeError):
+            dispatched, contained, cleanup_complete = True, False, False
+
+            @property
+            def args(self):
+                raise AssertionError("do not invoke an exception property")
+
+            def __str__(self):
+                raise AssertionError("do not render an exception")
+
+        class SubclassData(ProcessErrorData):
+            pass
+
+        known = (
+            ("owned command output exceeds its bound", "output-bound"),
+            ("owned command exceeded its original deadline", "deadline"),
+            ("owned command protocol or original ownership is incomplete", "protocol-or-original-ownership"),
+            ("owned command original parent ended", "original-parent-ended"),
+            ("owned command cleanup could not be confirmed", "cleanup-unconfirmed"),
+            ("owned command failed, timed out, or produced incomplete output", "failed-timeout-or-incomplete-output"),
+            ("owned command executable could not be started", "exec-rejected"),
+            ("owned command was stopped before execution", "stopped-before-execution"),
+            ("owned command produced incomplete output", "incomplete-output"),
+        )
+        cases = [(ProcessErrorData(message), expected) for message, expected in known] + [
+            (RuntimeError(known[0][0]), "unclassified"),
+            (SubclassData(known[0][0]), "unclassified"),
+            (ProcessErrorData(known[0][0] + " PRIVATE"), "unclassified"),
+            (ProcessErrorData("PRIVATE" * 4096), "unclassified"),
+            (ProcessErrorData(known[0][0], "PRIVATE"), "unclassified"),
+            (ProcessErrorData({"PRIVATE": "not string data"}), "unclassified"),
+        ]
+        for error, expected in cases:
+            with tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary), "owner", error)
+                owner.ProcessError = ProcessErrorData
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+                with self.assertRaises(module.Refused):
+                    operation.execute()
+                receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
+                call = receipt["originalCalls"][0]
+                diagnostic = call["originalFailure"]
+                self.assertEqual(diagnostic["classification"], expected)
+                self.assertEqual(diagnostic["ownerErrorType"], "ProcessError" if type(error) is ProcessErrorData else "other")
+                self.assertEqual((diagnostic["timeoutSeconds"], diagnostic["outputLimitBytes"], diagnostic["captureMode"]),
+                                 (480, 4 * 1024 * 1024, "bytes"))
+                encoded = json.dumps(diagnostic, sort_keys=True, separators=(",", ":")).encode("ascii")
+                self.assertLessEqual(len(encoded), 2048)
+                self.assertNotIn(b"PRIVATE", encoded)
+                self.assertNotIn(b"owned command ", encoded)
+                self.assertEqual((receipt["passed"], receipt["targetRetired"], call["returned"]), (False, False, False))
+                self.assertNotIn("returncode", call)
+                self.assertTrue((work / "android-helper-target").is_dir())
+                self.assertFalse((work / "android-helper-build.jsonl").exists())
+                self.assertFalse((work / "android-helper-build.stderr").exists())
+                self.assertFalse((work / "android-helper-build.status").exists())
+                self.assertEqual(len(observations), 1)
+                if type(error) is ProcessErrorData:
+                    self.assertEqual((call["dispatched"], call["contained"], call["cleanup_complete"]), (True, False, False))
+
+        # Synthetic Python frames only: no owner import, process or native run.
+        checkout = Path("/DATA-only/checkout")
+        owner = SimpleNamespace(ProcessError=ProcessErrorData)
+
+        def template(depth, recurse, error):
+            if depth:
+                return recurse(depth - 1, recurse, error)
+            raise error
+
+        def trace_data(filename, depth=0, function="data_frame", line=1):
+            code = template.__code__.replace(co_filename=filename, co_name=function, co_firstlineno=line)
+            traced = FunctionType(code, {})
+            try:
+                traced(depth, traced, ProcessErrorData(known[0][0]))
+            except ProcessErrorData as error:
+                return module.original_failure(error, owner, checkout, 480, 4 * 1024 * 1024)
+            self.fail("synthetic traceback was not raised")
+
+        for name in ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py"):
+            diagnostic = trace_data(str(checkout / "src/mobile_release" / name))
+            self.assertEqual(diagnostic["frames"], [{"source": "src/mobile_release/" + name,
+                                                    "function": "data_frame", "line": 4}])
+        exact = str(checkout / "src/mobile_release/_command_process.py")
+        for foreign in ("/unrelated/_command_process.py", str(checkout / "src/mobile_release/../mobile_release/_command_process.py")):
+            diagnostic = trace_data(foreign)
+            self.assertEqual(diagnostic["frames"], [])
+            self.assertEqual(diagnostic["foreignFrames"], diagnostic["visitedFrames"])
+        diagnostic = trace_data(exact, 12, "x" * 64)
+        self.assertEqual(len(diagnostic["frames"]), 8)
+        self.assertFalse(diagnostic["tracebackTruncated"])
+        self.assertEqual(diagnostic["omittedFrames"], diagnostic["visitedFrames"] - 8)
+        self.assertLessEqual(len(json.dumps(diagnostic, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+        diagnostic = trace_data(exact, 40)
+        self.assertEqual((diagnostic["visitedFrames"], len(diagnostic["frames"]), diagnostic["tracebackTruncated"]), (32, 8, True))
+        for function, line in (("PRIVATE\nframe", 1), ("x" * 65, 1), ("data_frame", 1000001)):
+            self.assertEqual(trace_data(exact, function=function, line=line)["frames"], [])
+
+        # Even diagnostic inspection failure must re-raise the identical owner
+        # exception and leave the uncertain target; this is still a DATA double.
+        with tempfile.TemporaryDirectory() as temporary:
+            error = ProcessErrorData(known[0][0])
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary), "owner", error)
+            owner.ProcessError = ProcessErrorData
+            operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+            try:
+                operation.open()
+                with mock.patch.object(module, "original_failure", side_effect=KeyboardInterrupt("DATA diagnostic failed")):
+                    with self.assertRaises(ProcessErrorData) as caught:
+                        operation.call("build", ["cargo", "build"], module.build_environment(environment, work),
+                                       cwd=checkout, timeout=480, limit=4 * 1024 * 1024)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(operation.calls[0]["originalFailure"], {"schemaVersion": 1, "available": False})
+                self.assertFalse(operation.calls[0]["returned"])
+            finally:
+                operation.finish()
+            self.assertTrue((work / "android-helper-target").is_dir())
+            self.assertFalse(operation.receipt["targetRetired"])
+            self.assertTrue(operation.receipt["originalClosesKnown"])
+            self.assertEqual(len(observations), 1)
 
     def test_clean_environment_and_configured_profile_refuse_any_ad_hoc_fallback(self):
         module = ANDROID_HELPER
