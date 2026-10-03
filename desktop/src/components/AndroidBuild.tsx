@@ -10,8 +10,9 @@ import { androidCatalogActive, sameAndroidCatalogSelection } from '../androidToo
 import { androidToolSourceHelp, androidToolSourcesActive } from '../androidToolSources.ts';
 import type { AndroidToolSourceRole, AndroidToolSourcesStatus } from '../androidToolSources.ts';
 import { androidToolRegistrationActive, androidToolRegistrationPrerequisiteText, androidToolRegistrationReasonText,
-  sameAndroidToolRegistrationIdentity } from '../androidToolRegistration.ts';
-import type { AndroidToolRegistrationProblem, AndroidToolRegistrationStatus } from '../androidToolRegistration.ts';
+  sameAndroidToolRegistrationIdentity, androidToolServiceActive, sameAndroidToolServiceIdentity } from '../androidToolRegistration.ts';
+import type { AndroidToolRegistrationProblem, AndroidToolRegistrationStatus, AndroidToolServiceStatus,
+  AndroidToolServiceState, AndroidToolServiceOutcome } from '../androidToolRegistration.ts';
 
 const phases: Record<AndroidBuildPhase, string> = { 'awaiting-consent': 'Awaiting your approval', starting: 'Starting build',
   running: 'Build running', stopping: 'Stopping · waiting for cleanup', terminal: 'Build request finished', unknown: 'Cleanup needs attention' };
@@ -75,12 +76,20 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       {(androidToolRegistrationActive(state.toolRegistration) || state.toolRegistration?.review) && <button type="button" className="button secondary small" disabled={!controller.canCancelToolRegistration()} onClick={() => controller.cancelToolRegistration()}>{sameAndroidToolRegistrationIdentity(state.registrationCancelClaimed, state.toolRegistration?.operation ?? null)
         ? 'Cancel / discard requested · waiting for settlement' : state.toolRegistration?.review ? 'Discard this source review' : 'Cancel this inspection / copy'}</button>}
     </>}
+    {state.toolService?.availability !== 'unsupported-platform' && state.serviceListening && <>
+      <button type="button" className="button secondary small" disabled={!controller.canCheckToolServiceStatus()}
+        onClick={() => void controller.checkToolServiceStatus()}>{state.serviceReadPending ? 'Reading service status…' : 'Read service action status'}</button>
+      {androidToolServiceActive(state.toolService) && <button type="button" className="button secondary small"
+        disabled={!controller.canCancelToolService()} onClick={() => controller.cancelToolService()}>
+        {sameAndroidToolServiceIdentity(state.serviceCancelClaimed, state.toolService?.operation ?? null)
+          ? 'Service cancellation requested · waiting for cleanup' : 'Cancel this service action'}</button>}
+    </>}
     {onHelp && <HelpButton content={androidBuildCancelHelp} onHelp={onHelp} />}
     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>Show in Releases</button>}
   </div>;
   if (compact) return <section className="notice notice-warning offline-global" aria-label="Android build status">
     <Icon name="shield" size={20} /><div><strong>Android tools / build · {operationProjectName ?? projectName ?? 'original application'}</strong>
-      <p>{androidToolRegistrationActive(state.toolRegistration) || state.toolRegistration?.review ? 'Original inspection / registration: ' + state.toolRegistration?.phase + '.' : androidToolSourcesActive(state.toolSources) ? 'Original folder selection: ' + state.toolSources?.phase + '.' : androidCatalogActive(state.catalogStatus) ? 'Original protected-tool read: ' + state.catalogStatus?.phase + '.' : op ? phases[op.phase] : 'Waiting for confirmation of the original request.'} {owned}</p>{controls}
+      <p>{androidToolServiceActive(state.toolService) ? 'Original service setup: ' + state.toolService?.phase + '.' : androidToolRegistrationActive(state.toolRegistration) || state.toolRegistration?.review ? 'Original inspection / registration: ' + state.toolRegistration?.phase + '.' : androidToolSourcesActive(state.toolSources) ? 'Original folder selection: ' + state.toolSources?.phase + '.' : androidCatalogActive(state.catalogStatus) ? 'Original protected-tool read: ' + state.catalogStatus?.phase + '.' : op ? phases[op.phase] : 'Waiting for confirmation of the original request.'} {owned}</p>{controls}
       <p>Cancel is not rollback. Protected copies, project changes, network effects or signed outputs may already exist.</p>
     </div>
   </section>;
@@ -89,6 +98,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     <SectionHeading title="Build Android app" description="Build the selected saved configuration, then inspect its AAB. This does not publish a release.">
       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={androidBuildHelp} onHelp={onHelp} />}
     </SectionHeading>
+    <AndroidToolService state={state} controller={controller} onHelp={onHelp} />
     <AndroidToolSources state={state} controller={controller} onHelp={onHelp} />
     <AndroidToolRegistration state={state} controller={controller} onHelp={onHelp} />
     <AndroidToolchainCatalog state={state} controller={controller} onHelp={onHelp} />
@@ -145,6 +155,64 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
 }
 
 
+const servicePhases: Record<AndroidToolServiceStatus['phase'], string> = {
+  idle: 'Not checked this session', checking: 'Checking the installed service', requesting: 'Requesting system registration',
+  'opening-settings': 'Opening the system approval page', settling: 'Waiting for original cleanup', stopping: 'Stopping the original action',
+  complete: 'Service action completed', refused: 'Service action refused', cancelled: 'Service action cancelled', unknown: 'Service cleanup is unconfirmed',
+};
+const serviceStates: Record<AndroidToolServiceState, string> = {
+  'not-registered': 'Not registered with macOS', enabled: 'Enabled in macOS', 'requires-approval': 'Approval required in System Settings',
+  'not-found': 'The expected service was not found', unavailable: 'No usable service state', error: 'macOS could not provide a usable service state',
+};
+const serviceOutcomes: Record<AndroidToolServiceOutcome, string> = {
+  'not-entered': 'No system action entered', observed: 'Read-only service observation returned',
+  'registration-requested': 'Registration request returned', 'already-registered': 'Service was already registered',
+  'needs-approval': 'macOS requires your approval', 'settings-requested': 'System Settings open request returned',
+  'denied-by-user': 'macOS reported that registration was denied', stopped: 'Action stopped', refused: 'Request refused',
+  error: 'System request failed', unknown: 'System outcome is unknown',
+};
+const serviceHelp: HelpContent = {
+  label: 'Android system service on macOS', requiredness: 'conditional',
+  requiredWhen: 'Before registering a protected Android tool copy on a supported Mac. Source folders are not required for this setup step.',
+  what: 'A fixed helper supplied with the signed app creates protected tool copies. Check reads its installed identity and current macOS state. Registration and opening Settings each require a separate button click.',
+  why: 'macOS controls permission for the helper. An enabled service still must authenticate each original copy request; it is not permission to read your selected folders or run a build.',
+  where: 'Install a correctly signed Mobile Release Kit release from its publisher. If approval is required, use Open approval settings, then find Mobile Release Kit under General → Login Items (or Login Items & Extensions) and review the system request.',
+  format: 'No service name, administrator command, path or certificate is entered here. Select the separate checkbox only when you want this installed helper registered with macOS. Afterwards choose Check installed service again.',
+  failure: 'A missing shipping signature must be fixed by the publisher, not with local administrator commands or ad-hoc signing. Denied, awaiting approval and unavailable are different states. Cancel does not unregister or undo a completed system action; keep original Status until cleanup is confirmed.',
+};
+function AndroidToolService({ state, controller, onHelp }: {
+  state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
+}) {
+  const status = state.toolService, reason = controller.serviceActionReason(), registrationReason = controller.serviceRegistrationReason();
+  if (status?.availability === 'unsupported-platform' || !state.serviceListening && !status) return null;
+  return <section className="session-review" aria-label="Android system service setup">
+    <div className="inline-heading"><h3>Set up the Android system service</h3>{onHelp && <HelpButton content={serviceHelp} onHelp={onHelp} />}</div>
+    <p>Check the helper included with the installed Mac app. You can do this before choosing Java, SDK or Gradle folders. Nothing is registered automatically.</p>
+    <div className="button-row">
+      <button type="button" className="button secondary small" disabled={reason !== null}
+        onClick={() => void controller.checkAndroidToolService()}>Check installed service</button>
+      <button type="button" className="button secondary small" disabled={reason !== null}
+        onClick={() => void controller.openAndroidToolServiceApprovalSettings()}>Open approval settings</button>
+    </div>
+    <p className="save-note">Check is read-only. Opening System Settings does not approve or register anything. Approve only after reviewing the macOS prompt, then explicitly Check again.</p>
+    <label className="offline-ack"><input type="checkbox" checked={state.serviceConsent !== null} disabled={reason !== null}
+      onChange={(event) => { if (status) controller.setServiceRegistrationAcknowledged(status.setupGeneration, event.target.checked); }} />
+      <span>I authorize one registration request for the fixed Android helper supplied with this signed app. This is not approval to copy tools, accept vendor licenses, build, sign or publish a release.</span></label>
+    <button type="button" className="button secondary" disabled={registrationReason !== null}
+      onClick={() => void controller.requestAndroidToolServiceRegistration()}>Request system-service registration</button>
+    {reason ? <p className="review-caution">{reason}</p> : registrationReason && <p className="save-note">{registrationReason}</p>}
+    {status && <div role="status" aria-live="polite">
+      <p><strong>{servicePhases[status.phase]}.</strong> {status.operation && <>Original project: {status.operation.context.projectId}.</>}</p>
+      {status.observation && <p>{serviceStates[status.observation.state]}. {serviceOutcomes[status.observation.outcome]}.</p>}
+      {status.reason !== 'none' && <p>{androidToolRegistrationReasonText[status.reason]}</p>}
+      {status.observation?.mutationReturned && <p className="save-note">A system action actually returned. Cancellation cannot undo that action.</p>}
+    </div>}
+    <p className="save-note">A completed setup check is not protected-copy consent or proof that a future connection will work. Register tools performs its own fresh identity/service check and authentication.</p>
+    {state.serviceUnconfirmed && <p className="review-caution">The original service reply is unconfirmed. Read service action status below; do not repeat registration. Cancel uses only that original action.</p>}
+    {state.serviceError && <ErrorNotice error={state.serviceError} title="No new service outcome was confirmed" />}
+  </section>;
+}
+
 const sourceRoles: AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];
 const sourcePhase: Record<AndroidToolSourcesStatus['phase'], string> = {
   idle: 'No folder selected yet', picking: 'Choose a folder in the native dialog', checking: 'Checking the selected directory',
@@ -192,6 +260,7 @@ function AndroidToolSources({ state, controller, onHelp }: {
 
 const registrationPhases: Record<AndroidToolRegistrationStatus['phase'], string> = {
   idle: 'Sources not inspected', inspecting: 'Inspecting original sources', review: 'Source review ready',
+  preparing: 'Checking the installed service · no files transferred yet',
   copying: 'Copying into protected storage', verifying: 'Verifying the protected copy',
   publishing: 'Publishing the registration', settling: 'Waiting for original cleanup',
   stopping: 'Stopping · waiting for original cleanup', complete: 'Protected copy published',

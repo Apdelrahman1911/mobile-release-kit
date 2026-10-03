@@ -13,7 +13,7 @@ impl Action {
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Outcome { NotEntered,Observed,RegistrationRequested,AlreadyRegistered,NeedsApproval,
-    SettingsRequested,Refused,Error,Unknown,Stopped }
+    SettingsRequested,Refused,Error,Unknown,DeniedByUser,Stopped }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct Observation {
     pub action:Action,pub status:Status,pub outcome:Outcome,
@@ -63,7 +63,7 @@ struct Report {
 }
 fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
     if raw.version!=2 || raw.action!=action.code() || Some(raw.phase)!=phase.code()
-        || raw.status>5 || raw.outcome>8 || raw.entered>1 || raw.returned>raw.entered
+        || raw.status>5 || raw.outcome>9 || raw.entered>1 || raw.returned>raw.entered
         || raw.cleanup_known>1 || raw.unknown>1 || raw.called!=1 || raw.reserved!=0
         || raw.service_state>5
         || (raw.unknown==1)!=(raw.outcome==8)
@@ -95,23 +95,23 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
             if raw.outcome!=expected { return None; }
         }
         if phase==Phase::Mutate && match action {
-            Action::RequestRegistration=>raw.status!=0 || !matches!(raw.outcome,2|3|4|7),
+            Action::RequestRegistration=>raw.status!=0 || !matches!(raw.outcome,2|3|4|7|9),
             Action::OpenApprovalSettings=>raw.status>3 || raw.outcome!=5,
             Action::Observe=>true,
         } { return None; }
         if phase==Phase::ObserveResult
-            && (!matches!(raw.outcome,2|3|4|7) || raw.status==5 && raw.outcome!=7) { return None; }
+            && (!matches!(raw.outcome,2|3|4|7|9) || raw.status==5 && raw.outcome!=7) { return None; }
     }
     let status=match raw.status { 0=>Status::NotRegistered,1=>Status::Enabled,2=>Status::RequiresApproval,
         3=>Status::NotFound,4=>Status::Unavailable,_=>Status::Error };
     let outcome=match raw.outcome { 0=>Outcome::NotEntered,1=>Outcome::Observed,2=>Outcome::RegistrationRequested,
         3=>Outcome::AlreadyRegistered,4=>Outcome::NeedsApproval,5=>Outcome::SettingsRequested,
-        6=>Outcome::Refused,7=>Outcome::Error,_=>Outcome::Unknown };
+        6=>Outcome::Refused,7=>Outcome::Error,8=>Outcome::Unknown,_=>Outcome::DeniedByUser };
     if outcome==Outcome::Observed && action!=Action::Observe
-        || matches!(outcome,Outcome::RegistrationRequested|Outcome::AlreadyRegistered|Outcome::NeedsApproval)
+        || matches!(outcome,Outcome::RegistrationRequested|Outcome::AlreadyRegistered|Outcome::NeedsApproval|Outcome::DeniedByUser)
             && action!=Action::RequestRegistration
         || outcome==Outcome::SettingsRequested && action!=Action::OpenApprovalSettings
-        || matches!(outcome,Outcome::RegistrationRequested|Outcome::SettingsRequested) && raw.returned!=1 {
+        || matches!(outcome,Outcome::RegistrationRequested|Outcome::SettingsRequested|Outcome::DeniedByUser) && raw.returned!=1 {
         return None;
     }
     Some(Observation { action,status,outcome,mutation_entered:raw.entered==1,
@@ -290,7 +290,7 @@ impl ServiceManager {
                 self.service=match raw.service_state {
                     2=>ServiceCustody::Owned,4=>ServiceCustody::Settled,_=>ServiceCustody::Unknown,
                 };
-                if matches!(observation.outcome,Outcome::Refused|Outcome::Error|Outcome::Unknown) { self.note(at); }
+                if matches!(observation.outcome,Outcome::Refused|Outcome::Error|Outcome::Unknown|Outcome::DeniedByUser) { self.note(at); }
                 self.unknown=raw.unknown==1;
             } else {
                 self.unknown=true;self.service=ServiceCustody::Unknown;self.note(at);
@@ -321,9 +321,214 @@ impl ServiceManager {
     }
 }
 
+/// Source/build selection only. True is NOT a signature, service or Ready
+/// observation. The missing shipping profile remains unavailable on all hosts.
+pub fn signing_profile_configured() -> bool {
+    option_env!("MRK_ANDROID_SIGNING_PROFILE_CONFIGURED") == Some("1")
+}
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum IdentityPhase { AllocateCell, Inspect(u8), Release(u8), RetireCell }
+impl IdentityPhase {
+    pub fn is_cleanup(self)->bool { matches!(self,Self::Release(_)|Self::RetireCell) }
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum IdentityResult { Verified,Unavailable,Refused,Unknown }
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub struct IdentityCustody {
+    pub phase:Option<IdentityPhase>,pub cell:CellCustody,pub references:[u32;12],
+    pub entered:bool,pub in_call:bool,pub gate_entered:bool,pub verified:bool,pub failed:bool,
+    pub unknown:bool,pub first_failure:Option<Instant>,
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum IdentityCheckpoint {
+    Before { phase:IdentityPhase,custody:IdentityCustody },
+    Returned { phase:IdentityPhase,at:Instant,custody:IdentityCustody },
+}
+#[repr(C)]
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+struct IdentityReport {
+    version:u32,phase:u32,calls:u32,returned:u32,verified:u32,failed:u32,unknown:u32,reserved:u32,
+    states:[u32;12],
+}
+fn identity_slot(phase:u8)->Option<usize> { match phase {
+    1=>Some(0),2=>Some(1),3=>Some(2),4=>Some(3),6=>Some(4),
+    7=>Some(5),8=>Some(6),9=>Some(7),10=>Some(8),12=>Some(9),13=>Some(10),15=>Some(11),_=>None,
+} }
+fn identity_report(raw:IdentityReport,old:IdentityReport,phase:IdentityPhase)->bool {
+    let code=match phase { IdentityPhase::Inspect(n) if (1..=17).contains(&n)=>u32::from(n),
+        IdentityPhase::Release(n) if n<12=>32+u32::from(n),_=>return false };
+    if raw.version!=1 || raw.phase!=code || raw.calls!=old.calls.saturating_add(1)
+        || raw.calls>29 || raw.returned>raw.calls || raw.returned<old.returned || raw.reserved!=0
+        || raw.verified>1 || raw.failed>1 || raw.unknown>1 || raw.failed<old.failed || raw.unknown<old.unknown
+        || raw.verified<old.verified || raw.states.iter().any(|state|*state>5)
+        || raw.unknown==1 && raw.failed!=1 || raw.unknown==0 && raw.returned!=raw.calls {
+        return false;
+    }
+    if raw.unknown==1 { return true; } // Retained Unknown; never work/release authority.
+    if raw.states.iter().any(|state|matches!(*state,1|3|5)) { return false; }
+    match phase {
+        IdentityPhase::Inspect(n)=>{
+            if old.failed!=0 || old.unknown!=0 || old.phase+1!=u32::from(n) { return false; }
+            let slot=identity_slot(n);
+            for (index,(&before,&after)) in old.states.iter().zip(&raw.states).enumerate() {
+                if Some(index)==slot {
+                    if before!=0 || !matches!(after,2|4) || after==4 && raw.failed!=1 { return false; }
+                } else if before!=after { return false; }
+            }
+            raw.verified==u32::from(n==17 && raw.failed==0)
+        },
+        IdentityPhase::Release(n)=>raw.verified==old.verified && raw.failed==old.failed
+            && old.states[usize::from(n)]==2 && old.states.iter().zip(&raw.states).enumerate()
+                .all(|(index,(before,after))|if index==usize::from(n){*after==4}else{before==after}),
+        _=>false,
+    }
+}
+unsafe extern "C" {
+    fn mrk_android_signing_new()->*mut c_void;
+    fn mrk_android_signing_step(book:*mut c_void,phase:u32,out:*mut IdentityReport)->c_int;
+    fn mrk_android_signing_release(book:*mut c_void,slot:u32,out:*mut IdentityReport)->c_int;
+    fn mrk_android_signing_retire(book:*mut c_void)->c_int;
+}
+/// One retained fixed signature original. Inert construction is safe anywhere;
+/// native entry is restricted to one non-main worker by the native book itself.
+/// The owning app stores this behind its original worker-only mutex. There is
+/// deliberately no cleanup in Drop or a method accepting paths/requirements.
+pub struct IdentityBook {
+    pointer:Option<NonNull<c_void>>,report:IdentityReport,phase:Option<IdentityPhase>,cell:CellCustody,
+    entered:bool,in_call:bool,in_gate:bool,unknown:bool,closed:bool,first:Option<Instant>,
+}
+// SAFETY: no native reference is exposed or dereferenced by Rust. Every entry
+// checks the recorded process AND pthread; transfer cannot permit a different
+// thread to operate the original. Unknown retains it without native Drop work.
+unsafe impl Send for IdentityBook {}
+impl Default for IdentityBook { fn default()->Self { Self::new() } }
+impl IdentityBook {
+    pub fn new()->Self { Self { pointer:None,report:IdentityReport { version:1,..IdentityReport::default() },
+        phase:None,cell:CellCustody::Absent,entered:false,in_call:false,in_gate:false,unknown:false,closed:false,first:None } }
+    pub fn project_owned_upper_bound()->Option<usize> { 1024_usize.checked_add(std::mem::size_of::<Self>()) }
+    pub fn custody(&self)->IdentityCustody { IdentityCustody { phase:self.phase,cell:self.cell,references:self.report.states,
+        entered:self.entered,in_call:self.in_call,gate_entered:self.in_gate,verified:self.report.verified==1,
+        failed:self.report.failed==1,unknown:self.unknown||self.in_call||self.in_gate||self.report.unknown==1,first_failure:self.first } }
+    fn note(&mut self,at:Instant) { self.first=Some(self.first.map_or(at,|first|first.min(at))); }
+    fn unknown(&mut self,at:Instant)->IdentityResult { self.note(at);self.unknown=true;IdentityResult::Unknown }
+    fn point(&mut self,phase:IdentityPhase,at:Option<Instant>,gate:&mut dyn FnMut(IdentityCheckpoint)->Decision)->Decision {
+        self.phase=Some(phase);let custody=self.custody();self.in_gate=true;
+        let result=gate(match at { Some(at)=>IdentityCheckpoint::Returned { phase,at,custody },
+            None=>IdentityCheckpoint::Before { phase,custody } });self.in_gate=false;result
+    }
+    fn work_point(&mut self,phase:IdentityPhase,at:Option<Instant>,gate:&mut dyn FnMut(IdentityCheckpoint)->Decision)->bool {
+        match self.point(phase,at,gate) {
+            Decision::Proceed=>true,Decision::Stop=>{self.note(at.unwrap_or_else(Instant::now));false},
+            _=>{self.unknown(at.unwrap_or_else(Instant::now));false},
+        }
+    }
+    fn stopped(&self)->IdentityResult { if self.unknown {IdentityResult::Unknown}else{IdentityResult::Refused} }
+    pub fn check_once(&mut self,gate:&mut dyn FnMut(IdentityCheckpoint)->Decision)->IdentityResult {
+        if self.entered || self.closed || self.pointer.is_some() || self.in_call || self.in_gate || self.unknown {
+            return self.unknown(Instant::now());
+        }
+        self.entered=true;
+        if !signing_profile_configured() { return IdentityResult::Unavailable; }
+        if !self.work_point(IdentityPhase::AllocateCell,None,gate) { return self.stopped(); }
+        self.cell=CellCustody::Entering;self.in_call=true;
+        // SAFETY: fixed no-argument allocator, no caller-selected identity.
+        let pointer=unsafe { mrk_android_signing_new() };let at=Instant::now();self.in_call=false;
+        self.pointer=NonNull::new(pointer);self.cell=if self.pointer.is_some(){CellCustody::Owned}else{CellCustody::Absent};
+        if self.pointer.is_none() { self.note(at); }
+        if !self.work_point(IdentityPhase::AllocateCell,Some(at),gate) || self.pointer.is_none() { return self.stopped(); }
+        for number in 1..=17 {
+            let phase=IdentityPhase::Inspect(number);
+            if !self.work_point(phase,None,gate) { return self.stopped(); }
+            let Some(pointer)=self.pointer else { return self.unknown(Instant::now()); };
+            let mut raw=IdentityReport::default();self.in_call=true;
+            // SAFETY: same exclusively borrowed original; native verifies the
+            // exact thread and next phase, writes only the fixed report cell.
+            let returned=unsafe { mrk_android_signing_step(pointer.as_ptr(),u32::from(number),&mut raw) };
+            let at=Instant::now();self.in_call=false;
+            if returned!=1 || !identity_report(raw,self.report,phase) { return self.unknown(at); }
+            self.report=raw;
+            if raw.failed==1 { self.note(at); }
+            if raw.unknown==1 { self.unknown=true; }
+            let proceed=self.work_point(phase,Some(at),gate);
+            if !proceed || raw.failed==1 || self.unknown { return self.stopped(); }
+        }
+        if self.report.verified==1 { IdentityResult::Verified } else { self.unknown(Instant::now()) }
+    }
+    /// Cleanup never Defer/WAITs. Caller still owns the immutable W/H/F and
+    /// imports native first-F BEFORE deciding each actual cleanup admission.
+    pub fn settle(&mut self,gate:&mut dyn FnMut(IdentityCheckpoint)->Decision)->bool {
+        if self.unknown || self.in_call || self.in_gate || self.report.unknown==1 { return false; }
+        if self.closed { return self.settled(); }
+        if self.pointer.is_none() { self.closed=true;return self.settled(); }
+        for number in (0..12).rev() {
+            if self.report.states[number]!=2 { continue; }
+            let phase=IdentityPhase::Release(number as u8);
+            if self.point(phase,None,gate)!=Decision::Proceed { self.unknown(Instant::now());return false; }
+            let Some(pointer)=self.pointer else { self.unknown(Instant::now());return false; };
+            let mut raw=IdentityReport::default();self.in_call=true;
+            // SAFETY: exact same retained native slot; no duplicate release.
+            let returned=unsafe { mrk_android_signing_release(pointer.as_ptr(),number as u32,&mut raw) };
+            let at=Instant::now();self.in_call=false;
+            if returned!=1 || !identity_report(raw,self.report,phase) { self.unknown(at);return false; }
+            self.report=raw;if raw.unknown==1 { self.unknown=true;self.note(at); }
+            if self.point(phase,Some(at),gate)!=Decision::Proceed || self.unknown { self.unknown(at);return false; }
+        }
+        let phase=IdentityPhase::RetireCell;
+        if self.point(phase,None,gate)!=Decision::Proceed { self.unknown(Instant::now());return false; }
+        let Some(pointer)=self.pointer else { self.unknown(Instant::now());return false; };
+        self.in_call=true;
+        // SAFETY: native consumes only the exact empty, returned original.
+        let returned=unsafe { mrk_android_signing_retire(pointer.as_ptr()) };
+        let at=Instant::now();self.in_call=false;
+        if returned==1 { self.pointer=None;self.cell=CellCustody::Consumed; }
+        else { self.cell=CellCustody::Unknown;self.unknown=true;self.note(at); }
+        if self.point(phase,Some(at),gate)!=Decision::Proceed || self.unknown { self.unknown(at);return false; }
+        self.closed=true;self.settled()
+    }
+    pub fn settled(&self)->bool { self.closed && !self.unknown && !self.in_call && !self.in_gate
+        && self.pointer.is_none() && matches!(self.cell,CellCustody::Absent|CellCustody::Consumed)
+        && self.report.unknown==0 && self.report.calls==self.report.returned
+        && self.report.states.iter().all(|state|matches!(*state,0|4)) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn signing_report_requires_exact_phase_slot_and_consuming_return() {
+        assert_eq!(std::mem::size_of::<IdentityReport>(),80);
+        let old=IdentityReport { version:1,..IdentityReport::default() };
+        let mut acquired=IdentityReport { version:1,phase:1,calls:1,returned:1,..IdentityReport::default() };
+        acquired.states[0]=2;
+        assert!(identity_report(acquired,old,IdentityPhase::Inspect(1)));
+        for bad in [IdentityReport { verified:1,..acquired },IdentityReport { phase:2,..acquired },
+            IdentityReport { returned:0,..acquired },IdentityReport { calls:2,..acquired },
+            IdentityReport { states:[0;12],..acquired }] {
+            assert!(!identity_report(bad,old,IdentityPhase::Inspect(1)));
+        }
+        let mut released=IdentityReport { phase:32,calls:2,returned:2,..acquired };
+        released.states[0]=4;
+        assert!(identity_report(released,acquired,IdentityPhase::Release(0)));
+        assert!(!identity_report(released,released,IdentityPhase::Release(0)));
+        assert!(!identity_report(IdentityReport { states:acquired.states,..released },acquired,IdentityPhase::Release(0)));
+        let unknown=IdentityReport { failed:1,unknown:1,returned:0,..acquired };
+        assert!(identity_report(unknown,old,IdentityPhase::Inspect(1))); // retained Unknown only
+        assert!(!identity_report(IdentityReport { failed:0,..unknown },old,IdentityPhase::Inspect(1)));
+    }
+    #[test]
+    fn denied_service_request_is_separate_from_approval_and_requires_real_mutation_return() {
+        let denied=Report { version:2,action:1,status:0,outcome:9,entered:1,returned:1,
+            phase:4,service_state:2,called:1,..Report::default() };
+        let observation=decode(denied,Action::RequestRegistration,Phase::Mutate).unwrap();
+        assert_eq!(observation.outcome,Outcome::DeniedByUser);
+        assert!(observation.mutation_entered && observation.mutation_returned);
+        for bad in [Report { returned:0,..denied },Report { action:0,..denied },Report { outcome:10,..denied }] {
+            assert!(decode(bad,Action::RequestRegistration,Phase::Mutate).is_none());
+        }
+        let approval=Report { status:2,outcome:4,entered:0,returned:0,phase:3,..denied };
+        assert_eq!(decode(approval,Action::RequestRegistration,Phase::ObserveStatus).unwrap().outcome,Outcome::NeedsApproval);
+    }
     #[derive(Default)]
     struct NativeData {
         report:Report,entries:Vec<Phase>,bad_mutation_return:bool,error_status:bool,

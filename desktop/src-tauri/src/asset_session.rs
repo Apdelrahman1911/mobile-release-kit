@@ -66,7 +66,7 @@ mod images;
 mod installation;
 #[path = "asset_session_installation_memory.rs"]
 mod installation_memory;
-pub(crate) use installation_memory::AndroidRegistrationCensus;
+pub(crate) use installation_memory::{AndroidRegistrationCensus,AndroidServiceSetupCensus};
 
 // Explicitly ignored component fixture only: no installed window, persistent
 // provider admission or renderer command is enabled by compiling this module.

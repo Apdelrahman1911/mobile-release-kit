@@ -31,6 +31,41 @@ pub(crate) struct AndroidRegistrationCensus<'a> {
     bytes: usize, document: &'a Arc<()>, pickers: &'a [Arc<OriginalWork>; 3],
     _state: &'a DocumentState,
 }
+/// Setup is source-independent, but every actually retained zero-to-three
+/// picker original is still included in the SAME document allocation census.
+/// This does not weaken registration's complete three-original requirement.
+pub(crate) struct AndroidServiceSetupCensus<'a> {
+    bytes:usize,document:&'a Arc<()>,pickers:&'a [Option<Arc<OriginalWork>>;3],_state:&'a DocumentState,
+}
+impl AndroidServiceSetupCensus<'_> {
+    pub(crate) fn for_originals(&self,document:&Arc<()>,pickers:&[Option<Arc<OriginalWork>>;3])->Option<usize>{
+        (Arc::ptr_eq(self.document,document) && self.pickers.iter().zip(pickers).all(|(before,after)|
+            match(before,after){(None,None)=>true,(Some(before),Some(after))=>Arc::ptr_eq(before,after),_=>false}))
+            .then_some(self.bytes)
+    }
+}
+fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if !document.inner.installed_session.try_lock().is_ok_and(|history|history.is_none()){return false;}
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    if !document.inner.installed_macos_session.try_lock().is_ok_and(|history|history.is_none()){return false;}
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if document.inner.fixture.is_some(){return false;}
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if document.inner.github_fixture.is_some(){return false;}
+    let _=document;true
+}
+pub(super) fn android_service_setup_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
+    pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<AndroidServiceSetupCensus<'a>,Reason>{
+    if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
+    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    {
+        let bytes=known::android_service_setup_bytes(state,pickers)?;
+        Ok(AndroidServiceSetupCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
+    }
+    #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+    {let _=(document,state,pickers);Err(Reason::Capacity)}
+}
 impl AndroidRegistrationCensus<'_> {
     pub(crate) fn for_originals(&self, document: &Arc<()>, pickers: &[Arc<OriginalWork>; 3]) -> Option<usize> {
         (Arc::ptr_eq(self.document, document) && self.pickers.iter().zip(pickers)
@@ -41,14 +76,7 @@ pub(super) fn android_registration_census<'a>(document: &'a DocumentBinding, sta
     pickers: &'a [Arc<OriginalWork>; 3]) -> Result<AndroidRegistrationCensus<'a>, Reason> {
     // All four existing fixture-Inner histories remain exclusions. This path
     // neither changes nor reuses installation::Admission or its empty-source gate.
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if !document.inner.installed_session.try_lock().is_ok_and(|history| history.is_none()) { return Err(Reason::Capacity); }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
-    if !document.inner.installed_macos_session.try_lock().is_ok_and(|history| history.is_none()) { return Err(Reason::Capacity); }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if document.inner.fixture.is_some() { return Err(Reason::Capacity); }
-    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if document.inner.github_fixture.is_some() { return Err(Reason::Capacity); }
+    if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
     #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
     {
         let bytes = known::android_registration_bytes(state, pickers)?;
@@ -370,6 +398,11 @@ mod known {
         // SAME Seen table: original picker state shared with Document.slot or
         // another retained root counts once; equal distinct Arcs count again.
         for picker in pickers { census.owner(picker)?; }
+        Ok(census.bytes)
+    }
+    pub(super) fn android_service_setup_bytes(state:&DocumentState,pickers:&[Option<Arc<OriginalWork>>;3])->Count<usize>{
+        let mut census=Census::new();census.document(state)?;
+        for picker in pickers.iter().flatten(){census.owner(picker)?;}
         Ok(census.bytes)
     }
     pub(super) fn admitted(state: &DocumentState, control: usize) -> Count<()> {

@@ -1,12 +1,16 @@
 //! Original picked-source inspection/registration companion of SavedCommandOwner.
-//! SOURCE checkpoint: actual read-only source worker/coordinator and admission
-//! are wired here. Protected-copy admission remains refused until the genuine
-//! Product service/signing/approval adapter and IPC original roster are supplied.
+//! Inspection and protected-copy registration retain separate original workers,
+//! source books, native client custody and independently joined coordinators.
 //! No bool, renderer id, source EOF or worker return creates a join/consent grant.
 use super::*;
 use crate::android_registration_app_protocol as wire;
 use std::sync::{Weak, TryLockError};
 use android_sources::SourceSnapshot;
+#[path = "saved_command_android_service_setup.rs"]
+pub(super) mod service_setup;
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[path = "saved_command_android_registration_client.rs"]
+mod client;
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 use crate::installed_runtime::{AndroidRegistrationSourceSlots, AndroidRegistrationSourceReview, AdmissionFailure, CloseOutcome};
 const WORK:Duration=Duration::from_secs(wire::WORK_SECONDS);
@@ -142,12 +146,18 @@ impl ReviewRoute {
 }
 impl ControlSlot {
     pub(crate) fn reserve_cancel(self:&Arc<Self>,input:&wire::Cancel)->Result<Option<CancelPublisher>,BridgeError> {
+        self.reserve_cancel_lane(&input.operation_id,input.registration_generation,ControlLane::Sources)
+    }
+    pub(crate) fn reserve_service_cancel(self:&Arc<Self>,input:&wire::ServiceCancel)->Result<Option<CancelPublisher>,BridgeError> {
+        self.reserve_cancel_lane(&input.operation_id,input.setup_generation,ControlLane::Service)
+    }
+    fn reserve_cancel_lane(self:&Arc<Self>,id:&str,generation:u32,lane:ControlLane)->Result<Option<CancelPublisher>,BridgeError> {
         let mut book=match self.book.lock(){Ok(book)=>book,
             Err(error)=>{drop(error.into_inner());self.poisoned();return Err(BridgeError::cleanup_unknown());}};
-        let target=if let Some(original)=book.original.as_ref().filter(|original|original.matches(input)) {
+        let target=if let Some(original)=book.original.as_ref().filter(|original|original.id==id && original.generation==generation && original.lane==lane) {
             Some((original.clone(),None))
         } else if let Some(route)=book.review.as_ref().filter(|route|
-            route.operation_id==input.operation_id && route.generation==input.registration_generation) {
+            lane==ControlLane::Sources && route.operation_id==id && route.generation==generation) {
             let Some(original)=route.original.upgrade() else {drop(book);self.poisoned();return Err(wire::unconfirmed());};
             Some((original.control.clone(),Some(route.reviewed.clone())))
         } else { None };
@@ -237,7 +247,10 @@ impl Publisher {
 impl Drop for Publisher {
     fn drop(&mut self) { if !self.finished { self.slot.poisoned(); } }
 }
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum ControlLane { Sources, Service }
 pub(super) struct Control {
+    lane:ControlLane,
     owner:Weak<Inner>,id:String,generation:u32,admitted:Instant,work:Instant,hard:Instant,
     slot:Weak<ControlSlot>,cohort:Arc<()>,epoch:u64,
     first:Mutex<Option<(wire::Reason,Instant)>>,unknown:AtomicBool,dirty:AtomicBool,
@@ -349,6 +362,38 @@ impl Drop for AdmissionCohort {
 #[derive(Clone)]
 pub(crate) struct WorkGate { slot: Arc<ControlSlot>, control: Arc<Control> }
 impl WorkGate {
+    /// Same-original nonblocking cut for independently runnable coordinators.
+    /// Pending is a reversible wait, not failure; accepted cohort F is imported
+    /// even before its publisher reaches Control/watch projection.
+    fn try_work(&self) -> Option<bool> {
+        self.control.advance(Instant::now());
+        if self.slot.is_unknown() || self.control.unknown.load(Ordering::SeqCst) {
+            self.control.poisoned(); return None;
+        }
+        let book = match self.slot.book.try_lock() {
+            Ok(book) => book, Err(TryLockError::WouldBlock) => return Some(false),
+            Err(TryLockError::Poisoned(_)) => { self.control.poisoned(); return None; }
+        };
+        let cohort = book.cohort.as_ref().filter(|value|
+            value.identity.as_ptr() == Arc::as_ptr(&self.control.cohort));
+        if let Some((reason, at)) = cohort.and_then(|value| value.first) {
+            drop(book); self.control.stop_at(reason, at); return None;
+        }
+        if self.slot.is_unknown() || !cohort.is_some_and(|value| value.epoch == self.control.epoch)
+            || book.epoch != self.control.epoch
+            || !book.original.as_ref().is_some_and(|value| Arc::ptr_eq(value, &self.control)) {
+            drop(book); self.control.poisoned(); return None;
+        }
+        let failure = match self.control.first.try_lock() {
+            Ok(first) => *first, Err(TryLockError::WouldBlock) => return Some(false),
+            Err(TryLockError::Poisoned(_)) => { drop(book); self.control.poisoned(); return None; }
+        };
+        if failure.is_some() { return None; }
+        let ready = !ControlSlot::pending(&book) && !self.control.unknown.load(Ordering::SeqCst);
+        let at = Instant::now();
+        drop(book);
+        if at >= self.control.work { self.control.advance(at); None } else { Some(ready) }
+    }
     /// The caller retains the SAME short book at its Proceed admission cut.
     /// Exact Cancel can have completed its whole projection while WORK waited
     /// for that book: pending is now clear but actual Control.first still stops
@@ -517,8 +562,15 @@ impl Snapshot {
         if !self.source.originals_settled(){return Err(wire::unavailable());}
         // Entropy is outside Document/Registry; original T already includes it.
         let id=nonce(SavedCommandDomain::AndroidBuild)?;
-        let review_id=nonce(SavedCommandDomain::AndroidBuild)?;
-        let instance=nonce(SavedCommandDomain::AndroidBuild)?;
+        // Register consumes the exact finalized Review, including its proposed
+        // immutable instance. Only the new operation gets new entropy; changing
+        // the proposal here would silently authorize an unreviewed copy.
+        let (review_id,instance)=match (&self.request,&self.reviewed) {
+            (Request::Inspect(_),None)=>(nonce(SavedCommandDomain::AndroidBuild)?,nonce(SavedCommandDomain::AndroidBuild)?),
+            (Request::Register(input),Some(review)) if input.review_id==review.public.review_id =>
+                (review.public.review_id.clone(),review.original.instance.clone()),
+            _=>return Err(wire::invalid()),
+        };
         if id==review_id || id==instance || review_id==instance{return Err(wire::unavailable());}
         Ok(Checked{snapshot:self,id,review_id,instance})
     }
@@ -551,6 +603,8 @@ struct Operation {
     coordinator_return:Mutex<Option<Result<bool,tokio::task::JoinError>>>,final_seen:AtomicBool,joined_at:std::sync::OnceLock<Instant>,accepted:AtomicBool,
     #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
     sources:Mutex<AndroidRegistrationSourceSlots>,
+    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    client:Option<client::ClientOriginal>,
 }
 /// A borrow of the actual joined original, not a current-input authority.
 /// Only Document can pair this DATA with a newly sampled private saved witness.
@@ -568,17 +622,31 @@ struct Last {data:wire::Operation,phase:wire::Phase,reason:wire::Reason,report:O
 pub(super) struct Registration {
     generation:u32,active:Option<Arc<Operation>>,review:Option<Arc<Review>>,last:Option<Last>,
     capability:Option<(Availability,wire::Prerequisite)>,
+    service:service_setup::State,
 }
-pub(crate) struct Admitted {status:wire::Status,release:Option<oneshot::Sender<()>>,original:Arc<Operation>}
+enum InvokeEntry {
+    Inspection(oneshot::Sender<()>),
+    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    Registration(oneshot::Sender<client::BeginPreparation>),
+}
+impl InvokeEntry {
+    fn release(self)->bool { match self {
+        Self::Inspection(sender)=>sender.send(()).is_ok(),
+        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        Self::Registration(sender)=>sender.send(client::BeginPreparation).is_ok(),
+    } }
+}
+pub(crate) struct Admitted {status:wire::Status,release:Option<InvokeEntry>,original:Arc<Operation>}
 impl Admitted {
-    /// Sole invoke GO, only AFTER the outer Document guard has been released.
+    /// Inspection GO or Register BeginPreparation, only AFTER Document unlocks.
+    /// Register source/transfer GO remains behind same-peer Ready and reproof.
     pub(crate) fn release(mut self)->Result<wire::Status,BridgeError>{
         // This original is already owned. Conditional pending must not become
         // a false ContextChanged failure here. Deliver its sole GO; the SAME
         // source worker commits entry through WorkGate and genuinely waits on
         // the original W/H. No new task, observation, consent or clock is made.
         let Some(release)=self.release.take()else{self.original.control.mark_unknown(Instant::now());return Err(wire::unconfirmed());};
-        if release.send(()).is_err(){
+        if !release.release(){
             let at=Instant::now();self.original.control.stop_at(wire::Reason::Cancelled,at);
             return Err(wire::unconfirmed());
         }
@@ -616,29 +684,31 @@ fn prerequisite_reason(value:wire::Prerequisite)->wire::Reason{match value{
     wire::Prerequisite::ApprovalDenied=>wire::Reason::ApprovalDenied,wire::Prerequisite::ServiceUnavailable=>wire::Reason::ServiceUnavailable,
     wire::Prerequisite::FreshServiceUnavailable=>wire::Reason::FreshServiceUnavailable,
 }}
-fn prerequisite()->wire::Prerequisite{
+fn prerequisite(service:&service_setup::State)->wire::Prerequisite{
     #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
     {
         if !crate::android_supplier_macos::available(){return wire::Prerequisite::SupplierUnavailable;}
-        // Explicit SOURCE checkpoint, NOT a positive readiness factory. Product
-        // has not supplied the genuine signing/approval/reusable-service
-        // adapter. A source hash, ClientBook constructor or native allocation
-        // bound alone cannot satisfy this system setup prerequisite.
-        return wire::Prerequisite::SigningUnavailable;
+        return service.prerequisite();
     }
     #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
-    {wire::Prerequisite::ServiceUnavailable}
+    {let _=service;wire::Prerequisite::ServiceUnavailable}
 }
 impl Operation {
     fn same_owner(&self,inner:&Inner)->bool{
         self.owner.as_ptr()==inner as *const Inner
             && self.document.upgrade().is_some_and(|document|inner.android_original_document_matches(Some(&document)))
     }
-    fn known_return(&self)->bool{
+    fn known_source_return(&self)->bool{
         if !self.source_join_seen.load(Ordering::SeqCst) || self.control.unknown.load(Ordering::SeqCst){return false;}
         let Ok(handle)=self.source_handle.try_lock()else{return false;};
         let Ok(returned)=self.source_return.try_lock()else{return false;};
         handle.is_none() && matches!(returned.as_ref(),Some(Ok(value)) if value.known && value.retained_bytes.is_some())
+    }
+    fn known_return(&self)->bool {
+        if !self.known_source_return(){return false;}
+        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        if let Some(client)=&self.client{return client.known_return();}
+        self.data.kind==wire::Kind::Inspection
     }
     fn retained_bytes(&self)->Option<usize>{
         if !self.accepted.load(Ordering::SeqCst) || !self.final_seen.load(Ordering::SeqCst)
@@ -662,22 +732,23 @@ impl Operation {
 }
 impl Registration {
     pub(super) fn sources_match(&self,sources:&android_sources::Sources)->bool{
-        self.active.as_ref().is_none_or(|original|sources.same_snapshot(&original.source))
+        self.service.sources_match(sources) && self.active.as_ref().is_none_or(|original|sources.same_snapshot(&original.source))
             && self.review.as_ref().is_none_or(|review|sources.same_snapshot(&review.original.source))
     }
     pub(super) fn invalidation_failure(&self) -> Option<(wire::Reason, Instant)> {
         self.active.as_ref().or_else(|| self.review.as_ref().map(|review| &review.original))
             .and_then(|original| WorkGate { slot: original.cohort.slot.clone(), control: original.control.clone() }.first())
+            .or_else(||self.service.invalidation_failure())
     }
-    pub(super) fn busy(&self)->bool{self.active.is_some()}
+    pub(super) fn busy(&self)->bool{self.active.is_some() || self.service.busy()}
     pub(super) fn unknown(&self)->bool{
-        self.active.as_ref().is_some_and(|value|value.control.unknown.load(Ordering::SeqCst))
+        self.service.unknown() || self.active.as_ref().is_some_and(|value|value.control.unknown.load(Ordering::SeqCst))
             || self.review.as_ref().is_some_and(|review|review.original.control.unknown.load(Ordering::SeqCst)
                 || review.original.control.failure().is_some() && review.accepted_at>=review.original.control.endpoint())
     }
-    pub(super) fn installation_empty(&self)->bool{self.active.is_none()&&self.review.is_none()&&self.last.is_none()}
+    pub(super) fn installation_empty(&self)->bool{self.active.is_none()&&self.review.is_none()&&self.last.is_none()&&self.service.empty()}
     pub(super) fn registration_matches(&self,registration:u32)->bool{
-        self.active.as_ref().is_none_or(|value|value.source.registration==registration)
+        self.service.registration_matches(registration) && self.active.as_ref().is_none_or(|value|value.source.registration==registration)
             && self.review.as_ref().is_none_or(|value|value.original.source.registration==registration)
     }
     pub(super) fn stop(&mut self,reason:wire::Reason,at:Instant)->bool{
@@ -685,6 +756,7 @@ impl Registration {
         // context/shutdown must not discard an original that became Unknown
         // between final publication and this separate invalidation request.
         let mut changed=self.negative_review_at(at);
+        changed|=self.service.stop(reason,at);
         changed|=self.review.is_some();
         if let Some(review)=self.review.take(){
             review.original.cohort.slot.clear_review(&review);
@@ -739,7 +811,7 @@ impl Registration {
     }
     fn retained_bytes(&self,source:&SourceSnapshot)->Option<usize>{
         if self.active.is_some(){return None;}
-        let mut bytes=std::mem::size_of::<Self>();
+        let mut bytes=std::mem::size_of::<Self>().checked_add(self.service.retained_bytes()?.checked_sub(std::mem::size_of::<service_setup::State>())?)?;
         if let Some(last)=&self.last{
             bytes=bytes.checked_add(operation_projection_bytes(&last.data)?)?
                 .checked_add(last.report.as_ref().map_or(Some(0),report_bytes)?)?;
@@ -826,19 +898,26 @@ fn inspect_source(original:Arc<Operation>,enter:oneshot::Receiver<()>)->SourceRe
 }
 fn poll_source(original:&Operation,slot:&mut Option<JoinHandle<SourceReturn>>,
     context:&mut TaskContext<'_>,at:Instant)->Poll<bool>{
-    let mut returned=match original.source_return.try_lock(){
+    poll_source_cells(&original.control,&original.source_join_seen,&original.source_return,slot,context,at)
+}
+// Actual original-cell consumption, shared by the inspection and Register
+// coordinators. A worker-return value or is_finished() is not a consumed join.
+fn poll_source_cells(control:&Control,joined:&AtomicBool,
+    returned_cell:&Mutex<Option<Result<SourceReturn,tokio::task::JoinError>>>,
+    slot:&mut Option<JoinHandle<SourceReturn>>,context:&mut TaskContext<'_>,at:Instant)->Poll<bool>{
+    let mut returned=match returned_cell.try_lock(){
         Ok(returned)=>returned,Err(TryLockError::WouldBlock)=>return Poll::Pending,
-        Err(TryLockError::Poisoned(_))=>{original.control.mark_unknown(at);return Poll::Ready(false);},
+        Err(TryLockError::Poisoned(_))=>{control.mark_unknown(at);return Poll::Ready(false);},
     };
-    if original.source_join_seen.load(Ordering::SeqCst) || returned.is_some(){
-        original.control.mark_unknown(at);return Poll::Ready(false);
+    if joined.load(Ordering::SeqCst) || returned.is_some(){
+        control.mark_unknown(at);return Poll::Ready(false);
     }
-    let Some(handle)=slot.as_mut()else{original.control.mark_unknown(at);return Poll::Ready(false);};
+    let Some(handle)=slot.as_mut()else{control.mark_unknown(at);return Poll::Ready(false);};
     let Poll::Ready(value)=Pin::new(handle).poll(context)else{return Poll::Pending;};
     let known=matches!(&value,Ok(data) if data.known && data.retained_bytes.is_some());
-    *returned=Some(value);original.source_join_seen.store(true,Ordering::SeqCst);
+    *returned=Some(value);joined.store(true,Ordering::SeqCst);
     slot.take();
-    if !known{original.control.mark_unknown(at);}
+    if !known{control.mark_unknown(at);}
     Poll::Ready(known)
 }
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
@@ -893,6 +972,7 @@ impl Registration {
     pub(super) fn reconcile(&mut self,inner:&Inner)->bool{
         let at=Instant::now();
         let mut changed=self.negative_review_at(at);
+        changed|=self.service.reconcile(inner);
         changed|=self.expire(at);
         if self.active.is_none(){return changed;}
         let original=self.active.as_ref().unwrap().clone();
@@ -913,6 +993,8 @@ impl Registration {
                     }
                 }
             }
+            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            if let Some(client)=&original.client{client.observe_late(&original);}
             return changed;
         }
         let mut slot=match original.coordinator.try_lock(){
@@ -994,7 +1076,17 @@ impl Registration {
         }
         #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
         {
-            let setup=prerequisite();
+            if let Some(client)=&original.client {
+                let Some((phase,reason,report))=client.report(original) else {
+                    drop(book);original.control.mark_unknown(at);return true;
+                };
+                if source.review.is_some() || !client.finalize_preparation(&mut self.service){drop(book);original.control.mark_unknown(at);return true;}
+                self.last=Some(Last{data:original.data.clone(),phase,reason,report:Some(report)});
+                self.review=None;original.accepted.store(true,Ordering::SeqCst);
+                book.original=None;book.cohort=None;self.active=None;
+                drop(book);inner.android_registration_control.wake.notify_all();return true;
+            }
+            let setup=prerequisite(&self.service);
             let sources=source.review.as_ref().map_or_else(Vec::new,AndroidRegistrationSourceReview::sources);
             if failure.is_none() && setup==wire::Prerequisite::Ready {
                 let Some(expires)=at.checked_add(REVIEW) else{original.control.mark_unknown(at);return true;};
@@ -1040,7 +1132,12 @@ impl Registration {
             let unknown=original.control.unknown.load(Ordering::SeqCst);
             let failure=original.control.failure();
             (if unknown{wire::Phase::Unknown}else if failure.is_some(){wire::Phase::Stopping}
-                else if original.settling.load(Ordering::SeqCst){wire::Phase::Settling}else{wire::Phase::Inspecting},
+                else if original.settling.load(Ordering::SeqCst){wire::Phase::Settling}else{
+                    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+                    if let Some(client)=&original.client{client.phase()}else{wire::Phase::Inspecting}
+                    #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+                    {wire::Phase::Inspecting}
+                },
             if unknown{wire::Reason::CleanupUnknown}else{failure.map_or(wire::Reason::None,|(reason,_)|reason)},
             Some(original.data.clone()),None,None)
         }else if let Some(review)=&self.review{
@@ -1089,7 +1186,7 @@ impl SavedCommandOwner {
         gate
     }
     fn registration_status_locked(&self,registry:&mut Registry,gate:android_wire::Availability,at:Instant)->Result<wire::Status,BridgeError>{
-        let setup=prerequisite();
+        let setup=prerequisite(&registry.android_registration.service);
         if registry.android_registration.negative_review_at(at){self.inner.bump(registry);}
         let mut availability=self.registration_gate(registry,Availability::from_android(gate));
         if availability==Availability::Available && setup!=wire::Prerequisite::Ready{availability=Availability::RuntimeUnqualified;}
@@ -1164,12 +1261,9 @@ impl SavedCommandOwner {
             let checked_at=Instant::now();
             let current_review=registry.android_registration.same_review(input,&snapshot.source,checked_at).ok_or_else(wire::invalid)?;
             if !snapshot.reviewed.as_ref().is_some_and(|before|Arc::ptr_eq(before,&current_review)){return Err(wire::invalid());}
-            // A fully wired Register handler must reserve its original ClientBook,
-            // Signal/ClockBridge, one-flight slot, IPC/source/coordinator handles
-            // and genuine service readiness BEFORE any GO. Those Product seams
-            // are not sealed in this checkpoint. Do not create an original or
-            // touch sources/IPC merely to manufacture a refusal receipt.
-            let _=prerequisite();
+            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            return client::admit(self,document,&mut registry,checked,current,census,gate,current_review);
+            #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
             return Err(wire::unavailable());
         }
         #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
@@ -1198,7 +1292,7 @@ impl SavedCommandOwner {
             let cohort=snapshot.cohort.lock().map_err(|_|wire::unconfirmed())?.take().ok_or_else(wire::invalid)?;
             if !self.inner.android_registration_control.current_claim(&cohort){return Err(wire::invalid());}
             let (stop,_)=watch::channel(false);let (audit,audit_read)=watch::channel(hard);
-            let control=Arc::new(Control{owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
+            let control=Arc::new(Control{lane:ControlLane::Sources,owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
                 admitted:snapshot.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),cohort:cohort.identity.clone(),epoch:cohort.epoch,first:Mutex::new(None),unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
                 latches:std::sync::atomic::AtomicUsize::new(0),stop,audit});
             let data=wire::Operation{operation_id:checked.id.clone(),registration_generation:generation,
@@ -1217,7 +1311,7 @@ impl SavedCommandOwner {
                 control:control.clone(),supplier_reservation,reservation:std::sync::OnceLock::new(),settling:AtomicBool::new(false),
                 source_handle:AsyncMutex::new(None),source_return:Mutex::new(None),source_join_seen:AtomicBool::new(false),
                 coordinator:Mutex::new(None),coordinator_return:Mutex::new(None),final_seen:AtomicBool::new(false),joined_at:std::sync::OnceLock::new(),accepted:AtomicBool::new(false),
-                sources:Mutex::new(AndroidRegistrationSourceSlots::new_registered(audit_read,
+                client:None,sources:Mutex::new(AndroidRegistrationSourceSlots::new_registered(audit_read,
                     WorkGate{slot:self.inner.android_registration_control.clone(),control:control.clone()}))});
             let (release,enter)=oneshot::channel();let (source_release,source_enter)=oneshot::channel();
             let source_worker={let original=original.clone();move||inspect_source(original,source_enter)};
@@ -1254,7 +1348,7 @@ impl SavedCommandOwner {
                     return Err(wire::unconfirmed());
                 },
             };
-            Ok(Admitted{status,release:Some(release),original})
+            Ok(Admitted{status,release:Some(InvokeEntry::Inspection(release)),original})
         }
     }
     pub(crate) fn cancel_android_tool_registration(&self,input:&wire::Cancel,publication:Option<&CancelPublisher>,
@@ -1302,6 +1396,7 @@ fn registration_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>
         .checked_add(registry.android_catalog.registration_retained_bytes()?.checked_sub(std::mem::size_of::<android_catalog::Catalog>())?)?
         .checked_add(registry.android_registration.retained_bytes(&checked.snapshot.source)?
             .checked_sub(std::mem::size_of::<Registration>())?)?.checked_add(checked.retained_bytes()?)?;
+    if inner.android_service_dispatcher.get().is_some(){bytes=bytes.checked_add(arc_bytes::<service_setup::Dispatcher>()?)?;}
     #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
         not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer")))]
     {bytes=bytes.checked_add(arc_bytes::<()>()?)?;} // Actual retained iOS fixture identity, even when its option is absent.
@@ -1324,12 +1419,15 @@ mod lifecycle_book_tests {
     // source/native book, Review or positive production qualification is made.
     use super::*;
 
-    fn control_at(admitted:Instant)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate) {
+    pub(super) fn control_at(admitted:Instant)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate) {
+        control_in_lane(admitted,ControlLane::Sources)
+    }
+    pub(super) fn control_in_lane(admitted:Instant,lane:ControlLane)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate) {
         let slot=Arc::new(ControlSlot::default());
         let cohort=slot.claim(0,None).unwrap();
         let work=admitted+WORK;let hard=admitted+HARD;
         let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
-        let control=Arc::new(Control{owner:Weak::new(),id:"inspection-original".to_owned(),generation:7,
+        let control=Arc::new(Control{lane,owner:Weak::new(),id:"inspection-original".to_owned(),generation:7,
             admitted,work,hard,slot:Arc::downgrade(&slot),cohort:cohort.identity.clone(),epoch:cohort.epoch,
             first:Mutex::new(None),unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
             latches:AtomicUsize::new(0),stop,audit});
@@ -1506,6 +1604,22 @@ mod lifecycle_book_tests {
         assert_eq!(control.failure(),Some((wire::Reason::Cancelled,publication.at())));
         assert!(slot.book.lock().unwrap().cancel.is_some());
         publication.finish();assert!(slot.book.lock().unwrap().cancel.is_none());
+    }
+
+    #[test]
+    fn service_and_source_cancel_never_cross_route_even_with_identical_wire_comparisons() {
+        for lane in [ControlLane::Sources,ControlLane::Service]{
+            let(slot,control,_cohort,_gate)=control_in_lane(Instant::now(),lane);
+            let source=wire::Cancel{operation_id:control.id.clone(),registration_generation:control.generation};
+            let service=wire::ServiceCancel{operation_id:control.id.clone(),setup_generation:control.generation};
+            let wrong=if lane==ControlLane::Sources{slot.reserve_service_cancel(&service)}else{slot.reserve_cancel(&source)};
+            assert!(wrong.unwrap().is_none());assert!(control.failure().is_none());
+            assert!(slot.book.lock().unwrap().cancel.is_none());
+            let exact=if lane==ControlLane::Sources{slot.reserve_cancel(&source)}else{slot.reserve_service_cancel(&service)};
+            let publication=exact.unwrap().unwrap();
+            assert_eq!(control.failure(),Some((wire::Reason::Cancelled,publication.at())));
+            publication.finish();assert!(slot.book.lock().unwrap().cancel.is_none());
+        }
     }
 
     #[test]

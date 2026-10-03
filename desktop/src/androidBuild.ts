@@ -11,9 +11,11 @@ import { androidToolSourcesActive, androidToolSourcesError, hasAndroidToolSource
 import type { AndroidToolSourceIdentity, AndroidToolSourceRole, AndroidToolSourcesStatus } from './androidToolSources.ts';
 import { ANDROID_TOOL_REGISTRATION_CONSENT, androidToolRegistrationActive, androidToolRegistrationError,
   androidToolRegistrationPrerequisiteText, hasAndroidToolRegistration, parseAndroidToolRegistrationStatus,
-  sameAndroidToolRegistrationIdentity } from './androidToolRegistration.ts';
+  sameAndroidToolRegistrationIdentity, ANDROID_TOOL_SERVICE_CONSENT, androidToolServiceActive, androidToolServiceError,
+  hasAndroidToolService, parseAndroidToolServiceStatus, sameAndroidToolServiceIdentity } from './androidToolRegistration.ts';
 import type { AndroidToolRegistrationIdentity, AndroidToolRegistrationKind, AndroidToolRegistrationStatus,
-  InspectAndroidToolSources, RegisterAndroidToolSources } from './androidToolRegistration.ts';
+  InspectAndroidToolSources, RegisterAndroidToolSources, AndroidToolServiceAction, AndroidToolServiceIdentity,
+  AndroidToolServiceStatus, CheckAndroidToolService } from './androidToolRegistration.ts';
 import type { AndroidMacToolchainSelection } from './androidBuildTypes.ts';
 import type { AndroidCatalogComparison, AndroidCatalogIdentity, AndroidToolchainCatalogStatus } from './androidToolchainCatalogTypes.ts';
 import { androidCatalogActive, androidCatalogComparison, androidCatalogError, parseAndroidToolchainCatalogStatus, sameAndroidCatalogIdentity, sameAndroidCatalogSelection } from './androidToolchainCatalogProtocol.ts';
@@ -47,6 +49,9 @@ interface AndroidToolRegistrationBinding {
 export interface AndroidToolRegistrationConsent extends AndroidToolRegistrationIdentity {
   reviewId: string; binding: AndroidToolRegistrationBinding; acknowledged: boolean; deadline: number;
 }
+interface AndroidToolServiceConsent {
+  setupGeneration: number; binding: AndroidToolRegistrationBinding; acknowledgedAt: number; deadline: number;
+}
 export interface AndroidBuildState {
   mode: BridgeMode; project: AndroidBuildProject | null; visible: boolean; selectionPending: boolean; verifyUploadSignature: boolean;
   catalogStatus: AndroidToolchainCatalogStatus | null; catalogListening: boolean; catalogReadPending: boolean;
@@ -59,6 +64,10 @@ export interface AndroidBuildState {
   registrationPending: 'inspect' | 'register' | null; registrationUnconfirmed: boolean; registrationIssue: boolean;
   registrationError: ApiError | null; registrationCancelClaimed: AndroidToolRegistrationIdentity | null; registrationCancelPending: boolean;
   registrationConsent: AndroidToolRegistrationConsent | null;
+  toolService: AndroidToolServiceStatus | null; serviceListening: boolean; serviceReadPending: boolean;
+  servicePending: AndroidToolServiceAction | null; serviceUnconfirmed: boolean; serviceIssue: boolean;
+  serviceError: ApiError | null; serviceCancelClaimed: AndroidToolServiceIdentity | null; serviceCancelPending: boolean;
+  serviceConsent: AndroidToolServiceConsent | null;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
   listening: boolean; initialized: boolean; readPending: boolean; status: AndroidBuildStatus | null;
   consent: AndroidBuildConsent | null; pending: 'prepare' | 'start' | null; originalUnconfirmed: boolean;
@@ -70,7 +79,9 @@ interface Observer { api: Port; active: boolean; generation: number; unlisten: (
   catalogUnlisten: (() => void) | null; catalogReading: Promise<void> | null; catalog: AndroidToolchainCatalogStatus | null; catalogCancelPending: boolean; catalogCancelConfirmed: boolean; catalogUnconfirmed: boolean; catalogLost: boolean;
   sourcesUnlisten: (() => void) | null; sourcesReading: Promise<void> | null; sources: AndroidToolSourcesStatus | null;
   registrationUnlisten: (() => void) | null; registrationReading: Promise<void> | null; registration: AndroidToolRegistrationStatus | null;
-  registrationLost: boolean; registrationStops: { identity: AndroidToolRegistrationIdentity; pending: boolean }[] }
+  registrationLost: boolean; registrationStops: { identity: AndroidToolRegistrationIdentity; pending: boolean }[];
+  serviceUnlisten: (() => void) | null; serviceReading: Promise<void> | null; service: AndroidToolServiceStatus | null;
+  serviceLost: boolean; serviceStop: { identity: AndroidToolServiceIdentity; pending: boolean } | null }
 interface Attempt {
   observer: Observer; binding: AndroidBuildBinding; previous: AndroidBuildIdentity | null; after: number;
   identity: AndroidBuildIdentity | null; prepareSent: boolean; prepareReply: boolean; deadline: number;
@@ -85,6 +96,11 @@ interface RegistrationAttempt {
   observer: Observer; before: number; after: number; binding: AndroidToolRegistrationBinding; kind: AndroidToolRegistrationKind;
   identity: AndroidToolRegistrationIdentity | null; retired: boolean; settled: boolean; sent: boolean;
   replySettled: boolean; notAdmitted: boolean; requestedAt: number; reviewDeadline: number;
+}
+interface ServiceAttempt {
+  observer: Observer; before: number; after: number; binding: AndroidToolRegistrationBinding; action: AndroidToolServiceAction;
+  identity: AndroidToolServiceIdentity | null; retired: boolean; settled: boolean; sent: boolean;
+  replySettled: boolean; notAdmitted: boolean;
 }
 interface Context {
   selectedProject: () => ProjectSession | null; releaseVersion: () => ReleaseVersionState | null;
@@ -167,6 +183,8 @@ function projectObservation(session: ProjectSession, version: ReleaseVersionStat
 }
 export function androidBuildOwnerReason(state: AndroidBuildState): string | null {
   if (state.nativeBlocked || state.integrityFailed || state.generationLost) return 'Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.';
+  if (state.serviceUnconfirmed || state.servicePending || state.serviceCancelPending || state.serviceIssue || androidToolServiceActive(state.toolService))
+    return 'The original Android service action is active or unconfirmed. Keep its Status and Cancel; do not repeat registration.';
   if (state.registrationUnconfirmed || state.registrationPending || state.registrationCancelPending || state.registrationIssue || androidToolRegistrationActive(state.toolRegistration))
     return 'The original Android source inspection or protected registration is active or unconfirmed. Keep its Status and Cancel; do not repeat copy.';
   if (state.toolRegistration?.review) return 'An original source review is retained. Register that exact review or explicitly discard it before conflicting work.';
@@ -187,6 +205,8 @@ export class AndroidBuildController {
     sourcesUnconfirmed: false, sourcesIssue: false, sourcesError: null, sourcesCancelClaimed: null,
     toolRegistration: null, registrationListening: false, registrationReadPending: false, registrationPending: null,
     registrationUnconfirmed: false, registrationIssue: false, registrationError: null, registrationCancelClaimed: null, registrationCancelPending: false, registrationConsent: null,
+    toolService: null, serviceListening: false, serviceReadPending: false, servicePending: null, serviceUnconfirmed: false,
+    serviceIssue: false, serviceError: null, serviceCancelClaimed: null, serviceCancelPending: false, serviceConsent: null,
     observationIssue: null, nativeBlocked: false, integrityFailed: false, generationLost: false });
   private readonly context: Context;
   private observer: Observer | null = null;
@@ -198,6 +218,7 @@ export class AndroidBuildController {
     identity: AndroidToolSourceIdentity | null; settled: boolean } | null = null;
   private sourcesCancelClaim: AndroidToolSourceIdentity | null = null;
   private registrationAttempt: RegistrationAttempt | null = null;
+  private serviceAttempt: ServiceAttempt | null = null;
 
   private draftReference: ProjectSession['draft'] = null;
   private snapshotReference: ProjectSession['snapshot'] = null;
@@ -224,8 +245,9 @@ export class AndroidBuildController {
     this.clearTimer();
     if (this.attempt) this.attempt.retired = true;
     if (this.registrationAttempt) this.registrationAttempt.retired = true;
-    this.update({ ...patch, consent: null, registrationConsent: null, historical: !!this.state.status?.operation || this.state.historical });
-    if (stop) { this.stopOriginal(); if (this.observer) this.stopRegistration(this.observer); }
+    if (this.serviceAttempt) this.serviceAttempt.retired = true;
+    this.update({ ...patch, consent: null, registrationConsent: null, serviceConsent: null, historical: !!this.state.status?.operation || this.state.historical });
+    if (stop) { this.stopOriginal(); if (this.observer) { this.stopRegistration(this.observer); this.stopService(this.observer); } }
   }
   private fail(error: unknown, protocol = false): void {
     this.retire({ error: androidBuildError(error), observationIssue: protocol ? 'protocol' : 'bridge',
@@ -238,13 +260,13 @@ export class AndroidBuildController {
     const relevant = ['snapshot-start', 'snapshot-done', 'snapshot-failed', 'new-draft', 'edit', 'remove-forbidden', 'undo-removal',
       'forget-removal', 'reset', 'adopt-suggestion', 'config-save-intent', 'config-save-final', 'config-save-recovery'];
     if (relevant.includes(action.type) && (action.projectId === this.state.project?.projectId || action.projectId === this.attempt?.binding.context.projectId
-        || action.projectId === this.registrationAttempt?.binding.context.projectId))
+        || action.projectId === this.registrationAttempt?.binding.context.projectId || action.projectId === this.serviceAttempt?.binding.context.projectId))
       this.retire(this.advance('contextGeneration'));
   }
   selectionIntent(): void { if (!this.disposed) { this.retire(this.advance('selectionGeneration')); if (this.observer) this.stopSources(this.observer); } }
   snapshotIntent(projectId: string): void {
     if (!this.disposed && (projectId === this.state.project?.projectId || projectId === this.attempt?.binding.context.projectId
-        || projectId === this.registrationAttempt?.binding.context.projectId))
+        || projectId === this.registrationAttempt?.binding.context.projectId || projectId === this.serviceAttempt?.binding.context.projectId))
       this.retire(this.advance('contextGeneration'));
   }
   versionIntent(): void { if (!this.disposed) this.retire(this.advance('contextGeneration')); }
@@ -281,7 +303,7 @@ export class AndroidBuildController {
         || this.registrationAttempt?.kind === 'inspection' && (this.registrationHeld() || !this.registrationAttempt.settled)
         || !!this.state.toolRegistration?.review))
       this.retire({ ...this.advance('contextGeneration'), visible });
-    else this.update({ visible }); // Started build/copy originals stay app-owned across pages.
+    else this.update({ visible, serviceConsent: visible ? this.state.serviceConsent : null }); // Started originals stay app-owned across pages.
   }
   private needsOriginal(observer: Observer): boolean {
     return this.attempt?.observer === observer && this.attempt.prepareSent && !this.attempt.settled || active(observer.status?.operation)
@@ -292,7 +314,10 @@ export class AndroidBuildController {
       || this.registrationAttempt?.observer === observer && this.registrationAttempt.sent
         && (!this.registrationAttempt.replySettled || !this.registrationAttempt.settled)
       || this.registrationHeld(observer.registration) || observer.registrationLost || observer.registrationStops.some((claim) => claim.pending)
-      || this.observer === observer && this.state.registrationUnconfirmed;
+      || this.observer === observer && this.state.registrationUnconfirmed
+      || this.serviceAttempt?.observer === observer && this.serviceAttempt.sent
+        && (!this.serviceAttempt.replySettled || !this.serviceAttempt.settled)
+      || androidToolServiceActive(observer.service) || observer.serviceLost || !!observer.serviceStop?.pending;
   }
   private detach(observer: Observer): void {
     observer.active = false;
@@ -304,12 +329,14 @@ export class AndroidBuildController {
     observer.sourcesUnlisten = null;
     try { observer.registrationUnlisten?.(); } catch { /* Not native settlement. */ }
     observer.registrationUnlisten = null;
+    try { observer.serviceUnlisten?.(); } catch { /* Not callback/native settlement. */ }
+    observer.serviceUnlisten = null;
   }
   beginConnection(): void {
     if (this.disposed) return;
     this.retire(this.advance('connectionGeneration'));
     const observer = this.observer;
-    if (observer) { this.stopCatalog(observer); this.stopSources(observer); this.stopRegistration(observer); }
+    if (observer) { this.stopCatalog(observer); this.stopSources(observer); this.stopRegistration(observer); this.stopService(observer); }
     if (observer && (this.needsOriginal(observer) || this.state.nativeBlocked || this.state.integrityFailed)) {
       this.update({ nativeBlocked: true, historical: true }); return; // Never adopt a replacement document/API.
     }
@@ -317,11 +344,14 @@ export class AndroidBuildController {
     this.observer = null;
     this.catalogAttempt = null; this.catalogCancelClaim = null; this.sourcesAttempt = null; this.sourcesCancelClaim = null;
     this.registrationAttempt = null;
+    this.serviceAttempt = null;
     this.update({ mode: 'unavailable', listening: false, initialized: false, readPending: false,
       catalogStatus: null, catalogListening: false, catalogReadPending: false, catalogPending: null, catalogUnconfirmed: false, catalogCancelPending: false, catalogIssue: false,
       toolSources: null, sourcesListening: false, sourcesReadPending: false, sourcesPending: false, sourcesUnconfirmed: false, sourcesIssue: false, sourcesError: null,
       toolRegistration: null, registrationListening: false, registrationReadPending: false, registrationPending: null, registrationUnconfirmed: false,
-      registrationIssue: false, registrationError: null, registrationCancelClaimed: null, registrationCancelPending: false, registrationConsent: null });
+      registrationIssue: false, registrationError: null, registrationCancelClaimed: null, registrationCancelPending: false, registrationConsent: null,
+      toolService: null, serviceListening: false, serviceReadPending: false, servicePending: null, serviceUnconfirmed: false,
+      serviceIssue: false, serviceError: null, serviceCancelClaimed: null, serviceCancelPending: false, serviceConsent: null });
   }
   async connect(api: Port): Promise<void> {
     if (this.disposed || this.observer?.api === api) return;
@@ -331,7 +361,8 @@ export class AndroidBuildController {
     if (api.mode !== 'native') return;
     const observer: Observer = { api, active: true, generation: this.state.connectionGeneration, unlisten: null, reading: null, status: null,
       catalogUnlisten: null, catalogReading: null, catalog: null, catalogCancelPending: false, catalogCancelConfirmed: false, catalogUnconfirmed: false, catalogLost: false, sourcesUnlisten: null, sourcesReading: null, sources: null,
-      registrationUnlisten: null, registrationReading: null, registration: null, registrationLost: false, registrationStops: [] };
+      registrationUnlisten: null, registrationReading: null, registration: null, registrationLost: false, registrationStops: [],
+      serviceUnlisten: null, serviceReading: null, service: null, serviceLost: false, serviceStop: null };
     this.observer = observer;
     try {
       const unlisten = await api.subscribeAndroidBuild((value) => { if (observer.active) this.receive(observer, value); });
@@ -352,6 +383,12 @@ export class AndroidBuildController {
         if (!observer.active || this.observer !== observer || this.disposed && !this.needsOriginal(observer)) { registrationUnlisten(); return; }
         observer.registrationUnlisten = registrationUnlisten; this.update({ registrationListening: true });
         await this.checkToolRegistration();
+      }
+      if (hasAndroidToolService(api)) {
+        const serviceUnlisten = await api.subscribeAndroidToolService!((value) => { if (observer.active) this.receiveService(observer, value); });
+        if (!observer.active || this.observer !== observer || this.disposed && !this.needsOriginal(observer)) { serviceUnlisten(); return; }
+        observer.serviceUnlisten = serviceUnlisten; this.update({ serviceListening: true });
+        await this.checkToolServiceStatus();
       }
       await this.checkStatus(); // Subscribe before reading or preparing.
     } catch (error) { if (observer.active) this.fail(error); }
@@ -495,6 +532,11 @@ export class AndroidBuildController {
     const registration = this.registrationAttempt;
     if (registration?.observer === observer && !registration.retired && this.registrationHeld(observer.registration)
         && !this.registrationMatches(registration)) this.retire(this.advance('contextGeneration'));
+    const service = this.serviceAttempt;
+    if (service?.observer === observer && !service.retired && (service.sent && !service.settled || androidToolServiceActive(observer.service))
+        && !this.serviceMatches(service)) this.retire(this.advance('contextGeneration'));
+    if (this.state.serviceConsent && this.state.serviceConsent.binding.sourceGeneration !== status.sourceGeneration)
+      this.update({ serviceConsent: null });
     if ((this.disposed || ours && attempt.retired) && androidToolSourcesActive(status)) this.stopSources(observer);
     if (this.disposed && !this.needsOriginal(observer)) this.detach(observer);
     return status;
@@ -523,6 +565,7 @@ export class AndroidBuildController {
     if (this.disposed || this.state.mode !== 'native' || !this.observer?.active || !hasAndroidToolSources(this.observer.api))
       return 'Open a supported native app to choose Android tool folders.';
     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
+    if (this.serviceHeld()) return androidBuildOwnerReason(this.state);
     if (this.observer.generation !== this.state.connectionGeneration || !this.state.sourcesListening || !this.state.toolSources || this.state.sourcesIssue)
       return 'Check the original tool-selection status before browsing.';
     if (this.state.sourcesPending || this.state.sourcesUnconfirmed || androidToolSourcesActive(this.state.toolSources))
@@ -632,7 +675,7 @@ export class AndroidBuildController {
     }
     if (before.phase === 'stopping') return ['stopping', 'refused', 'cancelled', 'unknown'].includes(after.phase);
     const working = before.operation?.kind === 'inspection' ? ['inspecting', 'settling', 'review']
-      : ['copying', 'verifying', 'publishing', 'settling', 'complete'];
+      : ['preparing', 'copying', 'verifying', 'publishing', 'settling', 'complete'];
     return ['stopping', 'refused', 'cancelled', 'unknown'].includes(after.phase)
       || working.indexOf(after.phase) >= working.indexOf(before.phase);
   }
@@ -737,6 +780,7 @@ export class AndroidBuildController {
     if (this.disposed || this.state.mode !== 'native' || !observer?.active || !hasAndroidToolRegistration(observer.api))
       return 'Protected registration is unavailable in this adapter. There is no browser, shell or unprivileged-copy fallback.';
     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
+    if (this.serviceHeld()) return androidBuildOwnerReason(this.state);
     if (observer.generation !== this.state.connectionGeneration || !this.state.registrationListening || !status || this.state.registrationIssue)
       return 'Check original registration Status and its subscription before inspecting or approving protected copy.';
     if (!this.state.listening || !this.state.initialized || !this.state.status || this.state.observationIssue
@@ -926,6 +970,229 @@ export class AndroidBuildController {
     return true;
   }
 
+  private serviceHeld(): boolean {
+    return this.state.serviceIssue || this.state.serviceUnconfirmed || this.state.servicePending !== null
+      || this.state.serviceCancelPending || androidToolServiceActive(this.state.toolService);
+  }
+  private serviceBindingCurrent(binding: AndroidToolRegistrationBinding, observer: Observer): boolean {
+    const project = this.state.project, sources = this.state.toolSources;
+    return !this.disposed && observer === this.observer && observer.active
+      && binding.connectionGeneration === this.state.connectionGeneration && binding.selectionGeneration === this.state.selectionGeneration
+      && binding.contextGeneration === this.state.contextGeneration && binding.requestGeneration === this.state.requestGeneration
+      && !!project && project.inputIssue === null && !this.state.selectionPending && !project.snapshotPending
+      && !project.versionPending && !project.saveRecoveryRequired && project.observationGeneration === binding.observationGeneration
+      && sameAndroidBuildData(binding.versionObservation, project.versionObservation)
+      && sameAndroidBuildData(binding.context, this.currentRegistrationContext())
+      && !!sources && sources.sourceGeneration === binding.sourceGeneration && !androidToolSourcesActive(sources)
+      && !this.state.sourcesIssue && !this.state.sourcesPending && !this.state.sourcesUnconfirmed;
+  }
+  private serviceMatches(attempt: ServiceAttempt): boolean {
+    return this.serviceAttempt === attempt && !attempt.retired && this.serviceBindingCurrent(attempt.binding, attempt.observer);
+  }
+  private serviceCandidate(attempt: ServiceAttempt, status: AndroidToolServiceStatus): boolean {
+    const op = status.operation;
+    return attempt.sent && !!op && status.setupGeneration === attempt.before + 1 && status.statusRevision > attempt.after
+      && op.action === attempt.action && op.sourceGeneration === attempt.binding.sourceGeneration
+      && sameAndroidBuildData(op.context, attempt.binding.context)
+      && (!attempt.identity || sameAndroidToolServiceIdentity(attempt.identity, op));
+  }
+  private serviceProgress(before: AndroidToolServiceStatus, after: AndroidToolServiceStatus): boolean {
+    if (!sameAndroidBuildData(before.operation, after.operation)) return false;
+    if (before.phase === 'unknown') return after.phase === 'unknown';
+    if (['complete', 'refused', 'cancelled'].includes(before.phase))
+      return after.phase === before.phase && after.reason === before.reason && sameAndroidBuildData(before.observation, after.observation);
+    if (before.phase === 'stopping') return ['stopping', 'refused', 'cancelled', 'unknown'].includes(after.phase);
+    if (before.phase === 'settling') return ['settling', 'stopping', 'complete', 'refused', 'cancelled', 'unknown'].includes(after.phase);
+    return before.phase === after.phase || ['settling', 'stopping', 'complete', 'refused', 'cancelled', 'unknown'].includes(after.phase);
+  }
+  private serviceFail(protocol = false): void {
+    if (protocol && this.observer) this.observer.serviceLost = true;
+    this.retire({ serviceError: androidToolServiceError(null), serviceIssue: true,
+      nativeBlocked: this.state.nativeBlocked || protocol, integrityFailed: this.state.integrityFailed || protocol });
+  }
+  private receiveService(observer: Observer, value: unknown): AndroidToolServiceStatus | null {
+    if (!observer.active) return null;
+    this.syncProject();
+    const status = parseAndroidToolServiceStatus(value), before = observer.service, attempt = this.serviceAttempt;
+    if (!status) { this.serviceFail(true); return null; }
+    if (observer.serviceLost) { this.stopService(observer); return null; }
+    if (before && status.statusRevision < before.statusRevision) return status;
+    const ours = attempt?.observer === observer, candidate = !!ours && this.serviceCandidate(attempt, status);
+    if (before && status.statusRevision === before.statusRevision && !sameAndroidBuildData(before, status)
+        || before && status.setupGeneration < before.setupGeneration
+        || before && status.setupGeneration !== before.setupGeneration && !candidate
+        || before && status.setupGeneration === before.setupGeneration && before.operation && !this.serviceProgress(before, status)
+        || ours && status.setupGeneration === attempt.before + 1 && !candidate
+        || ours && attempt.identity && !sameAndroidToolServiceIdentity(attempt.identity, status.operation)
+        || candidate && attempt.notAdmitted) { this.serviceFail(true); return null; }
+    if (candidate && status.operation) {
+      attempt.identity ??= { operationId: status.operation.operationId, setupGeneration: status.operation.setupGeneration };
+      attempt.settled = !androidToolServiceActive(status);
+    }
+    observer.service = status;
+    if (observer === this.observer) this.update({ toolService: status,
+      servicePending: candidate && attempt.replySettled ? null : this.state.servicePending,
+      serviceUnconfirmed: candidate ? false : this.state.serviceUnconfirmed,
+      serviceConsent: before?.setupGeneration === status.setupGeneration && before.prerequisite === status.prerequisite
+        && before.availability === status.availability ? this.state.serviceConsent : null,
+      nativeBlocked: this.state.nativeBlocked || status.phase === 'unknown'
+        || ['cleanup-unknown', 'document-lost', 'shutdown'].includes(status.availability),
+      generationLost: this.state.generationLost || status.statusRevision === ANDROID_BUILD_COUNTER_MAX });
+    if ((this.disposed || ours && attempt.retired) && androidToolServiceActive(status)) this.stopService(observer);
+    if (this.disposed && !this.needsOriginal(observer)) this.detach(observer);
+    return status;
+  }
+  canCheckToolServiceStatus(): boolean {
+    return !this.disposed && !!this.observer?.active && hasAndroidToolService(this.observer.api) && !this.state.serviceReadPending;
+  }
+  async checkToolServiceStatus(): Promise<void> {
+    const observer = this.observer;
+    if (this.disposed || !observer?.active || !hasAndroidToolService(observer.api)) return;
+    if (observer.serviceReading) return observer.serviceReading;
+    const work = Promise.resolve().then(async () => {
+      if (!observer.active) return;
+      try {
+        const status = this.receiveService(observer, await observer.api.androidToolServiceStatus!());
+        if (status && status.statusRevision >= (observer.service?.statusRevision ?? 0) && !this.state.integrityFailed)
+          this.update({ serviceIssue: false, serviceError: null });
+      } catch { if (observer.active) this.serviceFail(); }
+    });
+    observer.serviceReading = work; this.update({ serviceReadPending: true });
+    try { await work; } finally {
+      if (observer.serviceReading === work) {
+        observer.serviceReading = null; if (observer === this.observer) this.update({ serviceReadPending: false });
+      }
+    }
+  }
+  serviceActionReason = (ignoreOwnPending = false): string | null => {
+    const observer = this.observer, status = this.state.toolService, project = this.state.project;
+    if (this.disposed || this.state.mode !== 'native' || !observer?.active || !hasAndroidToolService(observer.api))
+      return 'Service setup requires the supported installed native Mac application. No browser or command-line fallback is used.';
+    if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
+    if (observer.generation !== this.state.connectionGeneration || !this.state.serviceListening || !status || this.state.serviceIssue)
+      return 'Read the original service status before a new setup action.';
+    if (this.state.serviceCancelPending || androidToolServiceActive(status)
+        || !ignoreOwnPending && (this.state.servicePending || this.state.serviceUnconfirmed))
+      return 'Keep the original service action until its reply and cleanup are confirmed. Do not repeat registration.';
+    if (this.registrationHeld() || this.state.registrationIssue || this.state.registrationPending
+        || this.state.registrationUnconfirmed || this.state.registrationCancelPending)
+      return 'Finish the original source inspection/copy, or discard its unstarted review, before service setup.';
+    if (!this.state.sourcesListening || !this.state.toolSources || this.state.sourcesIssue || this.state.sourcesPending
+        || this.state.sourcesUnconfirmed || androidToolSourcesActive(this.state.toolSources))
+      return 'Observe and settle the original folder-selection status. No source folders are required for service setup.';
+    if (!this.state.listening || !this.state.initialized || !this.state.status || this.state.observationIssue
+        || !this.state.catalogListening || !this.state.catalogStatus || this.state.catalogIssue || this.state.catalogPending
+        || this.state.catalogUnconfirmed || this.state.catalogCancelPending || androidCatalogActive(this.state.catalogStatus)
+        || this.state.pending || this.state.originalUnconfirmed || active(this.state.status.operation))
+      return 'Observe and settle the original build/catalog owners before service setup.';
+    if (status.prerequisite === 'signing-unavailable')
+      return 'This app does not contain the required shipping-signed helper identity. Obtain a correctly signed release from the publisher; local administrator access cannot replace it.';
+    if (status.availability !== 'available') return androidBuildAvailabilityText[status.availability];
+    if (!this.state.visible) return 'Open Releases to review and choose a service setup action.';
+    if (!project || this.state.selectionPending) return 'Select a registered mobile project first.';
+    if (project.snapshotPending || project.versionPending || project.saveRecoveryRequired) return 'Finish the saved-input observation or save recovery first.';
+    return project.inputIssue ?? (this.currentRegistrationContext() ? this.context.otherOperationReason() : 'Refresh saved configuration and read its saved version first.');
+  };
+  private serviceConsentCurrent(): boolean {
+    const consent = this.state.serviceConsent, observer = this.observer, now = this.now();
+    return !!consent && !!observer && consent.setupGeneration === this.state.toolService?.setupGeneration
+      && this.serviceBindingCurrent(consent.binding, observer) && Number.isFinite(now)
+      && now >= consent.acknowledgedAt && now < consent.deadline;
+  }
+  serviceRegistrationReason = (): string | null => this.serviceActionReason() ??
+    (this.serviceConsentCurrent() ? null : 'Acknowledge this separate system-service registration request. It does not approve a tool copy or accept vendor licenses.');
+  setServiceRegistrationAcknowledged(setupGeneration: number, acknowledged: boolean): void {
+    this.syncProject();
+    if (typeof acknowledged !== 'boolean') return;
+    if (!acknowledged) { this.update({ serviceConsent: null }); return; }
+    if (this.serviceActionReason() || setupGeneration !== this.state.toolService?.setupGeneration || this.serviceConsentCurrent()) return;
+    const context = this.currentRegistrationContext(), sources = this.state.toolSources, now = this.now();
+    if (!context || !sources || !Number.isFinite(now) || now < 0 || !Number.isFinite(now + ANDROID_BUILD_CONSENT_MS)) return;
+    const binding = this.registrationBinding(context, sources.sourceGeneration, this.state.requestGeneration);
+    if (binding) this.update({ serviceConsent: { setupGeneration, binding, acknowledgedAt: now, deadline: now + ANDROID_BUILD_CONSENT_MS } });
+  }
+  checkAndroidToolService = (): Promise<void> => this.admitServiceAction('check');
+  requestAndroidToolServiceRegistration = (): Promise<void> => this.admitServiceAction('request-registration');
+  openAndroidToolServiceApprovalSettings = (): Promise<void> => this.admitServiceAction('open-approval-settings');
+  private async admitServiceAction(action: AndroidToolServiceAction): Promise<void> {
+    this.syncProject();
+    if (this.serviceActionReason() || action === 'request-registration' && this.serviceRegistrationReason()) return;
+    const observer = this.observer, before = observer?.service, context = this.currentRegistrationContext(), sources = this.state.toolSources;
+    if (!observer?.active || !before || !context || !sources) return;
+    const counters = this.advance('requestGeneration');
+    if (before.setupGeneration >= ANDROID_BUILD_COUNTER_MAX - 1 || counters.generationLost) { this.retire({ generationLost: true }); return; }
+    const binding = this.registrationBinding(context, sources.sourceGeneration, counters.requestGeneration!); if (!binding) return;
+    const attempt: ServiceAttempt = { observer, before: before.setupGeneration, after: before.statusRevision, binding, action,
+      identity: null, retired: false, settled: false, sent: false, replySettled: false, notAdmitted: false };
+    this.serviceAttempt = attempt; observer.serviceStop = null;
+    // Consume the UI acknowledgement once, before invoke. Reentrancy, lost
+    // replies and Status cannot recreate consent or automatically retry it.
+    this.update({ ...counters, serviceConsent: null, servicePending: action, serviceUnconfirmed: true,
+      serviceError: null, serviceCancelClaimed: null }); this.syncProject();
+    if (!this.serviceMatches(attempt) || this.serviceActionReason(true)) {
+      attempt.retired = true; attempt.settled = true; attempt.replySettled = true;
+      this.update({ servicePending: null, serviceUnconfirmed: false }); return;
+    }
+    const request: CheckAndroidToolService = { schemaVersion: 1, setupGeneration: attempt.before, context };
+    attempt.sent = true;
+    try {
+      const value = action === 'check' ? await observer.api.checkAndroidToolService!(request)
+        : action === 'open-approval-settings' ? await observer.api.openAndroidToolServiceApprovalSettings!(request)
+        : await observer.api.requestAndroidToolServiceRegistration!({ ...request, consentVersion: ANDROID_TOOL_SERVICE_CONSENT, registrationAcknowledged: true });
+      attempt.replySettled = true;
+      if (!observer.active || this.serviceAttempt !== attempt) return;
+      const status = parseAndroidToolServiceStatus(value);
+      if (!status || !this.serviceCandidate(attempt, status)) { this.serviceFail(true); return; }
+      this.receiveService(observer, status);
+    } catch (error) {
+      attempt.replySettled = true;
+      if (!observer.active || this.serviceAttempt !== attempt) return;
+      const safe = androidToolServiceError(error);
+      if (['android_service_invalid', 'android_service_unavailable'].includes(safe.code)) {
+        if (attempt.identity || observer.service && this.serviceCandidate(attempt, observer.service)) { this.serviceFail(true); return; }
+        attempt.notAdmitted = true; attempt.retired = true; attempt.settled = true;
+        this.update({ servicePending: null, serviceUnconfirmed: false, serviceError: safe });
+      } else this.serviceFail();
+    } finally {
+      if (observer.active && this.serviceAttempt === attempt && attempt.identity && observer.service && this.serviceCandidate(attempt, observer.service))
+        this.receiveService(observer, observer.service);
+      if (this.disposed && !this.needsOriginal(observer)) this.detach(observer);
+    }
+  }
+  canCancelToolService(): boolean {
+    const observer = this.observer, status = observer?.service;
+    return !this.disposed && !!observer?.active && hasAndroidToolService(observer.api) && !!status?.operation
+      && androidToolServiceActive(status) && !sameAndroidToolServiceIdentity(observer.serviceStop?.identity ?? null, status.operation);
+  }
+  cancelToolService(): boolean { return !!this.observer && this.stopService(this.observer); }
+  private stopService(observer: Observer): boolean {
+    const attempt = this.serviceAttempt;
+    if (attempt?.observer === observer) attempt.retired = true;
+    if (observer === this.observer) this.update({ serviceConsent: null });
+    const status = observer.service, op = status?.operation;
+    if (!observer.active || !hasAndroidToolService(observer.api) || !op || !androidToolServiceActive(status)
+        || sameAndroidToolServiceIdentity(observer.serviceStop?.identity ?? null, op)) return false;
+    // Only the retained original, never an identity from a rejected foreign
+    // observation. Same-generation source-copy Cancel is a different route.
+    const identity = freeze({ operationId: op.operationId, setupGeneration: op.setupGeneration });
+    const claim = { identity, pending: true }; observer.serviceStop = claim;
+    this.update({ serviceCancelClaimed: identity, serviceCancelPending: true });
+    void (async () => {
+      try {
+        const result = parseAndroidToolServiceStatus(await observer.api.cancelAndroidToolService!({ schemaVersion: 1, ...identity }));
+        if (!observer.active) return;
+        if (!result || !sameAndroidToolServiceIdentity(result.operation, identity)) { this.serviceFail(true); return; }
+        this.receiveService(observer, result);
+      } catch { if (observer.active) this.serviceFail(); }
+      finally {
+        claim.pending = false;
+        if (observer === this.observer) this.update({ serviceCancelPending: false });
+        if (this.disposed && !this.needsOriginal(observer)) this.detach(observer);
+      }
+    })();
+    return true;
+  }
+
   private catalogFail(error: unknown, protocol = false, observer: Observer | null = this.observer): void {
     if (protocol && observer) observer.catalogLost = true;
     this.retire({ catalogError: androidCatalogError(error), catalogIssue: true,
@@ -1057,6 +1324,7 @@ export class AndroidBuildController {
   catalogActionReason = (): string | null => {
     if (this.disposed || this.state.mode !== 'native') return 'Open the native application to inspect protected Android tool copies.';
     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
+    if (this.serviceHeld()) return androidBuildOwnerReason(this.state);
     if (this.state.sourcesIssue || this.state.sourcesPending || this.state.sourcesUnconfirmed || androidToolSourcesActive(this.state.toolSources))
       return 'Settle or confirm the original Android tool picker before changing the protected copy.';
     if (this.state.registrationPending || this.state.registrationUnconfirmed || this.state.registrationCancelPending || this.state.registrationIssue || this.registrationHeld())
@@ -1188,6 +1456,7 @@ export class AndroidBuildController {
   private commonReason(): string | null {
     if (this.disposed || this.state.mode !== 'native') return 'Open the native application. Browser preview cannot prepare or run an Android build.';
     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return androidBuildOwnerReason(this.state);
+    if (this.serviceHeld()) return androidBuildOwnerReason(this.state);
     if (!this.observer?.active || this.observer.generation !== this.state.connectionGeneration || !this.state.listening || !this.state.initialized || !this.state.status || this.state.observationIssue)
       return 'A current original native Status and subscription are required. Passive diagnostics cannot qualify Android execution.';
     if (this.state.status.statusRevision >= ANDROID_BUILD_COUNTER_MAX) return 'The original status counter is exhausted. No counter or consent can be reused.';
@@ -1338,7 +1607,7 @@ export class AndroidBuildController {
   }
   dispose(): void {
     if (this.disposed) return;
-    this.retire(); if (this.observer) { this.stopCatalog(this.observer); this.stopSources(this.observer); this.stopRegistration(this.observer); }
+    this.retire(); if (this.observer) { this.stopCatalog(this.observer); this.stopSources(this.observer); this.stopRegistration(this.observer); this.stopService(this.observer); }
     this.disposed = true; this.listeners.clear();
     if (this.observer && !this.needsOriginal(this.observer)) this.detach(this.observer);
     // Sent work retains a retirement-only original observer until actual native

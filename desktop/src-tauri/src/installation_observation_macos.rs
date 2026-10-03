@@ -31,6 +31,13 @@ impl InstallationSlots {
     pub(crate) fn new() -> Self {
         Self { book: Some(Book::new()), entered: false, native_settled: false, storage_disposed: false, files: 0, bytes: 0 }
     }
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    pub(crate) fn new_registered(gate: crate::saved_command_owner::AndroidRegistrationWorkGate) -> Self {
+        // Same inert installation inspector, now subordinate to the caller's
+        // original registration clock/cohort. No entry or observation here.
+        let mut book = Book::new(); book.registration_gate = Some(gate);
+        Self { book: Some(book), entered: false, native_settled: false, storage_disposed: false, files: 0, bytes: 0 }
+    }
     pub(crate) fn settled(&self) -> bool {
         (!self.entered && self.book.as_ref().is_some_and(Book::never_started))
             || (self.entered && self.native_settled && self.storage_disposed && self.book.is_none())

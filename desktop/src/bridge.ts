@@ -42,8 +42,9 @@ import type { AndroidToolchainCatalogStatus } from './androidToolchainCatalogTyp
 import { ANDROID_TOOL_SOURCES_EVENT, androidToolSourcesError, encodeAndroidToolSourcesRequest, parseAndroidToolSourcesStatus } from './androidToolSources.ts';
 import type { AndroidToolSourcesCommand, AndroidToolSourcesStatus } from './androidToolSources.ts';
 import { ANDROID_TOOL_REGISTRATION_EVENT, androidToolRegistrationError, encodeAndroidToolRegistrationRequest,
-  parseAndroidToolRegistrationStatus } from './androidToolRegistration.ts';
-import type { AndroidToolRegistrationCommand, AndroidToolRegistrationStatus } from './androidToolRegistration.ts';
+  parseAndroidToolRegistrationStatus, ANDROID_TOOL_SERVICE_EVENT, androidToolServiceError,
+  encodeAndroidToolServiceRequest, parseAndroidToolServiceStatus } from './androidToolRegistration.ts';
+import type { AndroidToolRegistrationCommand, AndroidToolRegistrationStatus, AndroidToolServiceCommand, AndroidToolServiceStatus } from './androidToolRegistration.ts';
 import { IOS_ARCHIVE_EVENT, encodeIOSArchiveRequest, iosArchiveError, parseIOSArchiveStatus } from './iosArchiveProtocol.ts';
 import type { IOSArchiveCommand } from './iosArchiveProtocol.ts';
 import type { IOSArchiveStatus } from './iosArchiveTypes.ts';
@@ -53,7 +54,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -148,6 +149,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'android_registration_unconfirmed' };
       return status;
     } catch (error) { throw androidToolRegistrationError(error); }
+  };
+  const androidServiceCall = async (command: AndroidToolServiceCommand, value: unknown): Promise<AndroidToolServiceStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'android_service_unavailable' };
+      const body = encodeAndroidToolServiceRequest(command, value);
+      if (!body) throw { code: 'android_service_invalid' };
+      const status = parseAndroidToolServiceStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'android_service_unconfirmed' };
+      return status;
+    } catch (error) { throw androidToolServiceError(error); }
   };
   const iosCall = async (command: IOSArchiveCommand, value: unknown): Promise<IOSArchiveStatus> => {
     try {
@@ -381,6 +392,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'android_registration_unavailable' };
         return await listen(ANDROID_TOOL_REGISTRATION_EVENT, (value) => onStatus(parseAndroidToolRegistrationStatus(value)));
       } catch (error) { throw androidToolRegistrationError(error); }
+    },
+    androidToolServiceStatus: () => androidServiceCall('android_tool_service_status', { schemaVersion: 1 }),
+    checkAndroidToolService: (request) => androidServiceCall('check_android_tool_service', request),
+    requestAndroidToolServiceRegistration: (request) => androidServiceCall('request_android_tool_service_registration', request),
+    openAndroidToolServiceApprovalSettings: (request) => androidServiceCall('open_android_tool_service_approval_settings', request),
+    cancelAndroidToolService: (request) => androidServiceCall('cancel_android_tool_service', request),
+    subscribeAndroidToolService: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'android_service_unavailable' };
+        return await listen(ANDROID_TOOL_SERVICE_EVENT, (value) => onStatus(parseAndroidToolServiceStatus(value)));
+      } catch (error) { throw androidToolServiceError(error); }
     },
     androidToolchainCatalogStatus: () => androidCatalogCall('android_toolchain_catalog_status', { schemaVersion: 1 }),
     refreshAndroidToolchainCatalog: () => androidCatalogCall('refresh_android_toolchain_catalog', { schemaVersion: 1 }),

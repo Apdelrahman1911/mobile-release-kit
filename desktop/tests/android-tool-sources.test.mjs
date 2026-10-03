@@ -8,6 +8,8 @@ import { AndroidBuildController, androidBuildOwnerReason } from '../src/androidB
 import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
 import { ANDROID_TOOL_SOURCES_EVENT, androidToolSourceHelp, encodeAndroidToolSourcesRequest,
   parseAndroidToolSourcesStatus } from '../src/androidToolSources.ts';
+import { ANDROID_TOOL_SERVICE_EVENT, ANDROID_TOOL_SERVICE_CONSENT, ANDROID_TOOL_REGISTRATION_CONSENT,
+  encodeAndroidToolServiceRequest, parseAndroidToolServiceStatus, parseAndroidToolRegistrationStatus } from '../src/androidToolRegistration.ts';
 const clone = (value) => structuredClone(value);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let n = 0; n < 16; n++) await Promise.resolve(); };
@@ -181,6 +183,76 @@ test('each source role has practical in-app help and UI never presents selection
   const ui = readFileSync(new URL('../src/components/AndroidBuild.tsx', import.meta.url), 'utf8');
   assert.match(ui, /controller\.chooseToolSource\(role\)/);
   assert.match(ui, /HelpButton content=\{help\}/);
-  assert.match(ui, /Supplier inspection and protected-copy creation are not available/);
+  assert.match(ui, /Browsing alone neither inspects supplier contents nor registers a copy/);
+  assert.match(ui, /separate inspection and protected-copy approval stay disabled until their actual prerequisites are available/);
   assert.match(ui, /sameProject \? sources\?\.selections\.find/);
+});
+
+const serviceContext = () => ({ projectId: 'p1', draftRevision: 0, baselineGeneration: 1,
+  savedConfig: { bytes: 512, sha256: 'a'.repeat(64) },
+  savedVersion: { source: 'VERSION', bytes: 12, sha256: 'b'.repeat(64), name: '1.0.0', build: 1 },
+  artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } });
+const serviceStatus = () => ({ schemaVersion: 1, statusRevision: 1, setupGeneration: 1, availability: 'available',
+  prerequisite: 'approval-required', phase: 'complete', reason: 'none',
+  operation: { operationId: 'c'.repeat(32), setupGeneration: 1, sourceGeneration: 0, action: 'check', context: serviceContext() },
+  observation: { state: 'requires-approval', outcome: 'observed', mutationEntered: false, mutationReturned: false,
+    mutationUncertain: false, nativeSettled: true } });
+
+test('service route wiring and bounded consent keep setup independent of sources, copy and arbitrary destinations', async () => {
+  const request = { schemaVersion: 1, setupGeneration: 0, context: serviceContext() };
+  assert.ok(encodeAndroidToolServiceRequest('check_android_tool_service', request));
+  assert.ok(encodeAndroidToolServiceRequest('open_android_tool_service_approval_settings', request));
+  assert.equal(encodeAndroidToolServiceRequest('request_android_tool_service_registration', request), null);
+  const register = { ...request, consentVersion: ANDROID_TOOL_SERVICE_CONSENT, registrationAcknowledged: true };
+  assert.ok(encodeAndroidToolServiceRequest('request_android_tool_service_registration', register));
+  for (const [key, value] of [['consentVersion', ANDROID_TOOL_REGISTRATION_CONSENT], ['registrationAcknowledged', false],
+    ['path', '/not-authority'], ['serviceName', 'alternate'], ['url', 'https://example.invalid'], ['sourceGeneration', 0], ['licenseAcknowledged', true]])
+    assert.equal(encodeAndroidToolServiceRequest('request_android_tool_service_registration', { ...register, [key]: value }), null);
+  const calls = [], events = [];
+  const api = createNativeApi('native', async (command, body) => { calls.push({ command, body }); return serviceStatus(); },
+    async (event, callback) => { events.push(event); callback(serviceStatus()); return () => {}; });
+  await api.checkAndroidToolService(request);
+  assert.equal(calls[0].command, 'check_android_tool_service'); assert.ok(calls[0].body instanceof Uint8Array);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[0].body)), request);
+  await assert.rejects(api.requestAndroidToolServiceRegistration({ ...register, registrationAcknowledged: false }));
+  assert.equal(calls.length, 1);
+  (await api.subscribeAndroidToolService((value) => assert.ok(parseAndroidToolServiceStatus(value))))();
+  assert.deepEqual(events, [ANDROID_TOOL_SERVICE_EVENT]);
+  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  const build = read('../src-tauri/build.rs'), shell = read('../src-tauri/src/shell.rs');
+  const permissions = JSON.parse(read('../src-tauri/capabilities/main.json')).permissions;
+  const declared = [...build.match(/const COMMANDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/)[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  const handlers = shell.match(/generate_handler!\[([\s\S]*?)\]/)[1].split(',').map((name) => name.trim());
+  for (const command of ['android_tool_service_status', 'check_android_tool_service', 'request_android_tool_service_registration',
+    'open_android_tool_service_approval_settings', 'cancel_android_tool_service']) {
+    assert.equal(declared.filter((value) => value === command).length, 1);
+    assert.equal(handlers.filter((value) => value === command).length, 1);
+    assert.equal(permissions.filter((value) => value === 'allow-' + command.replaceAll('_', '-')).length, 1);
+    const start = shell.indexOf('async fn ' + command + '('), end = shell.indexOf('\n#[tauri::command]', start + 1);
+    assert.ok(start >= 0); assert.match(shell.slice(start, end === -1 ? undefined : end), /edit_window\(&webview\)/);
+  }
+});
+
+test('service observation distinguishes approval, actual denial and earlier cancellation without fake finality', () => {
+  const status = serviceStatus(); assert.ok(parseAndroidToolServiceStatus(status));
+  status.operation.action = 'request-registration'; status.observation.outcome = 'denied-by-user';
+  status.observation.mutationEntered = true; status.observation.mutationReturned = true;
+  assert.equal(parseAndroidToolServiceStatus(status), null);
+  status.phase = 'refused'; status.reason = 'approval-denied'; status.prerequisite = 'approval-denied';
+  assert.ok(parseAndroidToolServiceStatus(status));
+  status.phase = 'cancelled'; status.reason = 'cancelled'; assert.ok(parseAndroidToolServiceStatus(status));
+  status.phase = 'refused'; status.reason = 'timed-out'; assert.ok(parseAndroidToolServiceStatus(status));
+  for (const field of ['nativeSettled', 'mutationReturned']) {
+    const missing = clone(status); missing.observation[field] = false; assert.equal(parseAndroidToolServiceStatus(missing), null);
+  }
+  const wrong = clone(status); wrong.phase = 'unknown'; wrong.reason = 'cleanup-unknown'; wrong.availability = 'cleanup-unknown';
+  assert.equal(parseAndroidToolServiceStatus(wrong), null);
+  let invoked = 0;
+  Object.defineProperty(status, 'observation', { enumerable: true, get() { invoked++; return {}; } });
+  assert.equal(parseAndroidToolServiceStatus(status), null); assert.equal(invoked, 0);
+  const preparing = { schemaVersion: 1, statusRevision: 1, registrationGeneration: 1, availability: 'busy',
+    prerequisite: 'ready', phase: 'preparing', reason: 'none', operation: { operationId: 'd'.repeat(32), registrationGeneration: 1,
+      sourceGeneration: 3, kind: 'registration', context: serviceContext() }, review: null, report: null };
+  assert.ok(parseAndroidToolRegistrationStatus(preparing));
+  preparing.operation.kind = 'inspection'; assert.equal(parseAndroidToolRegistrationStatus(preparing), null);
 });

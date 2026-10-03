@@ -11,6 +11,8 @@ use crate::{
 
 pub(crate) const EVENT: &str = "android-tool-registration-state-changed";
 pub(crate) const CONSENT: &str = "android-tool-protected-copy-v1";
+pub(crate) const SERVICE_EVENT: &str = "android-tool-service-state-changed";
+pub(crate) const SERVICE_CONSENT: &str = "android-tool-service-registration-v1";
 pub(crate) const REQUEST_LIMIT: usize = 8192;
 pub(crate) const STATUS_LIMIT: usize = 65536;
 pub(crate) const WORK_SECONDS: u64 = 300;
@@ -34,7 +36,7 @@ pub(crate) enum Kind { Inspection, Registration }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Phase {
-    Idle, Inspecting, Review, Copying, Verifying, Publishing, Settling,
+    Idle, Inspecting, Review, Preparing, Copying, Verifying, Publishing, Settling,
     Stopping, Complete, Refused, Cancelled, Unknown,
 }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -128,6 +130,68 @@ pub(crate) struct Register {
 pub(crate) struct Cancel {
     pub(crate) operation_id: String, pub(crate) registration_generation: u32,
 }
+
+/// Service setup is a separate original action and consent. A completed
+/// observation is prerequisite DATA only: it cannot authorize payload transfer,
+/// infer user approval, replace authentication, or create the peer's Ready.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ServiceAction { Check, RequestRegistration, OpenApprovalSettings }
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ServicePhase { Idle, Checking, Requesting, OpeningSettings, Settling, Stopping, Complete, Refused, Cancelled, Unknown }
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ServiceState { NotRegistered, Enabled, RequiresApproval, NotFound, Unavailable, Error }
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ServiceOutcome {
+    NotEntered, Observed, RegistrationRequested, AlreadyRegistered, NeedsApproval,
+    SettingsRequested, DeniedByUser, Stopped, Refused, Error, Unknown,
+}
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceOperation {
+    pub(crate) operation_id: String, pub(crate) setup_generation: u32,
+    pub(crate) source_generation: u32, pub(crate) action: ServiceAction,
+    pub(crate) context: Prepare,
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceObservation {
+    pub(crate) state: ServiceState, pub(crate) outcome: ServiceOutcome,
+    pub(crate) mutation_entered: bool, pub(crate) mutation_returned: bool,
+    pub(crate) mutation_uncertain: bool, pub(crate) native_settled: bool,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServiceStatus {
+    pub(crate) schema_version: u32, pub(crate) status_revision: u32,
+    pub(crate) setup_generation: u32, pub(crate) availability: Availability,
+    pub(crate) prerequisite: Prerequisite, pub(crate) phase: ServicePhase,
+    pub(crate) reason: Reason, pub(crate) operation: Option<ServiceOperation>,
+    pub(crate) observation: Option<ServiceObservation>,
+}
+/// The route supplies action. No renderer-supplied method, service name, path,
+/// requirement, deadline, system URL or automatic-registration option exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServiceRequest {
+    pub(crate) setup_generation: u32, pub(crate) context: Prepare,
+    pub(crate) action: ServiceAction,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServiceCancel {
+    pub(crate) operation_id: String, pub(crate) setup_generation: u32,
+}
+pub(crate) fn service_invalid() -> BridgeError {
+    BridgeError::new("android_service_invalid", "The service request was rejected before admission. Nothing was authorized.")
+}
+pub(crate) fn service_unavailable() -> BridgeError {
+    BridgeError::new("android_service_unavailable", "The fixed Android service action was not admitted. Check its status and prerequisites.")
+}
+pub(crate) fn service_unconfirmed() -> BridgeError {
+    BridgeError::new("android_service_unconfirmed", "The original service action is unconfirmed. Keep its Status and Cancel; do not repeat registration.")
+}
 /// Rejection BEFORE any new original is admitted. Never use for lost GO, an
 /// admitted worker failure, or a Status/Cancel response for an existing original.
 pub(crate) fn invalid() -> BridgeError {
@@ -184,6 +248,86 @@ impl Cancel {
         let value = request(raw, &["schemaVersion", "operationId", "registrationGeneration"])?;
         Ok(Self { operation_id: comparison(&value, "operationId")?,
             registration_generation: counter(&value, "registrationGeneration", true)? })
+    }
+}
+impl ServiceRequest {
+    fn parse_action(raw: &[u8], action: ServiceAction) -> Result<Self, BridgeError> {
+        let names: &[&str] = if action == ServiceAction::RequestRegistration {
+            &["schemaVersion", "setupGeneration", "context", "consentVersion", "registrationAcknowledged"]
+        } else { &["schemaVersion", "setupGeneration", "context"] };
+        let value = request(raw, names).map_err(|_| service_invalid())?;
+        if action == ServiceAction::RequestRegistration &&
+            (value["consentVersion"].as_str() != Some(SERVICE_CONSENT)
+                || value["registrationAcknowledged"].as_bool() != Some(true)) { return Err(service_invalid()); }
+        Ok(Self { setup_generation: counter(&value, "setupGeneration", false).map_err(|_| service_invalid())?,
+            context: build::prepare(&value["context"]).map_err(|_| service_invalid())?, action })
+    }
+    pub(crate) fn check(raw: &[u8]) -> Result<Self, BridgeError> { Self::parse_action(raw, ServiceAction::Check) }
+    pub(crate) fn request_registration(raw: &[u8]) -> Result<Self, BridgeError> { Self::parse_action(raw, ServiceAction::RequestRegistration) }
+    pub(crate) fn open_approval_settings(raw: &[u8]) -> Result<Self, BridgeError> { Self::parse_action(raw, ServiceAction::OpenApprovalSettings) }
+}
+impl ServiceCancel {
+    pub(crate) fn parse(raw: &[u8]) -> Result<Self, BridgeError> {
+        let value = request(raw, &["schemaVersion", "operationId", "setupGeneration"]).map_err(|_| service_invalid())?;
+        Ok(Self { operation_id: comparison(&value, "operationId").map_err(|_| service_invalid())?,
+            setup_generation: counter(&value, "setupGeneration", true).map_err(|_| service_invalid())? })
+    }
+}
+impl ServiceObservation {
+    fn valid(&self, action: ServiceAction) -> bool {
+        if self.mutation_returned && !self.mutation_entered
+            || self.mutation_uncertain && (!self.mutation_entered || self.mutation_returned)
+            || self.native_settled && (self.mutation_uncertain || self.outcome == ServiceOutcome::Unknown)
+            || action == ServiceAction::Check && (self.mutation_entered || self.mutation_returned || self.mutation_uncertain) { return false; }
+        match self.outcome {
+            ServiceOutcome::Observed => action == ServiceAction::Check,
+            ServiceOutcome::RegistrationRequested | ServiceOutcome::DeniedByUser =>
+                action == ServiceAction::RequestRegistration && self.mutation_returned,
+            ServiceOutcome::AlreadyRegistered | ServiceOutcome::NeedsApproval => action == ServiceAction::RequestRegistration,
+            ServiceOutcome::SettingsRequested => action == ServiceAction::OpenApprovalSettings && self.mutation_returned,
+            _ => true,
+        }
+    }
+}
+impl ServiceStatus {
+    pub(crate) fn valid(&self) -> bool {
+        if self.schema_version != 1 || self.status_revision > COUNTER_MAX || self.setup_generation > COUNTER_MAX { return false; }
+        let Some(operation) = &self.operation else {
+            return self.setup_generation == 0 && self.phase == ServicePhase::Idle && self.observation.is_none()
+                && matches!(self.reason, Reason::SigningUnavailable | Reason::ServiceUnavailable);
+        };
+        if self.setup_generation == 0 || operation.setup_generation != self.setup_generation
+            || !token(&operation.operation_id) || operation.source_generation > COUNTER_MAX
+            || !context_valid(&operation.context) || self.phase == ServicePhase::Idle { return false; }
+        if self.phase == ServicePhase::Checking && operation.action != ServiceAction::Check
+            || self.phase == ServicePhase::Requesting && operation.action != ServiceAction::RequestRegistration
+            || self.phase == ServicePhase::OpeningSettings && operation.action != ServiceAction::OpenApprovalSettings { return false; }
+        if matches!(self.phase, ServicePhase::Checking | ServicePhase::Requesting | ServicePhase::OpeningSettings
+            | ServicePhase::Settling | ServicePhase::Complete) && self.reason != Reason::None
+            || matches!(self.phase, ServicePhase::Stopping | ServicePhase::Refused) && matches!(self.reason, Reason::None | Reason::NotInspected)
+            || self.phase == ServicePhase::Cancelled && self.reason != Reason::Cancelled
+            || self.phase == ServicePhase::Unknown && (self.reason != Reason::CleanupUnknown || self.availability != Availability::CleanupUnknown) { return false; }
+        if let Some(observation) = &self.observation {
+            if !observation.valid(operation.action)
+                || !matches!(self.phase, ServicePhase::Complete | ServicePhase::Refused | ServicePhase::Cancelled)
+                || !observation.native_settled { return false; }
+            // Earlier accepted cancellation/deadline remains the terminal
+            // reason even if a later real returned mutation reports denial.
+            // The observation preserves denial independently, never inferred
+            // from RequiresApproval or used to overwrite the first failure.
+            if observation.outcome == ServiceOutcome::DeniedByUser &&
+                (!matches!(self.phase, ServicePhase::Refused | ServicePhase::Cancelled)
+                    || matches!(self.reason, Reason::None | Reason::NotInspected)
+                    || self.prerequisite != Prerequisite::ApprovalDenied) { return false; }
+        }
+        if self.phase == ServicePhase::Complete && !self.observation.is_some_and(|observation|
+            matches!(observation.outcome, ServiceOutcome::Observed | ServiceOutcome::RegistrationRequested
+                | ServiceOutcome::AlreadyRegistered | ServiceOutcome::NeedsApproval | ServiceOutcome::SettingsRequested)) { return false; }
+        true
+    }
+    pub(crate) fn bounded(self) -> Result<Self, BridgeError> {
+        if !self.valid() || !serde_json::to_vec(&self).is_ok_and(|bytes| bytes.len() <= STATUS_LIMIT) { return Err(service_unconfirmed()); }
+        Ok(self)
     }
 }
 fn context_valid(value: &Prepare) -> bool {
@@ -251,9 +395,9 @@ impl Status {
         if self.registration_generation == 0 || operation.registration_generation != self.registration_generation
             || !token(&operation.operation_id) || operation.source_generation == 0 || operation.source_generation > COUNTER_MAX
             || !context_valid(&operation.context) || self.phase == Phase::Idle { return false; }
-        if operation.kind == Kind::Inspection && matches!(self.phase, Phase::Copying | Phase::Verifying | Phase::Publishing | Phase::Complete)
+        if operation.kind == Kind::Inspection && matches!(self.phase, Phase::Preparing | Phase::Copying | Phase::Verifying | Phase::Publishing | Phase::Complete)
             || operation.kind == Kind::Registration && matches!(self.phase, Phase::Inspecting | Phase::Review) { return false; }
-        let successful_phase = matches!(self.phase, Phase::Inspecting | Phase::Review | Phase::Copying | Phase::Verifying
+        let successful_phase = matches!(self.phase, Phase::Inspecting | Phase::Review | Phase::Preparing | Phase::Copying | Phase::Verifying
             | Phase::Publishing | Phase::Settling | Phase::Complete);
         if self.phase == Phase::Unknown && self.availability != Availability::CleanupUnknown
             || successful_phase && self.reason != Reason::None
@@ -343,6 +487,61 @@ mod tests {
         }
         assert!(Cancel::parse(br#"{"schemaVersion":1,"operationId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","registrationGeneration":1}"#).is_ok());
         assert!(Cancel::parse(br#"{"schemaVersion":1,"operationId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","registrationGeneration":0}"#).is_err());
+    }
+    #[test]
+    fn service_routes_are_closed_and_registration_has_its_own_explicit_consent() {
+        let check = serde_json::json!({"schemaVersion":1,"setupGeneration":0,"context":context_data()});
+        assert_eq!(ServiceRequest::check(&serde_json::to_vec(&check).unwrap()).unwrap().action, ServiceAction::Check);
+        assert_eq!(ServiceRequest::open_approval_settings(&serde_json::to_vec(&check).unwrap()).unwrap().action,
+            ServiceAction::OpenApprovalSettings);
+        assert!(ServiceRequest::request_registration(&serde_json::to_vec(&check).unwrap()).is_err());
+        let mut register = check.clone();
+        register["consentVersion"] = serde_json::json!(SERVICE_CONSENT);
+        register["registrationAcknowledged"] = serde_json::json!(true);
+        assert_eq!(ServiceRequest::request_registration(&serde_json::to_vec(&register).unwrap()).unwrap().action,
+            ServiceAction::RequestRegistration);
+        assert!(ServiceRequest::check(&serde_json::to_vec(&register).unwrap()).is_err());
+        for (key,value) in [("registrationAcknowledged",serde_json::json!(false)),("registrationAcknowledged",serde_json::json!("true")),
+            ("consentVersion",serde_json::json!(CONSENT)),("licenseAcknowledged",serde_json::json!(true)),
+            ("path",serde_json::json!("/tmp/service")),("teamId",serde_json::json!("ABCDEFGHIJ")),
+            ("serviceName",serde_json::json!("alternate")),("url",serde_json::json!("https://example.invalid")),
+            ("setupGeneration",serde_json::json!(u32::MAX))] {
+            let mut bad=register.clone();bad[key]=value;
+            assert!(ServiceRequest::request_registration(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        assert!(ServiceCancel::parse(br#"{"schemaVersion":1,"operationId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","setupGeneration":1}"#).is_ok());
+        assert!(ServiceCancel::parse(br#"{"schemaVersion":1,"operationId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","registrationGeneration":1}"#).is_err());
+        assert!(ServiceCancel::parse(br#"{"schemaVersion":1,"operationId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","setupGeneration":0}"#).is_err());
+    }
+    #[test]
+    fn service_observation_preserves_denial_without_inferring_approval_or_peer_ready() {
+        let operation=ServiceOperation {operation_id:"c".repeat(32),setup_generation:1,source_generation:0,
+            action:ServiceAction::Check,context:build::prepare(&context_data()).unwrap()};
+        let mut status=ServiceStatus {schema_version:1,status_revision:1,setup_generation:1,
+            availability:Availability::Available,prerequisite:Prerequisite::ApprovalRequired,
+            phase:ServicePhase::Complete,reason:Reason::None,operation:Some(operation),
+            observation:Some(ServiceObservation {state:ServiceState::RequiresApproval,outcome:ServiceOutcome::Observed,
+                mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true})};
+        // Setup can finish correctly while native approval is still required.
+        assert!(status.valid());
+        status.operation.as_mut().unwrap().action=ServiceAction::RequestRegistration;
+        let observation=status.observation.as_mut().unwrap();
+        observation.outcome=ServiceOutcome::DeniedByUser;observation.mutation_entered=true;observation.mutation_returned=true;
+        assert!(!status.valid());
+        status.phase=ServicePhase::Refused;status.reason=Reason::ApprovalDenied;status.prerequisite=Prerequisite::ApprovalDenied;
+        assert!(status.valid());
+        status.phase=ServicePhase::Cancelled;status.reason=Reason::Cancelled;assert!(status.valid());
+        status.phase=ServicePhase::Refused;status.reason=Reason::TimedOut;assert!(status.valid());
+        status.prerequisite=Prerequisite::ApprovalRequired;assert!(!status.valid());
+        status.prerequisite=Prerequisite::ApprovalDenied;
+        status.observation.as_mut().unwrap().mutation_returned=false;assert!(!status.valid());
+        status.observation.as_mut().unwrap().mutation_returned=true;
+        status.observation.as_mut().unwrap().native_settled=false;assert!(!status.valid());
+        status.observation=None;status.phase=ServicePhase::Unknown;status.reason=Reason::CleanupUnknown;
+        status.availability=Availability::CleanupUnknown;assert!(status.valid());
+        status.observation=Some(ServiceObservation {state:ServiceState::Enabled,outcome:ServiceOutcome::AlreadyRegistered,
+            mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true});
+        assert!(!status.valid()); // Known-looking callback DATA cannot rewrite Unknown finality.
     }
     #[test]
     fn usable_review_requires_all_complete_roles_same_inputs_and_ready_prerequisites() {

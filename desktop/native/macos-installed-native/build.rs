@@ -1,5 +1,27 @@
 #[path = "../../src-tauri/src/macos_install_fixed_paths.rs"]
 mod installed_paths;
+
+// Only reviewed source inputs can select the shipping identity. This is not a
+// renderer/environment requirement string, same-team wildcard or ad-hoc path.
+// The deliberately unconfigured profile builds an unavailable engineering app.
+fn android_requirements() -> Option<(String, String)> {
+    let profile = include_str!("../../packaging/macos-android-service-signing.profile");
+    let rows: Vec<_> = profile.lines().collect();
+    assert!(profile.len() <= 1024 && rows.len() == 5 && rows[0] == "schema=1"
+        && rows[1] == "app-identifier=dev.mobile-release-kit.desktop"
+        && rows[2] == "helper-identifier=dev.mobile-release-kit.desktop.android-register",
+        "fixed Android service signing profile shape");
+    let team = rows[3].strip_prefix("team-identifier=").expect("fixed Team ID profile field");
+    let certificate = rows[4].strip_prefix("developer-id-certificate-sha1=").expect("fixed Developer ID certificate profile field");
+    if team == "unconfigured" && certificate == "unconfigured" { return None; }
+    assert!(team.len() == 10 && team.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        && certificate.len() == 40 && certificate.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && certificate.bytes().any(|b| b != b'0'), "complete genuine Developer ID signing profile required");
+    let requirement = |identifier: &str| format!(
+        "anchor apple generic and identifier \"{identifier}\" and certificate leaf[subject.OU] = \"{team}\" and certificate leaf = H\"{certificate}\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists");
+    Some((requirement(installed_paths::BUNDLE_ID), requirement("dev.mobile-release-kit.desktop.android-register")))
+}
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification_native)");
@@ -46,6 +68,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/native.m");
     println!("cargo:rerun-if-changed=src/android_registration.m");
     println!("cargo:rerun-if-changed=src/android_service_management.m");
+    println!("cargo:rerun-if-changed=../../packaging/macos-android-service-signing.profile");
     println!("cargo:rerun-if-changed=src/vault_filesystem.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain.m");
     println!("cargo:rerun-if-changed=src/wrapping_interaction_policy.h");
@@ -54,6 +77,16 @@ fn main() {
     println!("cargo:rerun-if-changed=src/vault_helper_auth.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain_fixture.m");
     let mut build = cc::Build::new();
+    let app_path = format!("{:?}", installed_paths::APP);
+    build.define("MRK_ANDROID_APP_PATH", Some(app_path.as_str()));
+    if let Some((app, helper)) = android_requirements() {
+        let app = format!("{app:?}"); let helper = format!("{helper:?}");
+        build.define("MRK_ANDROID_APP_REQUIREMENT", Some(app.as_str()));
+        build.define("MRK_ANDROID_HELPER_REQUIREMENT", Some(helper.as_str()));
+        println!("cargo:rustc-env=MRK_ANDROID_SIGNING_PROFILE_CONFIGURED=1");
+    } else {
+        println!("cargo:rustc-env=MRK_ANDROID_SIGNING_PROFILE_CONFIGURED=0");
+    }
     if helper {
         build.define("MRK_WRAPPING_VAULT_HELPER", Some("1"));
         let app = format!("{:?}", installed_paths::APP);

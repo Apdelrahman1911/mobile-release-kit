@@ -686,6 +686,18 @@ mod tests {
     use super::*;
     fn bounds() -> Bounds { Bounds { origin: 10, work: 10 + WORK_NS, hard: 10 + HARD_NS } }
     #[test]
+    fn never_started_client_retires_its_actual_signal_without_arming_or_native_entry() {
+        // GO loss / failed installed-service Check occurs before ClockBridge
+        // capture. This is the production inert release path, not a receipt
+        // standing in for a connection that may already have been entered.
+        let signal=Arc::new(Signal::reserved());
+        let mut book=ClientBook::new(signal.clone());
+        assert!(signal.bounds().is_none());assert!(book.peer_nonentry_known());
+        assert!(!book.settled());assert!(book.release());assert!(book.settled());
+        assert!(book.release());assert_eq!(book.retained_bytes(),Some(0));
+        assert_eq!(Arc::strong_count(&signal),1);assert!(!signal.unknown());
+    }
+    #[test]
     fn earliest_failure_precedes_later_stop_and_cleanup_never_renews() {
         let signal = Signal::reserved(); signal.arm_at(bounds(), 20).unwrap();
         signal.failure_at(100, false); signal.failure_at(1_000, false);

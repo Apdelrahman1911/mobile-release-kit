@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         scope:
-          - installation-inspection
+          - android-registration-lifecycle
     runs-on: macos-26
     timeout-minutes: 75
     env:
@@ -49,7 +49,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping || "$MRK_MACOS_AQUA_SCOPE" == installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping-installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private ]] || exit 1
+          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping || "$MRK_MACOS_AQUA_SCOPE" == installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping-installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private || "$MRK_MACOS_AQUA_SCOPE" == android-registration-lifecycle ]] || exit 1
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]] || exit 1
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
@@ -58,10 +58,13 @@ jobs:
           [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
           [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
-          if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private ]]; then
+          if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private && "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle ]]; then
             # Supplier/CLT admission belongs only to the unchanged build routes.
             [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == eeffc3f53fce1fba444fdcf9d036207b27c4a00f58eb73cf890c7ec1b680be29 ]] || exit 1
             [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 6094ba0dffbc44f14017a2c992a8eac1de1bf42c102d7d25639419e07c1747bb ]] || exit 1
+            [[ -d "$DEVELOPER_DIR" ]] || exit 1
+          fi
+          if [[ "$MRK_MACOS_AQUA_SCOPE" == android-registration-lifecycle ]]; then
             [[ -d "$DEVELOPER_DIR" ]] || exit 1
           fi
       - name: Check out exact reviewed source without retained credentials
@@ -74,7 +77,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Prepare the pinned Apple Instant clock toolchain
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')
         timeout-minutes: 4
         shell: bash
         run: |
@@ -305,8 +308,8 @@ jobs:
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_OWNER_PINS
-      - name: Compile headless Mac libraries and run twenty-seven exact DATA regressions first
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+      - name: Compile headless Mac libraries and run the exact selected DATA regressions first
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')
         timeout-minutes: 10
         shell: bash
         run: |
@@ -315,20 +318,26 @@ jobs:
           umask 077
           # Cargo must see desktop/rust-toolchain.toml, not the host default.
           cd desktop/src-tauri
-          set +e
-          # The same locked graph builds both existing native DATA regressions.
-          cargo test --locked --no-default-features --jobs 2 --target aarch64-apple-darwin \
-            --package mobile-release-kit-desktop --package mrk-macos-installed-native \
-            --lib --no-run --message-format=json \
-            > "$MRK_MACOS_WORK/headless-build.jsonl" 2> "$MRK_MACOS_WORK/headless-build.stderr"
-          status=$?
-          set -e
-          printf '%s\n' "$status" > "$MRK_MACOS_WORK/headless-build.status"
-          [[ $status == 0 ]] || exit "$status"
+          # Existing app scopes retain their exact compiler route. The new
+          # headless-only scope uses the SAME owned-process API below, so its
+          # immediate target retirement never infers finality from raw exit.
+          if [[ "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle ]]; then
+            set +e
+            # The same locked graph builds both existing native DATA regressions.
+            cargo test --locked --no-default-features --jobs 2 --target aarch64-apple-darwin \
+              --package mobile-release-kit-desktop --package mrk-macos-installed-native \
+              --lib --no-run --message-format=json \
+              > "$MRK_MACOS_WORK/headless-build.jsonl" 2> "$MRK_MACOS_WORK/headless-build.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$MRK_MACOS_WORK/headless-build.status"
+            [[ $status == 0 ]] || exit "$status"
+          fi
           "$MRK_PYTHON" -I -S -B - <<'PY_HEADLESS'
-          import hashlib, importlib.util, json, os, pathlib, re, stat, subprocess, sys
+          import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess, sys
           work = pathlib.Path(os.environ["MRK_MACOS_WORK"])
           checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          android_lifecycle = os.environ["MRK_MACOS_AQUA_SCOPE"] == "android-registration-lifecycle"
           names = (
               "asset_source::macos::tests::private_asset_suffixes_admit_android_without_broadening_apple_formats",
               "asset_source::macos::tests::root_aliases_are_exact_and_physical_protection_is_not_path_text",
@@ -360,12 +369,35 @@ jobs:
               "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
               "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
           )
+          main_count, native_count = 25, 2
+          scope = "twenty-five-main-and-two-native-macos-headless-data-regressions"
+          if android_lifecycle:
+              # Fixed production-cut regressions only. These never enter
+              # a Dispatcher, ServiceManager, real peer or supplier transfer.
+              names = (
+                  "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::callback_stamp_needs_exclusive_capture_return_then_original_owner_finality",
+                  "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::deferred_reuses_only_same_private_owner_action_serial_and_unadmitted_cell",
+                  "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::main_gate_only_defers_at_admission_and_preserves_actual_f_on_short_lock_contention",
+                  "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::register_observation_failure_is_at_real_return_and_stop_keeps_original_deadlines",
+                  "saved_command_owner::android_registration::client::tests::enqueued_busy_and_processed_are_distinct_and_finish_never_precedes_its_ack",
+                  "saved_command_owner::android_registration::client::tests::ack_rejects_wrong_account_nonce_sequence_payload_and_earlier_failure",
+                  "saved_command_owner::android_registration::client::tests::same_original_ready_reproof_and_current_gates_precede_transfer",
+                  "saved_command_owner::android_registration::client::tests::mismatched_reproof_lost_go_and_earlier_failure_close_original_barriers",
+                  "saved_command_owner::android_registration::client::tests::finish_requires_the_actual_source_handle_consumption_not_worker_return",
+                  "saved_command_owner::android_registration::client::tests::go_loss_and_peer_failure_still_run_preparation_and_independent_native_release",
+                  "saved_command_owner::android_registration::client::tests::native_clock_preserves_bidirectional_earliest_f_without_echo_or_renewal",
+              )
+              native_names = (
+                  "android_registration::tests::never_started_client_retires_its_actual_signal_without_arming_or_native_entry",
+              )
+              main_count, native_count = 11, 1
+              scope = "eleven-main-and-one-native-macos-android-lifecycle-regressions"
           libraries = (
-              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 25, "headless"),
+              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, main_count, "headless"),
               ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",
-               ["default"], native_names, 2, "headless-native"),
+               ["default"], native_names, native_count, "headless-native"),
           )
-          receipt = {"schemaVersion": 1, "scope": "twenty-five-main-and-two-native-macos-headless-data-regressions",
+          receipt = {"schemaVersion": 1, "scope": scope,
                      "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                      "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
                      "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "names": names + native_names, "targets": [],
@@ -394,9 +426,72 @@ jobs:
                   stream.write(data)
                   stream.flush()
                   os.fsync(stream.fileno())
+          def directory_identity(s):
+              if (not stat.S_ISDIR(s.st_mode) or s.st_uid != os.getuid() or s.st_gid != os.getgid()
+                      or stat.S_IMODE(s.st_mode) != 0o700):
+                  raise ValueError("headless-owned-directory-shape")
+              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+          def load_original_owner():
+              spec = importlib.util.spec_from_file_location("_mrk_macos_headless_owner", checkout / "desktop/tools/macos_aqua_qualification.py")
+              qualification = importlib.util.module_from_spec(spec)
+              sys.modules[spec.name] = qualification
+              spec.loader.exec_module(qualification)
+              return qualification.load_owner(checkout)
           originals = []
+          owner = None
+          work_fd = target_fd = None
+          work_original = target_original = None
+          calls_entered = calls_returned = 0
+          cleanup_errors = []
+          if android_lifecycle:
+              receipt.update(compilerOriginalReturned=False, cargoTargetRetired=False,
+                             cargoTargetOriginalClosed=False, workOriginalClosed=False,
+                             genuineServiceQualified=False, protectedCopyQualified=False)
           stage = "original-compiler"
           try:
+              if android_lifecycle:
+                  if (work.parent != pathlib.Path("/Users/runner/work/_temp")
+                          or re.fullmatch(r"mrk-macos-aqua\.[A-Za-z0-9]{8}", work.name) is None
+                          or pathlib.Path(os.environ["CARGO_TARGET_DIR"]) != work / "cargo-target"
+                          or not shutil.rmtree.avoids_symlink_attacks):
+                      raise ValueError("headless-fixed-owned-target-route")
+                  # Retain actual original directory custody before any compiler.
+                  work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                  work_original = directory_identity(os.fstat(work_fd))
+                  if directory_identity(work.lstat()) != work_original:
+                      raise ValueError("headless-work-original-changed")
+                  os.mkdir("cargo-target", 0o700, dir_fd=work_fd)  # Exclusive; never reuse a target.
+                  target_fd = os.open("cargo-target", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=work_fd)
+                  target_original = directory_identity(os.fstat(target_fd))
+                  if directory_identity(os.stat("cargo-target", dir_fd=work_fd, follow_symlinks=False)) != target_original:
+                      raise ValueError("headless-target-original-changed")
+                  receipt["cargoTargetOriginal"] = target_original
+                  owner = load_original_owner()
+                  # Exact compiler environment, not test/app/service authority.
+                  # No ambient wrapper/flags, packaged-runtime or tool selection.
+                  build_env = {key: os.environ[key] for key in ("PATH", "HOME", "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET")}
+                  for key in ("CARGO_HOME", "RUSTUP_HOME"):
+                      if key in os.environ: build_env[key] = os.environ[key]
+                  build_env.update(LANG="C", LC_ALL="C", TZ="UTC", RUSTUP_TOOLCHAIN="1.98.1",
+                                   CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=str(work / "cargo-target"),
+                                   MRK_MACOS_INSTALL_SOURCE_COMMIT=os.environ["GITHUB_SHA"])
+                  calls_entered += 1
+                  compiler = owner.run_owned(
+                      ["cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
+                       "--target", "aarch64-apple-darwin", "--package", "mobile-release-kit-desktop",
+                       "--package", "mrk-macos-installed-native", "--lib", "--no-run", "--message-format=json"],
+                      environ=build_env, cwd=checkout / "desktop/src-tauri", timeout=480,
+                      capture=True, text=False, output_limit=4 * 1024 * 1024,
+                  )
+                  if (type(compiler) is not subprocess.CompletedProcess or type(compiler.returncode) is not int
+                          or type(compiler.stdout) is not bytes or type(compiler.stderr) is not bytes
+                          or len(compiler.stdout) + len(compiler.stderr) > 4 * 1024 * 1024):
+                      raise ValueError("headless-original-compiler-return-contract")
+                  calls_returned += 1
+                  receipt["compilerOriginalReturned"] = True
+                  publish("headless-build.jsonl", compiler.stdout)
+                  publish("headless-build.stderr", compiler.stderr)
+                  publish("headless-build.status", (str(compiler.returncode) + "\n").encode("ascii"))
               if read_bound(work / "headless-build.status", 4) != b"0\n":
                   raise ValueError("headless-original-compiler-status")
               raw = read_bound(work / "headless-build.jsonl", 4 * 1024 * 1024)
@@ -432,11 +527,7 @@ jobs:
                   receipt["targets"].append(record)
                   admitted.append((binary, test_names, count, prefix, record))
               stage = "owner-admission"
-              spec = importlib.util.spec_from_file_location("_mrk_macos_headless_owner", checkout / "desktop/tools/macos_aqua_qualification.py")
-              qualification = importlib.util.module_from_spec(spec)
-              sys.modules[spec.name] = qualification
-              spec.loader.exec_module(qualification)
-              owner = qualification.load_owner(checkout)
+              if owner is None: owner = load_original_owner()
               for binary, test_names, count, prefix, record in admitted:
                   stage = prefix + "-original-artifact"
                   binary_fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
@@ -465,6 +556,7 @@ jobs:
                   tmp.mkdir(mode=0o700)
                   if original_digest() != digest: raise ValueError("headless-original-artifact-hash")
                   stage = prefix + "-original-test-invocation"
+                  calls_entered += 1
                   result = owner.run_owned(
                       [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *test_names],
                       environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(tmp),
@@ -475,6 +567,7 @@ jobs:
                           or type(result.stdout) is not bytes or type(result.stderr) is not bytes
                           or len(result.stdout) + len(result.stderr) > 64 * 1024):
                       raise ValueError("headless-original-return-contract")
+                  calls_returned += 1
                   record.update(originalReturned=True, returncode=result.returncode,
                                 stdoutSha256=hashlib.sha256(result.stdout).hexdigest(),
                                 stderrSha256=hashlib.sha256(result.stderr).hexdigest())
@@ -510,18 +603,55 @@ jobs:
                       original["record"]["artifactOriginalClosed"] = True
                   except BaseException as error:
                       close_errors.append({"role": original["record"]["role"], "type": type(error).__name__})
+              if android_lifecycle:
+                  receipt.update(ownerCallsEntered=calls_entered, ownerCallsReturned=calls_returned)
+                  if target_original is not None and calls_entered == calls_returned and not close_errors:
+                      try:
+                          # Delete only the originally created target, after all
+                          # actual owner returns and artifact descriptor closes.
+                          if (directory_identity(os.fstat(work_fd)) != work_original
+                                  or directory_identity(work.lstat()) != work_original
+                                  or directory_identity(os.fstat(target_fd)) != target_original
+                                  or directory_identity(os.stat("cargo-target", dir_fd=work_fd, follow_symlinks=False)) != target_original):
+                              raise ValueError("headless-target-retirement-original-changed")
+                          shutil.rmtree("cargo-target", dir_fd=work_fd)
+                          try: os.stat("cargo-target", dir_fd=work_fd, follow_symlinks=False)
+                          except FileNotFoundError: pass
+                          else: raise ValueError("headless-target-retirement-incomplete")
+                          receipt["cargoTargetRetired"] = True
+                      except BaseException as error:
+                          cleanup_errors.append({"stage": "cargo-target-retirement", "type": type(error).__name__})
+                  else:
+                      receipt["cargoTargetRetentionReason"] = "original-custody-or-owner-finality-unconfirmed"
+                  directories = (("cargoTargetOriginalClosed", target_fd), ("workOriginalClosed", work_fd))
+                  target_fd = work_fd = None
+                  for field, directory_fd in directories:
+                      if directory_fd is None: continue
+                      try:
+                          os.close(directory_fd)  # One attempt, including failed-retirement paths.
+                          receipt[field] = True
+                      except BaseException as error:
+                          cleanup_errors.append({"stage": field, "type": type(error).__name__})
+                  if cleanup_errors: receipt["cleanupErrors"] = cleanup_errors
               if close_errors: receipt["closeErrors"] = close_errors
               for key in ("originalReturned", "artifactOriginalUnchanged", "artifactOriginalClosed"):
                   receipt[key] = len(receipt["targets"]) == 2 and all(row[key] for row in receipt["targets"])
               receipt["passed"] = ("failure" not in receipt and not close_errors
                   and receipt["originalReturned"] and receipt["artifactOriginalUnchanged"] and receipt["artifactOriginalClosed"]
                   and all(row["testsPassed"] for row in receipt["targets"]))
+              if android_lifecycle:
+                  receipt["passed"] = (receipt["passed"] and not cleanup_errors
+                      and receipt["compilerOriginalReturned"] and calls_entered == calls_returned == 3
+                      and receipt["cargoTargetRetired"] and receipt["cargoTargetOriginalClosed"] and receipt["workOriginalClosed"])
               if receipt["passed"]: receipt.update(tests=len(names) + len(native_names), failed=0, ignored=0, measured=0)
-              # No exception-path directory cleanup or fabricated finality.
+              # Unknown owner/close finality retains original target output.
               data = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() + b"\n"
               if len(data) > 16384: raise ValueError("headless-receipt-bound")
               publish("headless-tests.receipt.json", data)
               if close_errors and "failure" not in receipt: raise ValueError("headless-original-close-unconfirmed")
+              if cleanup_errors and "failure" not in receipt: raise ValueError("headless-original-target-cleanup-unconfirmed")
+              if android_lifecycle and not receipt["passed"] and "failure" not in receipt:
+                  raise ValueError("headless-android-lifecycle-finality-unconfirmed")
           PY_HEADLESS
       - name: Compile native wrapping variants once and run fixed cohorts and creator-reader pair
         if: success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'
@@ -2674,7 +2804,7 @@ jobs:
           # No retry/open/launchctl/TCC changes or false success after an owner
           # exception. Missing output does not establish original app finality.
       - name: Recheck admitted classification/private-native source even after an incomplete observation
-        if: always() && (env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private') && steps.source.outcome == 'success'
+        if: always() && (env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle') && steps.source.outcome == 'success'
         timeout-minutes: 1
         shell: bash
         run: |
@@ -2699,7 +2829,7 @@ jobs:
             /bin/rm -rf -- "$path"
           done
       - name: Export bounded diagnostics without altering original command evidence
-        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')
         timeout-minutes: 1
         shell: bash
         run: |
@@ -2708,7 +2838,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS'
           import hashlib, json, os, pathlib, re, stat
           aqua_scope = os.environ["MRK_MACOS_AQUA_SCOPE"]
-          admitted_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "project-fields-android-inputs", "vault-helper-shipping", "installation-inspection", "vault-helper-shipping-installation-inspection")
+          admitted_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "project-fields-android-inputs", "vault-helper-shipping", "installation-inspection", "vault-helper-shipping-installation-inspection", "android-registration-lifecycle")
           if aqua_scope not in admitted_scopes: raise ValueError("Aqua scope refused")
           selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else ["vault-helper-shipping", "installation-inspection"] if aqua_scope == "vault-helper-shipping-installation-inspection" else [aqua_scope]
           native_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "vault-helper-shipping", "installation-inspection")
@@ -2746,13 +2876,15 @@ jobs:
                   stream.flush()
                   os.fsync(stream.fileno())
           records = []
-          for original, status_name, limit, output, tail in (
+          streams = (
               ("headless-build.jsonl", "headless-build.status", 4 * 1024 * 1024, "headless-build.admitted.jsonl", False),
               ("headless-build.stderr", "headless-build.status", 64 * 1024, "headless-build.stderr.tail.txt", True),
               ("observer-build.jsonl", "observer-build.status", 4 * 1024 * 1024, "observer-build.admitted.jsonl", False),
               ("observer-build.stderr", "observer-build.status", 64 * 1024, "observer-build.stderr.tail.txt", True),
               ("installer-output.txt", "installer-output.status", 64 * 1024, "installer-output.tail.txt", True),
-          ):
+          )
+          if aqua_scope == "android-registration-lifecycle": streams = streams[:2]
+          for original, status_name, limit, output, tail in streams:
               status, status_meta = snapshot(status_name, 4)
               record = {"original": original, "originalStatus": None, "export": None}
               # No original status means the command may be unfinished. Do
@@ -2854,6 +2986,26 @@ jobs:
       # Instrumented engineering evidence only. No release, Store mutation,
       # shipping-binary equivalence, notarization or physical-device claim.
       # On uncertainty retain originals; runner disposal is not observed here.
+      - name: Preserve bounded Android lifecycle results and original workflow exit evidence
+        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-android-registration-lifecycle
+          path: |
+            ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl
+            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt
+            ${{ steps.work.outputs.root }}/headless-build.status
+            ${{ steps.work.outputs.root }}/headless-tests.stdout
+            ${{ steps.work.outputs.root }}/headless-tests.stderr
+            ${{ steps.work.outputs.root }}/headless-tests.status
+            ${{ steps.work.outputs.root }}/headless-native-tests.stdout
+            ${{ steps.work.outputs.root }}/headless-native-tests.stderr
+            ${{ steps.work.outputs.root }}/headless-native-tests.status
+            ${{ steps.work.outputs.root }}/headless-tests.receipt.json
+            ${{ steps.work.outputs.root }}/bounded-diagnostics.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Preserve bounded classification DATA and original workflow exit evidence
         if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

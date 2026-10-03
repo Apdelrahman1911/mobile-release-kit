@@ -8,12 +8,14 @@ import { androidBuildCounter, copyAndroidBuildRequest, sameAndroidBuildData } fr
 
 export const ANDROID_TOOL_REGISTRATION_EVENT = 'android-tool-registration-state-changed';
 export const ANDROID_TOOL_REGISTRATION_CONSENT = 'android-tool-protected-copy-v1';
+export const ANDROID_TOOL_SERVICE_EVENT = 'android-tool-service-state-changed';
+export const ANDROID_TOOL_SERVICE_CONSENT = 'android-tool-service-registration-v1';
 export const ANDROID_TOOL_REGISTRATION_REQUEST_LIMIT = 8192;
 export const ANDROID_TOOL_REGISTRATION_STATUS_LIMIT = 65536;
 export type AndroidToolRegistrationPrerequisite = 'ready' | 'supplier-unavailable' | 'signing-unavailable' |
   'approval-required' | 'approval-denied' | 'service-unavailable' | 'fresh-service-unavailable';
 export type AndroidToolRegistrationKind = 'inspection' | 'registration';
-export type AndroidToolRegistrationPhase = 'idle' | 'inspecting' | 'review' | 'copying' | 'verifying' | 'publishing' |
+export type AndroidToolRegistrationPhase = 'idle' | 'inspecting' | 'review' | 'preparing' | 'copying' | 'verifying' | 'publishing' |
   'settling' | 'stopping' | 'complete' | 'refused' | 'cancelled' | 'unknown';
 export type AndroidToolRegistrationReason = 'none' | 'not-inspected' | 'cancelled' | 'context-changed' | 'source-changed' |
   'source-refused' | 'version-mismatch' | 'layout-refused' | 'supplier-unavailable' | 'signing-unavailable' |
@@ -73,7 +75,43 @@ export interface AndroidToolRegistrationApi {
   registerAndroidToolSources?(request: RegisterAndroidToolSources): Promise<AndroidToolRegistrationStatus>;
   cancelAndroidToolRegistration?(request: CancelAndroidToolRegistration): Promise<AndroidToolRegistrationStatus>;
   subscribeAndroidToolRegistration?(onStatus: (status: unknown) => void): Promise<() => void>;
+  androidToolServiceStatus?(): Promise<AndroidToolServiceStatus>;
+  checkAndroidToolService?(request: CheckAndroidToolService): Promise<AndroidToolServiceStatus>;
+  requestAndroidToolServiceRegistration?(request: RequestAndroidToolServiceRegistration): Promise<AndroidToolServiceStatus>;
+  openAndroidToolServiceApprovalSettings?(request: CheckAndroidToolService): Promise<AndroidToolServiceStatus>;
+  cancelAndroidToolService?(request: CancelAndroidToolService): Promise<AndroidToolServiceStatus>;
+  subscribeAndroidToolService?(onStatus: (status: unknown) => void): Promise<() => void>;
 }
+// Fixed service setup is a separate original and separate consent. These DATA
+// values never grant helper authentication, protected copy or peer Ready.
+export type AndroidToolServiceAction = 'check' | 'request-registration' | 'open-approval-settings';
+export type AndroidToolServicePhase = 'idle' | 'checking' | 'requesting' | 'opening-settings' | 'settling' | 'stopping' |
+  'complete' | 'refused' | 'cancelled' | 'unknown';
+export type AndroidToolServiceState = 'not-registered' | 'enabled' | 'requires-approval' | 'not-found' | 'unavailable' | 'error';
+export type AndroidToolServiceOutcome = 'not-entered' | 'observed' | 'registration-requested' | 'already-registered' | 'needs-approval' |
+  'settings-requested' | 'denied-by-user' | 'stopped' | 'refused' | 'error' | 'unknown';
+export interface AndroidToolServiceIdentity { operationId: string; setupGeneration: number }
+export interface AndroidToolServiceOperation extends AndroidToolServiceIdentity {
+  sourceGeneration: number; action: AndroidToolServiceAction; context: PrepareAndroidBuild;
+}
+export interface AndroidToolServiceObservation {
+  state: AndroidToolServiceState; outcome: AndroidToolServiceOutcome;
+  mutationEntered: boolean; mutationReturned: boolean; mutationUncertain: boolean; nativeSettled: boolean;
+}
+export interface AndroidToolServiceStatus {
+  schemaVersion: 1; statusRevision: number; setupGeneration: number;
+  availability: AndroidBuildAvailability; prerequisite: AndroidToolRegistrationPrerequisite;
+  phase: AndroidToolServicePhase; reason: AndroidToolRegistrationReason;
+  operation: AndroidToolServiceOperation | null; observation: AndroidToolServiceObservation | null;
+}
+export interface CheckAndroidToolService { schemaVersion: 1; setupGeneration: number; context: PrepareAndroidBuild }
+export interface RequestAndroidToolServiceRegistration extends CheckAndroidToolService {
+  consentVersion: typeof ANDROID_TOOL_SERVICE_CONSENT; registrationAcknowledged: true;
+}
+export interface CancelAndroidToolService extends AndroidToolServiceIdentity { schemaVersion: 1 }
+export type AndroidToolServiceCommand = 'android_tool_service_status' | 'check_android_tool_service' |
+  'request_android_tool_service_registration' | 'open_android_tool_service_approval_settings' | 'cancel_android_tool_service';
+type ServiceRequest = { schemaVersion: 1 } | CheckAndroidToolService | RequestAndroidToolServiceRegistration | CancelAndroidToolService;
 export type AndroidToolRegistrationCommand = 'android_tool_registration_status' | 'inspect_android_tool_sources' |
   'register_android_tool_sources' | 'cancel_android_tool_registration';
 type Request = { schemaVersion: 1 } | InspectAndroidToolSources | RegisterAndroidToolSources | CancelAndroidToolRegistration;
@@ -81,7 +119,7 @@ const encoder = new TextEncoder();
 const roles = ['jdk', 'sdk', 'gradle'] as const;
 const availability = ['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified', 'toolchain-unqualified'] as const;
 const prerequisites = ['ready', 'supplier-unavailable', 'signing-unavailable', 'approval-required', 'approval-denied', 'service-unavailable', 'fresh-service-unavailable'] as const;
-const phases = ['idle', 'inspecting', 'review', 'copying', 'verifying', 'publishing', 'settling', 'stopping', 'complete', 'refused', 'cancelled', 'unknown'] as const;
+const phases = ['idle', 'inspecting', 'review', 'preparing', 'copying', 'verifying', 'publishing', 'settling', 'stopping', 'complete', 'refused', 'cancelled', 'unknown'] as const;
 const reasons = ['none', 'not-inspected', 'cancelled', 'context-changed', 'source-changed', 'source-refused', 'version-mismatch', 'layout-refused',
   'supplier-unavailable', 'signing-unavailable', 'approval-required', 'approval-denied', 'service-unavailable', 'fresh-service-unavailable',
   'review-expired', 'stale-review', 'timed-out', 'document-lost', 'shutdown', 'busy', 'input-limit', 'result-limit', 'protocol-error',
@@ -211,10 +249,10 @@ export function parseAndroidToolRegistrationStatus(value: unknown): AndroidToolR
             'service-unavailable', 'fresh-service-unavailable'].includes(data.reason)) return null;
     } else {
       if (!original || data.registrationGeneration === 0 || data.phase === 'idle'
-          || original.kind === 'inspection' && ['copying', 'verifying', 'publishing', 'complete'].includes(data.phase)
+          || original.kind === 'inspection' && ['preparing', 'copying', 'verifying', 'publishing', 'complete'].includes(data.phase)
           || original.kind === 'registration' && ['inspecting', 'review'].includes(data.phase)) return null;
       if (data.phase === 'unknown' && (data.availability !== 'cleanup-unknown' || data.reason !== 'cleanup-unknown')
-          || ['inspecting', 'review', 'copying', 'verifying', 'publishing', 'settling', 'complete'].includes(data.phase) && data.reason !== 'none'
+          || ['inspecting', 'review', 'preparing', 'copying', 'verifying', 'publishing', 'settling', 'complete'].includes(data.phase) && data.reason !== 'none'
           || data.phase === 'cancelled' && data.reason !== 'cancelled'
           || ['stopping', 'refused'].includes(data.phase) && ['none', 'not-inspected'].includes(data.reason)) return null;
       if (data.phase === 'review') {
@@ -273,12 +311,130 @@ export function sameAndroidToolRegistrationIdentity(a: AndroidToolRegistrationId
   return a === null || b === null ? a === b : a.operationId === b.operationId && a.registrationGeneration === b.registrationGeneration;
 }
 export function androidToolRegistrationActive(status: AndroidToolRegistrationStatus | null): boolean {
-  return !!status && ['inspecting', 'copying', 'verifying', 'publishing', 'settling', 'stopping', 'unknown'].includes(status.phase);
+  return !!status && ['inspecting', 'preparing', 'copying', 'verifying', 'publishing', 'settling', 'stopping', 'unknown'].includes(status.phase);
 }
 export function hasAndroidToolRegistration(api: AndroidToolRegistrationApi): boolean {
   return typeof api.androidToolRegistrationStatus === 'function' && typeof api.inspectAndroidToolSources === 'function'
     && typeof api.registerAndroidToolSources === 'function' && typeof api.cancelAndroidToolRegistration === 'function'
     && typeof api.subscribeAndroidToolRegistration === 'function';
+}
+const serviceActions = ['check', 'request-registration', 'open-approval-settings'] as const;
+const servicePhases = ['idle', 'checking', 'requesting', 'opening-settings', 'settling', 'stopping', 'complete', 'refused', 'cancelled', 'unknown'] as const;
+function serviceOperation(value: unknown, generation: number): AndroidToolServiceOperation | null {
+  const data = record(value, ['operationId', 'setupGeneration', 'sourceGeneration', 'action', 'context']);
+  if (!data || !token(data.operationId) || !counter(data.setupGeneration, true) || data.setupGeneration !== generation
+      || !counter(data.sourceGeneration) || !oneOf(data.action, serviceActions)) return null;
+  const saved = context(data.context);
+  return saved ? { operationId: data.operationId, setupGeneration: data.setupGeneration,
+    sourceGeneration: data.sourceGeneration, action: data.action, context: saved } : null;
+}
+function serviceObservation(value: unknown, action: AndroidToolServiceAction): AndroidToolServiceObservation | null {
+  const data = record(value, ['state', 'outcome', 'mutationEntered', 'mutationReturned', 'mutationUncertain', 'nativeSettled']);
+  if (!data || !oneOf(data.state, ['not-registered', 'enabled', 'requires-approval', 'not-found', 'unavailable', 'error'] as const)
+      || !oneOf(data.outcome, ['not-entered', 'observed', 'registration-requested', 'already-registered', 'needs-approval',
+        'settings-requested', 'denied-by-user', 'stopped', 'refused', 'error', 'unknown'] as const)
+      || typeof data.mutationEntered !== 'boolean' || typeof data.mutationReturned !== 'boolean'
+      || typeof data.mutationUncertain !== 'boolean' || typeof data.nativeSettled !== 'boolean'
+      || data.mutationReturned && !data.mutationEntered || data.mutationUncertain && (!data.mutationEntered || data.mutationReturned)
+      || data.nativeSettled && (data.mutationUncertain || data.outcome === 'unknown')
+      || action === 'check' && (data.mutationEntered || data.mutationReturned || data.mutationUncertain)
+      || data.outcome === 'observed' && action !== 'check'
+      || ['registration-requested', 'denied-by-user'].includes(data.outcome) && (action !== 'request-registration' || !data.mutationReturned)
+      || ['already-registered', 'needs-approval'].includes(data.outcome) && action !== 'request-registration'
+      || data.outcome === 'settings-requested' && (action !== 'open-approval-settings' || !data.mutationReturned)) return null;
+  return { state: data.state, outcome: data.outcome, mutationEntered: data.mutationEntered,
+    mutationReturned: data.mutationReturned, mutationUncertain: data.mutationUncertain, nativeSettled: data.nativeSettled };
+}
+export function parseAndroidToolServiceStatus(value: unknown): AndroidToolServiceStatus | null {
+  try {
+    const data = record(value, ['schemaVersion', 'statusRevision', 'setupGeneration', 'availability', 'prerequisite', 'phase', 'reason', 'operation', 'observation']);
+    if (!data || data.schemaVersion !== 1 || !counter(data.statusRevision) || !counter(data.setupGeneration)
+        || !oneOf(data.availability, availability) || !oneOf(data.prerequisite, prerequisites)
+        || !oneOf(data.phase, servicePhases) || !oneOf(data.reason, reasons)) return null;
+    const operation = data.operation === null ? null : serviceOperation(data.operation, data.setupGeneration);
+    let observation: AndroidToolServiceObservation | null = null;
+    if (data.operation === null) {
+      if (data.setupGeneration !== 0 || data.phase !== 'idle' || data.observation !== null
+          || !['signing-unavailable', 'service-unavailable'].includes(data.reason)) return null;
+    } else {
+      if (!operation || data.phase === 'idle'
+          || data.phase === 'checking' && operation.action !== 'check'
+          || data.phase === 'requesting' && operation.action !== 'request-registration'
+          || data.phase === 'opening-settings' && operation.action !== 'open-approval-settings'
+          || ['checking', 'requesting', 'opening-settings', 'settling', 'complete'].includes(data.phase) && data.reason !== 'none'
+          || ['stopping', 'refused'].includes(data.phase) && ['none', 'not-inspected'].includes(data.reason)
+          || data.phase === 'cancelled' && data.reason !== 'cancelled'
+          || data.phase === 'unknown' && (data.reason !== 'cleanup-unknown' || data.availability !== 'cleanup-unknown')) return null;
+      if (data.observation !== null) {
+        observation = serviceObservation(data.observation, operation.action);
+        if (!observation || !observation.nativeSettled || !['complete', 'refused', 'cancelled'].includes(data.phase)
+            || observation.outcome === 'denied-by-user' && (!['refused', 'cancelled'].includes(data.phase)
+              || ['none', 'not-inspected'].includes(data.reason) || data.prerequisite !== 'approval-denied')) return null;
+      }
+      if (data.phase === 'complete' && (!observation || !['observed', 'registration-requested', 'already-registered',
+        'needs-approval', 'settings-requested'].includes(observation.outcome))) return null;
+    }
+    const safe: AndroidToolServiceStatus = { schemaVersion: 1, statusRevision: data.statusRevision,
+      setupGeneration: data.setupGeneration, availability: data.availability, prerequisite: data.prerequisite,
+      phase: data.phase, reason: data.reason, operation, observation };
+    return encoder.encode(JSON.stringify(safe)).byteLength <= ANDROID_TOOL_REGISTRATION_STATUS_LIMIT ? safe : null;
+  } catch { return null; }
+}
+export function copyAndroidToolServiceRequest(command: AndroidToolServiceCommand, value: unknown): ServiceRequest | null {
+  try {
+    const names = command === 'android_tool_service_status' ? ['schemaVersion'] : command === 'cancel_android_tool_service'
+      ? ['schemaVersion', 'operationId', 'setupGeneration'] : command === 'request_android_tool_service_registration'
+      ? ['schemaVersion', 'setupGeneration', 'context', 'consentVersion', 'registrationAcknowledged']
+      : ['check_android_tool_service', 'open_android_tool_service_approval_settings'].includes(command)
+      ? ['schemaVersion', 'setupGeneration', 'context'] : null;
+    if (!names) return null;
+    const data = record(value, names);
+    if (!data || data.schemaVersion !== 1) return null;
+    let safe: ServiceRequest;
+    if (command === 'android_tool_service_status') safe = { schemaVersion: 1 };
+    else if (command === 'cancel_android_tool_service') {
+      if (!token(data.operationId) || !counter(data.setupGeneration, true)) return null;
+      safe = { schemaVersion: 1, operationId: data.operationId, setupGeneration: data.setupGeneration };
+    } else {
+      if (!counter(data.setupGeneration)) return null;
+      const saved = context(data.context); if (!saved) return null;
+      const common: CheckAndroidToolService = { schemaVersion: 1, setupGeneration: data.setupGeneration, context: saved };
+      if (command === 'request_android_tool_service_registration') {
+        if (data.consentVersion !== ANDROID_TOOL_SERVICE_CONSENT || data.registrationAcknowledged !== true) return null;
+        safe = { ...common, consentVersion: ANDROID_TOOL_SERVICE_CONSENT, registrationAcknowledged: true };
+      } else safe = common;
+    }
+    return encoder.encode(JSON.stringify(safe)).byteLength <= ANDROID_TOOL_REGISTRATION_REQUEST_LIMIT ? safe : null;
+  } catch { return null; }
+}
+export function encodeAndroidToolServiceRequest(command: AndroidToolServiceCommand, value: unknown): Uint8Array | null {
+  const safe = copyAndroidToolServiceRequest(command, value);
+  return safe === null ? null : encoder.encode(JSON.stringify(safe));
+}
+export function androidToolServiceActive(status: AndroidToolServiceStatus | null): boolean {
+  return !!status && ['checking', 'requesting', 'opening-settings', 'settling', 'stopping', 'unknown'].includes(status.phase);
+}
+export function sameAndroidToolServiceIdentity(a: AndroidToolServiceIdentity | null, b: AndroidToolServiceIdentity | null): boolean {
+  return a === null || b === null ? a === b : a.operationId === b.operationId && a.setupGeneration === b.setupGeneration;
+}
+export function hasAndroidToolService(api: AndroidToolRegistrationApi): boolean {
+  return typeof api.androidToolServiceStatus === 'function' && typeof api.checkAndroidToolService === 'function'
+    && typeof api.requestAndroidToolServiceRegistration === 'function' && typeof api.openAndroidToolServiceApprovalSettings === 'function'
+    && typeof api.cancelAndroidToolService === 'function' && typeof api.subscribeAndroidToolService === 'function';
+}
+const serviceErrors: Record<string, string> = {
+  android_service_invalid: 'The service request was rejected before admission. Nothing was authorized.',
+  android_service_unavailable: 'The fixed Android service action was not admitted. Check its status and prerequisites.',
+  android_service_unconfirmed: 'The original service action is unconfirmed. Keep its Status and Cancel; do not repeat registration.',
+};
+export function androidToolServiceError(error: unknown): ApiError {
+  let code = 'android_service_unconfirmed';
+  try {
+    const field = error !== null && typeof error === 'object' ? Object.getOwnPropertyDescriptor(error, 'code') : undefined;
+    const value: unknown = field && Object.hasOwn(field, 'value') ? field.value : undefined;
+    if (typeof value === 'string' && Object.hasOwn(serviceErrors, value)) code = value;
+  } catch { /* No native text, getters or framework transcript reaches UI. */ }
+  return { code, message: serviceErrors[code]!, retryable: false };
 }
 // Native invalid/unavailable errors are reserved for rejection BEFORE original
 // admission. Every lost GO/invoke/status reply after admission is unconfirmed;
@@ -301,7 +457,7 @@ export function androidToolRegistrationError(error: unknown): ApiError {
 export const androidToolRegistrationPrerequisiteText: Record<AndroidToolRegistrationPrerequisite, string> = {
   ready: 'Protected-copy prerequisites are currently available. Source inspection and separate explicit license acknowledgment are still required.',
   'supplier-unavailable': 'Registration is unavailable because the complete official supplier correspondence or original app-provided support tools are not available. Local hashes, version text or cache files cannot replace them.',
-  'signing-unavailable': 'The required signed service is unavailable. This view does not install a service or run administrator commands.',
+  'signing-unavailable': 'The required shipping-signed helper identity is unavailable. Obtain a correctly signed release from the publisher; local administrator access or ad-hoc signing cannot replace it.',
   'approval-required': 'The system setup approval is still required before a registration can start. No protected copy is waiting in the background for approval.',
   'approval-denied': 'System setup approval was denied. Registration is unavailable; changing selected folders does not bypass approval.',
   'service-unavailable': 'The genuinely installed protected-copy service is unavailable. There is no shell, browser or unprivileged-copy fallback.',

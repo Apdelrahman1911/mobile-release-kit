@@ -11,6 +11,8 @@ pub const INVENTORY_LIMIT: usize = 1024 * 1024;
 pub const RECORD_LIMIT: usize = 8192;
 pub const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;
 pub const FILE_LIMIT: usize = 2048;
+pub const ANDROID_HELPER: &str = "app/Contents/Helpers/mrk-android-register";
+pub const ANDROID_SERVICE_PLIST: &str = "app/Contents/Library/LaunchDaemons/dev.mobile-release-kit.desktop.android-register.plist";
 type Result<T> = std::result::Result<T, &'static str>;
 fn check(ok: bool, reason: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(reason) } }
 fn hex(value: &str, bytes: usize) -> bool {
@@ -71,7 +73,7 @@ impl Inventory {
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == matches!(item.path.as_str(),
-                "app/Contents/MacOS/mobile-release-kit-desktop" | "app/Contents/Helpers/mrk-vault-keychain" | "runtime/python/bin/python3"),
+                "app/Contents/MacOS/mobile-release-kit-desktop" | "app/Contents/Helpers/mrk-vault-keychain" | ANDROID_HELPER | "runtime/python/bin/python3"),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -83,6 +85,10 @@ impl Inventory {
             && files.contains_key("app/Contents/Info.plist") && files.contains_key("app/Contents/Helpers/mrk-vault-keychain")
             && files.contains_key("runtime/python/bin/python3")
             && files.get("runtime/manifest.json").is_some_and(|f| f.sha256 == self.runtime_manifest_sha256), "inventory-required")?;
+        // Optional only as a complete fixed pair. Absent keeps the existing
+        // engineering package unavailable; presence is DATA completeness, not
+        // signature trust, service approval, peer Ready or execution authority.
+        check(files.contains_key(ANDROID_HELPER) == files.contains_key(ANDROID_SERVICE_PLIST), "inventory-android-service-pair")?;
         let mut folded = BTreeSet::new();
         for name in files.keys().chain(directories.iter()) {
             check(folded.insert(name.to_ascii_lowercase()), "inventory-collision")?;
@@ -266,13 +272,35 @@ mod tests {
         assert!(progress.begin(1).is_err() && progress.wrote(1).is_err() && progress.record(true).is_err());
         assert!(progress.snapshot(true).get("originalsSettled").is_none());
     }
+    fn android_service_inventory_pair_and_executable_scope_data() {
+        let manifest="c".repeat(64);
+        let original:serde_json::Value=serde_json::from_slice(&inventory()).unwrap();
+        // The original five-file unavailable package remains a valid DATA
+        // inventory; it cannot acquire service authority by this parse.
+        assert!(Inventory::parse(&inventory(),&manifest).unwrap().index().is_ok());
+        for (helper,plist,helper_executable,plist_executable,accepted) in [
+            (true,true,true,false,true), (true,false,true,false,false),
+            (false,true,true,false,false), (true,true,false,false,false),
+            (true,true,true,true,false),
+        ] {
+            let mut changed=original.clone();let rows=changed["files"].as_array_mut().unwrap();
+            for (include,path,executable) in [(helper,ANDROID_HELPER,helper_executable),(plist,ANDROID_SERVICE_PLIST,plist_executable)] {
+                if include { rows.push(json!({"path":path,"sha256":"b".repeat(64),"size":1,"executable":executable})); }
+            }
+            rows.sort_by(|a,b|a["path"].as_str().cmp(&b["path"].as_str()));
+            let bytes=serde_json::to_vec(&changed).unwrap();
+            assert_eq!(Inventory::parse(&bytes,&manifest).unwrap().index().is_ok(),accepted);
+        }
+    }
     #[test] fn closed_record_tuple_inventory_and_nonfinality() { closed_record_tuple_inventory_and_nonfinality_data(); }
     #[test] fn full_inventory_and_stable_directory_identity() { full_inventory_and_stable_directory_identity_data(); }
     #[test] fn progress_preserves_partial_native_returns_and_never_mints_finality() { progress_preserves_partial_native_returns_and_never_mints_finality_data(); }
+    #[test] fn android_service_inventory_pair_and_executable_scope() { android_service_inventory_pair_and_executable_scope_data(); }
     pub(super) fn all() {
         closed_record_tuple_inventory_and_nonfinality_data();
         full_inventory_and_stable_directory_identity_data();
         progress_preserves_partial_native_returns_and_never_mints_finality_data();
+        android_service_inventory_pair_and_executable_scope_data();
     }
 }
 /// Shared inert bodies for the already selected normal-profile observer route.

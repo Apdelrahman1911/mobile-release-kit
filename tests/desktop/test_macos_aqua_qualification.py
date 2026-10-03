@@ -365,7 +365,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(label), 1)
         position = workflow.index(label)
         self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
-        for later in ("Compile headless Mac libraries and run twenty-seven exact DATA regressions first",
+        for later in ("Compile headless Mac libraries and run the exact selected DATA regressions first",
                       "Fail fast on native Scripts ownership and package format (never Installer)",
                       "Download only the exact accepted M archive (no rebuild or fallback)",
                       "Compile the fixed debug actual-main observer and normal embedded frontend once",
@@ -393,7 +393,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertNotIn("discover(", step)
         self.assertNotIn("loadTestsFrom", step)
 
-        headless_label = "      - name: Compile headless Mac libraries and run twenty-seven exact DATA regressions first\n"
+        headless_label = "      - name: Compile headless Mac libraries and run the exact selected DATA regressions first\n"
         self.assertEqual(workflow.count(headless_label), 1)
         self.assertLess(workflow.index(headless_label), workflow.index(
             "      - name: Fail fast on native Scripts ownership and package format (never Installer)\n"))
@@ -438,12 +438,13 @@ class AquaDataTests(unittest.TestCase):
             "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
             "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
         ))
-        self.assertIn('"scope": "twenty-five-main-and-two-native-macos-headless-data-regressions"', headless)
+        self.assertIn('scope = "twenty-five-main-and-two-native-macos-headless-data-regressions"', headless)
+        self.assertIn('"scope": scope', headless)
         table = headless.split("          libraries = (\n", 1)[1].split("          )\n", 1)[0]
         self.assertEqual(table,
-            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 25, "headless"),\n'
+            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, main_count, "headless"),\n'
             '              ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",\n'
-            '               ["default"], native_names, 2, "headless-native"),\n')
+            '               ["default"], native_names, native_count, "headless-native"),\n')
         for required in ("if len(targets) != 2:", "for role, directory, package, library, features, test_names, count, prefix in libraries:",
                          'r.get("target", {}).get("name") == library', "if len(matches) != 1:",
                          'package_id = "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"',
@@ -455,8 +456,8 @@ class AquaDataTests(unittest.TestCase):
                          'binary.parent != expected', 're.fullmatch(re.escape(library) + r"-[0-9a-f]+", binary.name)',
                          "for binary, test_names, count, prefix, record in admitted:"):
             self.assertIn(required, headless)
-        self.assertLess(headless.index("admitted.append("), headless.index("owner.run_owned("))
-        self.assertEqual(headless.count("owner.run_owned("), 1)
+        self.assertLess(headless.index("admitted.append("), headless.index("result = owner.run_owned("))
+        self.assertEqual(headless.count("owner.run_owned("), 2)
         for required in ('[str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *test_names]',
                          "cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024",
                          "type(result) is not subprocess.CompletedProcess", "type(result.stdout) is not bytes",
@@ -477,7 +478,7 @@ class AquaDataTests(unittest.TestCase):
             self.assertIn(required, headless)
         digest_checks = [item.start() for item in M.re.finditer(M.re.escape('if original_digest() != digest:'), headless)]
         self.assertEqual(len(digest_checks), 2)
-        self.assertLess(digest_checks[0], headless.index("owner.run_owned("))
+        self.assertLess(digest_checks[0], headless.index("result = owner.run_owned("))
         self.assertGreater(digest_checks[1], headless.index('publish(prefix + "-tests.status"'))
         self.assertLess(headless.index('raise ValueError("headless-original-return-contract")'), headless.index("home.rmdir()"))
         settlement = headless.split("          finally:\n", 1)[1]
@@ -6572,7 +6573,6 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Select fixed frontend compiler",
             "Record exact source and actual tool bindings only after route admission",
             "Check current owner pins before native preparation",
-            "Compile headless Mac libraries and run twenty-seven exact DATA regressions first",
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Acquire and verify the two fixed Android support archives as DATA",
             "Download only the exact accepted M archive (no rebuild or fallback)",
@@ -6588,13 +6588,13 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         }
         toolchain = {
             "Prepare the pinned Apple Instant clock toolchain":
-                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private')",
+                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')",
         }
         classifiers = {
             "Classify installed Xcode originals without preparing or selecting a toolchain":
                 "success() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification'",
             "Recheck admitted classification/private-native source even after an incomplete observation":
-                "always() && (env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private') && steps.source.outcome == 'success'",
+                "always() && (env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle') && steps.source.outcome == 'success'",
             "Preserve bounded classification DATA and original workflow exit evidence":
                 "always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'",
         }
@@ -6612,11 +6612,18 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "One installation-inspection Aqua journey through the reviewed original invocation owner": "installation-inspection",
             "Nine serial current-iOS Aqua cases through the reviewed original invocation owner": "ios-current-synthetic",
         }
+        lifecycle = {
+            "Compile headless Mac libraries and run the exact selected DATA regressions first":
+                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')",
+            "Export bounded diagnostics without altering original command evidence":
+                "always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')",
+            "Preserve bounded Android lifecycle results and original workflow exit evidence":
+                "always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success'",
+        }
         legacy_exports = {
-            "Export bounded diagnostics without altering original command evidence",
             "Preserve bounded original evidence; upload alone is not an Aqua pass",
         }
-        self.assertEqual(set(steps), admitted | legacy | set(toolchain) | set(classifiers) | set(private) | set(scoped) | legacy_exports)
+        self.assertEqual(set(steps), admitted | legacy | set(toolchain) | set(classifiers) | set(private) | set(scoped) | set(lifecycle) | legacy_exports)
         for name, body in steps.items():
             gates = [line.strip() for line in body.splitlines() if line.startswith("        if:")]
             if name in admitted:
@@ -6627,6 +6634,8 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                 expected = ["if: " + classifiers[name]]
             elif name in private:
                 expected = ["if: " + private[name]]
+            elif name in lifecycle:
+                expected = ["if: " + lifecycle[name]]
             elif name in scoped:
                 selection = "env.MRK_MACOS_AQUA_SCOPE == " + repr(scoped[name])
                 if scoped[name] in ("project-fields", "android-inputs"):
@@ -6653,7 +6662,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         for forbidden in ("sudo", "xcodebuild", "xcrun", "cargo", "npm", "continue-on-error", "set +e", "|| true", "rm -"):
             self.assertNotIn(forbidden, classify)
         admission = steps["Admit only this exact disposable-hosted source route"]
-        self.assertIn('if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private ]]; then', admission)
+        self.assertIn('if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private && "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle ]]; then', admission)
         self.assertIn("        id: source\n", steps["Bind the complete reviewed first-party checkout before compilation"])
         post = steps["Recheck admitted classification/private-native source even after an incomplete observation"]
         self.assertIn("git -c core.fsmonitor=false diff --exit-code HEAD --", post)
@@ -9086,7 +9095,7 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    steps:\n", 1)[0]
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
-        self.assertIn("        scope:\n          - vault-helper-shipping-installation-inspection\n", header)
+        self.assertIn("        scope:\n          - android-registration-lifecycle\n", header)
         self.assertNotIn("          - project-fields", header)
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         run = blocks["Three serial shipping-helper journeys through the original document and invocation owner"]
@@ -9104,9 +9113,157 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         self.assertIn("self.terminal.as_ref().is_some_and(|t|t.valid && t.input_closed)", provider)
         self.assertIn("fn only_valid_decoded_terminal_input_retirement_suppresses_stop_control", provider)
         vault = (root / "desktop/src-tauri/src/asset_session_vault.rs").read_text()
-        self.assertIn("DURABLE_QUALIFIED: bool = false", vault)
-        self.assertIn("Qualification::Ordinary => DURABLE_QUALIFIED", vault)
-        self.assertIn("self.gate(state, false)?;", vault)
+        self.assertTrue("DURABLE_QUALIFIED: bool = false" in vault,
+                        "the global durable-storage gate must remain disabled")
+        self.assertTrue("Qualification::Ordinary => self.persistence_qualified()," in vault,
+                        "ordinary storage must use the current document qualification")
+        self.assertTrue("DURABLE_QUALIFIED || document.inner.bridge.installed_persistence_available(&document.inner.session_identity)" in vault,
+                        "installed storage qualification must remain bound to the original session")
+        self.assertTrue("self.gate(state, false)?;" in vault,
+                        "durable operations must retain the ordinary document gate")
+
+
+class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def source():
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
+        headless = blocks["Compile headless Mac libraries and run the exact selected DATA regressions first"]
+        body = headless.split("<<'PY_HEADLESS'\n", 1)[1].split("          PY_HEADLESS", 1)[0]
+        return workflow, blocks, headless, ast.parse("\n".join(line[10:] for line in body.splitlines()))
+
+    def test_exact_twelve_route_excludes_app_suppliers_and_preserves_original_test_results(self):
+        workflow, blocks, headless, tree = self.source()
+        selected = next(node for node in tree.body if isinstance(node, ast.If)
+                        and isinstance(node.test, ast.Name) and node.test.id == "android_lifecycle"
+                        and any(isinstance(child, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "names"
+                                for t in child.targets) for child in node.body))
+        values = {target.id: ast.literal_eval(node.value) for node in selected.body if isinstance(node, ast.Assign)
+                  for target in node.targets if isinstance(target, ast.Name) and target.id in ("names", "native_names")}
+        self.assertEqual(values["names"], (
+            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::callback_stamp_needs_exclusive_capture_return_then_original_owner_finality",
+            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::deferred_reuses_only_same_private_owner_action_serial_and_unadmitted_cell",
+            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::main_gate_only_defers_at_admission_and_preserves_actual_f_on_short_lock_contention",
+            "saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::register_observation_failure_is_at_real_return_and_stop_keeps_original_deadlines",
+            "saved_command_owner::android_registration::client::tests::enqueued_busy_and_processed_are_distinct_and_finish_never_precedes_its_ack",
+            "saved_command_owner::android_registration::client::tests::ack_rejects_wrong_account_nonce_sequence_payload_and_earlier_failure",
+            "saved_command_owner::android_registration::client::tests::same_original_ready_reproof_and_current_gates_precede_transfer",
+            "saved_command_owner::android_registration::client::tests::mismatched_reproof_lost_go_and_earlier_failure_close_original_barriers",
+            "saved_command_owner::android_registration::client::tests::finish_requires_the_actual_source_handle_consumption_not_worker_return",
+            "saved_command_owner::android_registration::client::tests::go_loss_and_peer_failure_still_run_preparation_and_independent_native_release",
+            "saved_command_owner::android_registration::client::tests::native_clock_preserves_bidirectional_earliest_f_without_echo_or_renewal",
+        ))
+        self.assertEqual(values["native_names"], (
+            "android_registration::tests::never_started_client_retires_its_actual_signal_without_arming_or_native_entry",
+        ))
+        self.assertEqual(len(set(values["names"] + values["native_names"])), 12)
+        for text in ('main_count, native_count = 11, 1', 'main_count, native_count = 25, 2',
+                     '"--jobs", "1"', '"--lib", "--no-run", "--message-format=json"',
+                     'timeout=480', 'output_limit=4 * 1024 * 1024',
+                     'calls_entered == calls_returned == 3', 'if android_lifecycle and not receipt["passed"]',
+                     'len(expected_rows) != count', 'set(lines[1:-1]) != expected_rows',
+                     '0 failed; 0 ignored; 0 measured;', 'shutil.rmtree.avoids_symlink_attacks',
+                     'os.mkdir("cargo-target", 0o700, dir_fd=work_fd)',
+                     'shutil.rmtree("cargo-target", dir_fd=work_fd)', 'target_fd = work_fd = None'):
+            self.assertIn(text, headless)
+        self.assertLess(headless.index('calls_entered += 1'), headless.index('compiler = owner.run_owned('))
+        self.assertLess(headless.index('headless-original-compiler-return-contract'), headless.index('calls_returned += 1'))
+        self.assertLess(headless.index('os.close(descriptor)'), headless.index('shutil.rmtree("cargo-target"'))
+        for name in ("Select fixed frontend compiler", "Record exact source and actual tool bindings only after route admission",
+                     "Check current owner pins before native preparation", "Fail fast on native Scripts ownership and package format (never Installer)",
+                     "Acquire and verify the two fixed Android support archives as DATA", "Download only the exact accepted M archive (no rebuild or fallback)",
+                     "Reuse accepted Mac supplier and prepare only the current source payload",
+                     "Build and sign the separate fixed vault helper before binding the app",
+                     "Compile the fixed debug actual-main observer and normal embedded frontend once",
+                     "Application installation uses only standard privileged Installer; app and Python stay nonroot",
+                     "Compile native wrapping variants once and run fixed cohorts and creator-reader pair",
+                     "Verify source stayed unchanged; retire only disposable owned build output"):
+            gate = next(line for line in blocks[name].splitlines() if line.startswith("        if:"))
+            self.assertNotIn("android-registration-lifecycle", gate)
+        export = blocks["Export bounded diagnostics without altering original command evidence"]
+        self.assertIn('if aqua_scope == "android-registration-lifecycle": streams = streams[:2]', export)
+        upload = blocks["Preserve bounded Android lifecycle results and original workflow exit evidence"]
+        paths = [line.strip().split("/", 1)[1] for line in upload.splitlines() if "${{ steps.work.outputs.root }}/" in line]
+        self.assertEqual(paths, ["source-inventory.json", "headless-build.admitted.jsonl", "headless-build.stderr.tail.txt", "headless-build.status",
+            "headless-tests.stdout", "headless-tests.stderr", "headless-tests.status", "headless-native-tests.stdout",
+            "headless-native-tests.stderr", "headless-native-tests.status", "headless-tests.receipt.json", "bounded-diagnostics.json"])
+        self.assertIn("if-no-files-found: error", upload)
+        for forbidden in ("workflow_dispatch", "continue-on-error: true"):
+            self.assertNotIn(forbidden, workflow)
+        for forbidden in ("--features", "npm", "codesign", "installer", "run_cases("):
+            self.assertNotIn(forbidden, headless)
+
+    def test_actual_finalizer_needs_all_owned_returns_and_keeps_each_cleanup_failure(self):
+        # Execute ONLY the actual finally statements and pure directory shape
+        # function against private DATA facades. No real FD/filesystem/owner,
+        # compiler, process, native action, receipt or directory is produced.
+        _, _, _, tree = self.source()
+        final = next(node for node in tree.body if isinstance(node, ast.Try) and node.finalbody)
+        directory = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "directory_identity")
+        body = ast.Module(body=[deepcopy(directory), *deepcopy(final.finalbody)], type_ignores=[])
+        self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom)) for node in ast.walk(body)))
+        code = compile(ast.fix_missing_locations(body), "<original-headless-finalizer-DATA>", "exec")
+        for case in ("pass", "owner-unknown", "returned-compiler-failure", "artifact-close-failure",
+                     "target-collision", "cleanup-failure", "directory-close-failure"):
+            with self.subTest(case=case):
+                events, publications, retired = [], [], [False]
+                root_info = SimpleNamespace(st_dev=7, st_ino=101, st_mode=stat.S_IFDIR | 0o700, st_uid=501, st_gid=20)
+                target_info = SimpleNamespace(st_dev=7, st_ino=102, st_mode=stat.S_IFDIR | 0o700, st_uid=501, st_gid=20)
+                collision = SimpleNamespace(st_dev=7, st_ino=999, st_mode=stat.S_IFDIR | 0o700, st_uid=501, st_gid=20)
+                def close(fd):
+                    self.assertIn(fd, (17, 18, 19, 20)); events.append(("close", fd))
+                    if (case == "artifact-close-failure" and fd == 17
+                            or case == "directory-close-failure" and fd == 20): raise OSError("injected DATA close")
+                def lookup(name, *, dir_fd, follow_symlinks):
+                    self.assertEqual((name, dir_fd, follow_symlinks), ("cargo-target", 19, False))
+                    if retired[0]: raise FileNotFoundError("retired DATA name")
+                    return collision if case == "target-collision" else target_info
+                def remove(name, *, dir_fd):
+                    self.assertEqual((name, dir_fd), ("cargo-target", 19)); events.append(("remove", name))
+                    if case == "cleanup-failure": raise OSError("injected DATA cleanup")
+                    retired[0] = True
+                def publish(name, raw):
+                    self.assertEqual(name, "headless-tests.receipt.json"); publications.append(json.loads(raw))
+                targets = [] if case in ("owner-unknown", "returned-compiler-failure") else [
+                    {"role": role, "originalReturned": True, "artifactOriginalUnchanged": True,
+                     "artifactOriginalClosed": False, "testsPassed": True} for role in ("main", "native")]
+                receipt = {"targets": targets, "compilerOriginalReturned": case != "owner-unknown",
+                           "cargoTargetRetired": False, "cargoTargetOriginalClosed": False, "workOriginalClosed": False}
+                if not targets: receipt["failure"] = {"stage": "original-compiler", "type": "DataFailure"}
+                originals = [{"fd": fd, "record": record} for fd, record in zip((17, 18), targets)]
+                namespace = {"__builtins__": {"ValueError": ValueError, "BaseException": BaseException,
+                        "FileNotFoundError": FileNotFoundError, "type": type, "len": len, "all": all},
+                    "os": SimpleNamespace(getuid=lambda: 501, getgid=lambda: 20, close=close,
+                        fstat=lambda fd: root_info if fd == 19 else target_info, stat=lookup),
+                    "shutil": SimpleNamespace(rmtree=remove), "stat": stat, "json": json,
+                    "work": SimpleNamespace(lstat=lambda: root_info), "work_fd": 19, "target_fd": 20,
+                    "work_original": (7, 101, root_info.st_mode, 501, 20), "target_original": (7, 102, target_info.st_mode, 501, 20),
+                    "android_lifecycle": True, "calls_entered": 1 if not targets else 3,
+                    "calls_returned": 0 if case == "owner-unknown" else 1 if not targets else 3,
+                    "receipt": receipt, "originals": originals, "cleanup_errors": [], "publish": publish,
+                    "names": tuple(range(11)), "native_names": (0,)}
+                raised = None
+                try: exec(code, namespace)
+                except ValueError as error: raised = error
+                self.assertEqual(len(publications), 1)
+                result = publications[0]
+                self.assertEqual(result["passed"], case == "pass")
+                self.assertEqual(result["cargoTargetRetired"], case in ("pass", "returned-compiler-failure", "directory-close-failure"))
+                self.assertEqual(len([event for event in events if event == ("close", 19)]), 1)
+                self.assertEqual(len([event for event in events if event == ("close", 20)]), 1)
+                for original in originals:
+                    self.assertIsNone(original["fd"])
+                if case in ("owner-unknown", "artifact-close-failure", "target-collision"):
+                    self.assertFalse(any(event[0] == "remove" for event in events))
+                if case == "pass":
+                    self.assertIsNone(raised); self.assertEqual(result["tests"], 12)
+                    self.assertEqual(events, [("close", 17), ("close", 18), ("remove", "cargo-target"), ("close", 20), ("close", 19)])
+                elif case == "artifact-close-failure":
+                    self.assertEqual(result["closeErrors"], [{"role": "main", "type": "OSError"}]); self.assertIsNotNone(raised)
+                elif case in ("target-collision", "cleanup-failure", "directory-close-failure"):
+                    self.assertEqual(len(result["cleanupErrors"]), 1); self.assertIsNotNone(raised)
+                else:
+                    self.assertIn("failure", result); self.assertIsNone(raised)
 
 if __name__ == "__main__":
     unittest.main()

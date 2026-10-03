@@ -233,6 +233,7 @@ fn main() {
             "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "select_android_toolchain", "cancel_android_toolchain_catalog",
             "android_tool_sources_status", "choose_android_tool_source", "cancel_android_tool_source",
             "android_tool_registration_status", "inspect_android_tool_sources", "register_android_tool_sources", "cancel_android_tool_registration",
+            "android_tool_service_status", "check_android_tool_service", "request_android_tool_service_registration", "open_android_tool_service_approval_settings", "cancel_android_tool_service",
             "prepare_project_recovery", "start_project_recovery", "project_recovery_status", "cancel_project_recovery",
             "prepare_ios_archive", "start_ios_archive", "ios_archive_status", "cancel_ios_archive",
             "validate_config", "suggest_config", "preview_config", "propose_github_setup",

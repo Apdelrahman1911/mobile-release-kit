@@ -50,6 +50,19 @@ impl Default for Sources {
         active: None, last: None, phase: wire::Phase::Idle, reason: wire::Reason::NotInspected } }
 }
 impl Sources {
+    pub(super) fn census_generation(&self)->u32{self.generation}
+    /// Separate read-only census seam for service setup, including a genuinely
+    /// empty or partial selection. This does NOT weaken snapshot()'s all-three
+    /// requirement or grant source inspection, registration or tool authority.
+    pub(super) fn census_originals(&self) -> Option<[Option<Arc<OriginalWork>>; 3]> {
+        if self.unknown || self.active.is_some() { return None; }
+        Some(std::array::from_fn(|index| self.selected.0[index].1.as_ref().map(|value| value.original.clone())))
+    }
+    pub(super) fn same_census_originals(&self, originals: &[Option<Arc<OriginalWork>>; 3]) -> bool {
+        !self.unknown && self.active.is_none() && self.selected.0.iter().zip(originals).all(|((_, selected), original)|
+            match (selected, original) { (None,None)=>true,
+                (Some(selected),Some(original))=>Arc::ptr_eq(&selected.original,original),_=>false })
+    }
     pub(super) fn snapshot(&self) -> Option<SourceSnapshot> {
         if self.unknown || self.active.is_some() || self.generation == 0 { return None; }
         let (project_id, registration, project) = self.binding.as_ref()?;

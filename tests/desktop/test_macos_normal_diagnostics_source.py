@@ -28,6 +28,10 @@ DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; obse
 DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
 DASHBOARD_QUERY_ORIGINAL = '        _ = try unique(heading, "dashboard heading is ambiguous")\n'
 DASHBOARD_QUERY_DIAGNOSTICS_SHA256 = "4a0f78d6468535805756ea785f0cdf5fbcede31c38d276635485a476b9fb6ad6"
+RENDERER_QUERY_BEGIN = '        // Fixed renderer singleton diagnostic; no additional query or wait.\n'
+RENDERER_QUERY_END = '        // End fixed renderer singleton diagnostic.\n'
+RENDERER_QUERY_ORIGINAL = '        let renderer = try unique(window.webViews, "ordinary first-party renderer is missing or ambiguous")\n'
+RENDERER_QUERY_DIAGNOSTICS_SHA256 = 'dea59830e6aef376217856dc9779acffb9634aa5fd2d260847db0b876cb7a0c4'
 ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
 ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
 BLOCK_PINS = {'normal_ui_result': 'cad0ea48888071634eac7834632e4057e71ae482f93814974c8d5c6501629657',
@@ -107,6 +111,56 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def restored_renderer_queries(self, swift: str) -> str:
+        # A new readiness/fallback policy is not authorized: bind the same one
+        # original query/count/refusal at exactly the two existing launch sites.
+        self.assertEqual(swift.count(RENDERER_QUERY_BEGIN), 2)
+        self.assertEqual(swift.count(RENDERER_QUERY_END), 2)
+        self.assertEqual(swift.count(RENDERER_QUERY_ORIGINAL), 0)
+        begin = swift.index(RENDERER_QUERY_BEGIN)
+        end = swift.index(RENDERER_QUERY_END, begin) + len(RENDERER_QUERY_END)
+        block = swift[begin:end]
+        self.assertEqual(swift.count(block), 2)
+        for signature, following in (
+            ('    func testLaunchCancelAndQuit() throws {', '    // Finite synthetic files only.'),
+            ('    @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {',
+             '    private enum PrivateInput: String {'),
+        ):
+            self.assertEqual(swift.count(signature), 1)
+            self.assertEqual(swift.count(following), 1)
+            caller = swift.split(signature, 1)[1].split(following, 1)[0]
+            self.assertEqual(caller.count(block), 1)
+            self.assertIn('try require(window.isHittable, "ordinary main window is not usable")\n' + block
+                          + '        try dashboard(renderer)\n', caller)
+        for fragment in (
+            'let rendererQuery = window.webViews',
+            'let rendererCount = rendererQuery.count',
+            'if rendererCount != 1 {\n            print(',
+            'min(rendererCount, 5)', 'rendererCount > 4 ? 1 : 0',
+            'try require(rendererCount == 1, "ordinary first-party renderer is missing or ambiguous")',
+            'let renderer = rendererQuery.element(boundBy: 0)',
+        ):
+            self.assertEqual(block.count(fragment), 1, fragment)
+        self.assertEqual(block.count('window.webViews'), 1)
+        self.assertEqual(block.count('.count'), 1)
+        self.assertEqual(block.count('.element('), 1)
+        self.assertEqual(block.count('print('), 1)
+        self.assertEqual(block.count('MRK_MACOS_NORMAL_RENDERER_QUERY=observation=initial;matches='), 1)
+        self.assertEqual(block.count(';nonAtomic=1"'), 1)
+        self.assertEqual(swift.count('MRK_MACOS_NORMAL_RENDERER_QUERY='), 2)
+        self.assertLess(block.index('let rendererQuery = window.webViews'), block.index('let rendererCount = rendererQuery.count'))
+        self.assertLess(block.index('let rendererCount = rendererQuery.count'), block.index('if rendererCount != 1'))
+        self.assertLess(block.index('if rendererCount != 1'), block.index('print('))
+        self.assertIn('        }\n        try require(rendererCount == 1, "ordinary first-party renderer is missing or ambiguous")\n'
+                      '        let renderer = rendererQuery.element(boundBy: 0)\n', block)
+        for forbidden in ('firstMatch', 'matching(', 'allElements', 'descendants(', 'children(',
+                          'snapshot(', 'debugDescription', 'waitFor', 'sleep(', 'while ', 'return',
+                          'try?', 'catch', '.click(', 'evaluateJavaScript', 'app.', 'Process()',
+                          'FileManager', 'write('):
+            self.assertNotIn(forbidden, block, forbidden)
+        self.assertEqual(digest(block.encode()), RENDERER_QUERY_DIAGNOSTICS_SHA256)
+        return swift.replace(block, RENDERER_QUERY_ORIGINAL)
+
     def restored_dashboard_query(self, swift: str) -> str:
         # Validate this exact diagnostic allowance before reconstructing the old
         # singleton line for the unchanged whole-original-source pin below.
@@ -340,6 +394,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_normal_diagnostics_observes_original_complete_report_and_settled_projection(self):
         swift = (ROOT / SWIFT).read_text()
+        swift = self.restored_renderer_queries(swift)
         swift = self.restored_dashboard_query(swift)
         added = self.checked_saved_checks_block(swift)
         swift = swift.replace(added, "", 1)

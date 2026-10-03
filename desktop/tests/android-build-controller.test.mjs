@@ -12,6 +12,8 @@ import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_EVENT, ANDROID_BUILD_LIMITATIONS,
   ANDROID_BUILD_SCOPE, ANDROID_BUILD_TOOLCHAIN_PROFILE } from '../src/androidBuildProtocol.ts';
+import { ANDROID_TOOL_SERVICE_CONSENT } from '../src/androidToolRegistration.ts';
+import { parseAndroidToolchainCatalogStatus } from '../src/androidToolchainCatalogProtocol.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
 const CONFIG = { bytes: 512, sha256: 'd'.repeat(64) }, NEW_CONFIG = { bytes: 524, sha256: 'e'.repeat(64) };
@@ -63,15 +65,30 @@ function completed(op, selection = { module: ':app', variant: 'release', applica
 const TOOL_A = { instance: '1'.repeat(32), ownerUid: 501, catalogGeneration: 1,
   recordSha256: '2'.repeat(64), inventorySha256: '3'.repeat(64), osProviderSha256: '4'.repeat(64) };
 const TOOL_B = { ...TOOL_A, instance: '5'.repeat(32), recordSha256: '6'.repeat(64) };
-const toolEntry = (selection) => ({ selection: clone(selection), versions: { jdkVendor: 'Example', jdkVersion: '17.0.12',
-  gradleVersion: '8.10', agpVersion: '8.7', sdkPlatform: 'android-35', sdkBuildToolsVersion: '35.0.0' } });
+const toolEntry = (selection, verified) => ({ instance: selection.instance, occupants: 1,
+  status: verified ? 'verified-this-session' : 'recovery-required',
+  versions: { jdkVendor: 'Example', jdkVersion: '17.0.12', gradleVersion: '8.10', agpVersion: '8.7',
+    sdkPlatform: 'android-35', sdkBuildToolsVersion: '35.0.0' },
+  recovery: verified ? null : { catalogGeneration: selection.catalogGeneration, instance: selection.instance,
+    recordSha256: selection.recordSha256, inventorySha256: selection.inventorySha256, osProviderSha256: selection.osProviderSha256 },
+  selection: verified ? clone(selection) : null });
 const catalogStatus = (patch = {}) => ({ schemaVersion: 1, statusRevision: 0, catalogGeneration: 0, operationId: null,
   availability: 'unsupported-platform', phase: 'idle', reason: 'not-inspected', entries: [], selected: null, ...patch });
-const readyCatalog = (patch = {}) => catalogStatus({ statusRevision: 1, catalogGeneration: 1, operationId: '7'.repeat(32),
-  availability: 'available', phase: 'ready', reason: 'none', entries: [toolEntry(TOOL_A), toolEntry(TOOL_B)], ...patch });
-function harness(t, { initial = status(), initialCatalog = catalogStatus(), listenGate = null, completeVersion = true } = {}) {
+function readyCatalog(patch = {}) {
+  // One current session proof, never two verified copies. Other metadata
+  // remains recovery-required DATA and cannot itself authorize Choose.
+  const verified = patch.selected ?? TOOL_A;
+  const value = catalogStatus({ statusRevision: 1, catalogGeneration: 1, operationId: '7'.repeat(32),
+    availability: 'available', phase: 'ready', reason: 'none',
+    entries: [toolEntry(TOOL_A, verified.instance === TOOL_A.instance), toolEntry(TOOL_B, verified.instance === TOOL_B.instance)], ...patch });
+  assert.ok(parseAndroidToolchainCatalogStatus(value), 'Synthetic catalog must satisfy the current closed row/session contract');
+  return value;
+}
+function harness(t, { initial = status(), initialCatalog = catalogStatus(), initialService = null, sourceSelections = [], listenGate = null, completeVersion = true } = {}) {
   let state = workspace(), registry = clone(initial), catalogRegistry = clone(initialCatalog), clock = 10, other = null, versionOverride;
   const calls = [], reads = [], subscriptions = [], versionCalls = [], order = [], catalogCalls = [], catalogSubscriptions = [];
+  const serviceCalls = [], serviceSubscriptions = [];
+  let serviceRegistry = clone(initialService);
   const selected = () => state.selectedId ? state.projects[state.selectedId] : null;
   const version = new ReleaseVersionController(selected);
   version.setConnection({ mode: 'native', observeReleaseVersion: (projectId) => {
@@ -96,6 +113,27 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), list
     startAndroidBuild: (input) => { const call = { kind: 'start', input: clone(input), ...deferred() }; calls.push(call); return call.promise; },
     cancelAndroidBuild: (operationId, ownerGeneration) => { const call = { kind: 'cancel', input: { operationId, ownerGeneration }, ...deferred() }; calls.push(call); return call.promise; },
   };
+  if (initialService !== null) {
+    const serviceRequest = (kind, input) => { const call = { kind, input: clone(input), ...deferred() }; serviceCalls.push(call); return call.promise; };
+    Object.assign(api, {
+      androidToolSourcesStatus: async () => ({ schemaVersion: 1, statusRevision: sourceSelections.length ? 1 : 0,
+        sourceGeneration: sourceSelections.length ? 1 : 0, projectId: sourceSelections.length ? 'p1' : null,
+        availability: 'available', phase: sourceSelections.length ? 'selected' : 'idle', reason: 'not-inspected',
+        operation: sourceSelections.length ? { operationId: 1, sourceGeneration: 1, role: sourceSelections.at(-1).role } : null,
+        selections: clone(sourceSelections), inspection: 'not-run', protectedCopy: 'not-created' }),
+      chooseAndroidToolSource: (input) => serviceRequest('unexpected-picker', input),
+      cancelAndroidToolSource: (input) => serviceRequest('unexpected-picker-cancel', input),
+      subscribeAndroidToolSources: async () => () => {},
+      androidToolServiceStatus: async () => clone(serviceRegistry),
+      checkAndroidToolService: (input) => serviceRequest('check', input),
+      requestAndroidToolServiceRegistration: (input) => serviceRequest('request-registration', input),
+      openAndroidToolServiceApprovalSettings: (input) => serviceRequest('open-approval-settings', input),
+      cancelAndroidToolService: (input) => serviceRequest('cancel', input),
+      subscribeAndroidToolService: async (callback) => {
+        const row = { callback, closed: false }; serviceSubscriptions.push(row); return () => { row.closed = true; };
+      },
+    });
+  }
   const controller = new AndroidBuildController({ selectedProject: selected,
     releaseVersion: () => versionOverride === undefined ? version.getSnapshot() : versionOverride,
     otherOperationReason: () => typeof other === 'function' ? other() : other, now: () => clock });
@@ -110,6 +148,9 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), list
   const ready = connected.then(async () => { if (completeVersion) await readVersion(); });
   t.after(() => { unsubscribeVersion(); controller.dispose(); version.dispose(); });
   return { api, controller, version, calls, reads, subscriptions, versionCalls, order, ready, readVersion, catalogCalls, catalogSubscriptions,
+    serviceCalls, serviceSubscriptions,
+    emitService(value) { serviceRegistry = clone(value); serviceSubscriptions.at(-1)?.callback(clone(value)); },
+    replyService(call, value) { serviceRegistry = clone(value); call.resolve(clone(value)); },
     emitCatalog(value) { catalogRegistry = clone(value); catalogSubscriptions.at(-1)?.callback(clone(value)); },
     replyCatalog(call, value) { catalogRegistry = clone(value); call.resolve(clone(value)); },
     get state() { return controller.getSnapshot(); }, get workspace() { return state; }, get project() { return selected(); },
@@ -128,7 +169,8 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), list
 }
 async function reviewed(h, patch = {}) {
   await h.ready;
-  const preparing = h.controller.prepare(), call = h.calls.at(-1); assert.equal(call.kind, 'prepare');
+  const preparing = h.controller.prepare(), call = h.calls.at(-1);
+  assert.equal(call?.kind, 'prepare', h.controller.prepareReason() ?? 'Expected the original Prepare invocation');
   const op = operation(call.input, patch); h.reply(call, status((h.state.status?.statusRevision ?? 0) + 1, op)); await preparing;
   assert.ok(h.state.consent); assert.equal(h.state.consent.acknowledged, false); return op;
 }
@@ -480,7 +522,8 @@ test('Mac tool selection is explicit DATA and changing it retires the saved buil
   const choosing = h.controller.selectToolchain(TOOL_A.instance, TOOL_A.recordSha256);
   const selected = h.catalogCalls.at(-1);
   assert.equal(selected.kind, 'catalog-select');
-  assert.deepEqual(selected.input, { schemaVersion: 1, catalogGeneration: 1, instance: TOOL_A.instance, recordSha256: TOOL_A.recordSha256 });
+  assert.deepEqual(selected.input, { schemaVersion: 1, catalogGeneration: 1, instance: TOOL_A.instance,
+    recordSha256: TOOL_A.recordSha256, inventorySha256: TOOL_A.inventorySha256, osProviderSha256: TOOL_A.osProviderSha256 });
   h.replyCatalog(selected, readyCatalog({ statusRevision: 2, selected: TOOL_A })); await choosing;
   const op = await reviewed(h);
   assert.deepEqual(h.state.consent.binding.toolchainSelection, TOOL_A);
@@ -498,7 +541,11 @@ test('lost catalog reply and Unknown retain the original observer, cancel target
   assert.equal(h.state.catalogUnconfirmed, true);
   const identity = { catalogGeneration: 1, operationId: '7'.repeat(32) };
   h.emitCatalog(catalogStatus({ statusRevision: 1, ...identity, availability: 'busy', phase: 'reading', reason: 'none' }));
-  assert.equal(h.state.catalogUnconfirmed, false); assert.ok(androidBuildOwnerReason(h.state));
+  // Event identifies native custody; the original request promise is still
+  // pending, so it cannot confirm its reply or release the retained observer.
+  assert.equal(h.state.catalogUnconfirmed, true); assert.equal(h.state.catalogPending, 'refresh');
+  assert.equal(h.catalogSubscriptions[0].closed, false); assert.equal(h.subscriptions[0].closed, false);
+  assert.ok(androidBuildOwnerReason(h.state));
   h.emitCatalog(catalogStatus({ statusRevision: 2, ...identity, availability: 'cleanup-unknown', phase: 'unknown', reason: 'cleanup-unknown' }));
   assert.ok(h.state.nativeBlocked);
   h.controller.beginConnection();
@@ -522,4 +569,112 @@ test('a Mac result from another tool selection cannot become the reviewed build 
   h.emit(status(3, result));
   assert.equal(h.state.integrityFailed, true);
   assert.equal(h.state.status.operation.result, null);
+});
+
+const serviceIdle = (patch = {}) => ({ schemaVersion: 1, statusRevision: 0, setupGeneration: 0,
+  availability: 'available', prerequisite: 'service-unavailable', phase: 'idle', reason: 'service-unavailable',
+  operation: null, observation: null, ...patch });
+function servicePending(call, sourceGeneration = 0) {
+  return serviceIdle({ statusRevision: 1 + 2 * call.input.setupGeneration, setupGeneration: call.input.setupGeneration + 1,
+    availability: 'busy', phase: ({ check: 'checking', 'request-registration': 'requesting', 'open-approval-settings': 'opening-settings' })[call.kind], reason: 'none',
+    operation: { operationId: String(call.input.setupGeneration + 1).repeat(32), setupGeneration: call.input.setupGeneration + 1,
+      sourceGeneration, action: call.kind, context: clone(call.input.context) } });
+}
+function serviceComplete(pending, { state = 'enabled', phase = 'complete', reason = 'none', observation = true } = {}) {
+  const action = pending.operation.action, mutation = action !== 'check';
+  return { ...clone(pending), statusRevision: pending.statusRevision + 1, availability: 'available', phase, reason,
+    prerequisite: state === 'enabled' ? 'ready' : state === 'requires-approval' ? 'approval-required' : 'service-unavailable',
+    observation: observation ? { state, outcome: action === 'check' ? 'observed' : action === 'request-registration' ? 'registration-requested' : 'settings-requested',
+      mutationEntered: mutation, mutationReturned: mutation, mutationUncertain: false, nativeSettled: true } : null };
+}
+
+test('source-independent setup keeps one-use system consent separate from check, approval, copy and pending invoke', async (t) => {
+  const h = harness(t, { initialService: serviceIdle() }); await h.ready;
+  assert.equal(h.state.toolSources.selections.length, 0); assert.equal(h.controller.serviceActionReason(), null);
+  await h.controller.requestAndroidToolServiceRegistration(); assert.equal(h.serviceCalls.length, 0);
+  const checking = h.controller.checkAndroidToolService(), check = h.serviceCalls[0];
+  assert.equal(check.kind, 'check'); assert.equal(check.input.consentVersion, undefined);
+  const pending = servicePending(check), done = serviceComplete(pending, { state: 'requires-approval' });
+  h.emitService(pending); h.emitService(done);
+  assert.equal(h.state.servicePending, 'check'); // Event completion does not settle this original invoke.
+  assert.ok(androidBuildOwnerReason(h.state)); assert.equal(h.state.serviceConsent, null);
+  h.replyService(check, done); await checking;
+  assert.equal(h.state.servicePending, null); assert.equal(h.state.registrationConsent, null);
+  h.controller.setServiceRegistrationAcknowledged(1, true); assert.ok(h.state.serviceConsent);
+  const requesting = h.controller.requestAndroidToolServiceRegistration(), request = h.serviceCalls[1];
+  assert.equal(request.input.consentVersion, ANDROID_TOOL_SERVICE_CONSENT);
+  assert.equal(request.input.registrationAcknowledged, true); assert.equal(request.input.licenseAcknowledged, undefined);
+  assert.equal(h.state.serviceConsent, null);
+  await h.controller.requestAndroidToolServiceRegistration(); await h.controller.chooseToolSource('jdk'); await h.controller.refreshCatalog();
+  assert.equal(h.serviceCalls.length, 2); assert.equal(h.catalogCalls.length, 0); assert.equal(h.calls.length, 0);
+  h.replyService(request, serviceComplete(servicePending(request))); await requesting;
+  assert.equal(h.state.serviceConsent, null); assert.equal(h.state.registrationConsent, null);
+  assert.ok(h.controller.serviceRegistrationReason()); // Completion did not renew either consent.
+});
+
+test('service setup accepts a partial picker census, but missing shipping identity remains a real prerequisite', async (t) => {
+  const partial = harness(t, { initialService: serviceIdle(), sourceSelections: [{ role: 'jdk', displayName: 'Example.jdk' }] });
+  await partial.ready;
+  assert.equal(partial.controller.serviceActionReason(), null);
+  const checking = partial.controller.checkAndroidToolService(), call = partial.serviceCalls[0];
+  partial.replyService(call, serviceComplete(servicePending(call, 1))); await checking;
+  assert.equal(partial.state.toolService.operation.sourceGeneration, 1);
+  const missing = harness(t, { initialService: serviceIdle({ prerequisite: 'signing-unavailable', reason: 'signing-unavailable' }) });
+  await missing.ready;
+  assert.match(missing.controller.serviceActionReason(), /publisher/);
+  missing.controller.setServiceRegistrationAcknowledged(0, true);
+  await missing.controller.checkAndroidToolService(); await missing.controller.requestAndroidToolServiceRegistration();
+  assert.equal(missing.serviceCalls.length, 0); assert.equal(missing.state.serviceConsent, null);
+});
+
+test('lost service reply never retries; later exact original observation supplies only bounded status/cancel', async (t) => {
+  const h = harness(t, { initialService: serviceIdle() }); await h.ready;
+  h.controller.setServiceRegistrationAcknowledged(0, true);
+  const requesting = h.controller.requestAndroidToolServiceRegistration(), call = h.serviceCalls[0];
+  call.reject({ message: '/private/framework/error-not-for-display' }); await requesting;
+  assert.equal(h.state.serviceUnconfirmed, true); assert.equal(h.state.serviceConsent, null);
+  await h.controller.checkToolServiceStatus(); await h.controller.requestAndroidToolServiceRegistration();
+  assert.equal(h.state.serviceUnconfirmed, true); assert.equal(h.serviceCalls.length, 1);
+  const pending = servicePending(call); h.emitService(pending); await flush();
+  const cancel = h.serviceCalls[1]; assert.equal(cancel.kind, 'cancel');
+  assert.deepEqual(cancel.input, { schemaVersion: 1, operationId: pending.operation.operationId, setupGeneration: 1 });
+  assert.equal(h.controller.cancelToolService(), false);
+  h.replyService(cancel, serviceComplete(pending, { state: 'unavailable', phase: 'cancelled', reason: 'cancelled', observation: false }));
+  await flush(); await h.controller.checkToolServiceStatus();
+  assert.equal(h.state.serviceError, null); assert.equal(h.state.toolService.phase, 'cancelled');
+  assert.equal(h.state.serviceConsent, null); assert.equal(h.serviceCalls.length, 2);
+});
+
+test('service original survives project/dispose changes until both exact invoke and cancellation settle', async (t) => {
+  const h = harness(t, { initialService: serviceIdle() }); await h.ready;
+  const checking = h.controller.checkAndroidToolService(), call = h.serviceCalls[0];
+  h.dispatch({ type: 'select', project: { id: 'p2', name: 'Other inert project', path: '/inert/other' } });
+  h.controller.dispose(); assert.equal(h.serviceSubscriptions[0].closed, false);
+  const pending = servicePending(call); h.emitService(pending); await flush();
+  const cancel = h.serviceCalls[1]; assert.equal(cancel.kind, 'cancel');
+  h.replyService(cancel, serviceComplete(pending, { state: 'unavailable', phase: 'refused', reason: 'context-changed', observation: false }));
+  await flush(); assert.equal(h.serviceSubscriptions[0].closed, false);
+  call.reject({ code: 'reply_lost' }); await checking; await flush();
+  assert.equal(h.serviceSubscriptions[0].closed, true); assert.equal(h.subscriptions[0].closed, true);
+});
+
+test('foreign service action and terminal regression cannot replace the retained original or target foreign Cancel', async (t) => {
+  const h = harness(t, { initialService: serviceIdle() }); await h.ready;
+  const checking = h.controller.checkAndroidToolService(), call = h.serviceCalls[0], pending = servicePending(call);
+  h.emitService(pending);
+  const foreign = clone(pending); foreign.statusRevision++; foreign.operation.operationId = 'f'.repeat(32);
+  h.emitService(foreign); await flush();
+  assert.equal(h.state.integrityFailed, true); assert.equal(h.state.toolService.operation.operationId, pending.operation.operationId);
+  assert.equal(h.serviceCalls[1].input.operationId, pending.operation.operationId);
+  h.replyService(call, serviceComplete(pending)); await checking;
+  h.replyService(h.serviceCalls[1], serviceComplete(pending, { state: 'unavailable', phase: 'cancelled', reason: 'cancelled', observation: false }));
+  await flush(); assert.equal(h.state.integrityFailed, true); assert.equal(h.state.serviceConsent, null);
+  assert.equal(h.serviceCalls.length, 2);
+  const g = harness(t, { initialService: serviceIdle() }); await g.ready;
+  const finishing = g.controller.checkAndroidToolService(), original = g.serviceCalls[0];
+  const active = servicePending(original), finished = serviceComplete(active);
+  g.replyService(original, finished); await finishing;
+  g.emitService({ ...active, statusRevision: finished.statusRevision + 1 });
+  assert.equal(g.state.integrityFailed, true); assert.equal(g.state.toolService.phase, 'complete');
+  assert.equal(g.serviceCalls.length, 1); // A regressed event cannot create a new Cancel target.
 });

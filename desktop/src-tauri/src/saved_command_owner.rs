@@ -34,6 +34,12 @@ pub(crate) type AndroidRegistrationFinalization = android_registration::Finaliza
 pub(crate) type AndroidRegistrationCancelPublisher = android_registration::CancelPublisher;
 pub(crate) use android_registration::{ControlSlot as AndroidRegistrationControl, Publisher as AndroidRegistrationPublisher, PublisherKind as AndroidRegistrationPublisherKind};
 pub(crate) use android_registration::WorkGate as AndroidRegistrationWorkGate;
+pub(crate) type AndroidServiceSnapshot = android_registration::service_setup::Snapshot;
+pub(crate) type AndroidServiceChecked = android_registration::service_setup::Checked;
+pub(crate) type AndroidServiceAdmitted = android_registration::service_setup::Admitted;
+pub(crate) type AndroidServiceFinalization = android_registration::service_setup::Finalization;
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(crate) use android_registration::service_setup::Dispatcher as AndroidServiceDispatcher;
 pub(crate) type AndroidCatalogAdmitted = android_catalog::Admitted;
 #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
 #[path = "saved_command_android_leased.rs"]
@@ -617,6 +623,8 @@ struct Inner {
     ios_observation_identity: Arc<()>,
     android_original_owner: bool, android_document: Mutex<Option<std::sync::Weak<()>>>,
     android_registration_control: Arc<android_registration::ControlSlot>,
+    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    android_service_dispatcher:std::sync::OnceLock<Arc<AndroidServiceDispatcher>>,
     domain: SavedCommandDomain, runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -1385,6 +1393,8 @@ impl SavedCommandOwner {
             ios_observation_identity: Arc::new(()),
             android_original_owner, android_document: Mutex::new(None),
             android_registration_control: Arc::new(android_registration::ControlSlot::default()),
+            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            android_service_dispatcher:std::sync::OnceLock::new(),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default(),

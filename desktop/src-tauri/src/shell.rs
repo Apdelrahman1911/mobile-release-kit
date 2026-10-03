@@ -367,6 +367,41 @@ async fn cancel_android_tool_registration(webview: Webview, request: tauri::ipc:
     state.document.cancel_android_tool_registration(input)
 }
 #[tauri::command]
+async fn android_tool_service_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_|crate::android_registration_app_protocol::service_invalid())?;
+    crate::android_registration_app_protocol::status_request(android_registration_request_body(request.body())?).map_err(|_|crate::android_registration_app_protocol::service_invalid())?;
+    state.document.android_tool_service_status()
+}
+#[tauri::command]
+async fn check_android_tool_service(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_|crate::android_registration_app_protocol::service_invalid())?;
+    let input=crate::android_registration_app_protocol::ServiceRequest::check(android_registration_request_body(request.body())?)?;
+    state.document.android_tool_service_action(input)
+}
+#[tauri::command]
+async fn request_android_tool_service_registration(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_|crate::android_registration_app_protocol::service_invalid())?;
+    let input=crate::android_registration_app_protocol::ServiceRequest::request_registration(android_registration_request_body(request.body())?)?;
+    state.document.android_tool_service_action(input)
+}
+#[tauri::command]
+async fn open_android_tool_service_approval_settings(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_|crate::android_registration_app_protocol::service_invalid())?;
+    let input=crate::android_registration_app_protocol::ServiceRequest::open_approval_settings(android_registration_request_body(request.body())?)?;
+    state.document.android_tool_service_action(input)
+}
+#[tauri::command]
+async fn cancel_android_tool_service(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_|crate::android_registration_app_protocol::service_invalid())?;
+    let input=crate::android_registration_app_protocol::ServiceCancel::parse(android_registration_request_body(request.body())?)?;
+    state.document.cancel_android_tool_service(input)
+}
+#[tauri::command]
 async fn android_toolchain_catalog_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
@@ -1565,6 +1600,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_catalog_revision = None;
         let mut android_sources_revision = None;
         let mut android_registration_revision = None;
+        let mut android_service_revision = None;
         let mut android_build_relay_failed = false;
         let mut ios_archive_revision = None;
         let mut ios_archive_relay_failed = false;
@@ -1696,6 +1732,17 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                         }
                     },
                     Err(_) => { android_build_relay_failed = true; document.android_build_relay_lost(); },
+                }
+            }
+            if !android_build_relay_failed {
+                match document.android_tool_service_status(){
+                    Ok(status)=>{if android_service_revision!=Some(status.status_revision){
+                        android_service_revision=Some(status.status_revision);
+                        if app.emit_to(MAIN_WINDOW,crate::android_registration_app_protocol::SERVICE_EVENT,&status).is_err(){
+                            android_build_relay_failed=true;document.android_build_relay_lost();
+                        }
+                    }},
+                    Err(_)=>{android_build_relay_failed=true;document.android_build_relay_lost();}
                 }
             }
             if !android_build_relay_failed {
@@ -3094,6 +3141,10 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             owned_windows::before_webview(&startup)?;
             let window = window.build()?;
+            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            if let Some(dispatcher)=crate::saved_command_owner::AndroidServiceDispatcher::original_main(window.clone()){
+                let _=document.bind_android_service_dispatcher(dispatcher);
+            }
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             owned_windows::install(&window, startup);
             #[cfg(target_os = "linux")]
@@ -3176,6 +3227,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             android_toolchain_catalog_status, refresh_android_toolchain_catalog, select_android_toolchain, cancel_android_toolchain_catalog,
             android_tool_sources_status, choose_android_tool_source, cancel_android_tool_source,
             android_tool_registration_status, inspect_android_tool_sources, register_android_tool_sources, cancel_android_tool_registration,
+            android_tool_service_status, check_android_tool_service, request_android_tool_service_registration, open_android_tool_service_approval_settings, cancel_android_tool_service,
             prepare_project_recovery, start_project_recovery, project_recovery_status, cancel_project_recovery,
             prepare_ios_archive, start_ios_archive, ios_archive_status, cancel_ios_archive,
             validate_config, suggest_config, preview_config,

@@ -97,6 +97,30 @@ impl AndroidBuildOwner {
         self.saved.cancel_android_tool_registration(input,publication,gate)
     }
 
+    pub(crate) fn service_status(&self,gate:Availability)->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{
+        self.saved.android_tool_service_status(gate)
+    }
+    pub(crate) fn service_snapshot(&self,document:&std::sync::Arc<()>,at:Instant,input:crate::android_registration_app_protocol::ServiceRequest,
+        registration:u32,project:RegisteredRoot,saved:crate::asset_session::ValidatedSavedInput,gate:Availability)
+        ->Result<crate::saved_command_owner::AndroidServiceSnapshot,BridgeError>{
+        self.saved.snapshot_android_tool_service(document,at,input,registration,project,saved,gate)
+    }
+    pub(crate) fn admit_service(&self,document:&std::sync::Arc<()>,checked:&crate::saved_command_owner::AndroidServiceChecked,
+        current:crate::asset_session::ValidatedSavedInput,registration:u32,project:&RegisteredRoot,
+        census:&crate::asset_session::AndroidServiceSetupCensus<'_>,gate:Availability)->Result<crate::saved_command_owner::AndroidServiceAdmitted,BridgeError>{
+        self.saved.admit_android_tool_service(document,checked,current,registration,project,census,gate)
+    }
+    pub(crate) fn service_finalization(&self)->Option<crate::saved_command_owner::AndroidServiceFinalization>{self.saved.android_service_finalization()}
+    pub(crate) fn finalize_service(&self,request:&crate::saved_command_owner::AndroidServiceFinalization,
+        current:Option<&crate::asset_session::ValidatedSavedInput>,gate:Availability){self.saved.finalize_android_service(request,current,gate);}
+    pub(crate) fn cancel_service(&self,input:&crate::android_registration_app_protocol::ServiceCancel,
+        publication:Option<&crate::saved_command_owner::AndroidRegistrationCancelPublisher>,gate:Availability)
+        ->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{self.saved.cancel_android_tool_service(input,publication,gate)}
+    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    pub(crate) fn bind_service_dispatcher(&self,document:&std::sync::Arc<()>,dispatcher:crate::saved_command_owner::AndroidServiceDispatcher)->bool{
+        self.saved.bind_android_service_dispatcher(document,dispatcher)
+    }
+
     pub(crate) fn catalog_status(&self,gate:Availability) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
         self.saved.android_catalog_status(gate)
     }

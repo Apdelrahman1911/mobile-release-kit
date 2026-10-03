@@ -15,6 +15,7 @@
     "allow-android-toolchain-catalog-status", "allow-refresh-android-toolchain-catalog", "allow-select-android-toolchain", "allow-cancel-android-toolchain-catalog",
     "allow-android-tool-sources-status", "allow-choose-android-tool-source", "allow-cancel-android-tool-source",
     "allow-android-tool-registration-status", "allow-inspect-android-tool-sources", "allow-register-android-tool-sources", "allow-cancel-android-tool-registration",
+    "allow-android-tool-service-status", "allow-check-android-tool-service", "allow-request-android-tool-service-registration", "allow-open-android-tool-service-approval-settings", "allow-cancel-android-tool-service",
     "allow-prepare-project-recovery", "allow-start-project-recovery", "allow-project-recovery-status", "allow-cancel-project-recovery",
     "allow-prepare-ios-archive", "allow-start-ios-archive", "allow-ios-archive-status", "allow-cancel-ios-archive",
     "allow-validate-config", "allow-suggest-config", "allow-preview-config", "allow-propose-github-setup",

@@ -1001,6 +1001,48 @@ def installation_record_fixture():
 
 @unittest.skipUnless(TOOL is not None, "POSIX inert DATA definitions only")
 class MacInstallationMetadataData(unittest.TestCase):
+    def test_optional_android_service_is_exact_nonexecutable_plist_and_bound_helper_pair(self):
+        _, _, _, helper = normal_cargo_fixture()
+        expected = TOOL.digest(helper)
+        plist = TOOL.plistlib.dumps({"Label": TOOL.ANDROID_SERVICE_LABEL, "BundleProgram": TOOL.ANDROID_HELPER,
+                                    "MachServices": {TOOL.ANDROID_SERVICE_LABEL: True}})
+        helper_path = Path("/inert/android-helper")
+        args = SimpleNamespace(android_helper=helper_path, expected_android_helper=expected)
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: helper if path == helper_path else plist):
+            files = TOOL.android_service_files(args)
+            self.assertEqual(files, {TOOL.ANDROID_HELPER: (helper, 0o555), TOOL.ANDROID_SERVICE_PLIST: (plist, 0o644)})
+            TOOL.android_service_input(files, expected)
+            self.assertEqual(TOOL.android_service_files(SimpleNamespace()), {})
+            TOOL.android_service_input({}, None)
+            for source, digest in [({TOOL.ANDROID_HELPER: (helper, 0o555)}, expected),
+                                   ({TOOL.ANDROID_SERVICE_PLIST: (plist, 0o644)}, expected),
+                                   (files, None), ({}, expected),
+                                   ({**files, TOOL.ANDROID_HELPER: (helper + b"changed", 0o555)}, expected),
+                                   ({**files, TOOL.ANDROID_SERVICE_PLIST: (plist, 0o755)}, expected),
+                                   ({**files, TOOL.ANDROID_SERVICE_PLIST: (plist + b"changed", 0o644)}, expected)]:
+                with self.subTest(source=sorted(source), expected=digest), self.assertRaises(TOOL.Refused):
+                    TOOL.android_service_input(source, digest)
+            for request in [SimpleNamespace(android_helper=helper_path), SimpleNamespace(expected_android_helper=expected),
+                            SimpleNamespace(android_helper=helper_path, expected_android_helper="f" * 64)]:
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.android_service_files(request)
+        # The installation inventory mirrors the same pair/mode boundary; it
+        # still describes DATA, not a signed/approved service or Ready receipt.
+        _, body, _, _ = installation_record_fixture()
+        for selected, accepted in [([], True), ([TOOL.ANDROID_HELPER], False),
+                                   ([TOOL.ANDROID_SERVICE_PLIST], False),
+                                   ([TOOL.ANDROID_HELPER, TOOL.ANDROID_SERVICE_PLIST], True)]:
+            value = TOOL.decode(body)
+            value["files"].extend({"path": "app/" + name, "size": 1, "sha256": "b" * 64,
+                                   "executable": name == TOOL.ANDROID_HELPER} for name in selected)
+            value["files"].sort(key=lambda row: row["path"])
+            changed = TOOL.canonical(value)
+            if accepted:
+                TOOL.observation_inventory_bytes(changed, TOOL.digest(changed), "c" * 64)
+            else:
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.observation_inventory_bytes(changed, TOOL.digest(changed), "c" * 64)
+
     def test_closed_record_matches_exact_inventory_tuple_and_full_integer_directory_identity(self):
         record, inventory, root, release = installation_record_fixture()
         def parse(body, payload=inventory):

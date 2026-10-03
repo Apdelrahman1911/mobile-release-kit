@@ -188,7 +188,15 @@ final class NormalAppUITests: XCTestCase {
         try require(app.windows.element(boundBy: 0).waitForExistence(timeout: 5), "ordinary app has no visible main window")
         let window = try unique(app.windows, "ordinary main window is ambiguous")
         try require(window.isHittable, "ordinary main window is not usable")
-        let renderer = try unique(window.webViews, "ordinary first-party renderer is missing or ambiguous")
+        // Fixed renderer singleton diagnostic; no additional query or wait.
+        let rendererQuery = window.webViews
+        let rendererCount = rendererQuery.count
+        if rendererCount != 1 {
+            print("MRK_MACOS_NORMAL_RENDERER_QUERY=observation=initial;matches=\(min(rendererCount, 5));exceedsFour=\(rendererCount > 4 ? 1 : 0);nonAtomic=1")
+        }
+        try require(rendererCount == 1, "ordinary first-party renderer is missing or ambiguous")
+        let renderer = rendererQuery.element(boundBy: 0)
+        // End fixed renderer singleton diagnostic.
         try dashboard(renderer)
 
         let first = try quitSheet(app, window)
@@ -1000,7 +1008,15 @@ final class NormalAppUITests: XCTestCase {
         try require(app.windows.element(boundBy: 0).waitForExistence(timeout: 5), "ordinary app has no visible main window")
         let window = try unique(app.windows, "ordinary main window is ambiguous")
         try require(window.isHittable, "ordinary main window is not usable")
-        let renderer = try unique(window.webViews, "ordinary first-party renderer is missing or ambiguous")
+        // Fixed renderer singleton diagnostic; no additional query or wait.
+        let rendererQuery = window.webViews
+        let rendererCount = rendererQuery.count
+        if rendererCount != 1 {
+            print("MRK_MACOS_NORMAL_RENDERER_QUERY=observation=initial;matches=\(min(rendererCount, 5));exceedsFour=\(rendererCount > 4 ? 1 : 0);nonAtomic=1")
+        }
+        try require(rendererCount == 1, "ordinary first-party renderer is missing or ambiguous")
+        let renderer = rendererQuery.element(boundBy: 0)
+        // End fixed renderer singleton diagnostic.
         try dashboard(renderer)
         return (app, window, renderer)
     }

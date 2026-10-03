@@ -38,6 +38,172 @@ mod android_registration_source;
 #[cfg(not(feature = "macos-android-registration-helper"))]
 pub(crate) use android_registration_source::{SourceSlots as AndroidRegistrationSourceSlots, SourceReview as AndroidRegistrationSourceReview, PayloadSink as AndroidRegistrationPayloadSink};
 
+/// The full installation inspector and this separately retained fixed identity
+/// book are subordinate to one original setup/Register worker and clock. The
+/// inspector's consumed result never stands in for these live CF/FD originals.
+#[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) struct AndroidServiceIdentitySlots {
+    installation: InstallationSlots, original: Book,
+    signing: native::android_service_management::IdentityBook,
+    gate: crate::saved_command_owner::AndroidRegistrationWorkGate,
+    entered: bool, checked: bool, closed: bool,
+}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl AndroidServiceIdentitySlots {
+    pub(crate) fn new(gate: crate::saved_command_owner::AndroidRegistrationWorkGate) -> Self {
+        let mut original=Book::new();original.registration_gate=Some(gate.clone());
+        Self { installation:InstallationSlots::new_registered(gate.clone()),original,
+            signing:native::android_service_management::IdentityBook::new(),gate,entered:false,checked:false,closed:false }
+    }
+    pub(crate) fn working_reservation_bytes()->Option<usize> {
+        // InstallationSlots' unchanged16MiB complete inspector bound is the
+        // larger phase. Its actual storage is consumed before the separate
+        // fixed identity book allocates its ledger/record parser. Charge the
+        // simultaneous inline/control/CF cells and bounded record DATA too.
+        installation_observation::CONTROL_RESERVE.checked_add(2*1024*1024)?
+            .checked_add(std::mem::size_of::<Self>())?
+            .checked_add(native::android_service_management::IdentityBook::project_owned_upper_bound()?)
+    }
+    fn attempt<T>(&mut self,call:impl FnOnce(&mut Book)->Result<T>)->Result<T> {
+        let result=call(&mut self.original);let at=Instant::now();
+        if let Some((failure,first))=self.original.first_failure(){Self::note_failure(&self.gate,failure,first);}
+        if let Err(failure)=&result{Self::note_failure(&self.gate,*failure,at);}
+        result
+    }
+    fn note_failure(gate:&crate::saved_command_owner::AndroidRegistrationWorkGate,failure:AdmissionFailure,at:Instant){
+        use crate::android_registration_app_protocol::Reason;
+        gate.note(match failure{AdmissionFailure::Stopped=>Reason::Cancelled,AdmissionFailure::Deadline=>Reason::TimedOut,
+            AdmissionFailure::Bounds=>Reason::InputLimit,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed=>Reason::CleanupUnknown,
+            _=>Reason::SigningUnavailable},at);
+    }
+    fn mode(book:&Book,index:usize,mode:u16,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        book.point(end,stop)?;
+        let identity=book.records.get(index).and_then(|record|record.identity).ok_or(AdmissionFailure::Identity)?;
+        if identity.uid!=0 || identity.gid!=0 || identity.flags!=0 || identity.mode&0o7777!=mode {
+            return Err(AdmissionFailure::Ownership);
+        }
+        native::no_xattrs(book.fd(index)?.as_fd()).map_err(native_error)?;
+        book.check_name(index,end,stop)
+    }
+    fn fixed_payload(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        use crate::macos_install_record as data;
+        self.attempt(|book|book.arm_acl_once(end,stop))?;
+        let contents=self.attempt(|book|book.protected_app_once(end,stop))?;
+        let app=self.original.records[contents].parent.ok_or(AdmissionFailure::Identity)?;
+        let install=self.original.records[app].parent.ok_or(AdmissionFailure::Identity)?;
+        self.attempt(|book|Self::mode(book,app,0o555,end,stop))?;
+        self.attempt(|book|Self::mode(book,contents,0o555,end,stop))?;
+        self.attempt(|book|Self::mode(book,install,0o755,end,stop))?;
+        let versions=self.attempt(|book|book.open(Some(install),"versions",true,end,stop))?;
+        self.attempt(|book|Self::mode(book,versions,0o755,end,stop))?;
+        let release=self.attempt(|book|book.open(Some(versions),crate::macos_install_paths::RELEASE,true,end,stop))?;
+        self.attempt(|book|Self::mode(book,release,0o755,end,stop))?;
+        let mut read_data=|name:&str,limit:usize|->Result<Vec<u8>> {
+            let index=self.attempt(|book|book.open(Some(release),name,false,end,stop))?;
+            self.attempt(|book|Self::mode(book,index,0o444,end,stop))?;
+            let size=self.original.records[index].identity.and_then(|id|u64::try_from(id.size).ok())
+                .filter(|size|*size>0 && *size<=limit as u64).ok_or(AdmissionFailure::Bounds)?;
+            self.attempt(|book|book.read(index,size,true,end,stop)).map(|(_,body)|body)
+        };
+        let descriptor=read_data(data::RECORD_NAME,data::RECORD_LIMIT)?;
+        let inventory_bytes=read_data(data::INVENTORY_NAME,data::INVENTORY_LIMIT)?;
+        let identity=|index:usize|->Result<data::DirectoryIdentity> {
+            let id=self.original.records[index].identity.ok_or(AdmissionFailure::Identity)?;
+            Ok(data::DirectoryIdentity {device:i64::from(id.dev),inode:id.ino,mode:u32::from(id.mode),uid:id.uid,gid:id.gid,flags:id.flags})
+        };
+        let manifest=option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").unwrap_or("");
+        let expected=data::Expected {kind:data::Kind::Ordinary,source_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").unwrap_or(""),
+            runtime_manifest:manifest,install_root:identity(install)?,release_directory:identity(release)?};
+        data::Record::parse_data(&descriptor,&inventory_bytes,&expected).map_err(|_|AdmissionFailure::Inventory)?;
+        let inventory=data::Inventory::parse(&inventory_bytes,manifest).map_err(|_|AdmissionFailure::Inventory)?;
+        // Full inventory/rosters were checked by the SAME original inspector.
+        // Rebind these exact three retained files to the same source-bound
+        // protected record before Security/framework service entry.
+        for (path,names,mode) in [
+            ("app/Contents/MacOS/mobile-release-kit-desktop",&["MacOS","mobile-release-kit-desktop"][..],0o555),
+            (data::ANDROID_HELPER,&["Helpers","mrk-android-register"][..],0o555),
+            (data::ANDROID_SERVICE_PLIST,&["Library","LaunchDaemons","dev.mobile-release-kit.desktop.android-register.plist"][..],0o444),
+        ] {
+            let row=inventory.files.iter().find(|row|row.path==path).ok_or(AdmissionFailure::Inventory)?;
+            let mut parent=contents;
+            for (position,name) in names.iter().enumerate() {
+                let directory=position+1<names.len();
+                parent=self.attempt(|book|book.open(Some(parent),name,directory,end,stop))?;
+                self.attempt(|book|Self::mode(book,parent,if directory{0o555}else{mode},end,stop))?;
+            }
+            let collect=path==data::ANDROID_SERVICE_PLIST;
+            let (hash,body)=self.attempt(|book|book.read(parent,row.size,collect,end,stop))?;
+            if hash!=row.sha256 || row.executable!=(mode==0o555)
+                || collect && body!=include_bytes!("../../macos-installed-inputs/dev.mobile-release-kit.desktop.android-register.plist") {
+                return Err(AdmissionFailure::Inventory);
+            }
+        }
+        self.recheck(end,stop)
+    }
+    pub(crate) fn check_once(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        use native::android_service_management as management;
+        if self.entered || self.closed{return Err(AdmissionFailure::AlreadyUsed);}
+        self.entered=true;
+        if !management::signing_profile_configured(){
+            self.gate.note(crate::android_registration_app_protocol::Reason::SigningUnavailable,Instant::now());
+            return Err(AdmissionFailure::Inventory);
+        }
+        let gate=self.gate.clone();
+        let result=self.installation.run(end,stop,&mut |why,at|{
+            use crate::installation::CheckReason as Problem;
+            let reason=match why {Problem::CleanupUnknown=>crate::android_registration_app_protocol::Reason::CleanupUnknown,
+                Problem::Deadline=>crate::android_registration_app_protocol::Reason::TimedOut,
+                Problem::Cancelled=>crate::android_registration_app_protocol::Reason::Cancelled,
+                _=>crate::android_registration_app_protocol::Reason::SigningUnavailable};
+            gate.note(reason,at);
+        },&mut |first|gate.source_cleanup_expired(first),&mut |_,_|{});
+        if result.is_err(){return Err(if self.installation.settled(){AdmissionFailure::Inventory}else{AdmissionFailure::Unknown});}
+        let result=self.fixed_payload(end,stop);let at=Instant::now();
+        if let Err(failure)=result{Self::note_failure(&self.gate,failure,at);return Err(failure);}
+        let result=self.signing.check_once(&mut |point|Self::signing_gate(&gate,point));
+        match result {
+            management::IdentityResult::Verified=>{self.recheck(end,stop)?;self.checked=true;Ok(())},
+            management::IdentityResult::Unknown=>{gate.source_note(AdmissionFailure::Unknown,Instant::now());Err(AdmissionFailure::Unknown)},
+            _=>{gate.note(crate::android_registration_app_protocol::Reason::SigningUnavailable,Instant::now());Err(AdmissionFailure::Inventory)},
+        }
+    }
+    fn signing_gate(gate:&crate::saved_command_owner::AndroidRegistrationWorkGate,
+        point:native::android_service_management::IdentityCheckpoint)->native::android_service_management::Decision {
+        use native::android_service_management::{IdentityCheckpoint as Point,Decision};
+        let (phase,custody,returned)=match point {Point::Before{phase,custody}=>(phase,custody,None),
+            Point::Returned{phase,at,custody}=>(phase,custody,Some(at))};
+        if let Some(at)=custody.first_failure{gate.note(crate::android_registration_app_protocol::Reason::SigningUnavailable,at);}
+        if custody.unknown{gate.note(crate::android_registration_app_protocol::Reason::CleanupUnknown,
+            custody.first_failure.or(returned).unwrap_or_else(Instant::now));}
+        if phase.is_cleanup(){if gate.source_cleanup_expired(None){Decision::Unknown}else{Decision::Proceed}}
+        else if gate.source_work().is_ok(){Decision::Proceed}else{Decision::Stop}
+    }
+    pub(crate) fn recheck(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        for index in 0..self.original.records.len() {
+            if self.original.records[index].state==State::Owned {
+                self.attempt(|book|book.check_name(index,end,stop))?;
+            }
+        }
+        self.gate.source_work()
+    }
+    pub(crate) fn settle(&mut self)->bool {
+        if self.closed{return self.settled();}
+        let gate=self.gate.clone();
+        let signing=self.signing.settle(&mut |point|Self::signing_gate(&gate,point));
+        // One signature failure never suppresses independently permitted FD/ACL
+        // settlement. Both are retained on the same original if either is unknown.
+        let files=self.original.settle(&mut |first|gate.source_cleanup_expired(first))==CloseOutcome::Settled;
+        self.closed=true;signing && files && self.settled()
+    }
+    pub(crate) fn settled(&self)->bool {self.closed && self.installation.settled() && self.original.settled() && self.signing.settled()}
+    pub(crate) fn checked(&self)->bool {self.checked && !self.closed}
+    pub(crate) fn retained_bytes(&self)->Option<usize>{
+        if !self.settled(){return None;}
+        std::mem::size_of::<Self>().checked_add(self.original.retained_heap_bytes()?)?
+            .checked_add(self.installation.control_bytes()?)
+    }
+}
+
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionFailure { Stopped, Deadline, Bounds, Native, Ownership, Inventory, Identity, AlreadyUsed, Unknown }

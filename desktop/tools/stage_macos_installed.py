@@ -40,6 +40,9 @@ INSTALL_ROOT = Path("/Library/Application Support/MobileReleaseKit")
 APP_NAME = "Mobile Release Kit.app"
 APP_BINARY = "Contents/MacOS/mobile-release-kit-desktop"
 VAULT_HELPER = "Contents/Helpers/mrk-vault-keychain"
+ANDROID_HELPER = "Contents/Helpers/mrk-android-register"
+ANDROID_SERVICE_PLIST = "Contents/Library/LaunchDaemons/dev.mobile-release-kit.desktop.android-register.plist"
+ANDROID_SERVICE_LABEL = "dev.mobile-release-kit.desktop.android-register"
 ANDROID_SUPPORT_PREFIX = "Contents/Resources/android-support/"
 ANDROID_SUPPORT_MANIFEST = DESKTOP / "macos-installed-inputs/android-support.json"
 ANDROID_SUPPORT_LAYOUT = (
@@ -126,6 +129,11 @@ PACKAGE_REFUSALS = {
     "android-support-notice": "MRK_MACOS_PACKAGE_REFUSED=android-support-notice",
     "android-support-roster": "MRK_MACOS_PACKAGE_REFUSED=android-support-roster",
     "android-support-resource": "MRK_MACOS_PACKAGE_REFUSED=android-support-resource",
+    "android-service-paired-inputs": "MRK_MACOS_PACKAGE_REFUSED=android-service-paired-inputs",
+    "android-service-plist": "MRK_MACOS_PACKAGE_REFUSED=android-service-plist",
+    "android-helper-final-signed-digest": "MRK_MACOS_PACKAGE_REFUSED=android-helper-final-signed-digest",
+    "android-service-input-pair": "MRK_MACOS_PACKAGE_REFUSED=android-service-input-pair",
+    "android-helper-signature-bytes-changed": "MRK_MACOS_PACKAGE_REFUSED=android-helper-signature-bytes-changed",
     "output-mode": "MRK_MACOS_PACKAGE_REFUSED=output-mode",
     "compressed-data-bound": "MRK_MACOS_PACKAGE_REFUSED=compressed-data-bound",
     "xar-header-bound": "MRK_MACOS_PACKAGE_REFUSED=xar-header-bound",
@@ -440,7 +448,7 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
             for path, (body, mode) in sorted(files.items()):
                 # The separately signed nested helper is copied unchanged and
                 # stays read-only. Only the containing app is signed afterward.
-                allowed_modes = ((0o555,) if path == VAULT_HELPER else (0o644, 0o755)) if app_signing else (0o444, 0o555)
+                allowed_modes = ((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER) else (0o644, 0o755)) if app_signing else (0o444, 0o555)
                 need(mode in allowed_modes, "output-mode")
                 with parent(Path(output) / path) as (fd, leaf):
                     opened = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=fd)
@@ -1012,6 +1020,45 @@ def source_app_info():
     return info
 
 
+def android_service_plist():
+    body = read(DESKTOP / "macos-installed-inputs" / Path(ANDROID_SERVICE_PLIST).name, 4096)
+    try:
+        value = plistlib.loads(body)
+    except Exception:
+        raise Refused("android-service-plist") from None
+    need(value == {"Label": ANDROID_SERVICE_LABEL, "BundleProgram": ANDROID_HELPER,
+                   "MachServices": {ANDROID_SERVICE_LABEL: True}}
+         and value["MachServices"][ANDROID_SERVICE_LABEL] is True, "android-service-plist")
+    return body
+
+
+def android_service_files(args):
+    helper = getattr(args, "android_helper", None)
+    expected = getattr(args, "expected_android_helper", None)
+    need((helper is None) == (expected is None), "android-service-paired-inputs")
+    if helper is None:
+        return {}
+    need(sha(expected), "android-helper-final-signed-digest")
+    body = read(helper, 32 * 1024 * 1024)
+    need(digest(body) == expected, "android-helper-final-signed-digest")
+    macho(body, system_only=True)
+    # This closed DATA pair merely stages the already supplied helper. No
+    # signing, registration, approval or service launch occurs in this tool.
+    return {ANDROID_HELPER: (body, 0o555), ANDROID_SERVICE_PLIST: (android_service_plist(), 0o644)}
+
+
+def android_service_input(app, expected):
+    helper = ANDROID_HELPER in app
+    need(helper == (ANDROID_SERVICE_PLIST in app) == (expected is not None), "android-service-input-pair")
+    if not helper:
+        return
+    body, mode = app[ANDROID_HELPER]
+    need(sha(expected) and digest(body) == expected, "android-helper-signature-bytes-changed")
+    macho(body, system_only=True)
+    need(mode == 0o555 and app[ANDROID_SERVICE_PLIST][0] == android_service_plist()
+         and app[ANDROID_SERVICE_PLIST][1] in (0o444, 0o644), "android-service-plist")
+
+
 def app_command(args):
     cargo_messages = getattr(args, "normal_cargo_messages", None)
     cargo_target = getattr(args, "normal_cargo_target_dir", None)
@@ -1030,6 +1077,8 @@ def app_command(args):
              "Contents/Resources/icon.png": (read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024), 0o644)}
     support_sha, support = android_support_files(args)
     files.update(support)
+    android_service = android_service_files(args)
+    files.update(android_service)
     # Native codesign is a SEPARATE fixed workflow command after this returned
     # copy. It may modify the app only; the runtime is not nested in the app.
     # Root/Contents must remain writable to that original codesign writer.
@@ -1038,6 +1087,9 @@ def app_command(args):
               "androidSupportManifestSha256": support_sha, "qualification": "app-copied-not-signed-or-launched"}
     if normal is not None:
         result["normalCargoArtifact"] = normal
+    if android_service:
+        result["androidHelperSha256"] = digest(android_service[ANDROID_HELPER][0])
+        result["androidServicePlistSha256"] = digest(android_service[ANDROID_SERVICE_PLIST][0])
     return result
 
 
@@ -1062,12 +1114,13 @@ def input_command(args):
     macho(app[VAULT_HELPER][0], system_only=True)
     need(sha(args.expected_vault_helper) and digest(app[VAULT_HELPER][0]) == args.expected_vault_helper,
          "nested-helper-signature-bytes-changed")
+    android_service_input(app, getattr(args, "expected_android_helper", None))
     support_sha = android_support_input(app)
     files = {}
     for prefix, source in (("runtime/", runtime), ("app/", app)):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
-            expected_mode = 0o555 if prefix + name in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "runtime/python/bin/python3") else 0o444
+            expected_mode = 0o555 if prefix + name in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3") else 0o444
             # codesign may have made its newly created CodeResources 0644. The
             # fresh input copy normalizes modes; it never edits that source.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
@@ -1287,8 +1340,9 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest):
              and safe_path(row["path"]) and row["path"].startswith(("app/Contents/", "runtime/")) and row["path"] not in rows
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
-             and row["executable"] == (row["path"] in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "runtime/python/bin/python3")), "observation-inventory-row")
+             and row["executable"] == (row["path"] in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3")), "observation-inventory-row")
         rows[row["path"]] = row
+    need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows), "android-service-input-pair")
     need(list(rows) == sorted(rows) and sum(row["size"] for row in rows.values()) <= MAX_BYTES
          and {"app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
          and rows["runtime/manifest.json"]["sha256"] == expected_manifest, "observation-inventory-required")
@@ -2007,6 +2061,9 @@ def main(argv=None):
     app.add_argument("--binary", required=True, type=Path)
     app.add_argument("--vault-helper", required=True, type=Path)
     app.add_argument("--expected-vault-helper", required=True)
+    app.add_argument("--android-helper", type=Path,
+                     help="Optional already-signed fixed Android helper; requires its exact digest")
+    app.add_argument("--expected-android-helper")
     app.add_argument("--output", required=True, type=Path)
     app.add_argument("--normal-cargo-messages", type=Path)
     app.add_argument("--normal-cargo-target-dir", type=Path)
@@ -2022,6 +2079,8 @@ def main(argv=None):
     inputs = commands.add_parser("input")
     inputs.add_argument("--app", required=True, type=Path)
     inputs.add_argument("--expected-vault-helper", required=True)
+    inputs.add_argument("--expected-android-helper",
+                        help="Required exactly when the signed app contains the Android helper/plist pair")
     inputs.add_argument("--runtime", required=True, type=Path)
     inputs.add_argument("--expected-manifest", required=True)
     inputs.add_argument("--current-runtime", action="store_true",
