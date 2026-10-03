@@ -21,6 +21,330 @@ import subprocess
 import sys
 from types import FunctionType, ModuleType
 
+# Fixed synthetic literals only. The producer below is byte-identical to the
+# reviewed core-failure fixture; the historical Linux runner is never imported.
+RECOVERY_CASE = "project-recovery-pending"
+RECOVERY_FILES = {"project/.gitignore": b".mobile-release/\n", "project/unrelated.txt": b"unrelated synthetic file; preserve\n",
+                  "project/google-services.json": b"synthetic original Android input\n",
+                  "project/GoogleService-Info.plist": b"synthetic original iOS input\n"}
+RECOVERY_FOREIGN = b"synthetic foreign iOS input; preserve\n"
+RECOVERY_LIMITATIONS = ["build-inputs-only-not-store-or-account-recovery", "recorded-quiescence-not-new-worker-proof",
+                       "foreign-changes-preserved", "cancellation-does-not-undo-completed-cleanup", "project-and-release-readiness-not-assessed"]
+RECOVERY_JOINS = tuple(("inspectionJoined acquisitionJoined attempted childWaitedSuccess stdinClosed stdoutEofClosed stderrEofClosed ioJoined "
+                       "coreLifetimeSettled runtimeLedgerSettled runtimeSettlementJoined driverJoined managerJoined observerJoined watchdogJoined retiredBeforeCutoff").split())
+
+
+def _expected_recovery_report():
+    """Inert comparison DATA only, never used to manufacture an observation."""
+    observation = {"status": "pending", "session": "e" * 32, "roles": ["android-services", "ios-services"], "quiescence": "original"}
+    originals, prepared = [], []
+    for i, action in enumerate(("inspect", "recover")):
+        operation, generation = ("a" if i == 0 else "c") * 32, ("b" if i == 0 else "d") * 32
+        context = {"projectId": "inert-recovery-parser", "draftRevision": 1, "baselineGeneration": 1,
+                   "action": action, "review": None if i == 0 else dict(observation)}
+        prep = {"operationId": operation, "ownerGeneration": generation, "context": context, "phase": "awaiting-consent",
+                "intentUsable": True, "outcome": None, "reason": "none", "result": None, "effect": None}
+        prepared.append(prep)
+        result = {"schemaVersion": 1, "scope": "project-build-inputs-only", "action": action,
+                  "observation": dict(observation) if i == 0 else None,
+                  "recoveredSession": None if i == 0 else observation["session"], "limitations": RECOVERY_LIMITATIONS}
+        facts = {key: True for key in RECOVERY_JOINS}
+        facts.update(domain="project-recovery", id=operation, generation=generation, noChild=False, activeRetained=False, resourceUnknown=False)
+        originals.append({"facts": facts, "projection": {**prep, "phase": "terminal", "intentUsable": False,
+            "outcome": "complete", "result": result, "effect": "inspection" if i == 0 else "recovery-attempted"},
+            "accepted": True, "coreTerminal": True, "coreFatal": False, "reviewMinted": i == 0})
+    return {"schemaVersion": 1, "scope": "project-build-input-recovery-native-observation-v1", "case": RECOVERY_CASE,
+            "ordinaryProfileAvailableBeforeAdmission": True, "originals": originals, "prepared": prepared,
+            "requests": [1] * 4, "replies": [1] * 4, "statusCallsReturned": 0,
+            "freshUncheckedReview": True, "explicitAcknowledgement": True, "exactSessionReviewed": True, "finalVisible": True,
+            "workMs": 120000, "hardMs": 130000, "observationMs": 315000, "outerInvocationMs": 325000,
+            "commandDispatches": 0, "profileCalls": 0, "signedModesActivated": False, "shippingBinaryQualified": False}
+
+
+def _recovery_report(value):
+    expected = _expected_recovery_report()
+    try:
+        need(type(value) is dict and type(value["originals"]) is list and len(value["originals"]) == 2
+             and type(value["prepared"]) is list and len(value["prepared"]) == 2, "recovery-original-pair")
+        ids, generations = [], []
+        context = value["prepared"][0]["context"]
+        need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", context["projectId"])
+             and all(type(context[key]) is int and 0 <= context[key] < 2**32-1 for key in ("draftRevision", "baselineGeneration")), "recovery-context")
+        session = value["originals"][0]["projection"]["result"]["observation"]["session"]
+        need(type(session) is str and re.fullmatch(r"[0-9a-f]{32}", session), "recovery-session")
+        for i in range(2):
+            original, prep = expected["originals"][i], expected["prepared"][i]
+            operation, generation = value["prepared"][i]["operationId"], value["prepared"][i]["ownerGeneration"]
+            need(all(type(token) is str and re.fullmatch(r"[0-9a-f]{32}", token) for token in (operation, generation)), "recovery-original-identity")
+            ids.append(operation); generations.append(generation)
+            prep.update(operationId=operation, ownerGeneration=generation)
+            for key in ("projectId", "draftRevision", "baselineGeneration"):
+                prep["context"][key] = context[key]
+            original["facts"].update(id=operation, generation=generation)
+            original["projection"].update(operationId=operation, ownerGeneration=generation)
+            if i == 0:
+                original["projection"]["result"]["observation"]["session"] = session
+            else:
+                prep["context"]["review"]["session"] = session
+                original["projection"]["result"]["recoveredSession"] = session
+        need(ids[0] != ids[1] and generations[0] != generations[1], "recovery-original-reused")
+        calls = value["statusCallsReturned"]
+        need(type(calls) is int and 0 <= calls <= 96, "recovery-status-calls")
+        expected["statusCallsReturned"] = calls
+    except (KeyError, TypeError, IndexError) as error:
+        raise Refused("recovery-report-shape") from error
+    _exact(value, expected, ("projectRecovery",))
+    return value
+
+
+def recovery_producer_result(result):
+    need(result.returncode == 0 and result.stderr == b"" and result.stdout.endswith(b"\n")
+         and b"\n" not in result.stdout[:-1] and 0 < len(result.stdout) <= 2048, "recovery-producer-failed")
+    value = json.loads(result.stdout, object_pairs_hook=_pairs, parse_constant=lambda _: (_ for _ in ()).throw(Refused("recovery-producer-json")))
+    expected = {"schemaVersion": 1, "scope": "real-core-project-recovery-fixture-v1", "case": RECOVERY_CASE,
+                "materializationOutcome": "expected-cleanup-failure", "coreFatal": True, "commands": 0, "profileCalls": 0,
+                "attemptedDescriptors": None, "neverOpenedDescriptors": None, "attemptedDescriptorsClosed": True,
+                "handlersRestored": True, "invocationReleased": True, "originalQuiescenceRecorded": True,
+                "retirementInterceptions": 0, "observersRestored": True,
+                "restored": {"android-services": True, "ios-services": False}, "followupCoreOrFilesystemOperation": False}
+    need(type(value) is dict and value.keys() == expected.keys(), "recovery-producer-shape")
+    counts = [value[key] for key in ("attemptedDescriptors", "neverOpenedDescriptors")]
+    need(all(type(n) is int and 0 <= n <= 2048 for n in counts) and 0 < counts[0] <= sum(counts) <= 2048, "recovery-producer-descriptors")
+    expected.update(attemptedDescriptors=counts[0], neverOpenedDescriptors=counts[1])
+    _exact(value, expected)
+    return value
+
+
+def produce_pending_recovery(fixtures, run_owned, uid, username):
+    """Exactly one already-admitted installed interpreter call, then DATA.
+
+    Unknown/foreign return retains the original custody and forbids scans,
+    moves, closing fixtures, app entry and another call. Semantic refusal with
+    a genuine returned command permits closing, never a recovery dispatch.
+    """
+    need(fixtures.cases == (RECOVERY_CASE,) and not fixtures.inflight and not fixtures.recovery_produced, "recovery-producer-reused")
+    executable, core = fixtures.recovery_runtime_paths()
+    state = fixtures.path / "state" / RECOVERY_CASE
+    argv = [executable, "-I", "-S", "-B", "-c", SHELL_RECOVERY_PRODUCER, core, str(fixtures.path / RECOVERY_CASE / "project"), RECOVERY_CASE]
+    fixtures.case, fixtures.stage, fixtures.inflight, fixtures.last_returned = RECOVERY_CASE, "recovery-producer", True, False
+    # The original callable's actual CompletedProcess is the only return edge.
+    result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
+                       timeout=30, capture=True, text=False, output_limit=2048)
+    need(type(result) is subprocess.CompletedProcess and type(result.args) is list and len(result.args) == len(argv)
+         and all(type(arg) is str for arg in result.args) and result.args == argv and type(result.returncode) is int
+         and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= 2048,
+         "recovery-producer-return-contract")
+    fixtures.inflight, fixtures.last_returned, fixtures.stage = False, True, "recovery-generated"
+    attestation = recovery_producer_result(result)
+    fixtures.accept_recovery_producer(attestation)
+
+
+def _preserve_recovery_conflict_exclusive(project):
+    """One fixed Darwin renameatx_np(RENAME_EXCL), never replace or retry.
+
+    Caller holds the original private project descriptor and has validated the
+    known-return producer inventory. A destination collision remains untouched.
+    """
+    need(sys.platform == "darwin" and type(project) is int and project >= 0, "recovery-rename-platform")
+    import ctypes  # Native-only; importing this DATA module does not load it.
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    rename = library.renameatx_np
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(project, b"GoogleService-Info.plist", project, b"saved-foreign-ios", 0x4) != 0:
+        raise OSError(ctypes.get_errno(), "recovery exclusive preservation refused")
+
+
+def _recovery_kind(path):
+    if path in (".", "project", "project/.mobile-release", "project/.mobile-release/build-inputs", "project/.mobile-release/build-inputs/scratch"):
+        return "directory"
+    if path in RECOVERY_FILES or path in ("project/saved-foreign-ios", "project/.mobile-release/build-inputs-complete.json"):
+        return "file"
+    if re.fullmatch(r"project/\.mobile-release/build-inputs/(?:header\.json|intent\.json|checkpoint-(?:0[0-9]{2}|1[01][0-9]|12[0-7])\.json|(?:backup|stage|retired)-[01])", path):
+        return "file"
+    raise Refused("recovery-fixture-member")
+
+
+def _recovery_inventory_data(rows, uid, gid):
+    need(type(rows) is dict and 6 <= len(rows) <= 160, "recovery-inventory-count")
+    seen, total = set(), 0
+    device = rows["."].identity[0]
+    for name, row in rows.items():
+        need(type(name) is str and type(row) is Node, "recovery-inventory-shape")
+        kind = _recovery_kind(name)
+        identity = row.identity
+        need(type(identity) is tuple and len(identity) == 9 and all(type(n) is int and 0 <= n < 2**64 for n in identity)
+             and identity[0] == device and identity[1] > 0 and identity[:2] not in seen and identity[3:5] == (uid, gid)
+             and identity[2] == (stat.S_IFDIR | 0o700 if kind == "directory" else stat.S_IFREG | 0o600), "recovery-inventory-identity")
+        seen.add(identity[:2])
+        if kind == "directory":
+            need(row.sha256 is None and type(row.entries) is tuple and len(row.entries) <= 136 and identity[5] >= 1
+                 and identity[6] <= 1024*1024, "recovery-inventory-directory")
+            expected = tuple(sorted(p.rsplit("/", 1)[-1] for p in rows if p != "." and str(Path(p).parent) == name))
+            need(row.entries == expected, "recovery-inventory-roster")
+        else:
+            need(identity[5] == 1 and 0 < identity[6] <= 256*1024 and row.entries is None
+                 and type(row.sha256) is str and re.fullmatch(r"[0-9a-f]{64}", row.sha256), "recovery-inventory-file")
+            total += identity[6]
+        if name != ".":
+            parent = str(Path(name).parent)
+            need(parent in rows and rows[parent].sha256 is None, "recovery-inventory-parent")
+    need(total <= 136*256*1024, "recovery-inventory-bytes")
+    checkpoints = sorted(name for name in rows if "/checkpoint-" in name)
+    need(checkpoints == [f"project/.mobile-release/build-inputs/checkpoint-{i:03}.json" for i in range(len(checkpoints))], "recovery-checkpoint-sequence")
+    return rows
+
+
+def _recovery_bytes(row, body):
+    need(row.identity[6] == len(body) and row.sha256 == digest(body), "recovery-fixture-content")
+
+
+def _recovery_moved(original, current):
+    need(original.identity[:8] == current.identity[:8] and original.sha256 == current.sha256, "recovery-original-move")
+
+
+def _recovery_generated(initial, generated, uid, gid):
+    _recovery_inventory_data(initial, uid, gid); _recovery_inventory_data(generated, uid, gid)
+    static = {".", "project", *RECOVERY_FILES}
+    pending = "project/.mobile-release/build-inputs"
+    controls = {name for name in generated if "/checkpoint-" in name}
+    need(set(initial) == static and controls and set(generated) == static | {"project/.mobile-release", pending,
+         pending+"/header.json", pending+"/intent.json", pending+"/backup-1"} | controls, "recovery-generated-roster")
+    for path, body in RECOVERY_FILES.items():
+        _recovery_bytes(initial[path], body)
+    for name in ("project/.gitignore", "project/unrelated.txt"):
+        need(generated[name] == initial[name], "recovery-generated-unrelated")
+    for name in (".", "project"):
+        need(generated[name].identity[:5] == initial[name].identity[:5], "recovery-generated-ancestry")
+    _recovery_moved(initial["project/google-services.json"], generated["project/google-services.json"])
+    _recovery_moved(initial["project/GoogleService-Info.plist"], generated[pending+"/backup-1"])
+    _recovery_bytes(generated["project/GoogleService-Info.plist"], RECOVERY_FOREIGN)
+
+
+def _recovery_before(generated, before, uid, gid):
+    _recovery_inventory_data(before, uid, gid)
+    moved, saved = "project/GoogleService-Info.plist", "project/saved-foreign-ios"
+    need(set(before) == set(generated) - {moved} | {saved}, "recovery-preservation-roster")
+    _recovery_moved(generated[moved], before[saved])
+    need(all(before[name] == row for name, row in generated.items() if name not in (moved, "project"))
+         and before["project"].identity[:5] == generated["project"].identity[:5], "recovery-preservation-unrelated")
+
+
+def _recovery_final(initial, generated, before, after, uid, gid):
+    _recovery_generated(initial, generated, uid, gid); _recovery_before(generated, before, uid, gid)
+    _recovery_inventory_data(after, uid, gid)
+    need(set(after) == {".", "project", *RECOVERY_FILES, "project/.mobile-release", "project/saved-foreign-ios"}, "recovery-final-roster")
+    for name in ("project/.gitignore", "project/unrelated.txt", "project/google-services.json", "project/saved-foreign-ios"):
+        need(after[name] == before[name], "recovery-final-preservation")
+    for name in (".", "project", "project/.mobile-release"):
+        need(after[name].identity[:5] == before[name].identity[:5], "recovery-final-ancestry")
+    _recovery_moved(initial["project/GoogleService-Info.plist"], after["project/GoogleService-Info.plist"])
+    return {"fixture": "real-core-project-recovery-v1", "case": RECOVERY_CASE, "realCoreGenerated": True,
+            "originalTargetsRestored": True, "metadataRetired": True, "foreignPreserved": True, "privateContentsExported": False,
+            "inventories": [{"stage": stage, "nodes": len(rows), "sha256": digest(_recovery_inventory_bytes(rows))}
+                            for stage, rows in zip(("initial", "generated", "before", "after"), (initial, generated, before, after))]}
+
+
+def _recovery_inventory_bytes(rows):
+    raw = json.dumps({name: {"identity": row.identity, "sha256": row.sha256, "entries": row.entries} for name, row in sorted(rows.items())},
+                     sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+    need(len(raw) <= 128*1024, "recovery-inventory-data-limit")
+    return raw
+
+SHELL_RECOVERY_PRODUCER = r'''import errno, json, os, sys, threading
+from pathlib import Path, PurePosixPath
+def need(ok):
+    if not ok: raise RuntimeError("fixed recovery fixture refused")
+need(len(sys.argv)==4 and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode)
+core, raw_root, case=sys.argv[1:]
+need(case in ("project-recovery-pending","project-recovery-cancel","project-recovery-cleanup-only","project-recovery-partial"))
+root=Path(raw_root)
+need(root.is_absolute() and root.name=="project" and root.parent.name==case and Path(core).is_absolute())
+need(threading.current_thread() is threading.main_thread() and threading.active_count()==1)
+sys.path.insert(0, core)
+from mobile_release import build_inputs as inputs
+from mobile_release.owned_process import ProcessCleanupError
+need(inputs.__file__.startswith(core+"/") and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+original_init=inputs._FD.__init__
+original_retire=inputs._retire_terminal
+slots=[]
+retirement_calls=[]
+def observed_init(self, guard):
+    original_init(self, guard)
+    need(len(slots)<2048)
+    slots.append(self)
+def retirement_stop(project, terminal, binding):
+    need(case=="project-recovery-cleanup-only" and not retirement_calls)
+    need(project is invocation._original_project and terminal["quiescence"]=="original")
+    retirement_calls.append(True)
+    raise OSError(errno.EIO,"fixed synthetic metadata retirement interruption")
+def foreign(original, name, content):
+    slot=inputs._FD(original.cancellation)
+    with inputs._fd_cleanup(slot):
+        fd=slot.open(root/name, os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+        need(os.write(fd,content)==len(content))
+        os.fsync(fd)
+invocation=original=None
+caught=None
+inputs._FD.__init__=observed_init
+if case=="project-recovery-cleanup-only": inputs._retire_terminal=retirement_stop
+try:
+    try:
+        with inputs.invocation_custody(root,mode="build") as invocation:
+            with invocation.project(signing_lease=None):
+                with invocation.materialization(signing_lease=None) as original:
+                    original.replace_all((
+                        inputs.TargetReplacement("android-services",PurePosixPath("google-services.json"),b"synthetic temporary Android input\n"),
+                        inputs.TargetReplacement("ios-services",PurePosixPath("GoogleService-Info.plist"),b"synthetic temporary iOS input\n"),
+                    ))
+                    if case=="project-recovery-partial":
+                        foreign(original,"google-services.json",b"synthetic foreign Android input; preserve\n")
+                    if case!="project-recovery-cleanup-only":
+                        foreign(original,"GoogleService-Info.plist",b"synthetic foreign iOS input; preserve\n")
+    except BaseException as error:
+        caught=error
+finally:
+    inputs._FD.__init__=original_init
+    inputs._retire_terminal=original_retire
+# NO core operation or filesystem access below: inspect the original retained
+# objects and emit bounded closed DATA to the original stdout only.
+need(type(caught) is ProcessCleanupError and invocation is not None and original is not None)
+guard=invocation.cancellation
+ledger=guard._ledger
+project=invocation._original_project
+attempted=[slot for slot in slots if slot.open_state!="NEW"]
+never_opened=[slot for slot in slots if slot.open_state=="NEW"]
+need(0<len(attempted)<=2048 and len(attempted)+len(never_opened)==len(slots))
+need(all(slot.guard is guard and slot.open_state in ("OPEN","NO_EFFECT") and slot.close_state=="CLOSED" and slot.number is None for slot in attempted))
+need(all(slot.guard is guard and slot.number is None and slot.close_state in ("NOT_ATTEMPTED","CLOSED") for slot in never_opened))
+need(guard._restoration=="RESTORED" and ledger._fatal and ledger._command is None and ledger._profile is None
+     and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False)
+need(invocation.claimed and not invocation.active and not invocation.reserved and not invocation.frames
+     and invocation.child is None and invocation.project_owner is None and invocation.store_namespace is None
+     and invocation.reservation_state=="RELEASED" and invocation.lock_result is None and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+need(project is not None and project.claimed and original.claimed and original.quiescence=="original" and not original.failed)
+need(inputs._FD.__init__ is original_init and inputs._retire_terminal is original_retire)
+need(len(retirement_calls)==int(case=="project-recovery-cleanup-only"))
+primary=ledger._primary
+if case=="project-recovery-cleanup-only":
+    need(type(primary) is OSError and primary.errno==errno.EIO and primary.args==(errno.EIO,"fixed synthetic metadata retirement interruption"))
+else:
+    need(type(primary) is inputs.BuildInputError and primary.args==("build inputs: intervening target must be preserved",))
+restored={row["role"]:row["restored"] for row in original.records}
+expected={"android-services":case!="project-recovery-partial","ios-services":case=="project-recovery-cleanup-only"}
+need(restored==expected and all(type(x) is bool for x in restored.values()))
+report={"schemaVersion":1,"scope":"real-core-project-recovery-fixture-v1","case":case,
+    "materializationOutcome":"expected-cleanup-failure","coreFatal":True,"commands":0,"profileCalls":0,
+    "attemptedDescriptors":len(attempted),"neverOpenedDescriptors":len(never_opened),
+    "attemptedDescriptorsClosed":True,"handlersRestored":True,"invocationReleased":True,
+    "originalQuiescenceRecorded":True,"retirementInterceptions":len(retirement_calls),"observersRestored":True,
+    "restored":restored,"followupCoreOrFilesystemOperation":False}
+raw=json.dumps(report,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")+b"\n"
+need(len(raw)<=2048)
+sys.stdout.buffer.write(raw)
+sys.stdout.buffer.flush()
+'''
+
 CASES = ("first-save", "noop-stale", "picker-loss", "save-loss")
 IOS_CASES = ("ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality")
 IOS_SIGNED_CASES = ("ios-signed-refusal", "ios-signed-cancel")
@@ -52,7 +376,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE,)
+ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE,)
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -92,6 +416,7 @@ FAILURE_STEPS |= frozenset(f"Vault({name})" for name in (
 FAILURE_STEPS |= frozenset(f"Installation({name})" for name in (
     "StartCancelled WaitFirstRead Cancel WaitCancelled StartMatching WaitMatching"
 ).split())
+FAILURE_STEPS |= frozenset(f"Recovery({name})" for name in ("Navigate Ready Inspect WaitInspect ReadInspect Review ReadReview Acknowledge ReadChecked Start WaitRecover ReadFinal").split())
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
@@ -126,6 +451,7 @@ FAILURE_REASONS = frozenset((
     "native-completion-custody native-completion-data native-completion-unknown native-completion-selection "
     "ios-original-witness ios-request-contract ios-status-contract ios-version-contract "
     "ios-finality-contract ios-fixture-contract ios-dom-contract "
+    "recovery-original-contract recovery-request-contract recovery-result-contract recovery-dom-contract recovery-fixture-contract "
     "session-request-contract session-result-contract session-original-contract session-dom-contract "
     "project-fields-request-contract project-fields-result-contract project-fields-original-contract "
     "project-fields-fixture-contract project-fields-dom-contract "
@@ -605,12 +931,12 @@ class Binding:
         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
         return self
 
-    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False):
+    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False, recovery=False):
         self.checked()
-        flags = (project_fields, vault_helper, installation_inspection)
+        flags = (project_fields, vault_helper, installation_inspection, recovery)
         need(all(type(flag) is bool for flag in flags) and sum(flags) <= 1, "scope-not-supported")
         suffix = ("-project-fields" if project_fields else "-vault-helper" if vault_helper
-                  else "-installation-inspection" if installation_inspection else "")
+                  else "-installation-inspection" if installation_inspection else "-project-recovery" if recovery else "")
         return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}{suffix}"
 
     def public(self):
@@ -641,10 +967,10 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE), "scope-not-supported")
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE), "scope-not-supported")
     if scope == VAULT_HELPER_SCOPE:
         return VAULT_HELPER_CASES
-    if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, INSTALLATION_INSPECTION_CASE):
+    if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE):
         return (scope,)
     if scope == "ios-current-synthetic":
         return IOS_CURRENT_CASES
@@ -658,13 +984,14 @@ def argument_scope(argv):
                                or argv == ["--scope", PROJECT_FIELDS_CASE]
                                or argv == ["--scope", ANDROID_INPUT_CASE]
                                or argv == ["--scope", VAULT_HELPER_SCOPE]
-                               or argv == ["--scope", INSTALLATION_INSPECTION_CASE]), "arguments-not-supported")
+                               or argv == ["--scope", INSTALLATION_INSPECTION_CASE]
+                               or argv == ["--scope", RECOVERY_CASE]), "arguments-not-supported")
     return argv[1] if argv else None
 
 
 def case_timeout(case):
     need(type(case) is str and case in ALL_CASES, "case-binding")
-    return 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES else 135 if case in VAULT_HELPER_CASES else 60
+    return 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
 
 
 def ios_config(case):
@@ -1198,13 +1525,15 @@ def expected_result(binding, case):
         value["native"]["panelAttachments"] = [False, True, False, False]
         value["reload"] = dict.fromkeys(value["reload"], False)
         return value
-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) or case in VAULT_HELPER_CASES:
+    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE) or case in VAULT_HELPER_CASES:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
         if case in IOS_OPERATION_CASES:
             value["iosArchive"] = _expected_ios_report(case)
         if case in SESSION_CASES:
             value["signingInputs"] = _expected_signing_inputs(case)
+        if case == RECOVERY_CASE:
+            value["projectRecovery"] = _expected_recovery_report()
         if case == PROJECT_FIELDS_CASE:
             value["projectFields"] = _expected_project_fields()
         if case in VAULT_HELPER_CASES:
@@ -1376,6 +1705,8 @@ RESULT_LOCATION_KEYS |= frozenset((
 ).split())
 
 
+RESULT_LOCATION_KEYS |= frozenset(("projectRecovery ordinaryProfileAvailableBeforeAdmission prepared projection noChild runtimeSettlementJoined coreTerminal coreFatal reviewMinted intentUsable action review observation recoveredSession roles quiescence requests replies freshUncheckedReview explicitAcknowledgement exactSessionReviewed commandDispatches signedModesActivated").split())
+
 def _result_location(parts):
     if type(parts) is not tuple or not 1 <= len(parts) <= 12 or type(parts[0]) is not str:
         return None
@@ -1430,6 +1761,9 @@ def parse_result(stdout, stderr, binding, case):
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
+    if case == RECOVERY_CASE:
+        need(type(value) is dict and "projectRecovery" in value, "recovery-report")
+        expected["projectRecovery"] = _recovery_report(value["projectRecovery"])
     if case == INSTALLATION_INSPECTION_CASE:
         need(type(value) is dict and "installationInspection" in value, "installation-inspection-report")
         expected["installationInspection"] = _installation_report(value["installationInspection"])
@@ -2768,6 +3102,14 @@ def signature(info):
 
 def fixture_data(case, final, *, ios_output_created=None):
     need(case in ALL_CASES and type(final) is bool, "fixture-case")
+    if case == RECOVERY_CASE:
+        files = {name.removeprefix("project/"): body for name, body in RECOVERY_FILES.items()}
+        directories = {".": (0o700, tuple(sorted(files)))}
+        if final:
+            files["saved-foreign-ios"] = RECOVERY_FOREIGN
+            directories["."] = (0o700, tuple(sorted((*files, ".mobile-release"))))
+            directories[".mobile-release"] = (0o700, ())
+        return files, directories
     if case in IOS_CURRENT_CASES:
         return ios_fixture_data(case, final, output_created=ios_output_created)
     need(ios_output_created is None, "fixture-output-kind")
@@ -2915,7 +3257,7 @@ class Fixtures:
         self.binding, self.uid, self.gid = binding, uid, gid
         self.cases = selected_cases(scope)
         self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
-                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE))
+                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE))
         self.fds = set()
         self.close_errors = 0
         self.first_close_error = None
@@ -2929,6 +3271,10 @@ class Fixtures:
         self.vault_ancestors, self.vault_parents = [], {}
         self.vault_namespace = self.vault_support = None
         self.vault_paths, self.vault_completed = {}, set()
+        self.recovery_case = None
+        self.recovery_produced = False
+        self.recovery_attestation = self.recovery_session = self.recovery_runtime = None
+        self.recovery_runtime_originals, self.recovery_inventories = [], {}
 
     def _open(self, name, parent=None, *, directory=False, create=False):
         flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -3019,6 +3365,9 @@ class Fixtures:
         self.state = self._mkdir(self.root, "state")
         for case in self.cases:
             project = self._mkdir(self.root, case)
+            if case == RECOVERY_CASE:
+                self.recovery_case = project
+                project = self._mkdir(project, "project")
             self.projects[case] = project
             files, directories = fixture_data(case, False)
             with ExitStack() as children:
@@ -3050,7 +3399,10 @@ class Fixtures:
                 with self._temporary(self._mkdir(state, "outside")) as outside:
                     self._write(outside, "VERSION", VERSION)
                 self.field_outside_originals[case] = self._capture_field_outside(case)
-            self.originals[case] = self._capture(case, False)
+            if case == RECOVERY_CASE:
+                self._retain_recovery_inventory("initial", self._capture_recovery())
+            else:
+                self.originals[case] = self._capture(case, False)
         self._namespace()
         if self.cases == VAULT_HELPER_CASES:
             self._prepare_vault_parents()
@@ -3062,7 +3414,12 @@ class Fixtures:
         self._roster(self.root, (*self.cases, "state"), "fixture-namespace-roster")
         self._roster(self.state, self.cases, "fixture-state-roster")
         for case in self.cases:
-            self._named(self.root, case, self.projects[case], 0o700)
+            if case == RECOVERY_CASE:
+                self._named(self.root, case, self.recovery_case, 0o700)
+                self._named(self.recovery_case, "project", self.projects[case], 0o700)
+                self._roster(self.recovery_case, ("project",), "recovery-case-roster")
+            else:
+                self._named(self.root, case, self.projects[case], 0o700)
             self._named(self.state, case, self.states[case], 0o700)
 
     def _roster(self, fd, expected, label):
@@ -3187,10 +3544,16 @@ class Fixtures:
     def before_call(self, case):
         self.case, self.stage = case, "before-invocation"
         self._namespace()
-        validate_snapshot(self.originals[case], self._capture(case, False), case, False, self.uid, self.gid)
+        if case == RECOVERY_CASE:
+            need(not self.inflight and self.last_returned and self.recovery_produced, "recovery-app-before-producer")
+            need(self._capture_recovery() == self.recovery_inventories["before"], "recovery-before-app-changed")
+        else:
+            validate_snapshot(self.originals[case], self._capture(case, False), case, False, self.uid, self.gid)
         state = self.states[case]
         self._roster(state, ("home", "tmp", "inputs") if case in SESSION_CASES
-                     else ("home", "tmp", "outside") if case == PROJECT_FIELDS_CASE else ("home", "tmp"), "fresh-state-roster")
+                     else ("home", "tmp", "outside") if case == PROJECT_FIELDS_CASE
+                     else ("home", "tmp", "recovery-initial.json", "recovery-generated.json", "recovery-before.json") if case == RECOVERY_CASE
+                     else ("home", "tmp"), "fresh-state-roster")
         self._inputs_unchanged(case)
         if case in VAULT_HELPER_CASES:
             self._vault_namespace_current()
@@ -3208,6 +3571,214 @@ class Fixtures:
         self._inputs_unchanged(case)
         return validate_snapshot(self.originals[case], self._capture(case, True, ios_output_created=ios_output_created),
                                  case, True, self.uid, self.gid, ios_output_created=ios_output_created)
+
+    def _capture_recovery(self):
+        need(not self.inflight, "recovery-readback-before-return")
+        rows, seen, total = {}, set(), 0
+        device = signature(os.fstat(self.recovery_case))[0]
+        def visit(parent, name, relative, original_fd=None):
+            nonlocal total
+            need(len(rows) < 160, "recovery-inventory-count")
+            kind = _recovery_kind(relative)
+            before = signature(os.fstat(original_fd) if original_fd is not None else os.stat(name, dir_fd=parent, follow_symlinks=False))
+            need(before[0] == device and before[:2] not in seen and before[3:5] == (self.uid, self.gid)
+                 and before[2] == (stat.S_IFDIR | 0o700 if kind == "directory" else stat.S_IFREG | 0o600)
+                 and (before[5] >= 1 if kind == "directory" else before[5] == 1), "recovery-fixture-identity")
+            seen.add(before[:2])
+            # Each directory reader is a fresh open description, never a dup
+            # cursor. Every original FD and scandir close stays in this owner.
+            with self._temporary(self._open("." if original_fd is not None else name,
+                                            original_fd if original_fd is not None else parent, directory=(kind == "directory"))) as fd:
+                need(signature(os.fstat(fd)) == before, "recovery-fixture-open-race")
+                if kind == "directory":
+                    names = []
+                    iterator = os.scandir(fd)
+                    original_error = None
+                    try:
+                        for entry in iterator:
+                            need(len(names) < 136 and entry.name not in names, "recovery-fixture-roster")
+                            _recovery_kind(entry.name if relative == "." else relative + "/" + entry.name)
+                            names.append(entry.name)
+                    except BaseException as error:
+                        original_error = error
+                        raise
+                    finally:
+                        try:
+                            iterator.close()
+                        except BaseException as error:
+                            self.close_errors += 1
+                            if self.first_close_error is None:
+                                self.first_close_error = error
+                            if original_error is None:
+                                raise
+                    names.sort(); rows[relative] = Node(before, None, tuple(names))
+                    for child in names:
+                        visit(fd, child, child if relative == "." else relative + "/" + child)
+                else:
+                    need(0 < before[6] <= 256*1024, "recovery-fixture-file-limit")
+                    chunks, remaining = [], before[6] + 1
+                    while remaining:
+                        chunk = os.read(fd, remaining)
+                        if not chunk:
+                            break
+                        chunks.append(chunk); remaining -= len(chunk)
+                    body = b"".join(chunks); total += len(body)
+                    need(len(body) == before[6] and total <= 136*256*1024, "recovery-fixture-byte-limit")
+                    rows[relative] = Node(before, digest(body), None)
+                    if relative == "project/.mobile-release/build-inputs/header.json":
+                        # Correlate the actual journal session with the two UI
+                        # originals, not authority to construct/upgrade a journal.
+                        header = json.loads(body, object_pairs_hook=_pairs)
+                        need(type(header) is dict and type(header.get("session")) is str
+                             and re.fullmatch(r"[0-9a-f]{32}", header["session"]), "recovery-fixture-session")
+                        need(self.recovery_session in (None, header["session"]), "recovery-fixture-session-changed")
+                        self.recovery_session = header["session"]
+                need(signature(os.fstat(fd)) == before and signature(os.fstat(original_fd) if original_fd is not None
+                     else os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "recovery-fixture-read-race")
+        visit(None, None, ".", self.recovery_case)
+        return _recovery_inventory_data(rows, self.uid, self.gid)
+
+    def _retain_recovery_inventory(self, stage, rows):
+        need(stage in ("initial", "generated", "before", "after") and stage not in self.recovery_inventories and not self.inflight,
+             "recovery-inventory-stage-reused")
+        self._write(self.states[RECOVERY_CASE], "recovery-" + stage + ".json", _recovery_inventory_bytes(rows))
+        self.recovery_inventories[stage] = rows
+
+    def accept_recovery_producer(self, attestation):
+        need(not self.inflight and self.last_returned and not self.recovery_produced
+             and set(self.recovery_inventories) == {"initial"}, "recovery-generation-before-return")
+        self._namespace()
+        generated = self._capture_recovery()
+        _recovery_generated(self.recovery_inventories["initial"], generated, self.uid, self.gid)
+        self._retain_recovery_inventory("generated", generated)
+        project = self.projects[RECOVERY_CASE]
+        source, target = "GoogleService-Info.plist", "saved-foreign-ios"
+        before = signature(os.stat(source, dir_fd=project, follow_symlinks=False))
+        need(before == generated["project/" + source].identity, "recovery-move-source-changed")
+        try:
+            os.stat(target, dir_fd=project, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise Refused("recovery-move-target-occupied")
+        # RENAME_EXCL is atomic even if a collision appears after the DATA
+        # absence observation above. No overwrite, link/unlink or retry path.
+        _preserve_recovery_conflict_exclusive(project)
+        preserved = self._capture_recovery()
+        _recovery_before(generated, preserved, self.uid, self.gid)
+        self._retain_recovery_inventory("before", preserved)
+        self.recovery_attestation = attestation
+        self.recovery_produced = True
+
+    def readback_recovery(self, report):
+        need(not self.inflight and self.last_returned and self.recovery_produced, "readback-without-return")
+        self.stage = "independent-recovery-readback"
+        _recovery_report(report)
+        need(report["originals"][0]["projection"]["result"]["observation"]["session"] == self.recovery_session,
+             "recovery-ui-fixture-session")
+        self._namespace()
+        after = self._capture_recovery()
+        result = _recovery_final(*(self.recovery_inventories[s] for s in ("initial", "generated", "before")), after, self.uid, self.gid)
+        self._retain_recovery_inventory("after", after)
+        result["producer"] = self.recovery_attestation
+        return result
+
+    def _recovery_read(self, parent, name, owner, limit, mode=None, *, retain=False):
+        before = signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
+        need(stat.S_ISREG(before[2]) and before[3] == owner and before[5] == 1 and 0 < before[6] <= limit
+             and before[2] & 0o022 == 0 and (mode is None or before[2] == stat.S_IFREG | mode), "recovery-runtime-file")
+        fd = self._open(name, parent)
+        def read_original():
+            need(signature(os.fstat(fd)) == before, "recovery-runtime-open-race")
+            sha, chunks, total = hashlib.sha256(), [], 0
+            while total <= before[6]:
+                chunk = os.read(fd, min(1024*1024, before[6]-total+1))
+                if not chunk:
+                    break
+                total += len(chunk); sha.update(chunk)
+                if not retain:
+                    chunks.append(chunk)
+            need(total == before[6] and signature(os.fstat(fd)) == before
+                 and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "recovery-runtime-read-race")
+            return before, sha.hexdigest(), b"".join(chunks)
+        if retain:
+            answer = read_original()
+            self.recovery_runtime_originals.append((parent, name, fd, before))
+            return answer
+        with self._temporary(fd):
+            return read_original()
+
+    def admit_recovery_runtime(self, source, work):
+        need(self.cases == (RECOVERY_CASE,) and not self.inflight and self.recovery_runtime is None, "recovery-runtime-reused")
+        need(type(work) is Path or isinstance(work, Path), "recovery-runtime-work")
+        need(work.parent == Path("/Users/runner/work/_temp") and re.fullmatch(r"mrk-macos-aqua\.[A-Za-z0-9]{8}", work.name), "recovery-runtime-work-route")
+        def private_json(path, limit):
+            info, _, body = self._recovery_read(None, str(path), self.uid, limit)
+            return json.loads(body, object_pairs_hook=_pairs)
+        release = private_json(source / "desktop/macos-installed-inputs/build-release.json", 4096)
+        need(type(release) is dict and set(release) == {"schemaVersion", "packageVersion", "release"}
+             and type(release["schemaVersion"]) is int and release["schemaVersion"] == 1
+             and type(release["release"]) is str and re.fullmatch(r"macos26-arm64-[a-z0-9_.-]*[a-z0-9]", release["release"])
+             and len(release["release"]) <= 128, "recovery-runtime-release")
+        # Current stager output, NOT the historical supplier digest. The same
+        # actual reviewed workflow builds and installs these exact bytes first.
+        result = private_json(work / "runtime-result.json", 16384)
+        _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid, 1024*1024)
+        need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
+             and result.get("release") == release["release"] and result.get("target") == "aarch64-apple-darwin"
+             and result.get("qualification") == "current-source-staged-no-native-execution" and result.get("supplierOnlyReuse") is True
+             and type(result.get("sourceInputsSha256")) is str and re.fullmatch(r"[0-9a-f]{64}", result["sourceInputsSha256"])
+             and result.get("successorManifestSha256") == manifest_sha, "recovery-current-runtime-binding")
+        manifest = json.loads(manifest_body, object_pairs_hook=_pairs)
+        need(type(manifest) is dict and set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
+             and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
+             and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == "aarch64-apple-darwin"
+             and manifest["protocolSha256"] == result.get("protocolSha256") and manifest["coreSha256"] == result.get("coreSha256")
+             and type(manifest["files"]) is list and 1 <= len(manifest["files"]) <= 2048
+             and manifest["inventorySha256"] == result.get("inventorySha256")
+             and digest(json.dumps(manifest["files"], sort_keys=True, separators=(",", ":")).encode("ascii")) == manifest["inventorySha256"],
+             "recovery-current-manifest")
+        entries = {}
+        for row in manifest["files"]:
+            need(type(row) is dict and set(row) == {"path", "sha256", "size"} and type(row["path"]) is str
+                 and re.fullmatch(r"[A-Za-z0-9_.+/-]{1,512}", row["path"]) and not row["path"].startswith("/")
+                 and all(part not in ("", ".", "..") for part in row["path"].split("/")) and row["path"] not in entries
+                 and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+                 and type(row["size"]) is int and 0 <= row["size"] <= 512*1024*1024, "recovery-current-runtime-entry")
+            entries[row["path"]] = row
+        need(list(entries) == sorted(entries) and {"core.zip", "python/bin/python3"} <= entries.keys()
+             and sum(row["size"] for row in entries.values()) <= 512*1024*1024
+             and manifest["coreSha256"] == entries["core.zip"]["sha256"], "recovery-current-runtime-roster")
+        installed = Path("/Library/Application Support/MobileReleaseKit/versions") / release["release"] / "runtime"
+        current = self._open("/", directory=True)
+        before = signature(os.fstat(current))
+        need(stat.S_ISDIR(before[2]) and before[3] == 0 and before[2] & 0o022 == 0, "recovery-runtime-ancestor")
+        self.recovery_runtime_originals.append((None, "/", current, before))
+        parents = {"/": current}
+        path = Path("/")
+        for part in (*installed.parts[1:], "python", "bin"):
+            parent = current; current = self._open(part, parent, directory=True); path /= part
+            original = signature(os.fstat(current))
+            need(original == signature(os.stat(part, dir_fd=parent, follow_symlinks=False)) and stat.S_ISDIR(original[2])
+                 and original[3] == 0 and original[2] & 0o022 == 0, "recovery-runtime-ancestor")
+            self.recovery_runtime_originals.append((parent, part, current, original)); parents[str(path)] = current
+        runtime = parents[str(installed)]
+        _, actual, _ = self._recovery_read(runtime, "manifest.json", 0, 1024*1024, 0o444, retain=True)
+        need(actual == manifest_sha, "recovery-installed-current-manifest")
+        for relative in ("core.zip", "python/bin/python3"):
+            parent, _, name = relative.rpartition("/")
+            info, sha, _ = self._recovery_read(parents[str(installed / parent)] if parent else runtime, name, 0,
+                512*1024*1024, 0o555 if relative.endswith("python3") else 0o444, retain=True)
+            need(info[6] == entries[relative]["size"] and sha == entries[relative]["sha256"], "recovery-installed-current-file")
+        self.recovery_runtime = (str(installed / "python/bin/python3"), str(installed / "core.zip"))
+        self.recovery_runtime_paths()
+
+    def recovery_runtime_paths(self):
+        need(self.recovery_runtime is not None and not self.inflight and self.recovery_runtime_originals, "recovery-runtime-unadmitted")
+        for parent, name, fd, original in self.recovery_runtime_originals:
+            need(signature(os.fstat(fd)) == original and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == original,
+                 "recovery-runtime-original-changed")
+        return self.recovery_runtime
 
     def _prepare_vault_parents(self):
         import pwd
@@ -3469,10 +4040,12 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     cases = selected_cases(scope)
     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
     not_executed = []
+    if scope == RECOVERY_CASE:
+        produce_pending_recovery(fixtures, run_owned, uid, username)
     for case in cases:
         fixtures.before_call(case)
         state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
-                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE)) / "state" / case
+                                 installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE)) / "state" / case
         argv = [EXECUTABLE, case]
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
@@ -3506,7 +4079,9 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         fixtures.inner_diagnostic_source = "completed-output"
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
-        if case in VAULT_HELPER_CASES:
+        if case == RECOVERY_CASE:
+            readback = fixtures.readback_recovery(report["projectRecovery"])
+        elif case in VAULT_HELPER_CASES:
             readback = fixtures.readback_vault(case, report["vaultHelper"])
             if report["vaultHelper"]["testResult"] == "not-executed":
                 not_executed.append(case)
@@ -3621,6 +4196,8 @@ def main():
         os.umask(0o077)
         fixtures = Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
+        if scope == RECOVERY_CASE:
+            fixtures.admit_recovery_runtime(root, Path(os.environ["MRK_MACOS_WORK"]))
         not_executed = run_cases(binding, fixtures, owner.run_owned, uid, username, lambda value: emit_record(value, sys.stdout), scope)
     except BaseException as error:
         original_error = error

@@ -6,7 +6,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::Manager;
 use crate::{error::BridgeError, project_recovery_protocol as wire};
-use super::{Observation, Case as ShellCase, Step as ShellStep, commands::OriginalFacts};
+use super::{Observation, Case as ShellCase, Step as ShellStep};
+pub(crate) use super::commands::OriginalFacts;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Case { Pending, Cancel, CleanupOnly, Partial }

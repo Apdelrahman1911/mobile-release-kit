@@ -60,8 +60,8 @@ pub(super) fn retire(inner: &Inner, active: &Active, owner: &Arc<Session>, revie
 }
 
 fn facts(inner: &Inner, owner: &Session, book: &Resources, retired: bool, accepted: bool,
-    terminal: Option<&recovery_wire::Terminal>) -> Option<crate::shell::installed_observation::commands::OriginalFacts> {
-    use crate::shell::installed_observation::commands::OriginalFacts;
+    terminal: Option<&recovery_wire::Terminal>) -> Option<crate::shell::installed_observation::recovery::OriginalFacts> {
+    use crate::shell::installed_observation::recovery::OriginalFacts;
     if owner.domain != SavedCommandDomain::ProjectRecovery || !book.recovery_selected { return None; }
     let startup = owner.startup.try_lock().ok()?;
     let native = book.recovery_installed.as_ref()?.try_lock().ok()?;
@@ -112,6 +112,7 @@ fn snapshot_with_book(inner: &Inner, owner: &Session, book: &Resources, original
     Some(Snapshot { facts: facts(inner, owner, book, retired, accepted, terminal.as_ref())?, projection,
         accepted, core_terminal: terminal.is_some(), core_fatal: terminal.as_ref().is_some_and(|t| t.lifetime.retained_failure()), review_minted })
 }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(super) fn settlement_hold(inner: &Inner, owner: &Session, book: &Resources) -> Option<Arc<Control>> {
     let control = {
         let slot = inner.recovery_observation.lock().ok()?;
@@ -125,6 +126,20 @@ pub(super) fn settlement_hold(inner: &Inner, owner: &Session, book: &Resources) 
 }
 
 impl SavedCommandOwner {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn observe_installed_recovery_selection(&self) -> Result<(), BridgeError> {
+        let r = self.inner.lock();
+        if self.inner.domain != SavedCommandDomain::ProjectRecovery || r.revision != 0 || r.active.is_some()
+            || r.prepared.is_some() || r.last.is_some() || r.recovery_review.is_some() || r.disabled || r.stopping
+            || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
+            || !self.inner.recovery_installed_selected() {
+            return Err(self.inner.domain.unavailable());
+        }
+        let slot = self.inner.recovery_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if slot.is_some() { return Err(self.inner.domain.unavailable()); }
+        // This is exactly ordinary Mac selection, before any observer token.
+        Ok(())
+    }
     pub(crate) fn installed_recovery_identity(&self) -> std::sync::Weak<()> { Arc::downgrade(&self.inner.observation_identity) }
     pub(crate) fn admit_installed_recovery_observation(&self, token: Admission) -> Result<(), BridgeError> {
         let r = self.inner.lock();

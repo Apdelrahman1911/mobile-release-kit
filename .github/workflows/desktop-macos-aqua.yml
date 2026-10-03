@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         scope:
-          - android-registration-lifecycle
+          - project-recovery-pending
     runs-on: macos-26
     timeout-minutes: 75
     env:
@@ -49,7 +49,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping || "$MRK_MACOS_AQUA_SCOPE" == installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping-installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private || "$MRK_MACOS_AQUA_SCOPE" == android-registration-lifecycle ]] || exit 1
+          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping || "$MRK_MACOS_AQUA_SCOPE" == installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping-installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private || "$MRK_MACOS_AQUA_SCOPE" == android-registration-lifecycle || "$MRK_MACOS_AQUA_SCOPE" == project-recovery-pending ]] || exit 1
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]] || exit 1
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
@@ -77,7 +77,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Prepare the pinned Apple Instant clock toolchain
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 4
         shell: bash
         run: |
@@ -213,13 +213,13 @@ jobs:
           # later steps. Its immutable JSON is explicitly provisional, not a
           # substitute for workflow status. Never restore0775 before VM disposal.
       - name: Select fixed frontend compiler
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
           package-manager-cache: false
       - name: Record exact source and actual tool bindings only after route admission
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         shell: bash
         run: |
           set -euo pipefail
@@ -230,13 +230,14 @@ jobs:
                          "android-inputs": ("one-android-inputs-Aqua-engineering-case", ["android-inputs"]),
                          "vault-helper-shipping": ("three-shipping-helper-original-Aqua-engineering-cases", ["vault-helper-roundtrip", "vault-helper-stop-before-go", "vault-helper-stop-after-add"]),
                          "installation-inspection": ("one-installation-inspection-Aqua-engineering-case", ["installation-inspection"]),
+                         "project-recovery-pending": ("one-real-pending-ios-build-input-recovery-Aqua-engineering-case", ["project-recovery-pending"]),
                          "vault-helper-shipping-installation-inspection": ("four-shipping-helper-and-installation-Aqua-engineering-cases", ["vault-helper-roundtrip", "vault-helper-stop-before-go", "vault-helper-stop-after-add", "installation-inspection"]),
                          "project-fields-android-inputs": ("two-project-fields-and-android-inputs-Aqua-engineering-cases", ["project-fields", "android-inputs"]),
                          "ios-current-synthetic": ("nine-current-ios-Aqua-engineering-cases", ["ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality", "ios-signing-inputs", "ios-signed-refusal", "ios-signed-cancel", "ios-recovery-empty"])}
           if aqua_scope not in scope_cases: raise ValueError("Aqua scope refused")
           scope_label, case_names = scope_cases[aqua_scope]
           selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else ["vault-helper-shipping", "installation-inspection"] if aqua_scope == "vault-helper-shipping-installation-inspection" else [aqua_scope]
-          native_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "vault-helper-shipping", "installation-inspection")
+          native_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "vault-helper-shipping", "installation-inspection", "project-recovery-pending")
           tools = {}
           for name, command in (
               ("rustc", ["rustc", "--version", "--verbose"]),
@@ -277,7 +278,7 @@ jobs:
           finally: os.close(fd)
           PY
       - name: Check current owner pins before native preparation
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 1
         shell: bash
         run: |
@@ -308,8 +309,33 @@ jobs:
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_OWNER_PINS
+      - name: Check pending recovery SOURCE and DATA contracts before native preparation
+        if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_RECOVERY_DATA'
+          import importlib.util, pathlib, sys, unittest
+          suite = unittest.TestSuite()
+          for name, filename, cls in (
+              ("_mrk_pending_recovery_data", "test_macos_aqua_qualification.py", "PendingProjectRecoveryAquaDataTests"),
+              ("_mrk_pending_recovery_source", "test_macos_project_recovery_source.py", "MacProjectRecoverySourceTests"),
+          ):
+              path = pathlib.Path("tests/desktop") / filename
+              spec = importlib.util.spec_from_file_location(name, path.absolute())
+              module = importlib.util.module_from_spec(spec)
+              sys.modules[name] = module
+              spec.loader.exec_module(module)
+              suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(getattr(module, cls)))
+          if suite.countTestCases() != 12: raise SystemExit("fixed recovery DATA roster")
+          result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
+          if (result.testsRun != 12 or not result.wasSuccessful()
+                  or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
+              raise SystemExit(1)
+          PY_RECOVERY_DATA
       - name: Compile headless Mac libraries and run the exact selected DATA regressions first
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 10
         shell: bash
         run: |
@@ -2340,7 +2366,7 @@ jobs:
           if not receipt["passed"]: raise SystemExit("private wrapping cohort incomplete; originals retained")
           PY_WRAPPING
       - name: Fail fast on native Scripts ownership and package format (never Installer)
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 2
         shell: bash
         run: |
@@ -2391,7 +2417,7 @@ jobs:
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
           # Only inert archive bytes were checked. Never run this exit97 hook.
       - name: Acquire and verify the two fixed Android support archives as DATA
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 4
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
@@ -2416,7 +2442,7 @@ jobs:
             --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \
             > "$work/android-support-result.json"
       - name: Download only the exact accepted M archive (no rebuild or fallback)
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 3
         shell: bash
         env:
@@ -2426,7 +2452,7 @@ jobs:
           set -o noclobber
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10639324707/zip" > "$MRK_MACOS_WORK/accepted-native-evidence.zip"
       - name: Reuse accepted Mac supplier and prepare only the current source payload
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 3
         shell: bash
         run: |
@@ -2439,8 +2465,22 @@ jobs:
             --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
+      - name: Build and sign the separate fixed Android registration helper
+        id: android_helper
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
+        timeout-minutes: 10
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Fixed separate graph, original compiler/signature owners, and
+          # immediate target retirement. This never registers/runs the helper.
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare >> "$GITHUB_OUTPUT"
       - name: Build and sign the separate fixed vault helper before binding the app
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 8
         shell: bash
         run: |
@@ -2490,7 +2530,7 @@ jobs:
               output.write("MRK_MACOS_VAULT_HELPER_BYTES=" + str(len(body)) + "\n")
           PY_HELPER
       - name: Compile the fixed debug actual-main observer and normal embedded frontend once
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 24
         shell: bash
         env:
@@ -2532,9 +2572,12 @@ jobs:
               stream.write("MRK_MACOS_OBSERVER_BINARY=" + str(binary) + "\n")
           PY_BUILD
       - name: Assemble the instrumented engineering app; ad-hoc sign only the app
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 3
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -2542,23 +2585,30 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+            --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
+            --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \
             --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \
             --binary "$MRK_MACOS_OBSERVER_BINARY" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before
           /usr/bin/codesign --force --sign - --options runtime \
             --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/mrk-vault-keychain"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
       - name: Bind this signed app and current-source runtime into fresh Installer DATA
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 3
         shell: bash
+        env:
+          MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
         run: |
           set -euo pipefail
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+            --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
             --current-runtime \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
@@ -2585,7 +2635,7 @@ jobs:
           # authorized build into its one-shot installer; it grants no runtime,
           # GUI, distribution, update or arbitrary adjacent-file authority.
       - name: Build the fixed one-shot root Installer and scripts-only package
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 8
         shell: bash
         run: |
@@ -2643,7 +2693,7 @@ jobs:
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
       - name: Application installation uses only standard privileged Installer; app and Python stay nonroot
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 5
         shell: bash
         run: |
@@ -2682,7 +2732,7 @@ jobs:
           # A collision, partial publication, unknown close or timeout fails
           # here. Keep originals; no uninstall, rollback, retries or repair.
       - name: Nonroot byte/mode readback, not a headless GUI substitute
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 3
         shell: bash
         run: |
@@ -2737,6 +2787,28 @@ jobs:
           # The original helper returns zero only after original calls/readbacks,
           # fixture closes and complete-record publication. Failure remains job
           # failure; the separate fixture namespace remains evidence.
+      - name: One real pending iOS build-input recovery through ordinary Inspect and explicit Recover
+        if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'
+        timeout-minutes: 7
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope project-recovery-pending \
+            > "$MRK_MACOS_WORK/aqua-project-recovery-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-project-recovery-failure.jsonl"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua-project-recovery.status"
+          [[ $status == 0 ]] || exit "$status"
+          # Original producer30s returns before the original app325s. Failure
+          # never dispatches another app, repairs a journal or claims recovery.
+          # Four private inventories stay on this disposable host, not artifacts.
       - name: Three serial shipping-helper journeys through the original document and invocation owner
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
         timeout-minutes: 8
@@ -2814,7 +2886,7 @@ jobs:
           [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]] || exit 1
           # Source-only POST: no build, fixture, Keychain or shared-cache cleanup.
       - name: Verify source stayed unchanged; retire only disposable owned build output
-        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         shell: bash
         run: |
           set -euo pipefail
@@ -2829,7 +2901,7 @@ jobs:
             /bin/rm -rf -- "$path"
           done
       - name: Export bounded diagnostics without altering original command evidence
-        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')
+        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         timeout-minutes: 1
         shell: bash
         run: |
@@ -2838,10 +2910,10 @@ jobs:
           "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS'
           import hashlib, json, os, pathlib, re, stat
           aqua_scope = os.environ["MRK_MACOS_AQUA_SCOPE"]
-          admitted_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "project-fields-android-inputs", "vault-helper-shipping", "installation-inspection", "vault-helper-shipping-installation-inspection", "android-registration-lifecycle")
+          admitted_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "project-fields-android-inputs", "vault-helper-shipping", "installation-inspection", "vault-helper-shipping-installation-inspection", "android-registration-lifecycle", "project-recovery-pending")
           if aqua_scope not in admitted_scopes: raise ValueError("Aqua scope refused")
           selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else ["vault-helper-shipping", "installation-inspection"] if aqua_scope == "vault-helper-shipping-installation-inspection" else [aqua_scope]
-          native_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "vault-helper-shipping", "installation-inspection")
+          native_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "vault-helper-shipping", "installation-inspection", "project-recovery-pending")
           root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
           parent = pathlib.Path(os.environ["RUNNER_TEMP"])
           if root.parent != parent or not root.name.startswith("mrk-macos-aqua."): raise ValueError("fixed work root required")
@@ -2909,7 +2981,7 @@ jobs:
           publish("bounded-diagnostics.json", data)
           PY_DIAGNOSTICS
       - name: Preserve bounded original evidence; upload alone is not an Aqua pass
-        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
+        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.MRK_MACOS_AQUA_SCOPE }}
@@ -2948,6 +3020,24 @@ jobs:
             ${{ steps.work.outputs.root }}/vault-helper-build.jsonl
             ${{ steps.work.outputs.root }}/vault-helper-build.stderr
             ${{ steps.work.outputs.root }}/vault-helper-signing.json
+            ${{ steps.work.outputs.root }}/android-helper-prepare.json
+            ${{ steps.work.outputs.root }}/android-helper-build.jsonl
+            ${{ steps.work.outputs.root }}/android-helper-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-build.status
+            ${{ steps.work.outputs.root }}/android-helper-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-signed.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.json
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json
             ${{ steps.work.outputs.root }}/scripts-result.json
@@ -2977,6 +3067,9 @@ jobs:
             ${{ steps.work.outputs.root }}/aqua-installation-inspection-results.jsonl
             ${{ steps.work.outputs.root }}/aqua-installation-inspection-failure.jsonl
             ${{ steps.work.outputs.root }}/aqua-installation-inspection.status
+            ${{ steps.work.outputs.root }}/aqua-project-recovery-results.jsonl
+            ${{ steps.work.outputs.root }}/aqua-project-recovery-failure.jsonl
+            ${{ steps.work.outputs.root }}/aqua-project-recovery.status
             ${{ steps.work.outputs.root }}/aqua-results.jsonl
             ${{ steps.work.outputs.root }}/aqua-failure.jsonl
             ${{ steps.work.outputs.root }}/aqua.status

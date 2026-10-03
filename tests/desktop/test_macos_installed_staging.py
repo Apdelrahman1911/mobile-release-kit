@@ -7,11 +7,13 @@ import ast
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import shlex
 import stat
 import struct
+from subprocess import CompletedProcess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -19,11 +21,16 @@ import unittest
 from unittest import mock
 
 TOOL = None
+ANDROID_HELPER = None
 if sys.platform in ("darwin", "linux"):
     path = Path(__file__).absolute().parents[2] / "desktop/tools/stage_macos_installed.py"
     spec = importlib.util.spec_from_file_location("macos_installed_staging_data", path)
     TOOL = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(TOOL)
+    path = Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py"
+    spec = importlib.util.spec_from_file_location("macos_android_helper_packaging_data", path)
+    ANDROID_HELPER = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ANDROID_HELPER)
 
 
 def workflow_step(workflow, name):
@@ -39,6 +46,209 @@ def normal_app_steps(workflow):
         "Build only the normal ARM64 bundled-asset shell",
         "Assemble and ad-hoc sign the app only (never --deep or the runtime)",
         "Bind this completed signed app and current-source runtime into fresh Installer DATA"))
+
+
+@unittest.skipUnless(ANDROID_HELPER is not None, "POSIX inert packaging DATA only")
+class MacAndroidHelperPackagingData(unittest.TestCase):
+    """No compiler/codesign/helper/owner execution; every child is a DATA double."""
+
+    def cargo_rows(self, checkout, target):
+        module = ANDROID_HELPER
+        source = checkout / module.WORKSPACE
+        binary = target / "aarch64-apple-darwin/release" / module.HELPER
+        result = [{"reason": "compiler-artifact", "package_id": "path+" + source.as_uri() + "#mrk-android-register@0.1.0",
+                   "manifest_path": str(source / "Cargo.toml"), "features": [], "executable": str(binary),
+                   "filenames": [str(binary)], "target": {"name": module.HELPER, "kind": ["bin"], "crate_types": ["bin"],
+                       "src_path": str(source / "src/main.rs"), "edition": "2021"},
+                   "profile": {"test": False, "debug_assertions": False, "opt_level": "3"}}]
+        for directory, package, name, features in (
+            ("desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", ["macos-android-registration-helper"]),
+            ("desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", ["android-registration-helper", "default"]),
+        ):
+            result.append({"reason": "compiler-artifact", "package_id": "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0",
+                           "manifest_path": str(checkout / directory / "Cargo.toml"), "features": features,
+                           "target": {"name": name, "kind": ["lib"], "src_path": str(checkout / directory / "src/lib.rs")},
+                           "profile": {"test": False}})
+        return result + [{"reason": "build-finished", "success": True}]
+
+    def encoded(self, rows):
+        return b"\n".join(json.dumps(row).encode("ascii") for row in rows) + b"\n"
+
+    def fixture(self, root, failure=None):
+        module = ANDROID_HELPER
+        checkout, work = root / "checkout", root / "work"
+        checkout.mkdir(mode=0o700); work.mkdir(mode=0o700)
+        profile = checkout / module.PROFILE
+        profile.parent.mkdir(parents=True)
+        profile.write_bytes(module.UNCONFIGURED_PROFILE if failure != "profile" else module.UNCONFIGURED_PROFILE.replace(b"unconfigured", b"configured"))
+        profile.chmod(0o644)
+        plist = checkout / "desktop/macos-installed-inputs" / (module.IDENTIFIER + ".plist")
+        plist.parent.mkdir(parents=True)
+        plist.write_bytes(TOOL.android_service_plist())
+        plist.chmod(0o644)
+        _, _, _, body = normal_cargo_fixture()
+        observations = []
+
+        def command(argv, **options):
+            observations.append((tuple(argv), options))
+            if argv[0] == "cargo":
+                target = work / "android-helper-target"
+                binary = target / "aarch64-apple-darwin/release" / module.HELPER
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(body); binary.chmod(0o700)
+                deps = binary.parent / "deps"; deps.mkdir()
+                alias = deps / "mrk_android_register-0123456789abcdef"
+                if failure == "alias":
+                    alias.write_bytes(body); alias.chmod(0o700)
+                    os.link(binary, deps / "unexpected-alias")
+                else:
+                    os.link(binary, alias)
+                if failure == "owner":
+                    raise RuntimeError("DATA double original result unavailable")
+                output = self.encoded(self.cargo_rows(checkout, target))
+                return CompletedProcess(argv, 0, output.decode() if failure == "malformed" else output, b"")
+            self.assertEqual(argv[0], "/usr/bin/codesign")
+            selected = Path(argv[-1])
+            if "--sign" in argv:
+                original = work / "android-helper-target/aarch64-apple-darwin/release" / module.HELPER
+                self.assertEqual(original.read_bytes(), body)
+                self.assertEqual(original.stat().st_nlink, 2)
+                self.assertEqual(selected.stat().st_nlink, 1)
+                self.assertNotEqual(selected.stat().st_ino, original.stat().st_ino)
+                self.assertEqual(argv[argv.index("--identifier") + 1], module.IDENTIFIER)
+                # Model native codesign's permitted inode replacement, not a
+                # signature or native-platform pass. This file is never run.
+                replacement = work / "synthetic-signer-output"
+                replacement.write_bytes(body + b"DATA signature bytes")
+                replacement.chmod(0o755)
+                replacement.replace(selected)
+            elif failure == "changed":
+                selected.write_bytes(selected.read_bytes() + b"changed-after-verification")
+            return CompletedProcess(argv, 0, b"", b"")
+
+        environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                       "GITHUB_WORKFLOW_REF": "source-bound-DATA-fixture", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+                       "PATH": "/inert/fixed-tools", "HOME": str(root), "DEVELOPER_DIR": "/inert/clt", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
+        owner = SimpleNamespace(run_owned=command)
+        return checkout, work, environment, owner, observations
+
+    def test_exact_separate_cargo_graph_rejects_impostor_outputs_and_feature_unification(self):
+        module = ANDROID_HELPER
+        checkout, target = Path("/inert/source"), Path("/inert/work/android-helper-target")
+        rows = self.cargo_rows(checkout, target)
+        self.assertEqual(module.artifact(self.encoded(rows), checkout, target), target / "aarch64-apple-darwin/release" / module.HELPER)
+        for failure in ("extra-executable", "manifest", "features", "native-role", "source", "test", "finish"):
+            changed = json.loads(json.dumps(rows))
+            if failure == "extra-executable": changed.insert(0, changed[0].copy())
+            elif failure == "manifest": changed[0]["manifest_path"] = "/unrelated/Cargo.toml"
+            elif failure == "features": changed[1]["features"].append("desktop-shell")
+            elif failure == "native-role": changed[2]["features"].append("installed-observation")
+            elif failure == "source": changed[0]["target"]["src_path"] = "/unrelated/main.rs"
+            elif failure == "test": changed[0]["profile"]["test"] = True
+            elif failure == "finish": changed[-1]["success"] = False
+            with self.subTest(failure=failure), self.assertRaises(module.Refused):
+                module.artifact(self.encoded(changed), checkout, target)
+
+    def test_actual_copy_and_staged_checks_bind_final_bytes_and_retire_each_owned_target(self):
+        module = ANDROID_HELPER
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary))
+            operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+            expected = operation.execute()
+            self.assertEqual(expected, module.digest((work / module.HELPER).read_bytes()))
+            self.assertFalse((work / "android-helper-target").exists())
+            receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
+            self.assertTrue(receipt["passed"] and receipt["originalClosesKnown"] and receipt["targetRetired"])
+            self.assertEqual(len(receipt["originalCalls"]), 3)
+            self.assertTrue(all(entry["closed"] for entry in operation.entries))
+            self.assertFalse(receipt["androidServiceAuthenticated"] or receipt["androidBuildQualified"] or receipt["productReady"])
+            contents = work / "app/Mobile Release Kit.app/Contents"
+            helpers = contents / "Helpers"; helpers.mkdir(parents=True)
+            nested = helpers / module.HELPER
+            nested.write_bytes((work / module.HELPER).read_bytes()); nested.chmod(0o555)
+            daemons = contents / "Library/LaunchDaemons"; daemons.mkdir(parents=True)
+            (daemons / (module.IDENTIFIER + ".plist")).write_bytes(TOOL.android_service_plist())
+            (daemons / (module.IDENTIFIER + ".plist")).chmod(0o644)
+            for phase in ("verify-before", "verify-after"):
+                actual = module.Operation(owner, checkout, work, phase, environment, TOOL)
+                self.assertEqual(actual.execute(expected), expected)
+                self.assertFalse((work / ("android-helper-" + phase)).exists())
+                self.assertTrue(json.loads((work / ("android-helper-" + phase + ".json")).read_bytes())["passed"])
+            self.assertEqual([item[0][0] for item in observations], ["cargo"] + ["/usr/bin/codesign"] * 4)
+
+    def test_alias_original_return_close_and_signature_failures_never_produce_success(self):
+        module = ANDROID_HELPER
+        for failure in ("alias", "owner", "malformed", "close", "changed"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary), failure)
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+                original_close, injected = os.close, []
+
+                def close(fd):
+                    if failure == "close" and not injected and any(entry["role"] == "signed-helper" and entry["fd"] is None
+                            and not entry["closed"] for entry in operation.entries):
+                        # Actually discharge the DATA fixture FD, then inject
+                        # uncertainty. The production code must not retry it.
+                        original_close(fd); injected.append(fd)
+                        raise OSError("synthetic close result unavailable")
+                    original_close(fd)
+
+                with mock.patch.object(module.os, "close", close), self.assertRaises(module.Refused):
+                    operation.execute()
+                receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
+                self.assertFalse(receipt["passed"])
+                uncertain = failure in ("owner", "malformed", "close")
+                self.assertEqual((work / "android-helper-target").exists(), uncertain)
+                if failure in ("alias", "owner", "malformed"):
+                    self.assertEqual(len(observations), 1)
+                if failure == "close":
+                    self.assertEqual(len(injected), 1)
+                    self.assertFalse(receipt["originalClosesKnown"])
+
+    def test_clean_environment_and_configured_profile_refuse_any_ad_hoc_fallback(self):
+        module = ANDROID_HELPER
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary), "profile")
+            environment.update(RUSTC_WRAPPER="unrelated", CARGO_ENCODED_RUSTFLAGS="unrelated", GITHUB_TOKEN="inert-DATA", MRK_ANDROID_TOOL_INSTANCE="unrelated")
+            selected = module.build_environment(environment, work)
+            self.assertEqual(selected["RUSTUP_TOOLCHAIN"], "1.98.1")
+            self.assertFalse({"RUSTC_WRAPPER", "CARGO_ENCODED_RUSTFLAGS", "GITHUB_TOKEN", "MRK_ANDROID_TOOL_INSTANCE"} & selected.keys())
+            with self.assertRaises(module.Refused):
+                module.Operation(owner, checkout, work, "prepare", environment, TOOL).execute()
+            self.assertEqual(observations, [])
+            self.assertFalse((work / "android-helper-target").exists())
+
+    def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
+        root = Path(__file__).absolute().parents[2]
+        for filename, assembly, binding in (
+            ("desktop-macos-installed.yml", "Assemble and ad-hoc sign the app only (never --deep or the runtime)",
+             "Bind this completed signed app and current-source runtime into fresh Installer DATA"),
+            ("desktop-macos-aqua.yml", "Assemble the instrumented engineering app; ad-hoc sign only the app",
+             "Bind this signed app and current-source runtime into fresh Installer DATA"),
+        ):
+            workflow = (root / ".github/workflows" / filename).read_text()
+            build = workflow_step(workflow, "Build and sign the separate fixed Android registration helper")
+            app, inputs = workflow_step(workflow, assembly), workflow_step(workflow, binding)
+            self.assertIn("id: android_helper", build)
+            self.assertIn('macos_android_helper_package.py prepare >> "$GITHUB_OUTPUT"', build)
+            self.assertNotIn("cargo build", build)
+            for step in (app, inputs):
+                self.assertIn("MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}", step)
+                self.assertIn('--expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256"', step)
+            self.assertIn('--android-helper "$MRK_MACOS_WORK/mrk-android-register"', app)
+            self.assertLess(app.index("stage_macos_installed.py app"), app.index("macos_android_helper_package.py verify-before"))
+            self.assertLess(app.index("macos_android_helper_package.py verify-before"), app.index("/usr/bin/codesign --force --sign -"))
+            self.assertLess(app.index("/usr/bin/codesign --force --sign -"), app.index("macos_android_helper_package.py verify-after"))
+            self.assertNotIn("android-helper-*", workflow)
+            if filename == "desktop-macos-aqua.yml":
+                gates = lambda block: [line.strip() for line in block.splitlines() if line.startswith("        if:")]
+                self.assertEqual(gates(build), gates(app))
+                self.assertEqual(gates(build), gates(inputs))
+                self.assertIn("project-recovery-pending", ANDROID_HELPER.PACKAGE_SCOPES)
+                self.assertIn("env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'", " ".join(gates(build)))
+                for excluded in ("android-registration-lifecycle", "wrapping-keychain-private", "xcode-installed-classification", "supplier"):
+                    self.assertNotIn(excluded, " ".join(gates(build)))
+
 
 
 def odc(name, mode, body=b"", *, uid=0, gid=0, links=1):

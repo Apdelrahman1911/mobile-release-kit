@@ -6577,6 +6577,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Acquire and verify the two fixed Android support archives as DATA",
             "Download only the exact accepted M archive (no rebuild or fallback)",
             "Reuse accepted Mac supplier and prepare only the current source payload",
+            "Build and sign the separate fixed Android registration helper",
             "Build and sign the separate fixed vault helper before binding the app",
             "Compile the fixed debug actual-main observer and normal embedded frontend once",
             "Assemble the instrumented engineering app; ad-hoc sign only the app",
@@ -6588,7 +6589,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         }
         toolchain = {
             "Prepare the pinned Apple Instant clock toolchain":
-                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')",
+                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')",
         }
         classifiers = {
             "Classify installed Xcode originals without preparing or selecting a toolchain":
@@ -6610,13 +6611,15 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "One Android-input Aqua journey through the reviewed original invocation owner": "android-inputs",
             "Three serial shipping-helper journeys through the original document and invocation owner": "vault-helper-shipping",
             "One installation-inspection Aqua journey through the reviewed original invocation owner": "installation-inspection",
+            "Check pending recovery SOURCE and DATA contracts before native preparation": "project-recovery-pending",
+            "One real pending iOS build-input recovery through ordinary Inspect and explicit Recover": "project-recovery-pending",
             "Nine serial current-iOS Aqua cases through the reviewed original invocation owner": "ios-current-synthetic",
         }
         lifecycle = {
             "Compile headless Mac libraries and run the exact selected DATA regressions first":
-                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')",
+                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')",
             "Export bounded diagnostics without altering original command evidence":
-                "always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle')",
+                "always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')",
             "Preserve bounded Android lifecycle results and original workflow exit evidence":
                 "always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success'",
         }
@@ -6645,7 +6648,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                 expected = ["if: success() && " + selection]
             else:
                 prefix = "always() && steps.work.outputs.root != ''" if name in legacy_exports else "success()"
-                expected = ["if: " + prefix + " && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')"]
+                expected = ["if: " + prefix + " && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending')"]
             with self.subTest(step=name):
                 self.assertEqual(gates, expected)
         clock = steps["Prepare the pinned Apple Instant clock toolchain"]
@@ -6691,7 +6694,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
-            "          - vault-helper-shipping-installation-inspection\n"
+            "          - project-recovery-pending\n"
             "    runs-on: macos-26\n"
             "    timeout-minutes: 75\n"
         )
@@ -6833,10 +6836,11 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                   and node.targets[0].id == "scope_cases"]
         self.assertEqual(len(tables), 1)
         cases = ast.literal_eval(tables[0].value)
-        self.assertEqual(set(cases), {"project-fields", "android-inputs", "ios-current-synthetic", "project-fields-android-inputs", M.VAULT_HELPER_SCOPE, "installation-inspection", "vault-helper-shipping-installation-inspection"})
+        self.assertEqual(set(cases), {"project-fields", "android-inputs", "ios-current-synthetic", "project-fields-android-inputs", M.VAULT_HELPER_SCOPE, "installation-inspection", "vault-helper-shipping-installation-inspection", M.RECOVERY_CASE})
         self.assertEqual(cases["project-fields-android-inputs"][1], ["project-fields", "android-inputs"])
         self.assertEqual(cases["installation-inspection"][1], ["installation-inspection"])
         self.assertEqual(cases["vault-helper-shipping-installation-inspection"][1], [*M.VAULT_HELPER_CASES, "installation-inspection"])
+        self.assertEqual(cases[M.RECOVERY_CASE][1], [M.RECOVERY_CASE])
         selection = 'selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else ["vault-helper-shipping", "installation-inspection"] if aqua_scope == "vault-helper-shipping-installation-inspection" else [aqua_scope]'
         diagnostic = steps["Export bounded diagnostics without altering original command evidence"]
         for step in (binding, diagnostic):
@@ -9095,7 +9099,7 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    steps:\n", 1)[0]
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
-        self.assertIn("        scope:\n          - android-registration-lifecycle\n", header)
+        self.assertIn("        scope:\n          - project-recovery-pending\n", header)
         self.assertNotIn("          - project-fields", header)
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         run = blocks["Three serial shipping-helper journeys through the original document and invocation owner"]
@@ -9264,6 +9268,246 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
                     self.assertEqual(len(result["cleanupErrors"]), 1); self.assertIsNotNone(raised)
                 else:
                     self.assertIn("failure", result); self.assertIsNone(raised)
+
+
+def inert_recovery_inventories():
+    """Exact integer DATA only; not files, generated journals or receipts."""
+    next_inode = 2**60
+    def node(body=None):
+        nonlocal next_inode
+        next_inode += 1
+        identity = (7, next_inode, (stat.S_IFDIR | 0o700) if body is None else (stat.S_IFREG | 0o600),
+                    UID, GID, 9 if body is None else 1, 4096 if body is None else len(body), 2**60, 2**60)
+        return M.Node(identity, None if body is None else M.digest(body), () if body is None else None)
+    def rosters(rows):
+        for name, row in tuple(rows.items()):
+            if row.sha256 is None:
+                rows[name] = replace(row, entries=tuple(sorted(path.rsplit("/", 1)[-1] for path in rows
+                                    if path != "." and str(Path(path).parent) == name)))
+        return rows
+    def moved(row):
+        return replace(row, identity=(*row.identity[:8], row.identity[8] + 7))
+    initial = rosters({".": node(), "project": node(), **{name: node(body) for name, body in M.RECOVERY_FILES.items()}})
+    generated = dict(initial)
+    pending = "project/.mobile-release/build-inputs"
+    generated.update({"project/.mobile-release": node(), pending: node(),
+                      pending + "/header.json": node(b"inert header bytes"), pending + "/intent.json": node(b"inert intent bytes"),
+                      pending + "/checkpoint-000.json": node(b"inert checkpoint bytes"),
+                      pending + "/backup-1": moved(initial["project/GoogleService-Info.plist"]),
+                      "project/GoogleService-Info.plist": node(M.RECOVERY_FOREIGN),
+                      "project/google-services.json": moved(initial["project/google-services.json"])})
+    rosters(generated)
+    before = dict(generated)
+    before["project/saved-foreign-ios"] = moved(before.pop("project/GoogleService-Info.plist"))
+    rosters(before)
+    after = {name: row for name, row in before.items() if name != pending and not name.startswith(pending + "/")}
+    after["project/GoogleService-Info.plist"] = moved(generated[pending + "/backup-1"])
+    rosters(after)
+    return initial, generated, before, after
+
+
+def inert_recovery_producer():
+    return {"schemaVersion": 1, "scope": "real-core-project-recovery-fixture-v1", "case": M.RECOVERY_CASE,
+            "materializationOutcome": "expected-cleanup-failure", "coreFatal": True, "commands": 0, "profileCalls": 0,
+            "attemptedDescriptors": 12, "neverOpenedDescriptors": 1, "attemptedDescriptorsClosed": True,
+            "handlersRestored": True, "invocationReleased": True, "originalQuiescenceRecorded": True,
+            "retirementInterceptions": 0, "observersRestored": True,
+            "restored": {"android-services": True, "ios-services": False}, "followupCoreOrFilesystemOperation": False}
+
+
+class InertRecoveryFixtures(InertFixtures):
+    def __init__(self):
+        super().__init__()
+        self.cases = (M.RECOVERY_CASE,)
+        self.path = BINDING.root(recovery=True)
+        self.recovery_produced = False
+        self.accepted = []
+        self.fds = set()
+        self.first_close_error = None
+
+    def recovery_runtime_paths(self):
+        return "/inert/current/runtime/python/bin/python3", "/inert/current/runtime/core.zip"
+
+    def accept_recovery_producer(self, value):
+        if self.inflight or not self.last_returned:
+            raise AssertionError("generation precedes original return")
+        self.accepted.append(value)
+        self.recovery_produced = True
+
+    def before_call(self, case):
+        if not self.recovery_produced:
+            raise AssertionError("app precedes authenticated failed materialization")
+        super().before_call(case)
+
+    def readback_recovery(self, report):
+        M._recovery_report(report)
+        return super().readback(M.RECOVERY_CASE)
+
+
+class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
+    def test_scope_and_pair_parser_are_closed_without_enabling_ios_modes(self):
+        case = M.RECOVERY_CASE
+        self.assertEqual(M.selected_cases(case), (case,))
+        self.assertEqual(M.argument_scope(["--scope", case]), case)
+        self.assertEqual(M.case_timeout(case), 325)
+        self.assertEqual(M.selected_cases(), M.CASES)
+        self.assertNotIn(case, M.IOS_CURRENT_CASES)
+        for args in (["--scope", case, "--retry"], ["--scope", "project-recovery-partial"], [case]):
+            with self.assertRaises(M.Refused): M.argument_scope(args)
+        value = M.expected_result(BINDING, case)
+        self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
+        mutations = [("ordinaryProfileAvailableBeforeAdmission", False), ("requests", [1, 1, 1, 2]),
+                     ("replies", [1, 1, 1, 0]), ("statusCallsReturned", 97), ("statusCallsReturned", True),
+                     ("freshUncheckedReview", False), ("explicitAcknowledgement", False), ("exactSessionReviewed", False),
+                     ("signedModesActivated", True), ("shippingBinaryQualified", True), ("hardMs", 130001)]
+        for name, changed in mutations:
+            bad = deepcopy(value); bad["projectRecovery"][name] = changed
+            with self.subTest(name=name), self.assertRaises(M.Refused):
+                M.parse_result(captured(bad), b"", BINDING, case)
+
+    def test_both_originals_every_join_and_exact_review_session_are_required(self):
+        good = M._expected_recovery_report()
+        for i in (0, 1):
+            for key in M.RECOVERY_JOINS:
+                bad = deepcopy(good); bad["originals"][i]["facts"][key] = False
+                with self.subTest(original=i, join=key), self.assertRaises(M.Refused): M._recovery_report(bad)
+            for key in ("noChild", "activeRetained", "resourceUnknown"):
+                bad = deepcopy(good); bad["originals"][i]["facts"][key] = True
+                with self.subTest(original=i, flag=key), self.assertRaises(M.Refused): M._recovery_report(bad)
+            for key, value in (("accepted", False), ("coreTerminal", False), ("coreFatal", True), ("reviewMinted", i != 0)):
+                bad = deepcopy(good); bad["originals"][i][key] = value
+                with self.subTest(original=i, flag=key), self.assertRaises(M.Refused): M._recovery_report(bad)
+        for path, changed in ((["prepared", 1, "operationId"], good["prepared"][0]["operationId"]),
+                              (["prepared", 1, "ownerGeneration"], good["prepared"][0]["ownerGeneration"]),
+                              (["prepared", 1, "context", "review", "session"], "f"*32),
+                              (["prepared", 1, "context", "draftRevision"], 2),
+                              (["originals", 1, "projection", "result", "recoveredSession"], "f"*32),
+                              (["originals", 0, "projection", "result", "observation", "roles"], ["ios-services"]),
+                              (["originals", 0, "projection", "phase"], "unknown")):
+            bad = deepcopy(good); cursor = bad
+            for part in path[:-1]: cursor = cursor[part]
+            cursor[path[-1]] = changed
+            with self.subTest(path=path), self.assertRaises(M.Refused): M._recovery_report(bad)
+
+    def test_actual_returned_producer_then_app_then_independent_readback(self):
+        fixtures = InertRecoveryFixtures(); calls, emitted = [], []
+        def run(argv, **options):
+            calls.append((tuple(argv), options))
+            if len(calls) == 1:
+                self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
+                self.assertEqual(options["timeout"], 30); self.assertEqual(options["output_limit"], 2048)
+                self.assertEqual(argv[1:6], ["-I", "-S", "-B", "-c", M.SHELL_RECOVERY_PRODUCER])
+                return CompletedProcess(argv, 0, json.dumps(inert_recovery_producer()).encode() + b"\n", b"")
+            self.assertEqual(len(calls), 2); self.assertEqual(argv, [M.EXECUTABLE, M.RECOVERY_CASE])
+            self.assertEqual(options["timeout"], 325)
+            return CompletedProcess(argv, 0, captured(M.expected_result(BINDING, M.RECOVERY_CASE)), b"")
+        self.assertEqual(M.run_cases(BINDING, fixtures, run, UID, "runner", emitted.append, M.RECOVERY_CASE), ())
+        self.assertEqual(len(calls), 2); self.assertEqual(len(fixtures.accepted), 1)
+        self.assertEqual(fixtures.before, [M.RECOVERY_CASE]); self.assertEqual(fixtures.reads, [M.RECOVERY_CASE])
+        self.assertEqual(len(emitted), 1); self.assertTrue(fixtures.last_returned); self.assertFalse(fixtures.inflight)
+        output = io.StringIO(); M.emit_record(emitted[0], output)
+        self.assertLessEqual(len(output.getvalue().encode()), 24*1024+1)
+
+    def test_unknown_producer_return_preserves_original_and_never_reads_or_dispatches(self):
+        error = RuntimeError("inert original exception")
+        for kind in ("exception", "none", "foreign", "wrong-argv", "wrong-buffer", "oversize"):
+            fixtures = InertRecoveryFixtures(); calls, emitted = [], []
+            def run(argv, **options):
+                calls.append(argv)
+                if kind == "exception": raise error
+                if kind == "none": return None
+                if kind == "foreign": return SimpleNamespace(args=argv, returncode=0, stdout=b"{}\n", stderr=b"")
+                return CompletedProcess(["foreign"] if kind == "wrong-argv" else argv, 0,
+                                        "{}\n" if kind == "wrong-buffer" else b"x"*2049 if kind == "oversize" else b"{}\n", b"")
+            with self.subTest(kind=kind), self.assertRaises((M.Refused, RuntimeError)) as caught:
+                M.run_cases(BINDING, fixtures, run, UID, "runner", emitted.append, M.RECOVERY_CASE)
+            if kind == "exception": self.assertIs(caught.exception, error)
+            self.assertEqual(len(calls), 1); self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
+            self.assertEqual((fixtures.before, fixtures.reads, fixtures.accepted, emitted), ([], [], [], []))
+            with self.assertRaises(M.Refused): M.Fixtures.close(fixtures)
+
+    def test_semantic_producer_failure_is_not_permission_for_fixture_work_or_app(self):
+        for kind in ("exit", "stderr", "json", "incomplete", "lifetime", "wrong-restoration"):
+            fixtures = InertRecoveryFixtures(); calls, emitted = [], []
+            value = inert_recovery_producer()
+            if kind == "incomplete": value.pop("invocationReleased")
+            if kind == "lifetime": value["attemptedDescriptorsClosed"] = False
+            if kind == "wrong-restoration": value["restored"]["ios-services"] = True
+            def run(argv, **options):
+                calls.append(argv)
+                return CompletedProcess(argv, 1 if kind == "exit" else 0,
+                                        b"invalid\n" if kind == "json" else json.dumps(value).encode() + b"\n",
+                                        b"unexpected" if kind == "stderr" else b"")
+            with self.subTest(kind=kind), self.assertRaises((M.Refused, ValueError)):
+                M.run_cases(BINDING, fixtures, run, UID, "runner", emitted.append, M.RECOVERY_CASE)
+            self.assertEqual(len(calls), 1); self.assertFalse(fixtures.inflight); self.assertTrue(fixtures.last_returned)
+            self.assertEqual((fixtures.before, fixtures.reads, fixtures.accepted, emitted), ([], [], [], []))
+            M.Fixtures.close(fixtures)  # Empty inert original book, no OS close.
+
+    def test_four_inventory_stages_preserve_exact_full9_and_original_restoration(self):
+        stages = inert_recovery_inventories()
+        summary = M._recovery_final(*stages, UID, GID)
+        self.assertEqual([row["stage"] for row in summary["inventories"]], ["initial", "generated", "before", "after"])
+        self.assertTrue(summary["originalTargetsRestored"]); self.assertTrue(summary["foreignPreserved"])
+        self.assertFalse(summary["privateContentsExported"])
+        raw = M._recovery_inventory_bytes(stages[0]); data = json.loads(raw)
+        self.assertGreater(data["project"]["identity"][1], 2**53)
+        self.assertEqual(tuple(data["project"]["identity"]), stages[0]["project"].identity)
+        for path in ("project/unrelated.txt", "project/saved-foreign-ios", "project/GoogleService-Info.plist", "project/google-services.json"):
+            bad = list(stages); bad[3] = dict(bad[3]); row = bad[3][path]
+            bad[3][path] = replace(row, identity=(row.identity[0], row.identity[1]+1000, *row.identity[2:]))
+            with self.subTest(substitution=path), self.assertRaises(M.Refused): M._recovery_final(*bad, UID, GID)
+        for mode in ("missing", "gap", "modified"):
+            bad = list(stages); bad[1] = dict(bad[1]); name = "project/.mobile-release/build-inputs/checkpoint-000.json"
+            row = bad[1].pop(name)
+            if mode == "gap": bad[1][name.replace("000", "001")] = row
+            if mode == "modified": bad[1][name] = replace(row, sha256="a"*64)
+            with self.subTest(checkpoint=mode), self.assertRaises(M.Refused): M._recovery_final(*bad, UID, GID)
+
+    def test_exclusive_darwin_rename_is_one_fixed_call_and_collision_never_falls_back(self):
+        # Deliberately inert ctypes module: this test never loads a library or
+        # invokes a native operation, including on a genuine Mac test host.
+        for returned in (0, -1):
+            calls, loads = [], []
+            class Rename:
+                def __call__(self, *args): calls.append(args); return returned
+            rename = Rename(); fake = ModuleType("ctypes")
+            fake.c_int, fake.c_char_p, fake.c_uint = object(), object(), object()
+            fake.get_errno = lambda: 17
+            def load(name, **options): loads.append((name, options)); return SimpleNamespace(renameatx_np=rename)
+            fake.CDLL = load
+            with patch.object(M.sys, "platform", "darwin"), patch.dict(sys.modules, {"ctypes": fake}):
+                if returned:
+                    with self.assertRaises(OSError) as caught: M._preserve_recovery_conflict_exclusive(17)
+                    self.assertEqual(caught.exception.errno, 17)
+                else: M._preserve_recovery_conflict_exclusive(17)
+            self.assertEqual(loads, [("/usr/lib/libSystem.B.dylib", {"use_errno": True})])
+            self.assertEqual(calls, [(17, b"GoogleService-Info.plist", 17, b"saved-foreign-ios", 4)])
+            self.assertEqual(rename.argtypes, [fake.c_int, fake.c_char_p, fake.c_int, fake.c_char_p, fake.c_uint])
+            self.assertIs(rename.restype, fake.c_int)
+
+    def test_workflow_support_is_targeted_and_keeps_the_selected_matrix(self):
+        root = PATH.parents[2]
+        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        header = workflow.split("    runs-on:", 1)[0]
+        selected = [line.strip()[2:] for line in header.split("        scope:\n", 1)[1].splitlines() if line.strip().startswith("- ")]
+        # Only the reviewed native12 or single pending-recovery selection is allowed.
+        self.assertIn(selected, (["android-registration-lifecycle"], [M.RECOVERY_CASE]))
+        blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
+        step = blocks["One real pending iOS build-input recovery through ordinary Inspect and explicit Recover"]
+        self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'", step)
+        self.assertIn("timeout-minutes: 7", step)
+        self.assertEqual(step.count("macos_aqua_qualification.py --scope project-recovery-pending"), 1)
+        self.assertIn("[[ $status == 0 ]]", step)
+        self.assertNotIn("continue-on-error", step)
+        for name in ("aqua-project-recovery-results.jsonl", "aqua-project-recovery-failure.jsonl", "aqua-project-recovery.status"):
+            self.assertIn("${{ steps.work.outputs.root }}/" + name, workflow)
+        for name in ("recovery-initial.json", "recovery-generated.json", "recovery-before.json", "recovery-after.json"):
+            self.assertNotIn(name, workflow)
+        for name, body in blocks.items():
+            if "xcode-installed-classification" in name.lower() or "wrapping" in name.lower():
+                self.assertNotIn("--scope project-recovery-pending", body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2023,11 +2023,11 @@ impl DocumentBinding {
             || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
         self.inner.bridge.android_build.admit_installed_observation(&self.inner.session_identity, token)
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_recovery_identities(&self) -> (Weak<()>, Weak<()>) {
         (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.project_recovery.installed_recovery_identity())
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn admit_installed_recovery(&self, token: crate::shell::installed_observation::recovery::Admission) -> Result<(), BridgeError> {
         let state = self.lock();
         if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()

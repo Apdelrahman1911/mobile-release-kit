@@ -385,6 +385,19 @@ jobs:
             --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
+      - name: Build and sign the separate fixed Android registration helper
+        id: android_helper
+        timeout-minutes: 10
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Fixed separate graph, original compiler/signature owners, and
+          # immediate target retirement. This never registers/runs the helper.
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare >> "$GITHUB_OUTPUT"
       - name: Build and sign the separate fixed vault helper before binding the app
         timeout-minutes: 8
         shell: bash
@@ -1002,6 +1015,9 @@ jobs:
       - name: Assemble and ad-hoc sign the app only (never --deep or the runtime)
         timeout-minutes: 3
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -1009,24 +1025,31 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+            --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
+            --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \
             --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \
             --binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop" \
             --normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
             --normal-cargo-target-dir "$CARGO_TARGET_DIR" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before
           /usr/bin/codesign --force --sign - --options runtime \
             --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/mrk-vault-keychain"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
       - name: Bind this completed signed app and current-source runtime into fresh Installer DATA
         timeout-minutes: 3
         shell: bash
+        env:
+          MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
         run: |
           set -euo pipefail
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+            --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
             --current-runtime \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
@@ -2635,6 +2658,24 @@ jobs:
             ${{ steps.work.outputs.root }}/vault-helper-build.jsonl
             ${{ steps.work.outputs.root }}/vault-helper-build.stderr
             ${{ steps.work.outputs.root }}/vault-helper-signing.json
+            ${{ steps.work.outputs.root }}/android-helper-prepare.json
+            ${{ steps.work.outputs.root }}/android-helper-build.jsonl
+            ${{ steps.work.outputs.root }}/android-helper-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-build.status
+            ${{ steps.work.outputs.root }}/android-helper-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-signed.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-before.json
+            ${{ steps.work.outputs.root }}/android-helper-verify-after.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json
             ${{ steps.work.outputs.root }}/dialog-regressions.log
