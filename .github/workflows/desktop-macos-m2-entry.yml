@@ -1,4 +1,4 @@
-name: Desktop macOS synthetic fixed-entry feasibility
+name: Desktop macOS synthetic entry startup diagnostic
 
 on:
   push:
@@ -44,7 +44,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
-      - name: Observe two direct refusals and one original LaunchServices app
+      - name: Observe one original LaunchServices entry with payload absent
         id: observation
         shell: bash
         env:

@@ -52,6 +52,194 @@ class M2EntryDataTests(unittest.TestCase):
     def parse(self, value):
         return self.adapter.native_data(self.wire(value), self.SOURCE)
 
+    def early_value(self):
+        value = self.value()
+        value.update(firstFailure="payload-terminated-before-observation",
+                     referencePIDMatchesPayload=False, exclusiveBlockedWhilePayloadAlive=False,
+                     normalQuitRequestSent=False, observationComplete=False,
+                     payloadStart=None, payloadQuit=None)
+        for pair in self.adapter.REFERENCE_IDENTITY_PAIRS:
+            for flag in pair:
+                value[flag] = False
+        return value
+
+    def gate_value(self):
+        return {"schemaVersion": 1, "source": self.SOURCE, "case": "ls-payload-absent",
+                "phase": "entry-gate-admission", "selectedReturnCode": 66,
+                "originalRootDescriptor": 0, "gateOpenDescriptor": 1,
+                "gateOpenErrno": None, "gateMatchAccepted": False,
+                "rejectedGateCloseReturned": True}
+
+    def failed_value(self):
+        return {"schemaVersion": 1, "source": self.SOURCE,
+                "execReturnedENOENT": True, "originalGateStillHeld": True}
+
+    def test_startup_diagnostic_distinguishes_gate_and_failed_exec_without_feasibility(self):
+        native = self.parse(self.early_value())
+        for gate in (self.gate_value(),
+                     dict(self.gate_value(), originalRootDescriptor=3, gateOpenDescriptor=4),
+                     dict(self.gate_value(), gateOpenDescriptor=-1, gateOpenErrno=24,
+                          gateMatchAccepted=None, rejectedGateCloseReturned=None)):
+            with self.subTest(gate=gate):
+                value = self.adapter.startup_diagnostic(native, 1, gate, None, self.SOURCE)
+                self.assertEqual(value["entryOutcome"], "entry-gate-refused")
+                self.assertEqual(value["entryGateRefusal"], gate)
+                self.assertIsNone(value["failedExec"])
+                self.assertTrue(value["expectedControlObserved"])
+        failed = self.failed_value()
+        value = self.adapter.startup_diagnostic(native, 1, None, failed, self.SOURCE)
+        self.assertEqual(value["entryOutcome"], "entry-reached-exec-enoent")
+        self.assertEqual(value["failedExec"], failed)
+        self.assertTrue(value["expectedControlObserved"])
+        self.assertFalse(self.adapter.supported_observation(native))
+        self.assertIsNone(native["originalAppExitStatus"])
+        self.assertEqual(native["allWorkerFinality"], "not-established-by-NSRunningApplication")
+        self.assertEqual(native["firstFailure"], "payload-terminated-before-observation")
+
+    def test_startup_diagnostic_rejects_conflict_and_cannot_complete_unknown_late_or_close_failure(self):
+        native = self.parse(self.early_value())
+        value = self.adapter.startup_diagnostic(native, 1, None, None, self.SOURCE)
+        self.assertEqual(value["entryOutcome"], "unresolved")
+        self.assertFalse(value["expectedControlObserved"])
+        with self.assertRaisesRegex(self.adapter.Refused, "diagnostic-conflicting-outcomes"):
+            self.adapter.startup_diagnostic(native, 1, self.gate_value(), self.failed_value(), self.SOURCE)
+        gate = dict(self.gate_value(), rejectedGateCloseReturned=False)
+        value = self.adapter.startup_diagnostic(native, 1, gate, None, self.SOURCE)
+        self.assertEqual(value["entryOutcome"], "entry-gate-refused")
+        self.assertFalse(value["expectedControlObserved"])
+        for flag in ("execReturnedENOENT", "originalGateStillHeld"):
+            failed = self.failed_value()
+            failed[flag] = False
+            value = self.adapter.startup_diagnostic(native, 1, None, failed, self.SOURCE)
+            self.assertEqual(value["entryOutcome"], "unresolved")
+            self.assertFalse(value["expectedControlObserved"])
+        for status in (0, 64, 255):
+            self.assertFalse(self.adapter.startup_diagnostic(
+                native, status, self.gate_value(), None, self.SOURCE)["expectedControlObserved"])
+        for status in (True, -1, 256, "1"):
+            with self.assertRaisesRegex(self.adapter.Refused, "diagnostic-owner-status"):
+                self.adapter.startup_diagnostic(native, status, self.gate_value(), None, self.SOURCE)
+        changes = (("timely", False), ("workDeadlineFailed", True), ("rootCloseReturned", False),
+                   ("terminationObserved", False), ("exclusiveAvailableAfterTermination", False),
+                   ("launchRequested", False), ("launchReferenceReturned", False),
+                   ("launchErrorReported", True), ("normalQuitRequestSent", True),
+                   ("referencePIDMatchesPayload", True), ("exclusiveBlockedWhilePayloadAlive", True),
+                   ("referenceExecutableIsEntry", True), ("observationComplete", True),
+                   ("firstFailure", "root-close"), ("completionCount", 2),
+                   ("completionBodyDoneCount", 0), ("completionHandoffCount", 2),
+                   ("payloadStart", self.value()["payloadStart"]), ("payloadQuit", self.value()["payloadQuit"]))
+        for key, changed in changes:
+            value = self.early_value()
+            value[key] = changed
+            with self.subTest(key=key):
+                result = self.adapter.startup_diagnostic(
+                    self.parse(value), 1, self.gate_value(), None, self.SOURCE)
+                self.assertFalse(result["expectedControlObserved"])
+
+    def test_gate_refusal_shape_preserves_original_open_and_consuming_close_outcomes(self):
+        changes = (("schemaVersion", True), ("source", "f" * 40), ("case", "direct"),
+                   ("phase", "payload"), ("selectedReturnCode", True), ("selectedReturnCode", 76),
+                   ("originalRootDescriptor", True), ("originalRootDescriptor", -1),
+                   ("originalRootDescriptor", 2**31), ("gateOpenDescriptor", True),
+                   ("gateOpenDescriptor", -2), ("gateOpenDescriptor", 2**31), ("gateOpenDescriptor", 0),
+                   ("gateOpenErrno", 0), ("gateMatchAccepted", True), ("gateMatchAccepted", None),
+                   ("rejectedGateCloseReturned", None), ("rejectedGateCloseReturned", 1), ("extra", False))
+        for key, changed in changes:
+            value = self.gate_value()
+            value[key] = changed
+            with self.subTest(key=key), self.assertRaises(self.adapter.Refused):
+                self.adapter.gate_refusal(value, self.SOURCE)
+        for key in self.gate_value():
+            value = self.gate_value()
+            del value[key]
+            with self.subTest(missing=key), self.assertRaises(self.adapter.Refused):
+                self.adapter.gate_refusal(value, self.SOURCE)
+        opened = dict(self.gate_value(), gateOpenDescriptor=-1, gateOpenErrno=24,
+                      gateMatchAccepted=None, rejectedGateCloseReturned=None)
+        for key, changed in (("gateOpenErrno", None), ("gateOpenErrno", True),
+                             ("gateOpenErrno", 0), ("gateOpenErrno", 2**31),
+                             ("gateMatchAccepted", False), ("rejectedGateCloseReturned", True)):
+            with self.subTest(key=key), self.assertRaises(self.adapter.Refused):
+                self.adapter.gate_refusal(dict(opened, **{key: changed}), self.SOURCE)
+        # A consuming close failure is preserved as DATA, not discarded or success.
+        value = dict(self.gate_value(), rejectedGateCloseReturned=False)
+        self.assertEqual(self.adapter.gate_refusal(value, self.SOURCE), value)
+
+    def test_diagnostic_reader_distinguishes_initial_absence_from_changed_or_unproved_file(self):
+        path = Path("/private/tmp/mrk-m2-inert-root/entry-gate-refused.json")
+        with patch.object(Path, "lstat", side_effect=FileNotFoundError), \
+                patch.object(self.adapter, "read_file") as reader:
+            self.assertIsNone(self.adapter.read_diagnostic(path, 501, 20))
+            self.adapter.require_absent(path, "occupied")
+            reader.assert_not_called()
+        for method in (lambda: self.adapter.read_diagnostic(path, 501, 20),
+                       lambda: self.adapter.require_absent(path, "occupied")):
+            with patch.object(Path, "lstat", side_effect=PermissionError), self.assertRaises(PermissionError):
+                method()
+        with patch.object(Path, "lstat", return_value=object()), \
+                patch.object(self.adapter, "read_file", side_effect=FileNotFoundError), \
+                self.assertRaises(FileNotFoundError):
+            self.adapter.read_diagnostic(path, 501, 20)
+        with patch.object(Path, "lstat", return_value=object()), \
+                self.assertRaisesRegex(self.adapter.Refused, "occupied"):
+            self.adapter.require_absent(path, "occupied")
+        body = json.dumps(self.gate_value()).encode()
+        original = (7, 3, stat.S_IFREG | 0o400, 501, 20, 1, len(body), 100, 100)
+        with patch.object(Path, "lstat", return_value=object()), \
+                patch.object(self.adapter, "read_file", return_value=(body, original)) as reader:
+            self.assertEqual(self.adapter.read_diagnostic(path, 501, 20), self.gate_value())
+            reader.assert_called_once_with(path, 4096)
+        for index, changed in ((2, stat.S_IFREG | 0o600), (2, stat.S_IFLNK | 0o400),
+                               (3, 502), (4, 0), (5, 2)):
+            invalid = list(original)
+            invalid[index] = changed
+            with self.subTest(index=index), patch.object(Path, "lstat", return_value=object()), \
+                    patch.object(self.adapter, "read_file", return_value=(body, tuple(invalid))), \
+                    self.assertRaisesRegex(self.adapter.Refused, "diagnostic-record-original"):
+                self.adapter.read_diagnostic(path, 501, 20)
+        with self.assertRaisesRegex(self.adapter.Refused, "diagnostic-record-name"):
+            self.adapter.read_diagnostic(path.with_name("payload-start.json"), 501, 20)
+
+    def test_diagnostic_source_keeps_original_gate_verdict_and_single_ls_owner_path(self):
+        root = Path(__file__).resolve().parents[2]
+        entry = (root / "desktop/native/macos-m2-entry/entry.c").read_text()
+        fixture = (root / "desktop/native/macos-m2-entry/fixture.h").read_text()
+        capture = fixture[fixture.index("static inline int mrk_open_gate_captured("):
+                          fixture.index("static inline int mrk_open_gate(int root)")]
+        self.assertEqual(capture.count("openat("), 1)
+        self.assertEqual(capture.count("mrk_gate_matches("), 1)
+        self.assertEqual(capture.count("mrk_close("), 1)
+        self.assertNotIn("mrk_record(", capture)
+        order = [capture.index(part) for part in (
+            "int fd = openat(", "int open_error = fd < 0 ? errno : 0;",
+            "if (fd < 0) return -1;", "int matched = mrk_gate_matches(",
+            "int closed = mrk_close(&fd);")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("return mrk_open_gate_captured(root, NULL);", fixture)
+        refusal = entry.index("if (gate < 0) {")
+        self.assertNotIn("mrk_record(", entry[:refusal])
+        self.assertLess(entry.index("mrk_open_gate_captured(root, &gate_outcome)"), refusal)
+        self.assertLess(refusal, entry.index('mrk_record(root, "entry-gate-refused.json"'))
+        self.assertLess(entry.index("return selected_return;"), entry.index("if (flock(gate, LOCK_SH | LOCK_NB))"))
+        self.assertIn("const int selected_return = 66;", entry)
+        self.assertIn("if (argc != 1 || !mrk_account()) return 64;", entry)
+        self.assertIn("if (root < 0) return 65;", entry)
+        self.assertEqual(entry.count("execve("), 1)
+        self.assertNotIn("mrk_close(&gate)", entry[entry.index("execve("):])
+        source = (root / "desktop/tools/macos_m2_entry_feasibility.py").read_text()
+        main = source[source.index("def main():"):]
+        launch = 'observed = call("one-launchservices-observation", [str(observer)], 60)'
+        self.assertEqual(main.count(launch), 1)
+        self.assertLess(main.index('for name in ("Mobile Release Kit.app", *DIAGNOSTIC_RECORDS'), main.index(launch))
+        self.assertNotIn('bundle("Mobile Release Kit.app"', main)
+        self.assertNotIn('call("exclusive-refusal"', main)
+        self.assertNotIn('call("real-failed-exec"', main)
+        self.assertNotIn('report["feasibilityObserved"] =', main)
+        self.assertIn('"feasibilityObserved": False', main)
+        self.assertIn('report["diagnosticComplete"] = diagnostic_complete', main)
+        self.assertIn('return 0 if diagnostic_complete else 1', main)
+        self.assertIn('result = owner.run_owned(argv, environ=environment, cwd=work, timeout=timeout,', main)
+
     @contextmanager
     def created_root(self, gid=0):
         """Replace every filesystem call; object tokens cannot name real FDs."""

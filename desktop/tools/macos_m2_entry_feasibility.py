@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""One fixed hosted M2 entry experiment; no production maintenance or Store work.
+"""One fixed hosted LS/payload-absent startup diagnostic, not M2 feasibility.
 
 Imports are DATA-only. Native main reuses the reviewed Aqua owner loader and
 the existing original command owner. NSWorkspace app exit status remains unknown.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import importlib.util
 import json
@@ -42,6 +41,7 @@ REQUIRED_PAYLOAD = PAYLOAD_FLAGS - {flag for pair in PAYLOAD_IDENTITY_PAIRS for 
 OBSERVER_FLAGS = frozenset("launchRequested launchReferenceReturned launchErrorReported referencePIDMatchesPayload referenceBundleIsEntry referenceBundleIsPayload referenceExecutableIsEntry referenceExecutableIsPayload exclusiveBlockedWhilePayloadAlive normalQuitRequestSent terminationObserved exclusiveAvailableAfterTermination rootCloseReturned timely observationComplete workDeadlineFailed".split())
 COUNTS = frozenset(("completionCount", "completionBodyDoneCount", "completionHandoffCount"))
 FAILURES = frozenset("none launch-completion payload-record payload-terminated-before-observation original-reference-or-shared-bridge observation-deadline quit-record normal-quit-or-last-holder native-exception cleanup-native-exception root-close final-deadline".split())
+DIAGNOSTIC_RECORDS = ("entry-gate-refused.json", "entry-failed-exec.json")
 
 
 class Refused(Exception):
@@ -139,6 +139,77 @@ def supported_observation(value):
             and all(value["payloadStart"][a] != value["payloadStart"][b] for a, b in PAYLOAD_IDENTITY_PAIRS)
             and value["payloadQuit"]["normalQuitDelegateObserved"]
             and value["payloadQuit"]["gateStillHeldAtWillTerminate"])
+
+
+def gate_refusal(value, source):
+    """Latched original branch DATA, never an observed application exit status."""
+    fields = ("case", "phase", "selectedReturnCode", "originalRootDescriptor",
+              "gateOpenDescriptor", "gateOpenErrno", "gateMatchAccepted", "rejectedGateCloseReturned")
+    record(value, source, (), fields)
+    need(value["case"] == "ls-payload-absent" and value["phase"] == "entry-gate-admission"
+         and type(value["selectedReturnCode"]) is int and value["selectedReturnCode"] == 66
+         and type(value["originalRootDescriptor"]) is int and 0 <= value["originalRootDescriptor"] < 2**31
+         and type(value["gateOpenDescriptor"]) is int and -1 <= value["gateOpenDescriptor"] < 2**31,
+         "gate-refusal-shape")
+    if value["gateOpenDescriptor"] == -1:
+        need(type(value["gateOpenErrno"]) is int and 0 < value["gateOpenErrno"] < 2**31
+             and value["gateMatchAccepted"] is None and value["rejectedGateCloseReturned"] is None,
+             "gate-open-failure-shape")
+    else:
+        need(value["gateOpenDescriptor"] != value["originalRootDescriptor"]
+             and value["gateOpenErrno"] is None and value["gateMatchAccepted"] is False
+             and type(value["rejectedGateCloseReturned"]) is bool, "gate-comparison-failure-shape")
+    return value
+
+
+def startup_diagnostic(native, original_status, gate, failed, source):
+    """Keep expected diagnostic observation separate from full feasibility."""
+    need(type(original_status) is int and 0 <= original_status <= 255, "diagnostic-owner-status")
+    if gate is not None:
+        gate_refusal(gate, source)
+    if failed is not None:
+        record(failed, source, ("execReturnedENOENT", "originalGateStillHeld"))
+    need(gate is None or failed is None, "diagnostic-conflicting-outcomes")
+    outcome = "unresolved"
+    branch_accepted = False
+    if gate is not None:
+        outcome = "entry-gate-refused"
+        branch_accepted = gate["rejectedGateCloseReturned"] is not False
+    elif failed is not None and failed["execReturnedENOENT"] and failed["originalGateStillHeld"]:
+        outcome, branch_accepted = "entry-reached-exec-enoent", True
+    true_flags = ("launchRequested", "launchReferenceReturned", "terminationObserved",
+                  "exclusiveAvailableAfterTermination", "rootCloseReturned", "timely")
+    false_flags = ("launchErrorReported", "workDeadlineFailed", "normalQuitRequestSent",
+                   "observationComplete", "referencePIDMatchesPayload", "exclusiveBlockedWhilePayloadAlive",
+                   *(flag for pair in REFERENCE_IDENTITY_PAIRS for flag in pair))
+    observed = (branch_accepted and original_status == 1
+                and native["firstFailure"] == "payload-terminated-before-observation"
+                and all(native[k] for k in true_flags) and not any(native[k] for k in false_flags)
+                and all(native[k] == 1 for k in COUNTS)
+                and native["payloadStart"] is None and native["payloadQuit"] is None)
+    return {"case": "ls-payload-absent", "entryOutcome": outcome,
+            "entryGateRefusal": gate, "failedExec": failed, "expectedControlObserved": observed}
+
+
+def require_absent(path, reason):
+    try:
+        path.lstat()  # A dangling link or any other occupant is not absence.
+    except FileNotFoundError:
+        return
+    raise Refused(reason)
+
+
+def read_diagnostic(path, uid, gid):
+    need(path.name in DIAGNOSTIC_RECORDS, "diagnostic-record-name")
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    # A name seen above but lost during read/proof is an error, never missing.
+    body, original = read_file(path, 4096)
+    need(original[2] == stat.S_IFREG | 0o400 and original[3:5] == (uid, gid)
+         and original[5] == 1, "diagnostic-record-original")
+    return document(body)
 
 
 def snapshot(root, pins):
@@ -254,16 +325,17 @@ def tree(root):
 
 def main():
     root = Path(__file__).absolute().parents[2]
-    report = {"schemaVersion": 1, "scope": "m2-entry-feasibility-only", "feasibilityObserved": False,
+    report = {"schemaVersion": 1, "scope": "m2-entry-startup-diagnostic-only", "feasibilityObserved": False,
               "installedProductQualified": False, "tauriQualified": False, "credentialQualified": False,
-              "maintenanceAvailable": False, "commands": [], "native": None,
+              "maintenanceAvailable": False, "diagnosticComplete": False, "diagnostic": None,
+              "commands": [], "native": None,
               "stage": "admission", "error": None, "sourcePrePostMatched": False,
               "cleanup": {"disposableRemoved": False, "unknownStateRetained": False,
                           "applicationImagesAndTempRetained": False, "error": None}}
     owner = work = before = bundle_pins = None
     inflight = False
     last_returned = False
-    success = False
+    diagnostic_complete = False
     try:
         need(len(sys.argv) == 1 and sys.platform == "darwin" and platform.machine() == "arm64"
              and platform.mac_ver()[0].split(".")[0] == "26" and threading.current_thread() is threading.main_thread(),
@@ -384,57 +456,38 @@ def main():
              "entry-no-payload-initializer-or-rpath")
         report["entryPreMainClosure"] = {"onlyLinkedImage": "/usr/lib/libSystem.B.dylib", "dylinker": "/usr/lib/dyld",
                                          "noRpath": True, "noModInitFunc": True, "inspectedOriginalCommands": True}
-        need(not (work / "Mobile Release Kit.app").exists(), "payload-must-be-absent-for-failed-exec")
-        exclusive = os.open(work / "maintenance-use.lock", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-        try:
-            need(signature(os.fstat(exclusive)) == gate_original, "exclusive-original")
-            fcntl.flock(exclusive, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            refused = call("exclusive-refusal", [str(entry_exe)], 15)
-            need(refused.returncode == 75 and not refused.stdout and not refused.stderr, "exclusive-refusal")
-        finally:
-            os.close(exclusive)  # Only this adapter's independent exclusive original.
-        busy = document(read_file(work / "entry-busy.json", 4096)[0])
-        record(busy, sha, ("refusedBeforeExec", "exclusiveWouldBlock"))
-        need(busy["refusedBeforeExec"] and busy["exclusiveWouldBlock"], "exclusive-record")
-        failed = call("real-failed-exec", [str(entry_exe)], 15)
-        need(failed.returncode == 76 and not failed.stdout and not failed.stderr, "failed-exec-status")
-        failure = document(read_file(work / "entry-failed-exec.json", 4096)[0])
-        record(failure, sha, ("execReturnedENOENT", "originalGateStillHeld"))
-        need(failure["execReturnedENOENT"] and failure["originalGateStillHeld"], "failed-exec-hold")
-        exclusive = os.open(work / "maintenance-use.lock", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-        try:
-            need(signature(os.fstat(exclusive)) == gate_original, "post-exec-original")
-            fcntl.flock(exclusive, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        finally:
-            os.close(exclusive)
-        report["directCases"] = {"exclusiveRefusal": busy, "failedExec": failure, "exclusiveAvailableAfterOriginalExit": True}
-        payload = bundle("Mobile Release Kit.app", "payload", payload_id)
-        payload_exe = payload / "Contents/MacOS/payload"
         appkit = ["-fobjc-arc", "-fblocks", "-framework", "AppKit", "-framework", "Foundation"]
-        zero("compile-payload", compiler + common + appkit + [str(root / NATIVE / "payload.m"), "-o", str(payload_exe)], 60)
-        zero("sign-payload", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", "--options", "runtime", str(payload)])
-        zero("verify-payload-signature", ["/usr/bin/codesign", "--verify", "--strict", str(payload)])
         observer = work / "build/observe"
         zero("compile-observer", compiler + common + appkit + [str(root / NATIVE / "observe.m"), "-o", str(observer)], 60)
-        bundle_pins = {"entry": tree(entry), "payload": tree(payload), "observer": read_file(observer, 8 * 1024 * 1024)[1]}
+        bundle_pins = {"entry": tree(entry), "observer": read_file(observer, 8 * 1024 * 1024)[1]}
         report["bundleFiles"] = {label: {k: {"bytes": v["bytes"], "sha256": v["sha256"]} for k, v in entries.items()}
                                   for label, entries in bundle_pins.items() if label != "observer"}
+        # This fresh namespace has exactly one entry invocation: the LS call.
+        # Do not create the payload or consume diagnostic names in direct cases.
+        for name in ("Mobile Release Kit.app", *DIAGNOSTIC_RECORDS, "entry-busy.json",
+                     "payload-start.json", "payload-quit.json"):
+            require_absent(work / name, "startup-diagnostic-name-occupied")
         observed = call("one-launchservices-observation", [str(observer)], 60)
         # AppKit may emit OS diagnostics. Preserve their bound/hash above, not
         # raw text or invented evidence; only the strict stdout contract counts.
         report["native"] = native_data(observed.stdout, sha)
-        need(tree(entry) == bundle_pins["entry"] and tree(payload) == bundle_pins["payload"]
+        need(tree(entry) == bundle_pins["entry"]
              and read_file(observer, 8 * 1024 * 1024)[1] == bundle_pins["observer"], "native-inputs-changed")
+        require_absent(work / "Mobile Release Kit.app", "startup-diagnostic-payload-appeared")
+        gate = read_diagnostic(work / "entry-gate-refused.json", uid, gid)
+        failed = read_diagnostic(work / "entry-failed-exec.json", uid, gid)
+        report["diagnostic"] = startup_diagnostic(report["native"], observed.returncode, gate, failed, sha)
+        check_sources()
         report["sourcePrePostMatched"] = snapshot(root, pins) == before
-        success = observed.returncode == 0 and supported_observation(report["native"]) and report["sourcePrePostMatched"]
-        report["stage"] = "observed"
+        diagnostic_complete = report["diagnostic"]["expectedControlObserved"] and report["sourcePrePostMatched"]
+        report["stage"] = "startup-diagnostic-observed"
     except BaseException as error:
         report["error"] = str(error) if type(error) is Refused else "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "adapter-or-owner-error"
         report["originalCallReturned"] = last_returned
         if owner is not None and isinstance(error, (owner.ProcessError, owner.ProcessInterrupted)):
             report["ownerFailure"] = {"dispatched": error.dispatched, "contained": error.contained,
                                       "cleanupComplete": getattr(error, "cleanup_complete", None)}
-        success = False
+        diagnostic_complete = False
     if work is not None and "work_original" in locals():
         try:
             need(signature(work.lstat())[:5] == work_original, "work-original")
@@ -460,8 +513,8 @@ def main():
                 report["cleanup"]["disposableRemoved"] = True
         except BaseException:
             report["cleanup"]["error"] = "task-cleanup-refused"
-            success = False
-        report["feasibilityObserved"] = success
+            diagnostic_complete = False
+        report["diagnosticComplete"] = diagnostic_complete
         body = json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
         try:
             need(len(body) <= 262144, "report-bound")
@@ -469,9 +522,10 @@ def main():
         except BaseException:
             return 1
     else:
-        print(json.dumps({"schemaVersion": 1, "feasibilityObserved": False, "stage": report["stage"],
+        print(json.dumps({"schemaVersion": 1, "scope": "m2-entry-startup-diagnostic-only",
+                          "diagnosticComplete": False, "feasibilityObserved": False, "stage": report["stage"],
                           "error": report["error"], "fixtureAdmission": report.get("fixtureAdmission")}, sort_keys=True))
-    return 0 if success else 1
+    return 0 if diagnostic_complete else 1
 
 
 if __name__ == "__main__":

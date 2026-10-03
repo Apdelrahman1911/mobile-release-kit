@@ -7,8 +7,29 @@ int main(int argc, char **argv) {
     if (argc != 1 || !mrk_account()) return 64;
     int root = mrk_root();
     if (root < 0) return 65;
-    int gate = mrk_open_gate(root);
-    if (gate < 0) return 66;
+    mrk_gate_open_outcome gate_outcome;
+    int gate = mrk_open_gate_captured(root, &gate_outcome);
+    if (gate < 0) {
+        /* The original refusal is already irrevocable. Use only this admitted
+           root, never change the selected return or continue after logging. */
+        const int selected_return = 66;
+        char open_error[16], record[768];
+        int e = gate_outcome.allocated_fd < 0
+            ? snprintf(open_error, sizeof(open_error), "%d", gate_outcome.open_errno)
+            : snprintf(open_error, sizeof(open_error), "null");
+        int n = e > 0 && (size_t)e < sizeof(open_error) ? snprintf(record, sizeof(record),
+            "{\"schemaVersion\":1,\"source\":\"%s\",\"case\":\"ls-payload-absent\","
+            "\"phase\":\"entry-gate-admission\",\"selectedReturnCode\":66,"
+            "\"originalRootDescriptor\":%d,\"gateOpenDescriptor\":%d,\"gateOpenErrno\":%s,"
+            "\"gateMatchAccepted\":%s,\"rejectedGateCloseReturned\":%s}\n",
+            MRK_SOURCE, root, gate_outcome.allocated_fd, open_error,
+            gate_outcome.match_accepted < 0 ? "null" : gate_outcome.match_accepted ? "true" : "false",
+            gate_outcome.rejected_close_returned < 0 ? "null" : gate_outcome.rejected_close_returned ? "true" : "false") : -1;
+        if (n > 0 && (size_t)n < sizeof(record))
+            (void)mrk_record(root, "entry-gate-refused.json", record);
+        /* A readable diagnostic is not a writer-fsync or actual exit receipt. */
+        return selected_return;
+    }
     if (flock(gate, LOCK_SH | LOCK_NB)) {
         int busy = errno == EWOULDBLOCK;
         const char *record = "{\"schemaVersion\":1,\"source\":\"" MRK_SOURCE

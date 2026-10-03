@@ -48,11 +48,27 @@ static inline int mrk_gate_matches(int root, int fd) {
         && a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_nlink == b.st_nlink
         && a.st_size == b.st_size;
 }
-static inline int mrk_open_gate(int root) {
+typedef struct {
+    int allocated_fd, open_errno, match_accepted, rejected_close_returned;
+} mrk_gate_open_outcome;
+static inline int mrk_open_gate_captured(int root, mrk_gate_open_outcome *outcome) {
     int fd = openat(root, MRK_GATE, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int open_error = fd < 0 ? errno : 0;
+    /* Memory only: preserve the original allocated number before its one close.
+       No diagnostic open, descriptor normalization or repeated predicate. */
+    if (outcome) *outcome = (mrk_gate_open_outcome){fd, open_error, -1, -1};
     if (fd < 0) return -1;
-    if (!mrk_gate_matches(root, fd)) { (void)mrk_close(&fd); return -1; }
+    int matched = mrk_gate_matches(root, fd);
+    if (outcome) outcome->match_accepted = matched;
+    if (!matched) {
+        int closed = mrk_close(&fd);
+        if (outcome) outcome->rejected_close_returned = closed;
+        return -1;
+    }
     return fd;
+}
+static inline int mrk_open_gate(int root) {
+    return mrk_open_gate_captured(root, NULL);
 }
 /* A DIFFERENT open description, never an unlock/conversion of the bridge. */
 static inline int mrk_exclusive_probe(int root) {
@@ -72,7 +88,7 @@ static inline int mrk_decimal(const char *text, int minimum, int *value) {
     if (count < 1 || (size_t)count >= sizeof(canonical) || strcmp(canonical, text)) return 0;
     *value = (int)number; return 1;
 }
-/* Four fixed public diagnostic records; exclusive publication, no repair. */
+/* Five fixed public diagnostic records; exclusive publication, no repair. */
 static inline int mrk_record(int root, const char *name, const char *body) {
     size_t size = strlen(body), offset = 0;
     char staging[80];
