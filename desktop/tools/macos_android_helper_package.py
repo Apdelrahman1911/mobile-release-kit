@@ -386,9 +386,12 @@ class Operation:
 
     def prepare(self):
         self.stage = "separate-helper-compiler"
+        # Artifact/build-finished JSON is authoritative; rich diagnostic JSON
+        # is not consumed. Render diagnostics normally under the same combined
+        # stdout/stderr bound and original command deadline.
         result = self.call("build", ["cargo", "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
                            "--locked", "--release", "--jobs", "1", "--target", "aarch64-apple-darwin",
-                           "--bin", HELPER, "--message-format=json"],
+                           "--bin", HELPER, "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work), cwd=self.checkout / WORKSPACE,
                            timeout=480, limit=4 * 1024 * 1024)
         artifact(result.stdout, self.checkout, self.work / self.target_name)

@@ -109,7 +109,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         raise owner_error
                     raise RuntimeError("DATA double original result unavailable")
                 output = self.encoded(self.cargo_rows(checkout, target))
-                return CompletedProcess(argv, 0, output.decode() if failure == "malformed" else output, b"")
+                diagnostic = (b"error: synthetic helper build failed\n" if failure == "nonzero"
+                              else b"warning: synthetic helper build diagnostic\n")
+                return CompletedProcess(argv, 101 if failure == "nonzero" else 0,
+                                        output.decode() if failure == "malformed" else output, diagnostic)
             self.assertEqual(argv[0], "/usr/bin/codesign")
             selected = Path(argv[-1])
             if "--sign" in argv:
@@ -195,6 +198,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertFalse((work / "android-helper-target").exists())
             receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
             self.assertTrue(receipt["passed"] and receipt["originalClosesKnown"] and receipt["targetRetired"])
+            build_argv, build_options = observations[0]
+            self.assertEqual([arg for arg in build_argv if arg.startswith("--message-format=")],
+                             ["--message-format=json-render-diagnostics"])
+            self.assertEqual((build_options["timeout"], build_options["capture"],
+                              build_options["text"], build_options["output_limit"]),
+                             (480, True, False, 4 * 1024 * 1024))
+            diagnostic = b"warning: synthetic helper build diagnostic\n"
+            self.assertEqual((work / "android-helper-build.stderr").read_bytes(), diagnostic)
+            self.assertEqual(receipt["originalCalls"][0]["stderrSha256"], module.digest(diagnostic))
+            self.assertEqual((work / "android-helper-build.jsonl").read_bytes(),
+                             self.encoded(self.cargo_rows(checkout, work / "android-helper-target")))
             self.assertEqual(len(receipt["originalCalls"]), 3)
             self.assertTrue(all(entry["closed"] for entry in operation.entries))
             self.assertFalse(receipt["androidServiceAuthenticated"] or receipt["androidBuildQualified"] or receipt["productReady"])
@@ -214,7 +228,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_alias_original_return_close_and_signature_failures_never_produce_success(self):
         module = ANDROID_HELPER
-        for failure in ("alias", "owner", "malformed", "close", "changed"):
+        for failure in ("alias", "owner", "malformed", "close", "changed", "nonzero"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 checkout, work, environment, owner, observations = self.fixture(Path(temporary), failure)
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
@@ -235,8 +249,20 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse(receipt["passed"])
                 uncertain = failure in ("owner", "malformed", "close")
                 self.assertEqual((work / "android-helper-target").exists(), uncertain)
-                if failure in ("alias", "owner", "malformed"):
+                if failure in ("alias", "owner", "malformed", "nonzero"):
                     self.assertEqual(len(observations), 1)
+                if failure == "nonzero":
+                    call = receipt["originalCalls"][0]
+                    self.assertEqual((call["returned"], call["returncode"]), (True, 101))
+                    self.assertEqual(receipt["failure"], {"stage": "separate-helper-compiler",
+                                     "type": "Refused", "reason": "original-nonzero-build"})
+                    self.assertTrue(receipt["targetRetired"] and receipt["originalClosesKnown"])
+                    self.assertFalse((work / module.HELPER).exists())
+                    self.assertIsNone(operation.sha256)
+                    self.assertNotIn("helperSha256", receipt)
+                    self.assertEqual((work / "android-helper-build.stderr").read_bytes(),
+                                     b"error: synthetic helper build failed\n")
+                    self.assertEqual((work / "android-helper-build.status").read_bytes(), b"101\n")
                 if failure == "close":
                     self.assertEqual(len(injected), 1)
                     self.assertFalse(receipt["originalClosesKnown"])
