@@ -239,6 +239,24 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
         self.assertIn("  launchservices:", workflow)
         self.assertIn("  direct_entry:", workflow)
         self.assertEqual(workflow.count("persist-credentials: false"), 2)
+        # The service rejects runner context at jobs.<id>.env before allocating
+        # any runner. Each consumer gets its value at the permitted step scope;
+        # prepare/readback/observe must retain Context's same hosted-runner check.
+        self.assertEqual(workflow.count("${{ runner.environment }}"), 8)
+        jobs = (
+            workflow.split("\n  launchservices:\n", 1)[1].split("\n  direct_entry:\n", 1)[0],
+            workflow.split("\n  direct_entry:\n", 1)[1],
+        )
+        for job in jobs:
+            header, steps = job.split("    steps:\n", 1)
+            self.assertNotIn("${{ runner.", header)
+            for selected in ("work", "prepare", "readback", "observe"):
+                matches = [step for step in steps.split("      - name: ")
+                           if f"\n        id: {selected}\n" in step]
+                self.assertEqual(len(matches), 1)
+                step_header = matches[0].split("\n        run: |", 1)[0]
+                self.assertIn("\n        env:\n", step_header)
+                self.assertIn("\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}", step_header)
         self.assertEqual(workflow.count('root="/Users/runner/mrk-macos-entry-diagnostic-'), 2)
         self.assertNotIn('root="/private/tmp/mrk-macos-entry-diagnostic-', workflow)
         adapter = (ROOT / "desktop/tools/macos_installed_entry_diagnostic.py").read_text()

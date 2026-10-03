@@ -20,7 +20,6 @@ jobs:
     timeout-minutes: 15
     env:
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - name: Check out only reviewed diagnostic source, without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,6 +36,7 @@ jobs:
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           umask 077
@@ -73,6 +73,8 @@ jobs:
         id: prepare
         timeout-minutes: 3
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -103,6 +105,8 @@ jobs:
         id: readback
         timeout-minutes: 3
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -118,6 +122,8 @@ jobs:
         id: observe
         timeout-minutes: 5
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -158,7 +164,6 @@ jobs:
     timeout-minutes: 15
     env:
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - name: Check out only reviewed diagnostic source, without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -175,6 +180,7 @@ jobs:
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           umask 077
@@ -211,6 +217,8 @@ jobs:
         id: prepare
         timeout-minutes: 3
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -241,6 +249,8 @@ jobs:
         id: readback
         timeout-minutes: 3
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -256,6 +266,8 @@ jobs:
         id: observe
         timeout-minutes: 5
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
