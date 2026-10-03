@@ -382,6 +382,71 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertIsNone(wait_data(state, **options)["waitGuard"])
         self.assertLessEqual(len(json.dumps(pending, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
 
+        # A/C/O final-cause tuples are diagnostic DATA, not invented native
+        # waits/finality. Only the direct source-bound incomplete-result guard
+        # may expose this one immutable local; no arbitrary frame traversal.
+        def result_template(value, error, clear, following):
+            _result_guard_state = None if clear else value
+            if following is not None:
+                following(False, error)
+            raise error
+
+        def result_data(value, *, filename=exact, qualified="run_command", clear=False,
+                        following=None, message="owned command produced incomplete output"):
+            code = result_template.__code__.replace(co_filename=filename, co_name="run_command", co_qualname=qualified)
+            try:
+                FunctionType(code, {})(value, ProcessErrorData(message), clear, following)
+            except ProcessErrorData as error:
+                return module.original_failure(error, owner, checkout, 480, 4 * 1024 * 1024)
+            self.fail("inert result guard was not raised")
+
+        empty = (0, 0, 0, 0, ())
+        anchor = (1, 8191, (1, 2, 0, 0, ((1, 1234),)))
+        custodian = (1, 16383, (1, 1, 0, 17, ((1, 2345),)), (1, 2), anchor)
+        result_state = (1, 65535, (1, 2), (1, 0), (0, 0), (0, 0), custodian)
+        captured = result_data(result_state)
+        self.assertEqual(captured["resultGuard"], result_state)
+        self.assertEqual((captured["resultGuard"][6][2][1], captured["resultGuard"][6][4][2][1]), (1, 2))
+        self.assertIsNone(captured["waitGuard"])
+        self.assertEqual(captured["classification"], "incomplete-output")
+        for status in (0, 2, 3):
+            c_missing = (*result_state[:6], (status, 0, empty, (0, 0), (0, 0, empty)))
+            a_missing = (*result_state[:6], (*custodian[:4], (status, 0, empty)))
+            self.assertEqual(result_data(c_missing)["resultGuard"], c_missing)
+            self.assertEqual(result_data(a_missing)["resultGuard"], a_missing)
+        invalid_results = (
+            None, list(result_state), "PRIVATE", result_state[:-1], (True, *result_state[1:]),
+            (1, 65536, *result_state[2:]), (1, 0, (False, 0), *result_state[3:]),
+            (*result_state[:4], (-1, 0), *result_state[5:]),
+            (*result_state[:6], (3, 1, empty, (0, 0), (0, 0, empty))),
+            (*result_state[:6], (1, 0, (1, 1, 13, 0, ()), (1, 0), anchor)),  # errno only on OSError.
+            (*result_state[:6], (1, 0, (1, 11, 4096, 0, ()), (1, 0), anchor)),
+            (*result_state[:6], (*custodian[:4], (1, 0, (1, 2, 0, 0, ((1, 1),) * 5)))),
+            (*result_state[:6], (*custodian[:4], (1, 0, (1, 2, 0, 0, (("PRIVATE", 1),))))),
+            (*result_state[:6], (*custodian[:4], (2, 0, (2, 0, 0, 0, ())))),
+        )
+        for invalid in invalid_results:
+            diagnostic = result_data(invalid)
+            self.assertIsNone(diagnostic["resultGuard"])
+            self.assertNotIn("PRIVATE", json.dumps(diagnostic))
+        for options in ({"filename": "/unrelated/_command_process.py"}, {"qualified": "other.run_command"},
+                        {"clear": True}, {"following": require_template},
+                        {"message": "owned command protocol or original ownership is incomplete"}):
+            self.assertIsNone(result_data(result_state, **options)["resultGuard"])
+
+        maximum_failure = (1, 11, 4095, 31, ((4, 1000000),) * 4)
+        maximum = (1, 65535, (2, 255), (2, 255), (16777216, 16777216), (16777216, 16777216),
+                   (1, 16383, maximum_failure, (2, 255), (1, 8191, maximum_failure)))
+        largest = result_data(maximum)
+        self.assertEqual(largest["resultGuard"], maximum)
+        # Conservative independent maxima, not a claimed reachable receipt.
+        largest.update(ownerErrorType="ProcessOutcomeUnknown", classification="failed-timeout-or-incomplete-output",
+                       timeoutSeconds=2147483647, outputLimitBytes=2147483647, visitedFrames=32,
+                       omittedFrames=32, foreignFrames=32, tracebackTruncated=False,
+                       frames=[{"source": "src/mobile_release/_command_process.py", "function": "x" * 64,
+                                "line": 1000000}] * 8)
+        self.assertLessEqual(len(json.dumps(largest, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+
         # Even diagnostic inspection failure must re-raise the identical owner
         # exception and leave the uncertain target; this is still a DATA double.
         with tempfile.TemporaryDirectory() as temporary:

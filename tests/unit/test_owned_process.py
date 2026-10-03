@@ -22,7 +22,7 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import mobile_release
@@ -164,6 +164,65 @@ class CommandContractTests(unittest.TestCase):
                         if isinstance(failure, KeyboardInterrupt):
                             self.assertIs(engine.ctx.first_interruption, failure)
                         self.assertTrue(guard.lifetime_ledger.verdict().contained)
+
+    def test_first_failure_diagnostic_is_bounded_private_and_after_original_retirement(self):
+        ctx = self.context("A")
+        error = command._accept_stop(ctx, command._scalar(ctx.nonce, cutoff=ctx.run))
+        first, epoch, cutoff = ctx.first_failure, ctx.error_epoch, ctx.cutoff()
+        self.assertEqual(first[:3], (1, 1, 0))
+        self.assertEqual(first[3], 1 | 16)  # No traceback: exact direct STOP recorder.
+        self.assertEqual(first[4][0][0], 1)
+        self.assertTrue(command._accept_stop.__code__.co_firstlineno <= first[4][0][1]
+                        < command._accept_stop.__code__.co_firstlineno + 20)
+        ctx.record(owned.ProcessError(command.TIMEOUT))
+        self.assertIs(ctx.primary, error)
+        self.assertIs(ctx.first_failure, first)
+        self.assertEqual((ctx.error_epoch, ctx.cutoff()), (epoch + 1, cutoff))
+
+        ctx = self.context("C")
+        original = ValueError("PRIVATE exception payload")
+        def unavailable(*_args):
+            self.assertIs(ctx.primary, original)
+            self.assertTrue(ctx.stopped and ctx.launch_retired)
+            self.assertEqual(ctx.error_epoch, 1)
+            self.assertIsNotNone(ctx.failure_cutoff)
+            raise MemoryError("PRIVATE diagnostic failed")
+        with patch.object(command, "_first_failure_snapshot", side_effect=unavailable):
+            ctx.record(original)
+        self.assertIs(ctx.primary, original)
+        self.assertEqual(ctx.secondary, [])
+        self.assertEqual(ctx.error_epoch, 1)
+        self.assertEqual(command._failure_diagnostic(ctx), command._FAILURE_UNAVAILABLE)
+
+        class PrivateOSFailure(OSError):
+            @property
+            def errno(self):
+                raise AssertionError("must use builtin descriptor")
+            @property
+            def __traceback__(self):
+                raise AssertionError("must use builtin descriptor")
+            def __str__(self):
+                raise AssertionError("must not render exception")
+
+        def template(depth, recurse, failure):
+            if depth:
+                return recurse(depth - 1, recurse, failure)
+            raise failure
+
+        for filename in (command.__file__, "/unrelated/_command_process.py"):
+            traced = FunctionType(template.__code__.replace(co_filename=filename), {})
+            try:
+                traced(40, traced, PrivateOSFailure(13, "PRIVATE path/argv/output"))
+            except PrivateOSFailure as failure:
+                snapshot = command._first_failure_snapshot(failure, sys._getframe())
+            self.assertEqual(snapshot[:3], (1, 11, 13))
+            self.assertTrue(snapshot[3] & 2)  # At most16 visited traceback frames.
+            self.assertEqual(len(snapshot[4]), 4 if filename == command.__file__ else 0)
+            self.assertEqual(bool(snapshot[3] & 4), filename == command.__file__)
+            encoded = json.dumps(snapshot)
+            self.assertNotIn("PRIVATE", encoded)
+            self.assertNotIn(filename, encoded)
+            self.assertLessEqual(len(encoded), 128)
 
     def test_native_record_roundtrip_preserves_bytes_and_original_path_components(self):
         env = {"PATH": ":relative:relative:/bin", "EMPTY": "", "LARGE": "x" * 9000}
@@ -344,6 +403,7 @@ class CommandContractTests(unittest.TestCase):
         owner.anchor_protocol_failed = False
         owner.anchor_expected = owner.anchor_reply = None
         owner.anchor_work = owner.anchor_terminal = None
+        owner.anchor_diagnostic = command._ANCHOR_DIAGNOSTIC_NONE
         owner.child = owner.wait = owner.seal = owner.group = None
         owner.create_route = command._Route(command.Tag.CREATE_W)
         owner.run_route = command._Route(command.Tag.RUN_TOOL)
@@ -482,7 +542,13 @@ class CommandContractTests(unittest.TestCase):
                         first = ctx.primary
                     code = owner.finish()
                 self.assertEqual([tag for tag, _body in written], [command.Tag.WORK_DONE, command.Tag.TERMINAL])
-                self.assertEqual(written[0][1], written[1][1])
+                terminal = owned._parse(written[1][1])
+                diagnostic = terminal.pop("d")
+                self.assertEqual(written[0][1], owned._json(terminal))
+                self.assertEqual(diagnostic[0], 1)
+                self.assertEqual(bool(diagnostic[1] & (1 << 3)), order != "no-stop")
+                self.assertTrue(diagnostic[1] & (1 << 10))  # Genuine GROUP_DONE was observed first.
+                self.assertEqual(diagnostic[2][0], 0 if order == "no-stop" else 1)
                 self.assertEqual(written[0][1], owner.work_done)
                 self.assertTrue(owner.group_done and owner.group.retired and owner._local_producers())
                 self.assertEqual(code, command.HELPER_OK if order == "no-stop" else command.HELPER_FAILED)
@@ -612,7 +678,11 @@ class CommandContractTests(unittest.TestCase):
                     self.assertEqual(events, ["terminate", "retire", "wait", "worker-eof", "WORK_DONE",
                                               "group-done", "TERMINAL"])
                     self.assertEqual([tag for tag, _body in written], [command.Tag.WORK_DONE, command.Tag.TERMINAL])
-                    self.assertEqual(written[0][1], written[1][1])
+                    terminal = owned._parse(written[1][1])
+                    diagnostic = terminal.pop("d")
+                    self.assertEqual(written[0][1], owned._json(terminal))
+                    self.assertEqual(diagnostic[0], 1)
+                    self.assertTrue(diagnostic[1] & 1 and diagnostic[1] & (1 << 10))
                     fields = command._settlement_fields(written[0][1], ctx)
                     self.assertTrue(fields["producer"] and fields["create"] and fields["moved"])
                     self.assertFalse(fields["no_child"] or fields["run"] or fields["armed"])
@@ -851,15 +921,108 @@ class CommandContractTests(unittest.TestCase):
         engine.sealed = True
         fields = dict(create=True, run=True, no_target=None, wait={"kind": "exit", "code": 127},
                       producer=True, result=True, stdout=0, stderr=0, fence=None)
-        with self.assertRaises(owned.ProcessError): engine._terminal(command._scalar(engine.nonce, **fields))
+        empty = command._FAILURE_NONE
+        custodian = (1, 0, empty, (1, 0), (0, 0, empty))
+        for diagnostic in (None, custodian):
+            optional = {} if diagnostic is None else {"d": diagnostic}
+            with self.assertRaises(owned.ProcessError):
+                engine._terminal(command._scalar(engine.nonce, **fields, **optional))
         engine.create_route.attempted = engine.run_route.attempted = True
         engine.prepared, engine.ready = {"group": 2002, "signals": 0}, True
-        self.assertEqual(engine._terminal(command._scalar(engine.nonce, **fields))["wait"]["code"], 127)
+        for diagnostic, status in ((None, 0), (custodian, 1), ((2, 0, empty, (0, 0), (0, 0, empty)), 2),
+                                   ("PRIVATE invalid diagnostic", 3), ((False, 0, empty, (0, 0), (0, 0, empty)), 3)):
+            optional = {} if diagnostic is None else {"d": diagnostic}
+            authority = engine._terminal(command._scalar(engine.nonce, **fields, **optional))
+            self.assertEqual(authority["wait"]["code"], 127)
+            self.assertNotIn("d", authority)
+            self.assertEqual(engine.terminal_diagnostic[0], status)
+            self.assertFalse(engine.original_finality())  # Metadata supplies no real wait/close/handler proof.
         with self.assertRaises(owned.ProcessError):
             engine._terminal(command._scalar(engine.nonce, **{**fields, "no_target": "EXEC_REJECTED"}))
         fields["wait"] = {"kind": "signal", "code": signal.SIGKILL}
         fields["no_target"] = "EXEC_REJECTED"
         self.assertEqual(engine._terminal(command._scalar(engine.nonce, **fields))["no_target"], "EXEC_REJECTED")
+
+    def test_final_anchor_metadata_preserves_exact_authority_and_closed_statuses(self):
+        empty = command._FAILURE_NONE
+        for diagnostic, status in ((None, 0), ((1, 8191, (1, 2, 0, 0, ((1, 1000000),))), 1),
+                                   ((2, 0, empty), 2), ((0, 0, empty), 3), ((3, 0, empty), 3),
+                                   ("PRIVATE", 3), ((True, 0, empty), 3), ((1, 8192, empty), 3)):
+            owner = self._inert_custodian()
+            work = self._inert_custodian_settlement(owner)
+            owner._anchor_frame(command.Tag.WORK_DONE, work)
+            owner.group, owner.group_done_sent = SimpleNamespace(retired=True), True
+            terminal = work if diagnostic is None else command._with_terminal_diagnostic(work, diagnostic)
+            owner._anchor_frame(command.Tag.TERMINAL, terminal)
+            self.assertEqual(owner.anchor_terminal, owner.anchor_work)
+            self.assertEqual(owner.anchor_diagnostic[0], status)
+            self.assertIsNone(owner.ctx.primary)
+            self.assertNotIn("PRIVATE", json.dumps(owner.anchor_diagnostic))
+
+        for problem in ("work-metadata", "authority-mismatch", "nonce", "extra-key", "noncanonical"):
+            owner = self._inert_custodian()
+            work = self._inert_custodian_settlement(owner)
+            terminal = command._with_terminal_diagnostic(work, (1, 0, empty))
+            if problem != "work-metadata":
+                owner._anchor_frame(command.Tag.WORK_DONE, work)
+                owner.group, owner.group_done_sent = SimpleNamespace(retired=True), True
+            fields = owned._parse(terminal)
+            if problem == "authority-mismatch": fields["result"] = False
+            if problem == "nonce": fields["nonce"] = "f" * 32
+            if problem == "extra-key": fields["other"] = 1
+            terminal = owned._json(fields) + (b"\n" if problem == "noncanonical" else b"")
+            with self.assertRaises(owned.ProcessError):
+                owner._anchor_frame(command.Tag.WORK_DONE if problem == "work-metadata" else command.Tag.TERMINAL, terminal)
+
+    def test_result_guard_diagnostic_cannot_replace_original_failure_or_run_on_success(self):
+        # Actual Python guard, inert body/scope/publication only. These modeled
+        # observations are not native waits/finality evidence or command runs.
+        class Scope:
+            _cleanup_errors = ()
+            def __init__(self, *_args, **_kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+
+        for case in ("incomplete", "diagnostic-failed", "complete"):
+            guard = DefaultCancellation(owned.ProcessCleanupError, "fixture")
+            engine = command._Outer(guard, False, 30, None, None, suppress_cancel=False, text=False)
+            engine.body = lambda *_args: None
+            engine.frozen = self.frozen(nonce=engine.nonce)
+            engine.wait = SimpleNamespace(status_kind="exit", status_code=2)
+            engine.terminal = dict(wait={"kind": "exit", "code": 0}, result=False, stdout=0, stderr=0)
+            engine.decoded = (b"", b"") if case == "complete" else None
+            outcome = SimpleNamespace(original_finality=object(), no_target=None,
+                                      run_tool=SimpleNamespace(attempted=True), returncode=0,
+                                      result_integrity="complete" if case == "complete" else "incomplete")
+            engine.publish = lambda: outcome
+            diagnostic = engine._result_diagnostic
+            with patch.object(command, "cancellation_owner", return_value=(guard, False)), \
+                 patch.object(guard, "_borrowable"), patch.object(command, "CleanupScope", Scope), \
+                 patch.object(command, "_Outer", return_value=engine), \
+                 patch.object(engine, "_result_diagnostic", side_effect=MemoryError() if case == "diagnostic-failed"
+                              else diagnostic) as snapshot:
+                if case == "complete":
+                    result = owned.run_owned(["fixture"], text=False)
+                    self.assertEqual(result.returncode, 0)
+                    snapshot.assert_not_called()
+                else:
+                    states = []
+                    try:
+                        owned.run_owned(["fixture"], text=False)
+                    except owned.ProcessError as error:
+                        self.assertEqual(str(error), "owned command produced incomplete output")
+                        self.assertTrue(error.dispatched)
+                        self.assertIsNone(engine.ctx.primary)
+                        trace = error.__traceback__
+                        while trace is not None:
+                            if trace.tb_frame.f_code is command.run_command.__code__:
+                                states.append(trace.tb_frame.f_locals.get("_result_guard_state"))
+                            trace = trace.tb_next
+                    else:
+                        self.fail("incomplete modeled output unexpectedly returned")
+                    self.assertEqual(len(states), 1)
+                    self.assertEqual(states[0], None if case == "diagnostic-failed" else diagnostic(outcome))
+                    snapshot.assert_called_once_with(outcome)
 
     def test_latched_helper_stop_cannot_be_erased_by_a_later_terminal_epoch(self):
         for role in ("A", "C"):
@@ -894,7 +1057,8 @@ class CommandContractTests(unittest.TestCase):
     def test_c_result_and_terminal_status_preserve_signal_during_fence_or_publication(self):
         # Inert orchestration only: native producer/fence prerequisites are
         # isolated here, never presented as original process or disk evidence.
-        for edge in ("none", "failed-anchor", "fence", "serialization", "publication"):
+        for edge in ("none", "failed-anchor", "overflow", "fence", "serialization", "publication",
+                     "diagnostic-signal", "diagnostic-failed"):
             with self.subTest(edge=edge):
                 ctx = self.context("C")
                 owner = command._Custodian.__new__(command._Custodian)
@@ -907,16 +1071,24 @@ class CommandContractTests(unittest.TestCase):
                     if edge == "fence": ctx.helper_signal(signal.SIGTERM, None)
                 owner.writer = SimpleNamespace(publish=fence, close=lambda: True, complete=True)
                 owner.writer_prepared = True
-                owner._relay_output = lambda: True
+                def relay():
+                    if edge == "overflow":
+                        owner.output_overflow = True
+                        ctx.record(owned.ProcessError("owned command output exceeds its bound"))
+                    return True
+                owner._relay_output = relay
                 owner.anchor_work = dict(result=True, no_child=False, run=True, rejected=None,
                                          wait={"kind": "exit", "code": 0})
-                owner.wait = SimpleNamespace(status_code=(command.HELPER_FAILED if edge == "failed-anchor"
+                owner.wait = SimpleNamespace(status_kind="exit", status_code=(command.HELPER_FAILED if edge == "failed-anchor"
                                                          else command.HELPER_OK))
-                owner.output_overflow = owner.source_failed = False
+                owner.output_overflow = owner.source_failed = owner.anchor_protocol_failed = False
+                owner.anchor_diagnostic = ((1, 3, (1, 2, 0, 0, ((1, 1234),))) if edge == "failed-anchor"
+                                           else command._ANCHOR_DIAGNOSTIC_NONE)
                 owner.output = [b"", b""]
                 owner.create_route = owner.run_route = SimpleNamespace(attempted=True)
                 frames = []
                 encode = command._scalar
+                decorate = command._with_terminal_diagnostic
                 def scalar(nonce, **fields):
                     if edge == "serialization" and "fence" in fields:
                         ctx.helper_signal(signal.SIGTERM, None)
@@ -926,13 +1098,31 @@ class CommandContractTests(unittest.TestCase):
                     if tag is command.Tag.TERMINAL:
                         frames.append(owned._parse(content))
                         if edge == "publication": ctx.helper_signal(signal.SIGTERM, None)
-                with patch.object(command, "_scalar", new=scalar), patch.object(command, "_send", new=send):
+                def diagnostic(content, value):
+                    if edge == "diagnostic-failed": raise MemoryError("DATA-only diagnostic failure")
+                    if edge == "diagnostic-signal": ctx.helper_signal(signal.SIGTERM, None)
+                    return decorate(content, value)
+                with patch.object(command, "_scalar", new=scalar), patch.object(command, "_send", new=send), \
+                     patch.object(command, "_with_terminal_diagnostic", new=diagnostic):
                     result = owner.finish()
                 self.assertEqual(len(frames), 1)
-                self.assertIs(frames[0]["result"], edge not in {"fence", "failed-anchor"})
+                self.assertIs(frames[0]["result"], edge not in {"fence", "failed-anchor", "overflow"})
                 self.assertTrue(frames[0]["producer"] and frames[0]["fence"])
-                self.assertEqual(result, command.HELPER_OK if edge == "none" else
-                                 command.HELPER_FAILED if edge in {"fence", "failed-anchor"} else command.HELPER_UNKNOWN)
+                self.assertEqual(result, command.HELPER_OK if edge in {"none", "diagnostic-failed"} else
+                                 command.HELPER_FAILED if edge in {"fence", "failed-anchor", "overflow"} else command.HELPER_UNKNOWN)
+                if edge == "diagnostic-failed":
+                    self.assertNotIn("d", frames[0])
+                    self.assertIsNone(ctx.primary)
+                else:
+                    captured = command._received_custodian_diagnostic(frames[0]["d"])
+                    self.assertIsNotNone(captured)
+                    self.assertEqual(captured[3], (1, owner.wait.status_code))
+                    self.assertEqual(captured[4], owner.anchor_diagnostic)
+                    if edge == "failed-anchor":
+                        self.assertEqual((captured[2][1], captured[4][2][1]), (1, 2))
+                    elif edge == "overflow":
+                        self.assertEqual(captured[2][1], 3)
+                        self.assertTrue(captured[1] & (1 << 6))
 
     def event(self, ordinal, operation, edge, *, written=0, flags=0, outcome=None, identity=True):
         if outcome is None:

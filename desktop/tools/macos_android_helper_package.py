@@ -118,6 +118,45 @@ def build_environment(environment, work):
     return selected
 
 
+def result_guard_tuple(value):
+    """Closed immutable A/C/O diagnostic DATA, not a completion/ownership proof."""
+    def integer(item, low, high):
+        return type(item) is int and low <= item <= high
+
+    def failure(item):
+        if (type(item) is not tuple or len(item) != 5 or not integer(item[0], 0, 2)
+                or not integer(item[1], 0, 12) or not integer(item[2], 0, 4095)
+                or not integer(item[3], 0, 31) or type(item[4]) is not tuple or len(item[4]) > 4):
+            return False
+        if item[0] != 1:
+            return item == (item[0], 0, 0, 0, ())
+        return (item[1] != 0 and (item[2] == 0 or item[1] == 11)
+                and all(type(site) is tuple and len(site) == 2 and integer(site[0], 1, 4)
+                        and integer(site[1], 1, 1000000) for site in item[4]))
+
+    empty = (0, 0, 0, 0, ())
+
+    def anchor(item):
+        return (type(item) is tuple and len(item) == 3 and integer(item[0], 0, 3)
+                and integer(item[1], 0, 8191) and failure(item[2])
+                and (item[0] == 1 or item == (item[0], 0, empty)))
+
+    def waited(item):
+        return (type(item) is tuple and len(item) == 2 and integer(item[0], 0, 2)
+                and integer(item[1], 0, 255) and (item[0] != 0 or item[1] == 0)
+                and (item[0] != 2 or item[1] != 0))
+
+    def custodian(item):
+        return (type(item) is tuple and len(item) == 5 and integer(item[0], 0, 3)
+                and integer(item[1], 0, 16383) and failure(item[2]) and waited(item[3]) and anchor(item[4])
+                and (item[0] == 1 or item == (item[0], 0, empty, (0, 0), (0, 0, empty))))
+
+    return (type(value) is tuple and len(value) == 7 and integer(value[0], 1, 1)
+            and integer(value[1], 0, 65535) and waited(value[2]) and waited(value[3])
+            and all(type(pair) is tuple and len(pair) == 2 and all(integer(item, 0, 16 * 1024 * 1024)
+                    for item in pair) for pair in value[4:6]) and custodian(value[6]))
+
+
 def original_failure(error, owner, checkout, timeout, limit):
     """Bounded original exception DATA; never output, completion or custody proof."""
     need(type(timeout) is int and 0 < timeout < 2 ** 31
@@ -147,6 +186,7 @@ def original_failure(error, owner, checkout, timeout, limit):
                for name in ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py")}
     frames, visited, foreign = [], 0, 0
     wait_guard, wait_sites = None, 0
+    result_guard, result_sites = None, 0
     trace = BaseException.__traceback__.__get__(error)
     while trace is not None and visited < 32:
         visited += 1
@@ -179,13 +219,23 @@ def original_failure(error, owner, checkout, timeout, limit):
                                            "protocolFailed", "outputFailed"), value))
                     if not value[1]:
                         wait_guard["wireEof"] = wait_guard["wirePoisoned"] = None
+            if (error_type == "ProcessError" and classification == "incomplete-output"
+                    and source == "src/mobile_release/_command_process.py"
+                    and code.co_name == code.co_qualname == "run_command" and following is None):
+                result_sites += 1
+                # Only this source-owned immutable tuple; never read the engine,
+                # output, arbitrary frame locals, error payload, paths or argv.
+                value = trace.tb_frame.f_locals.get("_result_guard_state")
+                if result_guard_tuple(value):
+                    result_guard = value
         trace = trace.tb_next
     result = {"schemaVersion": 1, "available": True, "ownerErrorType": error_type,
               "classification": classification, "timeoutSeconds": timeout,
               "outputLimitBytes": limit, "captureMode": "bytes", "frames": frames,
               "visitedFrames": visited, "omittedFrames": visited - len(frames),
               "foreignFrames": foreign, "tracebackTruncated": trace is not None,
-              "waitGuard": wait_guard if wait_sites == 1 and trace is None else None}
+              "waitGuard": wait_guard if wait_sites == 1 and trace is None else None,
+              "resultGuard": result_guard if result_sites == 1 and trace is None else None}
     need(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")) <= 2048,
          "original-failure-diagnostic-bound")
     return result

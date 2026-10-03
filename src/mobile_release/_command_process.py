@@ -1009,6 +1009,161 @@ def _scalar_fields(content: bytes, nonce: bytes, names: set[str]) -> dict[str, A
     return result
 
 
+# Terminal diagnostics are DATA, never a producer/result/ownership predicate.
+# F=(availability,cause,errno,trace_flags,source_sites); A=(status,mask,F);
+# C=(status,mask,F,A_wait,A). Status 0/1/2/3 is missing/available/unavailable/invalid.
+_FAILURE_NONE = (0, 0, 0, 0, ())
+_FAILURE_UNAVAILABLE = (2, 0, 0, 0, ())
+_ANCHOR_DIAGNOSTIC_NONE = (0, 0, _FAILURE_NONE)
+_CUSTODIAN_DIAGNOSTIC_NONE = (0, 0, _FAILURE_NONE, (0, 0), _ANCHOR_DIAGNOSTIC_NONE)
+
+
+def _first_failure_snapshot(error: BaseException, caller: Any) -> tuple[Any, ...]:
+    # Closed cause codes: protocol/deadline/output/parent/observer/other ProcessError,
+    # cleanup/unknown/interrupt/exit/OSError/other. Never serialize exception text.
+    category, number = 12, 0
+    if type(error) is ProcessError:
+        category = 6
+        args = BaseException.args.__get__(error)
+        if type(args) is tuple and len(args) == 1 and type(args[0]) is str and len(args[0]) <= 128:
+            category = {ERROR: 1, TIMEOUT: 2, "owned command output exceeds its bound": 3,
+                        "owned command original parent ended": 4,
+                        "owned command original observer ended": 5}.get(args[0], 6)
+    elif type(error) is ProcessCleanupError:
+        category = 7
+    elif type(error) is ProcessOutcomeUnknown:
+        category = 8
+    elif isinstance(error, KeyboardInterrupt):
+        category = 9
+    elif isinstance(error, SystemExit):
+        category = 10
+    elif isinstance(error, OSError):
+        category = 11
+        value = OSError.errno.__get__(error)
+        number = value if _integer(value, 1, 4095) else 0
+    sources = {__file__: 1, native.__file__: 2, cancellation_state.__file__: 3,
+               os.path.join(os.path.dirname(__file__), "owned_process.py"): 4}
+
+    def site(frame: Any, line: int) -> tuple[int, int] | None:
+        filename = frame.f_code.co_filename
+        source = sources.get(filename) if type(filename) is str and len(filename) <= 4096 else None
+        return (source, line) if source is not None and _integer(line, 1, 1_000_000) else None
+
+    trace = BaseException.__traceback__.__get__(error)
+    flags, visited, sites = int(trace is None), 0, []
+    while trace is not None and visited < 16:
+        visited += 1
+        value = site(trace.tb_frame, trace.tb_lineno)
+        if value is None:
+            flags |= 8
+        else:
+            if len(sites) == 4:
+                sites.pop(0)
+                flags |= 4
+            sites.append(value)
+        trace = trace.tb_next
+    if trace is not None:
+        flags |= 2
+    if not sites:
+        flags |= 16  # Direct record site, not a manufactured traceback.
+        value = site(caller, caller.f_lineno)
+        if value is None:
+            flags |= 8
+        else:
+            sites.append(value)
+    return (1, category, number, flags, tuple(sites))
+
+
+def _failure_diagnostic(context: _Context) -> tuple[Any, ...]:
+    return (context.first_failure if context.first_failure is not None else
+            _FAILURE_UNAVAILABLE if context.primary is not None else _FAILURE_NONE)
+
+
+def _diagnostic_mask(*flags: bool) -> int:
+    return sum(1 << index for index, value in enumerate(flags) if value)
+
+
+def _diagnostic_wait(kind: Any, code: Any) -> tuple[int, int]:
+    if kind == "exit" and _integer(code, 0, 255):
+        return (1, code)
+    if kind == "signal" and _integer(code, 1, 255):
+        return (2, code)
+    return (0, 0)
+
+
+def _received_failure_diagnostic(value: Any) -> tuple[Any, ...] | None:
+    if (type(value) is not list or len(value) != 5 or any(type(item) is not int for item in value[:4])
+            or type(value[4]) is not list or len(value[4]) > 4):
+        return None
+    available, category, number, flags, sites = value
+    if available in (0, 2):
+        return (available, 0, 0, 0, ()) if category == number == flags == 0 and not sites else None
+    if (available != 1 or not 1 <= category <= 12 or not 0 <= number <= 4095
+            or number != 0 and category != 11 or not 0 <= flags <= 31
+            or any(type(site) is not list or len(site) != 2 or not _integer(site[0], 1, 4)
+                   or not _integer(site[1], 1, 1_000_000) for site in sites)):
+        return None
+    return (1, category, number, flags, tuple((site[0], site[1]) for site in sites))
+
+
+def _received_anchor_diagnostic(value: Any, *, nested: bool = False) -> tuple[Any, ...] | None:
+    if (type(value) is not list or len(value) != 3 or not _integer(value[0], 0, 3)
+            or not _integer(value[1], 0, 8191) or not nested and value[0] not in (1, 2)):
+        return None
+    failure = _received_failure_diagnostic(value[2])
+    if failure is None:
+        return None
+    if value[0] != 1 and (value[1] != 0 or failure != _FAILURE_NONE):
+        return None
+    return (value[0], value[1], failure)
+
+
+def _received_custodian_diagnostic(value: Any) -> tuple[Any, ...] | None:
+    if (type(value) is not list or len(value) != 5 or not _integer(value[0], 1, 2)
+            or not _integer(value[1], 0, 16383) or type(value[3]) is not list or len(value[3]) != 2):
+        return None
+    kind, code = value[3]
+    if (not _integer(kind, 0, 2) or not _integer(code, 0, 255)
+            or kind == 0 and code != 0 or kind == 2 and code == 0):
+        return None
+    failure, anchor = _received_failure_diagnostic(value[2]), _received_anchor_diagnostic(value[4], nested=True)
+    if failure is None or anchor is None:
+        return None
+    result = (value[0], value[1], failure, (kind, code), anchor)
+    if value[0] == 2 and result != (2, 0, _FAILURE_NONE, (0, 0), _ANCHOR_DIAGNOSTIC_NONE):
+        return None
+    return result
+
+
+def _terminal_authority(content: bytes, nonce: bytes, names: set[str], role: str) -> tuple[bytes, tuple[Any, ...]]:
+    from .owned_process import _parse
+    fields = _parse(content)
+    extra = {"d"} if "d" in fields else set()
+    # WHOLE canonical frame/nonce/exact keys first; none of these errors are
+    # diagnostic failures. Only d is stripped before original validators run.
+    fields = _scalar_fields(content, nonce, names | extra)
+    missing = _ANCHOR_DIAGNOSTIC_NONE if role == "A" else _CUSTODIAN_DIAGNOSTIC_NONE
+    if not extra:
+        return content, missing
+    value = fields.pop("d")
+    authority = _json(fields)
+    try:
+        diagnostic = (_received_anchor_diagnostic(value) if role == "A"
+                      else _received_custodian_diagnostic(value))
+    except BaseException:
+        diagnostic = None
+    return authority, (3, *missing[1:]) if diagnostic is None else diagnostic
+
+
+def _with_terminal_diagnostic(content: bytes, diagnostic: tuple[Any, ...]) -> bytes:
+    from .owned_process import _parse
+    fields = _parse(content)
+    fields["d"] = diagnostic
+    result = _json(fields)
+    _require(len(result) <= SCALAR_LIMIT)
+    return result
+
+
 @dataclass(slots=True)
 class _Route:
     tag: Tag
@@ -1040,6 +1195,7 @@ class _Context:
         self.guard, self.parent, self.suppress_cancel = guard, parent, suppress_cancel
         self.lock = threading.Lock()
         self.primary: BaseException | None = None
+        self.first_failure: tuple[Any, ...] | None = None
         self.secondary: list[BaseException] = []
         self.first_interruption: BaseException | None = None
         self.failure_cutoff: int | None = None
@@ -1092,9 +1248,11 @@ class _Context:
 
     def record(self, error: BaseException, *, unknown: bool = False) -> None:
         self.origin()  # Before the common lock or an inherited recorder.
+        first = False
         with self.lock:
             if self.primary is None:
                 self.primary = error
+                first = True
             elif error is not self.primary and len(self.secondary) < SCALAR_COUNT:
                 if not any(item is error for item in self.secondary):
                     self.secondary.append(error)
@@ -1121,6 +1279,13 @@ class _Context:
             self.cleanup_unknown = self.launch_retired = self.stopped = True
             if len(self.secondary) < SCALAR_COUNT:
                 self.secondary.append(diagnostic)
+        if first and self.role in ("A", "C"):
+            try:
+                # First primary/cutoffs/launch retirement already latched. No
+                # frame/local/payload reference escapes this bounded capture.
+                self.first_failure = _first_failure_snapshot(error, sys._getframe(1))
+            except BaseException:
+                self.first_failure = _FAILURE_UNAVAILABLE
 
     def retire_launch(self) -> None:
         self.origin()
@@ -2541,6 +2706,17 @@ class _Anchor:
             _require(not parent.eof)
             _pause(ctx.cutoff(), readers=(parent.reader,))
 
+    def _terminal_diagnostic(self, work_result: bool) -> tuple[Any, ...]:
+        ctx, wire = self.ctx, self.downstream
+        # Emission snapshot AFTER GROUP_DONE/crossed STOP, not post-close proof.
+        # Bits: primary,stop,signal,STOP,worker protocol,wire,poison,armed,reject,
+        # original WORK_DONE result,GROUP_DONE,cleanup unknown,error observed.
+        mask = _diagnostic_mask(ctx.primary is not None, ctx.stopped, ctx.signal_epoch > 0,
+                               ctx.stop_received, self.worker_protocol_failed, wire is not None,
+                               wire is not None and wire.poisoned, self.armed, self.rejection is not None,
+                               work_result, self.group_done, ctx.cleanup_unknown, ctx.error_epoch > 0)
+        return (1, mask, _failure_diagnostic(ctx))
+
     def finish(self) -> int:
         ctx, parent = self.ctx, self.upstream
         ctx.begin_cleanup()
@@ -2604,8 +2780,13 @@ class _Anchor:
         allowed = producer and self.group_done
         epoch = (ctx.error_epoch, ctx.signal_epoch)
         if allowed:
+            terminal = self.work_done
             try:
-                _send(parent, Tag.TERMINAL, self.work_done, lambda: None, normal=False)
+                terminal = _with_terminal_diagnostic(terminal, self._terminal_diagnostic(result))
+            except BaseException:
+                pass  # Optional DATA cannot replace the original settlement.
+            try:
+                _send(parent, Tag.TERMINAL, terminal, lambda: None, normal=False)
             except BaseException as error:
                 ctx.record(error)
         parent.close_writer()
@@ -2656,6 +2837,7 @@ class _Custodian:
         self.anchor_reply: bytes | None = None
         self.anchor_work: dict[str, Any] | None = None
         self.anchor_terminal: dict[str, Any] | None = None
+        self.anchor_diagnostic = _ANCHOR_DIAGNOSTIC_NONE
         self.wait: native.WaitReceipt | None = None
         self.group_done_sent = False
         self.seal: DescendantsSettled | None = None
@@ -2759,8 +2941,11 @@ class _Custodian:
         elif tag is Tag.TERMINAL:
             _require(self.group_done_sent and self.group is not None and self.group.retired
                      and self.anchor_work is not None and self.anchor_terminal is None)
-            self.anchor_terminal = _settlement_fields(body, self.ctx)
+            authority, diagnostic = _terminal_authority(body, self.ctx.nonce,
+                    {"create", "run", "no_child", "moved", "wait", "armed", "rejected", "producer", "result"}, "A")
+            self.anchor_terminal = _settlement_fields(authority, self.ctx)
             _require(self.anchor_terminal == self.anchor_work)
+            self.anchor_diagnostic = diagnostic
         else:
             self.anchor_protocol_failed = True
             raise ProcessError(ERROR)
@@ -2954,6 +3139,18 @@ class _Custodian:
                 self.ctx.close(descriptor)
         return complete
 
+    def _terminal_diagnostic(self, producer: bool, relay: bool, fs_settled: bool) -> tuple[Any, ...]:
+        ctx, anchor, wait = self.ctx, self.anchor_work, self.wait
+        # Bits: primary,stop,signal,STOP,anchor protocol,source failure,overflow,
+        # relay,producer,anchor work,anchor result,cleanup unknown,fs,error.
+        mask = _diagnostic_mask(ctx.primary is not None, ctx.stopped, ctx.signal_epoch > 0,
+                               ctx.stop_received, self.anchor_protocol_failed, self.source_failed,
+                               self.output_overflow, relay, producer, anchor is not None,
+                               anchor is not None and anchor["result"], ctx.cleanup_unknown,
+                               fs_settled, ctx.error_epoch > 0)
+        observed = (0, 0) if wait is None else _diagnostic_wait(wait.status_kind, wait.status_code)
+        return (1, mask, _failure_diagnostic(ctx), observed, self.anchor_diagnostic)
+
     def finish(self) -> int:
         ctx, parent = self.ctx, self.upstream
         self._settle_producers()
@@ -2994,6 +3191,10 @@ class _Custodian:
                             no_target=no_target, wait=None if anchor is None else anchor["wait"],
                             producer=producer, result=valid, stdout=len(self.output[0]), stderr=len(self.output[1]),
                             fence=None if self.writer is None else self.writer.complete)
+        try:
+            terminal = _with_terminal_diagnostic(terminal, self._terminal_diagnostic(producer, relay, fs_settled))
+        except BaseException:
+            pass  # Never bypass ORIGINAL serialization failure or refresh epoch.
         try:
             _send(parent, Tag.TERMINAL, terminal, lambda: None, normal=False)
         except BaseException as error:
@@ -3111,6 +3312,7 @@ class _Outer:
         self.prepared: dict[str, Any] | None = None
         self.ready = self.sealed = False
         self.terminal: dict[str, Any] | None = None
+        self.terminal_diagnostic = _CUSTODIAN_DIAGNOSTIC_NONE
         self.phase = "NEW"
         self.handlers_complete = self.local_cleanup_complete = self.cleanup_entered = False
         self.text = text
@@ -3154,6 +3356,8 @@ class _Outer:
                 raise ProcessError("owned command output exceeds its bound")
 
     def _terminal(self, content: bytes) -> dict[str, Any]:
+        content, diagnostic = _terminal_authority(content, self.nonce,
+                {"create", "run", "no_target", "wait", "producer", "result", "stdout", "stderr", "fence"}, "C")
         fields = _scalar_fields(content, self.nonce,
                                 {"create", "run", "no_target", "wait", "producer", "result", "stdout", "stderr", "fence"})
         _require(all(type(fields[name]) is bool for name in ("create", "run", "producer", "result"))
@@ -3180,6 +3384,7 @@ class _Outer:
             _require(fields["wait"] is not None and fields["wait"]["kind"] == "signal")
             if fields["no_target"] == "EXEC_REJECTED":
                 _require(fields["run"])
+        self.terminal_diagnostic = diagnostic
         return fields
 
     def _pump(self) -> None:
@@ -3434,6 +3639,23 @@ class _Outer:
         self.phase = "CLOSED" if final else "UNKNOWN"
         return outcome
 
+    def _result_diagnostic(self, outcome: OriginalCommandOutcome) -> tuple[Any, ...]:
+        terminal, wire, wait = self.terminal, self.wire, self.wait
+        observed = None if terminal is None else terminal["wait"]
+        # Bits: integrity,returncode,decoded,terminal,result,finality,seal,
+        # stdout/stderr EOF,protocol/output failure,wire/EOF/poison,primary,no-target.
+        mask = _diagnostic_mask(outcome.result_integrity == "complete", outcome.returncode is not None,
+                               self.decoded is not None, terminal is not None,
+                               terminal is not None and terminal["result"], outcome.original_finality is not None,
+                               self.sealed, self.output_eof[0], self.output_eof[1], self.protocol_failed,
+                               self.output_failed, wire is not None, wire is not None and wire.eof,
+                               wire is not None and wire.poisoned, self.ctx.primary is not None,
+                               outcome.no_target is not None)
+        return (1, mask, (0, 0) if wait is None else _diagnostic_wait(wait.status_kind, wait.status_code),
+                (0, 0) if observed is None else _diagnostic_wait(observed["kind"], observed["code"]),
+                (len(self.outputs[0]), len(self.outputs[1])),
+                (0, 0) if terminal is None else (terminal["stdout"], terminal["stderr"]), self.terminal_diagnostic)
+
 
 def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: Path | None,
                 timeout: int, capture: bool, output_limit: int,
@@ -3539,6 +3761,10 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
         raise ProcessError("owned command executable could not be started" if outcome.no_target.kind == "EXEC_REJECTED"
                            else "owned command was stopped before execution", dispatched=False)
     if outcome.result_integrity != "complete" or outcome.returncode is None or engine.decoded is None:
+        try:
+            _result_guard_state = engine._result_diagnostic(outcome)
+        except BaseException:
+            _result_guard_state = None
         raise ProcessError("owned command produced incomplete output", dispatched=dispatched)
     assert engine.frozen is not None
     return subprocess.CompletedProcess(list(engine.frozen.args), outcome.returncode, *engine.decoded)
