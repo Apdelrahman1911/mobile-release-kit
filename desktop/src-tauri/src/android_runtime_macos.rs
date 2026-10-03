@@ -247,7 +247,25 @@ impl AndroidBuildRuntimeSlots {
     pub(crate) fn first_failure(&self) -> Option<(AdmissionFailure,Instant)> {
         self.original().and_then(Book::android_first_failure)
     }
-    pub(crate) fn retained_bytes(&self) -> Option<usize> {self.original()?.android_retained_bytes()}
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        // Complete owned control/native census, not merely the ACL frame.
+        // M2 captures this before moving its lease tail and never probes this
+        // retired Book afterward. Closed records/selection capacities are not0.
+        let original=self.original()?;
+        if original.records.iter().any(|record|matches!(record.state,State::Acquiring|State::Closing|State::Unknown)){
+            return None;
+        }
+        let mut bytes=std::mem::size_of::<Self>()
+            .checked_add(std::mem::size_of::<Book>())?
+            .checked_add(original.records.capacity().checked_mul(std::mem::size_of::<Record>())?)?
+            .checked_add(original.android_retained_bytes()?)?;
+        for record in &original.records{bytes=bytes.checked_add(record.name.capacity())?;}
+        for selected in [self.selection.as_ref(),self.acquisition.as_ref().map(|a|&a.selection)].into_iter().flatten(){
+            bytes=bytes.checked_add(selected.python.capacity())?.checked_add(selected.bootstrap.capacity())?
+                .checked_add(selected.core.capacity())?.checked_add(selected.cwd.capacity())?;
+        }
+        Some(bytes)
+    }
     pub(crate) fn mark_interrupted(&mut self) {
         if let Some(original)=&mut self.inspection {original.unknown=true;original.android_note(AdmissionFailure::Unknown);}
         if let Some(capability)=&mut self.acquisition {capability.original.unknown=true;capability.original.android_note(AdmissionFailure::Unknown);}

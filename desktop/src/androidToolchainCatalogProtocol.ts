@@ -1,9 +1,9 @@
 import type { ApiError } from './types.ts';
 import type { AndroidMacToolchainSelection } from './androidBuildTypes.ts';
-import type { AndroidCatalogIdentity, AndroidToolchainCatalogStatus, AndroidToolchainEntry } from './androidToolchainCatalogTypes.ts';
+import type { AndroidCatalogComparison, AndroidCatalogIdentity, AndroidToolchainCatalogStatus, AndroidToolchainEntry, AndroidToolchainVersions } from './androidToolchainCatalogTypes.ts';
 export const ANDROID_CATALOG_EVENT = 'android-toolchain-catalog-state-changed' as const;
 export type AndroidCatalogCommand = 'android_toolchain_catalog_status' | 'refresh_android_toolchain_catalog' |
-  'select_android_toolchain' | 'cancel_android_toolchain_catalog';
+  'recover_android_toolchain' | 'select_android_toolchain' | 'cancel_android_toolchain_catalog';
 const max = 0xffffffff;
 const counter = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < max;
 const hex = (v: unknown, length: number): v is string => typeof v === 'string' && v.length === length && /^[0-9a-f]+$/.test(v);
@@ -38,13 +38,37 @@ function selection(value: unknown): AndroidMacToolchainSelection | null {
       ![v.recordSha256, v.inventorySha256, v.osProviderSha256].every((h) => hex(h, 64))) return null;
   return v as unknown as AndroidMacToolchainSelection;
 }
+function comparison(value: unknown): AndroidCatalogComparison | null {
+  const v = fields(value, ['catalogGeneration', 'instance', 'recordSha256', 'inventorySha256', 'osProviderSha256']);
+  if (!v || !counter(v.catalogGeneration) || v.catalogGeneration === 0 || !hex(v.instance, 32) ||
+      ![v.recordSha256, v.inventorySha256, v.osProviderSha256].every((h) => hex(h, 64))) return null;
+  return v as unknown as AndroidCatalogComparison;
+}
 function entry(value: unknown, generation: number): AndroidToolchainEntry | null {
-  const v = fields(value, ['selection', 'versions']);
-  const selected = v && selection(v.selection);
-  const versions = v && fields(v.versions, ['jdkVendor', 'jdkVersion', 'gradleVersion', 'agpVersion', 'sdkPlatform', 'sdkBuildToolsVersion']);
-  if (!selected || selected.catalogGeneration !== generation || !versions ||
-      !Object.values(versions).every((v) => typeof v === 'string' && v.length > 0 && v.length <= 128 && /^[A-Za-z0-9 ._+()-]+$/.test(v))) return null;
-  return { selection: selected, versions: versions as unknown as AndroidToolchainEntry['versions'] };
+  const v = fields(value, ['instance', 'occupants', 'status', 'versions', 'recovery', 'selection']);
+  if (!v || !hex(v.instance, 32) || !counter(v.occupants) || v.occupants < 1 || v.occupants > 7) return null;
+  if (v.status === 'busy' || v.status === 'interrupted' || v.status === 'refused') {
+    return v.versions === null && v.recovery === null && v.selection === null ?
+      { instance: v.instance, occupants: v.occupants, status: v.status, versions: null, recovery: null, selection: null } : null;
+  }
+  const versions = fields(v.versions, ['jdkVendor', 'jdkVersion', 'gradleVersion', 'agpVersion', 'sdkPlatform', 'sdkBuildToolsVersion']);
+  if (!versions || !Object.values(versions).every((v) => typeof v === 'string' && v.length > 0 && v.length <= 128 && /^[A-Za-z0-9 ._+()-]+$/.test(v))) return null;
+  if (v.status === 'recovery-required') {
+    const recovery = comparison(v.recovery);
+    return recovery && recovery.catalogGeneration === generation && recovery.instance === v.instance && v.selection === null ?
+      { instance: v.instance, occupants: v.occupants, status: v.status, versions: versions as unknown as AndroidToolchainVersions, recovery, selection: null } : null;
+  }
+  if (v.status === 'verified-this-session') {
+    const selected = selection(v.selection);
+    return selected && selected.catalogGeneration === generation && selected.instance === v.instance && v.recovery === null ?
+      { instance: v.instance, occupants: v.occupants, status: v.status, versions: versions as unknown as AndroidToolchainVersions, recovery: null, selection: selected } : null;
+  }
+  return null;
+}
+export function androidCatalogComparison(value: AndroidCatalogComparison): AndroidCatalogComparison {
+  // Deliberately excludes ownerUid from every Recover/Choose request.
+  return { catalogGeneration: value.catalogGeneration, instance: value.instance, recordSha256: value.recordSha256,
+    inventorySha256: value.inventorySha256, osProviderSha256: value.osProviderSha256 };
 }
 export function sameAndroidCatalogSelection(a: AndroidMacToolchainSelection | null, b: AndroidMacToolchainSelection | null): boolean {
   return a === null || b === null ? a === b : a.instance === b.instance && a.ownerUid === b.ownerUid &&
@@ -64,18 +88,19 @@ export function parseAndroidToolchainCatalogStatus(value: unknown): AndroidToolc
         !['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified', 'toolchain-unqualified'].includes(v.availability as string) ||
         !['idle', 'reading', 'stopping', 'ready', 'refused', 'cancelled', 'unknown'].includes(v.phase as string) ||
         !['none', 'not-inspected', 'cancelled', 'timed-out', 'document-lost', 'shutdown', 'catalog-changed', 'catalog-unavailable', 'cleanup-unknown'].includes(v.reason as string)) return null;
-    const rows = array(v.entries, 16); if (!rows) return null;
+    const rows = array(v.entries, 32); if (!rows) return null;
     const entries = rows.map((row) => entry(row, v.catalogGeneration as number));
-    if (entries.some((row) => row === null) || new Set(entries.map((row) => row!.selection.instance)).size !== entries.length) return null;
+    if (entries.some((row) => row === null) || new Set(entries.map((row) => row!.instance)).size !== entries.length) return null;
+    if (entries.filter((row) => row?.status === 'verified-this-session').length > 1) return null;
     const selected = v.selected === null ? null : selection(v.selected);
-    if (v.selected !== null && !selected || selected && !entries.some((e) => sameAndroidCatalogSelection(e!.selection, selected))) return null;
+    if (v.selected !== null && !selected || selected && !entries.some((e) => e?.status === 'verified-this-session' && sameAndroidCatalogSelection(e.selection, selected))) return null;
     if (v.phase === 'idle' ? v.operationId !== null || v.catalogGeneration !== 0 || v.reason !== 'not-inspected' :
         v.operationId === null || v.catalogGeneration === 0) return null;
     if (v.phase !== 'ready' && (entries.length > 0 || selected !== null) ||
         v.phase === 'ready' && v.reason !== 'none' ||
         v.phase === 'unknown' && (v.reason !== 'cleanup-unknown' || v.availability !== 'cleanup-unknown')) return null;
     const result = { ...v, entries, selected } as unknown as AndroidToolchainCatalogStatus;
-    return new TextEncoder().encode(JSON.stringify(result)).byteLength <= 32 * 1024 ? result : null;
+    return new TextEncoder().encode(JSON.stringify(result)).byteLength <= 64 * 1024 ? result : null;
   } catch { return null; }
 }
 export function encodeAndroidCatalogRequest(command: AndroidCatalogCommand, value: unknown): Uint8Array | null {
@@ -83,9 +108,10 @@ export function encodeAndroidCatalogRequest(command: AndroidCatalogCommand, valu
     let v: Record<string, unknown> | null;
     if (command === 'android_toolchain_catalog_status' || command === 'refresh_android_toolchain_catalog') {
       v = fields(value, ['schemaVersion']);
-    } else if (command === 'select_android_toolchain') {
-      v = fields(value, ['schemaVersion', 'catalogGeneration', 'instance', 'recordSha256']);
-      if (!v || !counter(v.catalogGeneration) || v.catalogGeneration === 0 || !hex(v.instance, 32) || !hex(v.recordSha256, 64)) return null;
+    } else if (command === 'recover_android_toolchain' || command === 'select_android_toolchain') {
+      v = fields(value, ['schemaVersion', 'catalogGeneration', 'instance', 'recordSha256', 'inventorySha256', 'osProviderSha256']);
+      if (!v || !counter(v.catalogGeneration) || v.catalogGeneration === 0 || !hex(v.instance, 32) ||
+          ![v.recordSha256, v.inventorySha256, v.osProviderSha256].every((h) => hex(h, 64))) return null;
     } else if (command === 'cancel_android_toolchain_catalog') {
       v = fields(value, ['schemaVersion', 'catalogGeneration', 'operationId']);
       if (!v || !counter(v.catalogGeneration) || v.catalogGeneration === 0 || !hex(v.operationId, 32)) return null;

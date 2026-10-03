@@ -588,6 +588,7 @@ pub struct EditOwner { inner: Arc<Inner> }
 struct Inner {
     runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify,
     poisoned: AtomicBool,
+    android_registration: std::sync::OnceLock<SavedRegistrationBinding>,
     #[cfg(all(test, feature = "development-runtime"))]
     fixture_authorized: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -599,6 +600,120 @@ struct Inner {
     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
     fixture_next_schedule: Mutex<Option<Arc<hosted_tests::Schedule>>>,
 }
+type RegistrationPublisher = crate::saved_command_owner::AndroidRegistrationPublisher;
+// Explicit function-scope publisher, not a RegistryGuard. Lock() is unchanged.
+struct EditPublication<'a> { owned: Option<RegistrationPublisher>, borrowed: Option<&'a RegistrationPublisher> }
+impl EditPublication<'_> {
+    fn changed(&mut self) {
+        if let Some(owned) = self.owned.as_mut().filter(|owned| !owned.accepted()) {
+            let _ = owned.accept(crate::android_registration_app_protocol::Reason::ContextChanged);
+        }
+    }
+    fn ticket(&self) -> Option<&RegistrationPublisher> { self.owned.as_ref().or(self.borrowed) }
+    fn finish(mut self) {
+        if let Some(owned) = self.owned.take() {
+            if owned.accepted() { owned.finish(); } else { owned.reject(); }
+        }
+    }
+}
+impl Inner {
+    fn publication<'a>(&self, supplied: Option<&'a RegistrationPublisher>, mandatory: bool) -> Result<EditPublication<'a>, BridgeError> {
+        let Some(binding) = self.android_registration.get() else { return Ok(EditPublication { owned: None, borrowed: None }); };
+        if let Some(supplied) = supplied {
+            if !supplied.same_slot(&binding.control) || !supplied.accepted() {
+                binding.control.poisoned(); return Err(edit_unknown());
+            }
+            return Ok(EditPublication { owned: None, borrowed: Some(supplied) });
+        }
+        binding.control.reserve(crate::saved_command_owner::AndroidRegistrationPublisherKind::General, mandatory)
+            .map(|owned| EditPublication { owned: Some(owned), borrowed: None })
+    }
+    fn mandatory_publication(&self) -> EditPublication<'_> {
+        self.publication(None, true).unwrap_or_else(|_| {
+            if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+            EditPublication { owned: None, borrowed: None }
+        })
+    }
+}
+
+struct SavedRegistrationBinding {
+    document: std::sync::Weak<()>, control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
+}
+/// Private bounded witness of the ORIGINAL edit Registry. No serde/renderer
+/// constructor, borrowed public status or caller-owned revision is authority.
+pub(crate) struct SavedEditStamp {
+    owner: std::sync::Weak<Inner>, document: std::sync::Weak<()>,
+    generation: [u8; 32], loss_generation: [u8; 32], revision: u32,
+    document_bound: bool, document_lost: bool, idle: bool, attention: bool, disabled: bool,
+}
+pub(crate) struct SavedEditGuard<'a> {
+    owner: &'a Arc<Inner>, binding: &'a SavedRegistrationBinding, registry: MutexGuard<'a, Registry>,
+}
+impl SavedEditGuard<'_> {
+    fn fresh(&self) -> bool {
+        let r = &self.registry;
+        r.document_bound && !r.document_lost && r.window.as_deref() == Some("main")
+            && !r.stopping && !r.disabled && !r.exhausted && !self.owner.poisoned.load(Ordering::SeqCst)
+            && r.active.is_none() && r.blocked_projects.is_empty() && r.image_recovery_projects.is_empty()
+            && !self.binding.control.is_unknown() && self.binding.document.strong_count() != 0
+    }
+    pub(crate) fn stamp(&self) -> Result<SavedEditStamp, BridgeError> {
+        if !self.fresh() { return Err(BridgeError::new("busy", "The original saved edit state is unavailable.")); }
+        let r = &self.registry;
+        Ok(SavedEditStamp { owner: Arc::downgrade(self.owner), document: self.binding.document.clone(),
+            generation: r.generation.as_bytes().try_into().map_err(|_| edit_unknown())?,
+            loss_generation: r.loss_generation.as_bytes().try_into().map_err(|_| edit_unknown())?,
+            revision: r.revision, document_bound: r.document_bound, document_lost: r.document_lost,
+            idle: r.active.is_none(), attention: !r.blocked_projects.is_empty() || !r.image_recovery_projects.is_empty(),
+            disabled: r.disabled || r.exhausted || r.stopping || self.owner.poisoned.load(Ordering::SeqCst) })
+    }
+    pub(crate) fn matches(&self, stamp: &SavedEditStamp) -> bool {
+        let r = &self.registry;
+        self.fresh() && stamp.owner.as_ptr() == Arc::as_ptr(self.owner)
+            && std::sync::Weak::ptr_eq(&stamp.document, &self.binding.document)
+            && stamp.generation.as_slice() == r.generation.as_bytes()
+            && stamp.loss_generation.as_slice() == r.loss_generation.as_bytes() && stamp.revision == r.revision
+            && stamp.document_bound && !stamp.document_lost && stamp.idle && !stamp.attention && !stamp.disabled
+    }
+}
+
+#[cfg(test)]
+mod saved_registration_stamp_tests {
+    use super::*;
+
+    #[test]
+    fn original_idle_edit_mutation_invalidates_the_actual_saved_stamp_and_epoch() {
+        let owner = EditOwner::new(RuntimeConfig::packaged(PathBuf::from("/never-opened-saved-stamp-fixture")));
+        let document = Arc::new(());
+        let control = Arc::new(crate::saved_command_owner::AndroidRegistrationControl::default());
+        owner.bind_saved_registration(&document, control.clone());
+        owner.initial_document("main").unwrap();
+        let old_epoch = control.epoch().unwrap();
+        let old_stamp = {
+            let guard = owner.saved_registration_guard(&document).unwrap();
+            let stamp = guard.stamp().unwrap();
+            assert!(guard.matches(&stamp));
+            stamp
+        };
+        // Use the actual publication and bump methods, not a fabricated stamp
+        // or direct revision-field write. No native edit or source work starts.
+        let mut publication = owner.inner.publication(None, false).unwrap();
+        {
+            let mut registry = owner.inner.lock();
+            assert!(registry.active.is_none());
+            owner.inner.bump(&mut registry, &mut publication);
+        }
+        publication.finish();
+        assert!(!control.is_unknown() && !control.matches_epoch(old_epoch));
+        assert!(control.idle_for_saved_observation());
+        let guard = owner.saved_registration_guard(&document).unwrap();
+        assert!(guard.fresh());
+        assert!(!guard.matches(&old_stamp));
+        let fresh_stamp = guard.stamp().unwrap();
+        assert!(guard.matches(&fresh_stamp));
+    }
+}
+
 struct Registry {
     generation: String, loss_generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
     revision: u32, exhausted: bool, stopping: bool, disabled: bool,
@@ -1086,12 +1201,20 @@ impl Inner {
     fn lock(&self) -> MutexGuard<'_, Registry> {
         match self.registry.lock() {
             Ok(guard) => guard,
-            Err(error) => { self.poisoned.store(true, Ordering::SeqCst); error.into_inner() }
+            Err(error) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+                error.into_inner()
+            }
         }
     }
-    fn bump(&self, registry: &mut Registry) {
+    fn bump(&self, registry: &mut Registry, publication: &mut EditPublication<'_>) {
+        publication.changed();
         if let Some(next) = registry.revision.checked_add(1) { registry.revision = next; }
         else { registry.exhausted = true; registry.disabled = true; }
+        if registry.disabled || registry.exhausted || self.poisoned.load(Ordering::SeqCst) {
+            if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+        }
         self.changes.send_replace(registry.revision);
         self.changed.notify_waiters();
     }
@@ -1179,7 +1302,7 @@ impl Inner {
             EditDomain::MetadataImages => self.metadata_images_snapshot(r).map(DomainStatus::MetadataImages),
         }
     }
-    fn trigger_locked(&self, r: &mut Registry, id: &str, reason: Reason, at: Instant) {
+    fn trigger_locked(&self, publication: &mut EditPublication<'_>, r: &mut Registry, id: &str, reason: Reason, at: Instant) {
         let Some(a) = r.active.as_mut().filter(|a| a.session.id == id) else { return; };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
@@ -1192,16 +1315,26 @@ impl Inner {
         a.phase_end = None;
         a.session.stop.send_replace(true); // Writer EOF is the sole cooperative STOP.
         a.session.wake.notify_waiters();
-        self.bump(r);
+        self.bump(r, publication);
     }
     fn trigger(&self, id: &str, reason: Reason, at: Instant) {
+        let mut publication = self.mandatory_publication();
+        self.trigger_published(&mut publication, id, reason, at);
+        publication.finish();
+    }
+    fn trigger_published(&self, publication: &mut EditPublication<'_>, id: &str, reason: Reason, at: Instant) {
         let mut r = self.lock();
-        self.expire_locked(&mut r, id, Instant::now());
-        self.trigger_locked(&mut r, id, reason, at);
+        self.expire_locked(publication,&mut r, id, Instant::now());
+        self.trigger_locked(publication,&mut r, id, reason, at);
     }
     fn unknown(&self, id: &str) {
+        let mut publication = self.mandatory_publication();
+        self.unknown_published(&mut publication, id);
+        publication.finish();
+    }
+    fn unknown_published(&self, publication: &mut EditPublication<'_>, id: &str) {
         let mut r = self.lock();
-        self.expire_locked(&mut r, id, Instant::now());
+        self.expire_locked(publication,&mut r, id, Instant::now());
         r.disabled = true;
         if let Some(a) = r.active.as_mut().filter(|a| a.session.id == id) {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
@@ -1216,14 +1349,19 @@ impl Inner {
             a.session.stop.send_replace(true);
             a.session.wake.notify_waiters();
         }
-        self.bump(&mut r);
+        self.bump(&mut r, publication);
     }
     fn deadline(&self, id: &str) -> Option<Instant> {
+        let mut publication = self.mandatory_publication();
+        let result = (|| {
         let mut r = self.lock();
-        self.expire_locked(&mut r, id, Instant::now());
+        self.expire_locked(&mut publication,&mut r, id, Instant::now());
         let a = r.active.as_ref().filter(|a| a.session.id == id)?;
         if a.cleanup_start.is_some() { return None; }
         phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted)
+        })();
+        publication.finish();
+        result
     }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     fn installed_claim_clear(&self, r: &Registry, owner: &Arc<Session>, slots: &InstalledEditSlots, now: Instant) -> bool {
@@ -1241,13 +1379,13 @@ impl Inner {
             stopped: *owner.stop.borrow(), end: phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted),
         }.clear(now)
     }
-    fn expire_locked(&self, r: &mut Registry, id: &str, now: Instant) {
+    fn expire_locked(&self, publication: &mut EditPublication<'_>, r: &mut Registry, id: &str, now: Instant) {
         // Evaluate the original phase endpoint before a new native F can clear
         // phase_end. Both events use their actual time; neither extends cleanup.
         let expired = r.active.as_ref().filter(|a| a.session.id == id && a.cleanup_start.is_none()).and_then(|a| {
             expired_phase(a.review_end, a.phase_end, a.projection.apply_submitted, now)
         });
-        if let Some((end, reason)) = expired { self.trigger_locked(r, id, reason, end); }
+        if let Some((end, reason)) = expired { self.trigger_locked(publication,r, id, reason, end); }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             let first = r.active.as_ref().filter(|a| a.session.id == id).and_then(|a| {
@@ -1259,12 +1397,17 @@ impl Inner {
                     || a.projection.native_reason == Reason::None)
             });
             // The mailbox is persistent DATA, not a repeating state transition.
-            if let Some((reason, at)) = first { self.trigger_locked(r, id, reason, at); }
+            if let Some((reason, at)) = first { self.trigger_locked(publication,r, id, reason, at); }
         }
     }
     fn expire(&self, id: &str, now: Instant) {
+        let mut publication = self.mandatory_publication();
+        let result = (|| {
         let mut r = self.lock();
-        self.expire_locked(&mut r, id, now.max(Instant::now()));
+        self.expire_locked(&mut publication,&mut r, id, now.max(Instant::now()));
+        })();
+        publication.finish();
+        result
     }
     fn admission(&self, r: &Registry, window: &str, domain: EditDomain) -> Result<(), BridgeError> {
         if r.window.as_deref() != Some(window) || !r.document_bound || r.document_lost { return Err(invalid_owner()); }
@@ -1297,6 +1440,7 @@ impl EditOwner {
         let loss_generation = loss_tombstone(&generation);
         let (changes, _) = watch::channel(0);
         Self { inner: Arc::new(Inner { runtime, changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            android_registration: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "development-runtime"))]
             fixture_authorized: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1315,6 +1459,23 @@ impl EditOwner {
             all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
                 installed_final: None,
             }) }) }
+    }
+    pub(crate) fn bind_saved_registration(&self, document: &Arc<()>,
+        control: Arc<crate::saved_command_owner::AndroidRegistrationControl>) {
+        if let Some(original) = self.inner.android_registration.get() {
+            if original.document.as_ptr() != Arc::as_ptr(document) || !Arc::ptr_eq(&original.control, &control) {
+                original.control.poisoned(); control.poisoned();
+            }
+            return;
+        }
+        if self.inner.android_registration.set(SavedRegistrationBinding { document: Arc::downgrade(document), control: control.clone() }).is_err() {
+            control.poisoned();
+        }
+    }
+    pub(crate) fn saved_registration_guard(&self, document: &Arc<()>) -> Result<SavedEditGuard<'_>, BridgeError> {
+        let binding = self.inner.android_registration.get().ok_or_else(edit_unknown)?;
+        if binding.document.as_ptr() != Arc::as_ptr(document) { return Err(invalid_owner()); }
+        Ok(SavedEditGuard { owner: &self.inner, binding, registry: self.inner.lock() })
     }
     pub fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub fn status(&self) -> Result<ConfigEditStatus, BridgeError> { self.inner.snapshot(&self.inner.lock()) }
@@ -1396,6 +1557,8 @@ impl EditOwner {
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     pub(crate) fn offline_fixture_attention(&self, permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
         owner: &crate::offline_preflight_owner::OfflinePreflightOwner, present: bool) -> Result<(), BridgeError> {
+        let mut publication = self.inner.publication(None, false)?;
+        let result = (|| {
         let (id, _, _) = permit.validate(owner)?;
         if !permit.gate_evidence() { return Err(crate::offline_preflight_owner::unavailable()); }
         let mut r = self.inner.lock();
@@ -1404,7 +1567,10 @@ impl EditOwner {
             return Err(crate::offline_preflight_owner::unavailable());
         }
         let changed = if present { r.blocked_projects.insert(id.into()) } else { r.blocked_projects.remove(id) };
-        if !changed { return Err(crate::offline_preflight_owner::unavailable()); } Ok(())
+        if !changed { return Err(crate::offline_preflight_owner::unavailable()); } publication.changed(); Ok(())
+        })();
+        publication.finish();
+        result
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn workflow_fixture_registration_permitted(&self, path: &std::path::Path) -> bool {
@@ -1427,34 +1593,50 @@ impl EditOwner {
         Ok(serde_json::json!({"documentBound":true,"documentLost":false,"authorized":false,"sessions":0,"children":0,"stopping":stopping}))
     }
 
-    pub fn initial_document(&self, window: &str) -> Result<(), BridgeError> {
+    pub fn initial_document(&self, window: &str) -> Result<(), BridgeError> { self.initial_document_published(window, None) }
+    pub(crate) fn initial_document_published(&self, window: &str, supplied: Option<&RegistrationPublisher>) -> Result<(), BridgeError> {
+        let mut publication = self.inner.publication(supplied, false)?;
+        let result = (|| {
         if window != "main" { return Err(invalid_owner()); }
         let mut r = self.inner.lock();
         if r.document_bound || r.document_lost {
             drop(r);
-            self.document_lost(window);
+            publication.changed();
+            self.document_lost_published(window, publication.ticket());
             return Err(invalid_owner());
         }
         r.window = Some(window.to_owned());
         r.document_bound = true;
-        self.inner.bump(&mut r);
+        self.inner.bump(&mut r, &mut publication);
         Ok(())
+        })();
+        publication.finish();
+        result
     }
-    pub fn document_lost(&self, window: &str) {
+    pub fn document_lost(&self, window: &str) { self.document_lost_published(window, None) }
+    pub(crate) fn document_lost_published(&self, window: &str, supplied: Option<&RegistrationPublisher>) {
+        let mut publication = self.inner.publication(supplied, true).unwrap_or_else(|_| self.inner.mandatory_publication());
+        let result = (|| {
         let owner = {
             let mut r = self.inner.lock();
             if r.window.as_deref().is_some_and(|bound| bound != window) { return; }
             let Registry { generation, loss_generation, document_lost, .. } = &mut *r;
             invalidate_generation(generation, loss_generation, document_lost);
             let owner = r.active.as_ref().map(|a| a.session.clone());
-            self.inner.bump(&mut r);
+            self.inner.bump(&mut r, &mut publication);
             owner
         };
-        if let Some(owner) = owner { self.inner.trigger(&owner.id, Reason::WindowLost, Instant::now()); }
+        if let Some(owner) = owner { self.inner.trigger_published(&mut publication, &owner.id, Reason::WindowLost, Instant::now()); }
+        })();
+        publication.finish();
+        result
     }
 
     pub fn open(&self, window: &str, project_id: String, root: PathBuf) -> Result<ConfigEditStatus, BridgeError> {
-        self.open_domain(window, project_id, root, EditDomain::Configuration, None, None, None, None)?.configuration()
+        self.open_domain(None, window, project_id, root, EditDomain::Configuration, None, None, None, None)?.configuration()
+    }
+    pub(crate) fn open_published(&self, publisher: &RegistrationPublisher, window: &str, project_id: String, root: PathBuf) -> Result<ConfigEditStatus, BridgeError> {
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::Configuration, None, None, None, None)?.configuration()
     }
     pub(crate) fn workflow_open_ticket(&self, window: &str) -> Result<WorkflowOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::GitHubWorkflows)
@@ -1479,42 +1661,72 @@ impl EditOwner {
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
         ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket), None, None)?.workflows()
+        self.open_domain(None, window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket), None, None)?.workflows()
+    }
+    pub(crate) fn open_workflow_published(&self, publisher: &RegistrationPublisher, window: &str, project_id: String, registration: WorkflowRegistration,
+        ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
+        let root = registration.root.path.clone();
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket), None, None)?.workflows()
     }
     pub(crate) fn open_metadata_text(&self, window: &str, project_id: String, context: metadata_wire::Context,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataTextEditStatus, BridgeError> {
         if !context.valid() { return Err(BridgeError::invalid()); }
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::MetadataText, Some(registration), Some(ticket), Some(context), None)?.metadata_text()
+        self.open_domain(None, window, project_id, root, EditDomain::MetadataText, Some(registration), Some(ticket), Some(context), None)?.metadata_text()
+    }
+    pub(crate) fn open_metadata_text_published(&self, publisher: &RegistrationPublisher, window: &str, project_id: String, context: metadata_wire::Context,
+        registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataTextEditStatus, BridgeError> {
+        if !context.valid() { return Err(BridgeError::invalid()); }
+        let root = registration.root.path.clone();
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::MetadataText, Some(registration), Some(ticket), Some(context), None)?.metadata_text()
     }
     pub(crate) fn open_release_version(&self, window: &str, project_id: String,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<ReleaseVersionEditStatus, BridgeError> {
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::ReleaseVersion, Some(registration), Some(ticket), None, None)?.release_version()
+        self.open_domain(None, window, project_id, root, EditDomain::ReleaseVersion, Some(registration), Some(ticket), None, None)?.release_version()
+    }
+    pub(crate) fn open_release_version_published(&self, publisher: &RegistrationPublisher, window: &str, project_id: String,
+        registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<ReleaseVersionEditStatus, BridgeError> {
+        let root = registration.root.path.clone();
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::ReleaseVersion, Some(registration), Some(ticket), None, None)?.release_version()
     }
     pub(crate) fn open_metadata_images(&self, window: &str, project_id: String, data: images_wire::ImportData,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket, claimed: &mut bool) -> Result<MetadataImagesEditStatus, BridgeError> {
         let root = registration.root.path.clone();
-        self.open_domain_attempt(window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
+        self.open_domain_attempt(None, window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
+            Some(ImageOpen::Import(data)), claimed)?.metadata_images()
+    }
+    pub(crate) fn open_metadata_images_published(&self, publisher: &RegistrationPublisher, window: &str, project_id: String, data: images_wire::ImportData,
+        registration: RegisteredEditRoot, ticket: RegisteredOpenTicket, claimed: &mut bool) -> Result<MetadataImagesEditStatus, BridgeError> {
+        let root = registration.root.path.clone();
+        self.open_domain_attempt(Some(publisher), window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
             Some(ImageOpen::Import(data)), claimed)?.metadata_images()
     }
     pub(crate) fn open_metadata_images_recovery(&self, window: &str, project_id: String,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataImagesEditStatus, BridgeError> {
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
+        self.open_domain(None, window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
             Some(ImageOpen::Recover))?.metadata_images()
     }
-    fn open_domain(&self, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
+    pub(crate) fn open_metadata_images_recovery_published(&self, publisher: &RegistrationPublisher, window: &str, project_id: String,
+        registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataImagesEditStatus, BridgeError> {
+        let root = registration.root.path.clone();
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::MetadataImages, Some(registration), Some(ticket), None,
+            Some(ImageOpen::Recover))?.metadata_images()
+    }
+    fn open_domain(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
         registration: Option<RegisteredEditRoot>, ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
         images: Option<ImageOpen>) -> Result<DomainStatus, BridgeError> {
         let recovery = domain == EditDomain::MetadataImages && matches!(images.as_ref(), Some(ImageOpen::Recover));
         let mut claimed = false;
-        self.open_domain_attempt(window, project_id, root, domain, registration, ticket, metadata, images, &mut claimed)
+        self.open_domain_attempt(supplied, window, project_id, root, domain, registration, ticket, metadata, images, &mut claimed)
             .map_err(|error| image_open_admission_error(recovery, claimed, error))
     }
-    fn open_domain_attempt(&self, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
+    fn open_domain_attempt(&self, supplied: Option<&RegistrationPublisher>, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
         registration: Option<RegisteredEditRoot>, ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>,
         images: Option<ImageOpen>, claimed: &mut bool) -> Result<DomainStatus, BridgeError> {
+        let mut publication = self.inner.publication(supplied, false)?;
+        let result = (|| {
         { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let fixture_workflow = if domain == EditDomain::GitHubWorkflows && !NATIVE_WORKFLOW_EDIT_QUALIFIED {
@@ -1621,25 +1833,38 @@ impl EditOwner {
                     project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
                     review_remaining_ms: REVIEW.as_millis() as u32, checkout: None, prepared: None, apply_submitted: false,
                     core_outcome: None, native_reason: Reason::None, native_finality: NativeFinality::Pending, late_settled: false } });
-            self.inner.bump(&mut r);
+            self.inner.bump(&mut r, &mut publication);
             self.inner.snapshot_for(&r, domain)? // Admission reply captured BEFORE queue/start.
         };
-        if session.commands.try_send(bytes).is_err() { self.inner.unknown(&id); return Err(edit_unknown()); }
+        if session.commands.try_send(bytes).is_err() { self.inner.unknown_published(&mut publication, &id); return Err(edit_unknown()); }
         if register_original_tasks(&executor, self.inner.clone(), session.clone()).is_err() {
             session.resource_unknown.store(true, Ordering::SeqCst);
-            self.inner.unknown(&id);
+            self.inner.unknown_published(&mut publication, &id);
             return Err(edit_unknown());
         }
         Ok(admission)
+        })();
+        publication.finish();
+        result
     }
 
     pub fn prepare(&self, window: &str, args: PrepareConfigEdit) -> Result<ConfigEditStatus, BridgeError> {
-        self.prepare_domain(window, EditDomain::Configuration, &args.session_id, &args.revision,
+        self.prepare_domain(None, window, EditDomain::Configuration, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation),
+            json!({"revision": &args.revision, "expectedBase": &args.expected_base, "draft": &args.draft}), None, None)?.configuration()
+    }
+    pub(crate) fn prepare_published(&self, publisher: &RegistrationPublisher, window: &str, args: PrepareConfigEdit) -> Result<ConfigEditStatus, BridgeError> {
+        self.prepare_domain(Some(publisher), window, EditDomain::Configuration, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation),
             json!({"revision": &args.revision, "expectedBase": &args.expected_base, "draft": &args.draft}), None, None)?.configuration()
     }
     pub(crate) fn prepare_workflow(&self, window: &str, args: PrepareWorkflowEdit, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
-        self.prepare_domain(window, EditDomain::GitHubWorkflows, &args.session_id, &args.revision,
+        self.prepare_domain(None, window, EditDomain::GitHubWorkflows, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation), json!({"revision":&args.revision,"draft":&args.draft,
+                "toolingRepository":&args.tooling_repository,"toolingSha":&args.tooling_sha}), Some(registration), None)?.workflows()
+    }
+    pub(crate) fn prepare_workflow_published(&self, publisher: &RegistrationPublisher, window: &str, args: PrepareWorkflowEdit, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
+        self.prepare_domain(Some(publisher), window, EditDomain::GitHubWorkflows, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation), json!({"revision":&args.revision,"draft":&args.draft,
                 "toolingRepository":&args.tooling_repository,"toolingSha":&args.tooling_sha}), Some(registration), None)?.workflows()
     }
@@ -1647,29 +1872,54 @@ impl EditOwner {
         registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
         let params = json!({"revision":&args.revision,"expectedBaseline":&args.expected_baseline,"fields":&args.fields});
         let submission = metadata_wire::Submission { expected_baseline: args.expected_baseline, fields: args.fields };
-        self.prepare_domain(window, EditDomain::MetadataText, &args.session_id, &args.revision,
+        self.prepare_domain(None, window, EditDomain::MetadataText, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation), params, Some(registration), Some(SavedTextSubmission::MetadataText(submission)))?.metadata_text()
+    }
+    pub(crate) fn prepare_metadata_text_published(&self, publisher: &RegistrationPublisher, window: &str, args: PrepareMetadataTextEdit,
+        registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
+        let params = json!({"revision":&args.revision,"expectedBaseline":&args.expected_baseline,"fields":&args.fields});
+        let submission = metadata_wire::Submission { expected_baseline: args.expected_baseline, fields: args.fields };
+        self.prepare_domain(Some(publisher), window, EditDomain::MetadataText, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation), params, Some(registration), Some(SavedTextSubmission::MetadataText(submission)))?.metadata_text()
     }
     pub(crate) fn prepare_release_version(&self, window: &str, args: PrepareReleaseVersionEdit,
         registration: RegisteredEditRoot) -> Result<ReleaseVersionEditStatus, BridgeError> {
         let params = json!({"revision":&args.revision,"expectedBaseline":&args.expected_baseline,"intent":args.intent,"values":&args.values});
         let submission = version_wire::Submission { expected_baseline: args.expected_baseline, intent: args.intent, values: args.values };
-        let result = self.prepare_domain(window, EditDomain::ReleaseVersion, &args.session_id, &args.revision,
+        let result = self.prepare_domain(None, window, EditDomain::ReleaseVersion, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation), params, Some(registration), Some(SavedTextSubmission::ReleaseVersion(submission)))
             .and_then(DomainStatus::release_version);
-        if result.is_err() { self.retire_release_version_request(window); }
+        result
+    }
+    pub(crate) fn prepare_release_version_published(&self, publisher: &RegistrationPublisher, window: &str, args: PrepareReleaseVersionEdit,
+        registration: RegisteredEditRoot) -> Result<ReleaseVersionEditStatus, BridgeError> {
+        let params = json!({"revision":&args.revision,"expectedBaseline":&args.expected_baseline,"intent":args.intent,"values":&args.values});
+        let submission = version_wire::Submission { expected_baseline: args.expected_baseline, intent: args.intent, values: args.values };
+        let result = self.prepare_domain(Some(publisher), window, EditDomain::ReleaseVersion, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation), params, Some(registration), Some(SavedTextSubmission::ReleaseVersion(submission)))
+            .and_then(DomainStatus::release_version);
         result
     }
     pub(crate) fn prepare_metadata_images(&self, window: &str, args: PrepareMetadataImagesEdit,
         registration: RegisteredEditRoot) -> Result<MetadataImagesEditStatus, BridgeError> {
         let params = json!({"revision":&args.revision,"expectedBaseline":&args.expected_baseline,"choices":&args.choices});
         let submission = images_wire::Submission { expected_baseline: args.expected_baseline, choices: args.choices };
-        self.prepare_domain(window, EditDomain::MetadataImages, &args.session_id, &args.revision,
+        self.prepare_domain(None, window, EditDomain::MetadataImages, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation), params, Some(registration),
             Some(SavedTextSubmission::MetadataImages(submission)))?.metadata_images()
     }
-    fn prepare_domain(&self, window: &str, domain: EditDomain, session_id: &str, revision: &str,
+    pub(crate) fn prepare_metadata_images_published(&self, publisher: &RegistrationPublisher, window: &str, args: PrepareMetadataImagesEdit,
+        registration: RegisteredEditRoot) -> Result<MetadataImagesEditStatus, BridgeError> {
+        let params = json!({"revision":&args.revision,"expectedBaseline":&args.expected_baseline,"choices":&args.choices});
+        let submission = images_wire::Submission { expected_baseline: args.expected_baseline, choices: args.choices };
+        self.prepare_domain(Some(publisher), window, EditDomain::MetadataImages, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation), params, Some(registration),
+            Some(SavedTextSubmission::MetadataImages(submission)))?.metadata_images()
+    }
+    fn prepare_domain(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, revision: &str,
         counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<SavedTextSubmission>) -> Result<DomainStatus, BridgeError> {
+        let mut publication = self.inner.publication(supplied, false)?;
+        let result = (|| {
         if !wire::token(session_id) || !wire::token(revision)
             || domain != EditDomain::Configuration && (counters.0 == u32::MAX || counters.1 == u32::MAX) { return Err(BridgeError::invalid()); }
         let bytes = request_bytes(domain, session_id, 1, "prepare", params)?;
@@ -1681,30 +1931,30 @@ impl EditOwner {
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Editing || a.prepare_counters.is_some() || !a.opened { return Err(invalid_owner()); }
             if a.session.registration != registration {
-                self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+                self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
             }
             let Some(phase_end) = claim_phase(a.review_end, now) else {
-                let at = a.review_end; self.inner.trigger_locked(&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
+                let at = a.review_end; self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
             };
             // Wrong revisions do not revise an original checkout or renew time.
             if a.projection.revision() != Some(revision) {
-                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
             }
             match (domain, submission) {
                 (EditDomain::MetadataText, Some(SavedTextSubmission::MetadataText(submission))) => {
                     let valid = a.projection.metadata_text.as_ref().is_some_and(|detail| detail.submission.is_none() && submission.valid_for(detail.platform));
-                    if !valid { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                    if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = Some(submission); }
                 },
                 (EditDomain::ReleaseVersion, Some(SavedTextSubmission::ReleaseVersion(submission))) => {
                     let valid = a.projection.release_version.as_ref().is_some_and(|detail| detail.submission.is_none() && submission.valid());
-                    if !valid { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                    if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if let Some(detail) = a.projection.release_version.as_mut() { detail.submission = Some(submission); }
                 },
                 (EditDomain::MetadataImages, Some(SavedTextSubmission::MetadataImages(submission))) => {
                     if !a.projection.metadata_images.as_ref().is_some_and(|detail| submission.valid_for(detail)) {
-                        self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+                        self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
                     }
                     if let Some(detail) = a.projection.metadata_images.as_mut() { detail.submission = Some(submission); }
                 },
@@ -1716,37 +1966,62 @@ impl EditOwner {
             a.phase_end = Some(phase_end);
             a.projection.phase = Phase::Preparing;
             let session = a.session.clone();
-            self.inner.bump(&mut r);
+            self.inner.bump(&mut r, &mut publication);
             (session, self.inner.snapshot_for(&r, domain)?)
         };
-        if session.commands.try_send(bytes).is_err() { self.inner.trigger(&session.id, Reason::IoError, Instant::now()); self.inner.unknown(&session.id); }
+        if session.commands.try_send(bytes).is_err() { self.inner.trigger_published(&mut publication, &session.id, Reason::IoError, Instant::now()); self.inner.unknown_published(&mut publication, &session.id); }
         session.wake.notify_waiters();
         Ok(reply)
+        })();
+        if domain==EditDomain::ReleaseVersion && result.is_err(){self.retire_release_version_request_with(&mut publication,window);}
+        publication.finish();
+        result
     }
 
     pub fn apply(&self, window: &str, session_id: &str, plan_token: &str) -> Result<ConfigEditStatus, BridgeError> {
-        self.apply_domain(window, EditDomain::Configuration, session_id, plan_token, None)?.configuration()
+        self.apply_domain(None, window, EditDomain::Configuration, session_id, plan_token, None)?.configuration()
+    }
+    pub(crate) fn apply_published(&self, publisher: &RegistrationPublisher, window: &str, session_id: &str, plan_token: &str) -> Result<ConfigEditStatus, BridgeError> {
+        self.apply_domain(Some(publisher), window, EditDomain::Configuration, session_id, plan_token, None)?.configuration()
     }
     pub(crate) fn apply_workflow(&self, window: &str, session_id: &str, plan_token: &str, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
-        self.apply_domain(window, EditDomain::GitHubWorkflows, session_id, plan_token, Some(registration))?.workflows()
+        self.apply_domain(None, window, EditDomain::GitHubWorkflows, session_id, plan_token, Some(registration))?.workflows()
+    }
+    pub(crate) fn apply_workflow_published(&self, publisher: &RegistrationPublisher, window: &str, session_id: &str, plan_token: &str, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
+        self.apply_domain(Some(publisher), window, EditDomain::GitHubWorkflows, session_id, plan_token, Some(registration))?.workflows()
     }
     pub(crate) fn apply_metadata_text(&self, window: &str, session_id: &str, plan_token: &str,
         registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
-        self.apply_domain(window, EditDomain::MetadataText, session_id, plan_token, Some(registration))?.metadata_text()
+        self.apply_domain(None, window, EditDomain::MetadataText, session_id, plan_token, Some(registration))?.metadata_text()
+    }
+    pub(crate) fn apply_metadata_text_published(&self, publisher: &RegistrationPublisher, window: &str, session_id: &str, plan_token: &str,
+        registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
+        self.apply_domain(Some(publisher), window, EditDomain::MetadataText, session_id, plan_token, Some(registration))?.metadata_text()
     }
     pub(crate) fn apply_release_version(&self, window: &str, session_id: &str, plan_token: &str,
         registration: RegisteredEditRoot) -> Result<ReleaseVersionEditStatus, BridgeError> {
-        let result = self.apply_domain(window, EditDomain::ReleaseVersion, session_id, plan_token, Some(registration))
+        let result = self.apply_domain(None, window, EditDomain::ReleaseVersion, session_id, plan_token, Some(registration))
             .and_then(DomainStatus::release_version);
-        if result.is_err() { self.retire_release_version_request(window); }
+        result
+    }
+    pub(crate) fn apply_release_version_published(&self, publisher: &RegistrationPublisher, window: &str, session_id: &str, plan_token: &str,
+        registration: RegisteredEditRoot) -> Result<ReleaseVersionEditStatus, BridgeError> {
+        let result = self.apply_domain(Some(publisher), window, EditDomain::ReleaseVersion, session_id, plan_token, Some(registration))
+            .and_then(DomainStatus::release_version);
         result
     }
     pub(crate) fn apply_metadata_images(&self, window: &str, session_id: &str, plan_token: &str,
         registration: RegisteredEditRoot) -> Result<MetadataImagesEditStatus, BridgeError> {
-        self.apply_domain(window, EditDomain::MetadataImages, session_id, plan_token, Some(registration))?.metadata_images()
+        self.apply_domain(None, window, EditDomain::MetadataImages, session_id, plan_token, Some(registration))?.metadata_images()
     }
-    fn apply_domain(&self, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
+    pub(crate) fn apply_metadata_images_published(&self, publisher: &RegistrationPublisher, window: &str, session_id: &str, plan_token: &str,
+        registration: RegisteredEditRoot) -> Result<MetadataImagesEditStatus, BridgeError> {
+        self.apply_domain(Some(publisher), window, EditDomain::MetadataImages, session_id, plan_token, Some(registration))?.metadata_images()
+    }
+    fn apply_domain(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
         registration: Option<WorkflowRegistration>) -> Result<DomainStatus, BridgeError> {
+        let mut publication = self.inner.publication(supplied, false)?;
+        let result = (|| {
         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
         let bytes = request_bytes(domain, session_id, 2, "apply", json!({"planToken": plan_token}))?;
         let (session, reply) = {
@@ -1764,11 +2039,11 @@ impl EditOwner {
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
             if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
-                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
             }
             let Some(phase_end) = claim_phase(a.review_end, now) else {
-                let at = a.review_end; self.inner.trigger_locked(&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
+                let at = a.review_end; self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
             };
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
@@ -1779,33 +2054,39 @@ impl EditOwner {
             a.claimed_seq = 2;
             a.phase_end = Some(phase_end);
             let session = a.session.clone();
-            self.inner.bump(&mut r);
+            self.inner.bump(&mut r, &mut publication);
             (session, self.inner.snapshot_for(&r, domain)?)
         };
-        if session.commands.try_send(bytes).is_err() { self.inner.trigger(session_id, Reason::IoError, Instant::now()); self.inner.unknown(session_id); }
+        if session.commands.try_send(bytes).is_err() { self.inner.trigger_published(&mut publication, session_id, Reason::IoError, Instant::now()); self.inner.unknown_published(&mut publication, session_id); }
         session.wake.notify_waiters();
         Ok(reply)
+        })();
+        if domain==EditDomain::ReleaseVersion && result.is_err(){self.retire_release_version_request_with(&mut publication,window);}
+        publication.finish();
+        result
     }
 
     pub fn close(&self, window: &str, session_id: &str) -> Result<ConfigEditStatus, BridgeError> {
-        self.close_domain(window, EditDomain::Configuration, session_id)?.configuration()
+        self.close_domain(None, window, EditDomain::Configuration, session_id)?.configuration()
     }
     pub(crate) fn close_workflow(&self, window: &str, session_id: &str) -> Result<WorkflowEditStatus, BridgeError> {
-        self.close_domain(window, EditDomain::GitHubWorkflows, session_id)?.workflows()
+        self.close_domain(None, window, EditDomain::GitHubWorkflows, session_id)?.workflows()
     }
     pub(crate) fn close_metadata_text(&self, window: &str, session_id: &str) -> Result<MetadataTextEditStatus, BridgeError> {
-        self.close_domain(window, EditDomain::MetadataText, session_id)?.metadata_text()
+        self.close_domain(None, window, EditDomain::MetadataText, session_id)?.metadata_text()
     }
     pub(crate) fn close_release_version(&self, window: &str, session_id: &str) -> Result<ReleaseVersionEditStatus, BridgeError> {
-        self.close_domain(window, EditDomain::ReleaseVersion, session_id)?.release_version()
+        self.close_domain(None, window, EditDomain::ReleaseVersion, session_id)?.release_version()
     }
     pub(crate) fn close_metadata_images(&self, window: &str, session_id: &str) -> Result<MetadataImagesEditStatus, BridgeError> {
-        self.close_domain(window, EditDomain::MetadataImages, session_id)?.metadata_images()
+        self.close_domain(None, window, EditDomain::MetadataImages, session_id)?.metadata_images()
     }
-    fn close_domain(&self, window: &str, domain: EditDomain, session_id: &str) -> Result<DomainStatus, BridgeError> {
+    fn close_domain(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str) -> Result<DomainStatus, BridgeError> {
+        let mut publication = self.inner.publication(supplied, false)?;
+        let result = (|| {
         if !wire::token(session_id) { return Err(BridgeError::invalid()); }
         let mut r = self.inner.lock();
-        self.inner.expire_locked(&mut r, session_id, Instant::now());
+        self.inner.expire_locked(&mut publication,&mut r, session_id, Instant::now());
         let reason = {
             if r.window.as_deref() != Some(window) || !r.document_bound || r.document_lost { return Err(invalid_owner()); }
             if r.last.as_ref().is_some_and(|p| p.domain == domain && p.session_id == session_id && p.owner_generation == r.generation) { return self.inner.snapshot_for(&r, domain); }
@@ -1813,8 +2094,11 @@ impl EditOwner {
             if a.cleanup_start.is_some() { return self.inner.snapshot_for(&r, domain); }
             if a.projection.apply_submitted { Reason::Cancelled } else { Reason::Discarded }
         };
-        self.inner.trigger_locked(&mut r, session_id, reason, Instant::now());
+        self.inner.trigger_locked(&mut publication,&mut r, session_id, reason, Instant::now());
         self.inner.snapshot_for(&r, domain)
+        })();
+        publication.finish();
+        result
     }
     pub(crate) fn workflow_project(&self, window: &str, session_id: &str) -> Result<String, BridgeError> {
         self.registered_edit_project(window, session_id, EditDomain::GitHubWorkflows)
@@ -1839,22 +2123,29 @@ impl EditOwner {
     }
 
     pub(crate) fn retire_release_version_request(&self, window: &str) {
-        let mut r = self.inner.lock();
-        if r.window.as_deref() != Some(window) || !r.document_bound || r.document_lost { return; }
-        let id = r.active.as_ref().filter(|a| release_version_request_retirable(a.session.domain,&a.projection,&r.generation))
-            .map(|a| a.session.id.clone());
-        if let Some(id) = id { self.inner.trigger_locked(&mut r, &id, Reason::CallerLost, Instant::now()); }
+        let mut publication=self.inner.mandatory_publication();
+        self.retire_release_version_request_with(&mut publication,window);
+        publication.finish();
+    }
+    fn retire_release_version_request_with(&self,publication:&mut EditPublication<'_>,window:&str){
+        let mut r=self.inner.lock();
+        if r.window.as_deref()!=Some(window) || !r.document_bound || r.document_lost{return;}
+        let id=r.active.as_ref().filter(|a|release_version_request_retirable(a.session.domain,&a.projection,&r.generation))
+            .map(|a|a.session.id.clone());
+        if let Some(id)=id{self.inner.trigger_locked(publication,&mut r,&id,Reason::CallerLost,Instant::now());}
     }
 
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
+        let mut publication = self.inner.mandatory_publication();
         let id = {
             let mut r = self.inner.lock();
             r.stopping = true;
             let id = r.active.as_ref().map(|a| a.session.id.clone());
-            self.inner.bump(&mut r);
+            self.inner.bump(&mut r, &mut publication);
             id
         };
-        if let Some(id) = id { self.inner.trigger(&id, Reason::Shutdown, Instant::now()); }
+        if let Some(id) = id { self.inner.trigger_published(&mut publication, &id, Reason::Shutdown, Instant::now()); }
+        publication.finish();
         loop {
             let changed = self.inner.changed.notified();
             if self.can_exit() { return Ok(()); }
@@ -2141,9 +2432,11 @@ fn terminal_admissible(a: &ActiveOwner, seq: u32, plan_token: Option<&str>, core
 }
 
 fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
+    let mut publication = inner.mandatory_publication();
+    let result = (|| {
     let mut r = inner.lock();
     let now = Instant::now();
-    inner.expire_locked(&mut r, &owner.id, now); // Receipt and expiry serialize.
+    inner.expire_locked(&mut publication,&mut r, &owner.id, now); // Receipt and expiry serialize.
     let Some(a) = r.active.as_mut().filter(|a| a.session.id == owner.id) else { return; };
     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
     let mut terminal = false;
@@ -2347,16 +2640,19 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
             }
         }
     }
-    inner.bump(&mut r);
+    inner.bump(&mut r, &mut publication);
     drop(r);
     if invalid {
-        inner.trigger(&owner.id, Reason::ProtocolError, now);
-        inner.unknown(&owner.id);
+        inner.trigger_published(&mut publication, &owner.id, Reason::ProtocolError, now);
+        inner.unknown_published(&mut publication, &owner.id);
     } else if terminal {
-        inner.trigger(&owner.id, Reason::None, now);
-        if uncertain { inner.unknown(&owner.id); }
+        inner.trigger_published(&mut publication, &owner.id, Reason::None, now);
+        if uncertain { inner.unknown_published(&mut publication, &owner.id); }
     }
     owner.wake.notify_waiters();
+    })();
+    publication.finish();
+    result
 }
 
 fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
@@ -2417,6 +2713,8 @@ fn installed_worker_lost(book: &Resources) {
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>) -> Result<(), BridgeError> {
+    let mut publication = inner.publication(None, true)?;
+    let result = (|| {
     let (inspection, acquisition) = startup_workers(book);
     if !inspection.started || !inspection.positive() || acquisition.started || !acquisition.positive() {
         return Err(edit_unknown());
@@ -2425,30 +2723,35 @@ fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>
     let mut slots = native.try_lock().map_err(|_| edit_unknown())?;
     let mut r = inner.lock();
     let now = Instant::now();
-    inner.expire_locked(&mut r, &owner.id, now);
+    inner.expire_locked(&mut publication,&mut r, &owner.id, now);
     if !inner.installed_claim_clear(&r, owner, &slots, now) { return Err(invalid_owner()); }
     // Exact active Arc, document generation and STOP/deadline share the SAME
     // registry race as this whole-ledger move. No native work or allocation.
     slots.transfer_once(owner.domain)
+    })();
+    publication.finish();
+    result
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
+    let mut publication = inner.mandatory_publication();
+    let result = (|| {
     if !installed_edit_selected(owner.domain, &inner.runtime) {
-        inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
+        inner.trigger_published(&mut publication, &owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
     }
     #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
     {
         let _ = (native, end);
-        inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
+        inner.trigger_published(&mut publication, &owner.id, Reason::RuntimeUnavailable, Instant::now());
         return; // No feature-off/development/publisher path even prepares or claims.
     }
     #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     {
         let mut slots = match native.lock() {
             Ok(slots) => slots,
-            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
+            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_published(&mut publication, &owner.id); return; },
         };
         let bootstrap_argument = installed_bootstrap_argument(slots.domain());
         let stop = owner.stop.subscribe();
@@ -2457,8 +2760,8 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
             owner.observe_native_failure(_first);
         }) {
             Ok(selected) => selected,
-            Err(InstalledPrepareFailure::CapabilityUnknown) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
-            Err(InstalledPrepareFailure::Unavailable) => { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; },
+            Err(InstalledPrepareFailure::CapabilityUnknown) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_published(&mut publication, &owner.id); return; },
+            Err(InstalledPrepareFailure::Unavailable) => { inner.trigger_published(&mut publication, &owner.id, Reason::RuntimeUnavailable, Instant::now()); return; },
         };
         // Fixed bootstrap and literal domain from the checked original slot,
         // never a caller-supplied selector. Configuration retains its default ABI.
@@ -2471,26 +2774,26 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
         if let Some(argument) = bootstrap_argument { command.arg(argument); } // Allocate BEFORE the final serialized claim.
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         if crate::runtime::macos_installed_environment(&mut command).is_err() {
-            inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return;
+            inner.trigger_published(&mut publication, &owner.id, Reason::RuntimeUnavailable, Instant::now()); return;
         }
         let mut startup = match owner.startup.lock() {
             Ok(startup) => startup,
-            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
+            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_published(&mut publication, &owner.id); return; },
         };
         if startup.attempted || startup.returned || startup.failed || startup.child.is_some() {
-            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_published(&mut publication, &owner.id); return;
         }
         let mut r = inner.lock();
         let now = Instant::now();
-        inner.expire_locked(&mut r, &owner.id, now);
+        inner.expire_locked(&mut publication,&mut r, &owner.id, now);
         if !inner.installed_claim_clear(&r, owner, &slots, now) {
             drop(r);
-            inner.trigger(&owner.id, Reason::Cancelled, Instant::now());
+            inner.trigger_published(&mut publication, &owner.id, Reason::Cancelled, Instant::now());
             return;
         }
         if slots.claim_once(owner.domain).is_err() {
             drop(r);
-            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_published(&mut publication, &owner.id); return;
         }
         startup.attempted = true;
         drop(r);
@@ -2500,11 +2803,14 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
                 startup.failed = true; // Opaque creation error is NEVER no-child/close evidence.
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 drop(startup);
-                inner.trigger(&owner.id, Reason::SpawnFailed, Instant::now());
-                inner.unknown(&owner.id);
+                inner.trigger_published(&mut publication, &owner.id, Reason::SpawnFailed, Instant::now());
+                inner.unknown_published(&mut publication, &owner.id);
             },
         }
     }
+    })();
+    publication.finish();
+    result
 }
 
 fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
@@ -2807,12 +3113,13 @@ async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, ow
             }
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             let cleanup_end = {
-                let mut r = inner.lock(); inner.expire_locked(&mut r, &owner.id, Instant::now());
+                let mut publication = inner.mandatory_publication();
+                let mut r = inner.lock(); inner.expire_locked(&mut publication,&mut r, &owner.id, Instant::now());
                 let original = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, owner));
                 let Some(end) = original.and_then(|a| a.cleanup_start.map(|start| start + FINALIZATION)) else {
                     drop(r); owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
                 };
-                end
+                drop(r); publication.finish(); end
             };
             let closing_owner = owner.clone();
             let closing = native.clone();
@@ -3271,11 +3578,13 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         pending::<()>().await; // Pure retained observer once original work ended.
         return;
     }
+    let mut publication = inner.mandatory_publication();
+    let result = (|| {
     let mut r = inner.lock();
-    inner.expire_locked(&mut r, &owner.id, Instant::now());
+    inner.expire_locked(&mut publication,&mut r, &owner.id, Instant::now());
     let Some(a) = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, &owner)) else { guard.completed = true; return; };
     let expired = a.cleanup_start.is_some_and(|start| Instant::now() >= start + FINALIZATION);
-    if expired && !a.unknown { drop(r); inner.unknown(&owner.id); r = inner.lock(); }
+    if expired && !a.unknown { drop(r); inner.unknown_published(&mut publication, &owner.id); r = inner.lock(); }
     if let Some(mut a) = r.active.take() {
         if !Arc::ptr_eq(&a.session, &owner) { r.active = Some(a); guard.completed = true; return; }
         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
@@ -3315,9 +3624,12 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             } else { None };
         }
         r.last = Some(a.projection); // Atomic active -> one terminal projection.
-        inner.bump(&mut r);
+        inner.bump(&mut r, &mut publication);
     }
     guard.completed = true;
+    })();
+    publication.finish();
+    result
 }
 
 #[cfg(all(test, feature = "development-runtime"))]

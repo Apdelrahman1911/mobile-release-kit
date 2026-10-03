@@ -15,12 +15,28 @@ use crate::{error::BridgeError, protocol::{strict_json, PROTOCOL}, runtime::{sel
 #[path = "android_toolchain_macos.rs"]
 mod android_tools;
 pub(crate) use android_tools::{AndroidToolchainSlots, AndroidCatalogSlots};
+#[cfg(not(feature = "macos-android-registration-helper"))]
+#[path = "android_leased_toolchain_macos.rs"]
+mod android_leased;
+#[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) use android_leased::{LeasedAndroidToolchainSlots, LeasedAndroidCatalogSlots,
+    CatalogMode, CatalogCandidate, RowCode, admission_issue as android_lease_admission_issue};
 #[path = "android_runtime_macos.rs"]
 mod android_runtime;
 pub(crate) use android_runtime::{AndroidBuildRuntimeSlots, AndroidBuildInstalledRuntime};
 #[path = "installation_observation_macos.rs"]
 mod installation_observation;
 pub(crate) use installation_observation::{InstallationSlots, native_problem as installation_native_problem};
+#[cfg(not(feature = "macos-android-registration-helper"))]
+#[path = "android_fixed_support_macos.rs"]
+mod android_fixed_support;
+#[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) use android_fixed_support::{FixedSupportSlots, FixedSupportReview};
+#[cfg(not(feature = "macos-android-registration-helper"))]
+#[path = "android_registration_source_macos.rs"]
+mod android_registration_source;
+#[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) use android_registration_source::{SourceSlots as AndroidRegistrationSourceSlots, SourceReview as AndroidRegistrationSourceReview, PayloadSink as AndroidRegistrationPayloadSink};
 
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +59,8 @@ impl Identity {
 }
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    registration_gate: Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
     android_acl: Option<std::sync::Mutex<android_runtime::Audit>>,
     // Constructors are DATA only. Entered survives a lost frame allocation.
     acl_entered: bool, acl: Option<RefCell<SnapshotBook>>,
@@ -75,9 +93,18 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
 }
 impl Book {
     fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        registration_gate: None,
         android_acl: None, acl_entered: false, acl: None, acl_invalid: Cell::new(false), acl_first: Cell::new(None) } }
+    fn point(&self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if let Some(gate)=&self.registration_gate{gate.source_work()?;}
+        checkpoint(end,stop)
+    }
     fn note_acl(&self, failure: AdmissionFailure, at: Instant) {
         self.acl_first.set(earliest_failure(self.acl_first.get(), Some((failure, at))));
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if let Some(gate)=&self.registration_gate{gate.source_note(failure,at);}
     }
     fn invalid_acl(&self) -> AdmissionFailure {
         self.acl_invalid.set(true); self.note_acl(AdmissionFailure::Unknown, Instant::now()); AdmissionFailure::Unknown
@@ -91,7 +118,10 @@ impl Book {
             },
             _ => { self.invalid_acl(); None },
         };
-        earliest_failure(self.acl_first.get(), native)
+        let first=earliest_failure(self.acl_first.get(), native);
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let first=earliest_failure(first,self.registration_gate.as_ref().and_then(|gate|gate.source_first()));
+        first
     }
     fn pristine(&self) -> bool { !self.started && !self.inspected && !self.prepared && !self.closed && !self.unknown
         && self.records.is_empty() && !self.acl_invalid.get() && self.acl_first.get().is_none() }
@@ -120,7 +150,7 @@ impl Book {
     }
     fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         if !self.never_started() { return Err(AdmissionFailure::AlreadyUsed); }
-        checkpoint(end, stop)?;
+        self.point(end, stop)?;
         // Only the already-registered original inspector may enter here, AFTER
         // its original entry barrier. No coordinator/Registry native allocation.
         self.acl_entered = true;
@@ -132,7 +162,7 @@ impl Book {
             else if !acl.not_started() || !acl.quiescent() { Err(AdmissionFailure::Unknown) } else { Ok(()) };
         drop(acl);
         if let Err(failure) = result { self.note_acl(failure, Instant::now()); return Err(failure); }
-        checkpoint(end, stop)
+        self.point(end, stop)
     }
     fn common_settled(&self) -> bool {
         if self.acl_invalid.get() { return false; }
@@ -184,17 +214,28 @@ impl Book {
         let expected = identity.acl_expected()?;
         let cell = self.acl.as_ref().ok_or_else(|| self.invalid_acl())?;
         let mut acl = cell.try_borrow_mut().map_err(|_| self.invalid_acl())?;
-        let result = acl.observe(fd.as_fd(), expected, Policy::Empty, stopped).map_err(map_acl_failure);
+        let result = acl.observe_phased(fd.as_fd(), expected, Policy::Empty,&mut |phase,first|{
+            #[cfg(not(feature = "macos-android-registration-helper"))]
+            if let Some(gate)=&self.registration_gate {
+                if phase==native::vault_filesystem::ObservePhase::Cleanup {
+                    // SnapshotBook's successful ACL close tail is cleanup too.
+                    // Never call a WAITing work predicate on this branch.
+                    return gate.source_cleanup_expired(first.map(|(failure,at)|(map_acl_failure(failure),at)));
+                }
+                if gate.source_work().is_err(){return true;}
+            }
+            let _=(phase,first);stopped()
+        }).map_err(map_acl_failure);
         if let Some((failure, at)) = acl.first_failure() { self.note_acl(map_acl_failure(failure), at); }
         result
     }
     fn open(&mut self, parent: Option<usize>, name: &str, directory: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
-        checkpoint(end, stop)?;
+        self.point(end, stop)?;
         let index = self.reserve(parent, name)?;
         let before = if let Some(parent) = parent {
             stat::fstatat(self.fd(parent)?, name, AtFlags::AT_SYMLINK_NOFOLLOW)
         } else { stat::lstat(Path::new("/")) }.map_err(native_error)?;
-        checkpoint(end, stop)?;
+        self.point(end, stop)?;
         let identity = metadata(&before, directory)?;
         if self.android_acl.is_some() {
             self.records[index].identity=Some(identity);self.records[index].android_flags=Some(before.st_flags);
@@ -208,15 +249,15 @@ impl Book {
             Ok(fd) => { self.records[index].fd = Some(fd); self.records[index].state = State::Owned; }
             Err(_) => { self.records[index].state = State::NoHandle; return Err(AdmissionFailure::Native); }
         }
-        checkpoint(end, stop)?;
+        self.point(end, stop)?;
         let after = stat::fstat(self.fd(index)?).map_err(native_error)?;
         if metadata(&after, directory)? != identity { return Err(AdmissionFailure::Identity); }
         self.records[index].identity = Some(identity);
-        self.filesystem(index, identity, &mut || checkpoint(end, stop).is_err())?;
+        self.filesystem(index, identity, &mut || self.point(end, stop).is_err())?;
         self.check_name(index, end, stop)?; Ok(index)
     }
     fn check_name(&self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        checkpoint(end, stop)?;
+        self.point(end, stop)?;
         let record = &self.records[index]; let identity = record.identity.ok_or(AdmissionFailure::Identity)?;
         let actual = stat::fstat(self.fd(index)?).map_err(native_error)?;
         let named = if let Some(parent) = record.parent {
@@ -224,7 +265,7 @@ impl Book {
         } else { stat::lstat(Path::new("/")) }.map_err(native_error)?;
         if Identity::of(&actual) != identity || Identity::of(&named) != identity
             || record.android_flags.is_some_and(|flags|actual.st_flags!=flags || named.st_flags!=flags) { return Err(AdmissionFailure::Identity); }
-        self.filesystem(index, identity, &mut || checkpoint(end, stop).is_err())?; checkpoint(end, stop)
+        self.filesystem(index, identity, &mut || self.point(end, stop).is_err())?; self.point(end, stop)
     }
     fn chain(&mut self, path: &Path, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         let bytes = path.as_os_str().as_bytes();
@@ -243,7 +284,7 @@ impl Book {
         if self.records[index].identity.is_none_or(|id| id.size < 0 || id.size as u64 != size) { return Err(AdmissionFailure::Inventory); }
         let mut hash = Sha256::new(); let mut bytes = Vec::new(); let mut count = 0u64; let mut block = [0u8; 65536];
         loop {
-            checkpoint(end, stop)?;
+            self.point(end, stop)?;
             let n = unistd::read(fd, &mut block).map_err(native_error)?;
             if n == 0 { break; }
             count = count.checked_add(n as u64).ok_or(AdmissionFailure::Bounds)?;
@@ -275,7 +316,7 @@ impl Book {
         if depth > 16 { return Err(AdmissionFailure::Bounds); }
         let mut buffer = [0u8; 65536]; let mut local = BTreeSet::new();
         loop {
-            checkpoint(end, stop)?;
+            self.point(end, stop)?;
             let used = native::directory_block(self.fd(parent)?.as_fd(), &mut buffer).map_err(native_error)?;
             if used == 0 { break; }
             let mut offset = 0;
@@ -312,18 +353,20 @@ impl Book {
                 let absolute = selection.cwd.join(&path);
                 let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute));
                 if !retain {
-                    checkpoint(end, stop)?;
+                    self.point(end, stop)?;
                     if !self.close(index) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); return Err(AdmissionFailure::Unknown); }
-                    checkpoint(end, stop)?; // A late real consuming return never renews work.
+                    self.point(end, stop)?; // A late real consuming return never renews work.
                 }
             }
         }
         self.check_name(parent, end, stop)
     }
-    fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+    // Private factoring of the existing installed-app proof, not a Resources
+    // capability. FixedSupport uses the SAME retained Contents ancestor.
+    fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         self.records.try_reserve_exact(8256).map_err(native_error)?; self.started = true;
-        checkpoint(end, stop)?; native::real_user().map_err(native_error)?; checkpoint(end, stop)?;
+        self.point(end, stop)?; native::real_user().map_err(native_error)?; self.point(end, stop)?;
         // A user-writable drag-copy or checkout app cannot select this runtime.
         let executable = Path::new(APP).join("Contents/MacOS/mobile-release-kit-desktop");
         if std::env::current_exe().map_err(native_error)? != executable { return Err(AdmissionFailure::Ownership); }
@@ -332,6 +375,10 @@ impl Book {
         let id = self.records[binary].identity.ok_or(AdmissionFailure::Identity)?;
         if id.gid != 0 || id.mode & 0o7777 != 0o555 { return Err(AdmissionFailure::Ownership); }
         native::no_xattrs(self.fd(binary)?.as_fd()).map_err(native_error)?;
+        self.records[app_parent].parent.ok_or(AdmissionFailure::Identity)
+    }
+    fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.protected_app_once(end, stop)?;
         if selection.cwd != runtime_root() { return Err(AdmissionFailure::Inventory); }
         let root = self.chain(&selection.cwd, end, stop)?;
         let id = self.records[root].identity.ok_or(AdmissionFailure::Identity)?;
@@ -366,17 +413,26 @@ impl Book {
         }
         let mut observed = BTreeSet::new(); self.walk(root, "", &files, &directories, &mut observed, selection, 0, end, stop)?;
         if observed.len() != files.len() + directories.len() { return Err(AdmissionFailure::Inventory); }
-        checkpoint(end, stop)?; self.inspected = true; Ok(())
+        self.point(end, stop)?; self.inspected = true; Ok(())
     }
     fn prepare(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         if !self.inspected || self.prepared || !self.admission_custody_ready() { return Err(AdmissionFailure::AlreadyUsed); }
-        checkpoint(end, stop)?; native::real_user().map_err(native_error)?;
+        self.point(end, stop)?; native::real_user().map_err(native_error)?;
         for (index, record) in self.records.iter().enumerate() {
             if record.state == State::Owned { self.check_name(index, end, stop)?; }
         }
-        checkpoint(end, stop)?; self.prepared = true; Ok(())
+        self.point(end, stop)?; self.prepared = true; Ok(())
     }
     fn settle(&mut self, expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool) -> CloseOutcome {
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let gate=self.registration_gate.clone();
+        let mut expired=|first|{
+            #[cfg(not(feature = "macos-android-registration-helper"))]
+            let gate_expired=gate.as_ref().is_some_and(|gate|gate.source_cleanup_expired(first));
+            #[cfg(feature = "macos-android-registration-helper")]
+            let gate_expired=false;
+            let owner_expired=expired(first);gate_expired || owner_expired
+        };
         let first = self.first_failure();
         let denied = expired(first); // Also publish around native poisoned/early returns.
         if self.closed || self.android_acl.is_some() { return CloseOutcome::Unknown; }

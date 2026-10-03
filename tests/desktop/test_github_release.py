@@ -30,6 +30,11 @@ TREE = "e" * 40
 ORIGINAL = "f" * 40
 RUN = "18446744073709551615"
 SENTINEL = "INERT_NOT_A_CREDENTIAL"
+APPLE_INTENT = "1a" * 32
+APPLE_ADOPTION = "recover-ios-candidate:" + APPLE_INTENT + ":Build_7.-"
+APPLE_UPLOAD = "retry-ios-candidate-upload:" + APPLE_INTENT + ":" + "2b" * 32
+APPLE_CREATES = "retry-ios-operation-creates:" + APPLE_INTENT + ":" + "3c" * 32
+APPLE_MAX_ADOPTION = "recover-ios-candidate:" + APPLE_INTENT + ":" + "B" * 255
 
 
 def configuration(source="release/version.properties"):
@@ -54,6 +59,12 @@ def target(stage="candidate", platform="android", recovery=False):
             "externalRunId": "102" if stage == "production-submit" and not recovery else None,
             "recoveryRunId": "103" if recovery else None, "originalSourceSha": ORIGINAL if original else None,
             "originalVersion": {"name": "1.2.3", "build": 42} if original else None}})
+
+
+def apple_target(stage="candidate", grant=APPLE_ADOPTION):
+    value = target(stage, "ios", True).value()
+    value["selection"]["recoveryConfirmation"] = grant
+    return policy.Target.parse(value)
 
 
 def blob(raw):
@@ -197,6 +208,96 @@ class GitHubReleasePolicyTests(unittest.TestCase):
         raw = target().value(); raw["platform"] = "both"
         with self.assertRaises(ValueError): policy.Target.parse(raw)
 
+    def test_apple_recovery_confirmation_exact_forms_and_applicability(self):
+        valid = (("candidate", APPLE_ADOPTION), ("candidate", APPLE_UPLOAD),
+                 ("external-testing", APPLE_CREATES), ("production-submit", APPLE_CREATES),
+                 ("candidate", "recover-ios-candidate:" + APPLE_INTENT + ":B"),
+                 ("candidate", APPLE_MAX_ADOPTION))
+        self.assertEqual((len(APPLE_MAX_ADOPTION), len(APPLE_UPLOAD), len(APPLE_CREATES)), (342, 156, 157))
+        for stage, grant in valid:
+            with self.subTest(stage=stage, grant=grant):
+                selected = apple_target(stage, grant)
+                self.assertEqual(selected.selection.recovery_confirmation, grant)
+                self.assertEqual(policy.Target.parse(selected.value()), selected)
+                self.assertEqual(set(selected.selection.value()), {"stage", "candidateRunId", "externalRunId",
+                    "recoveryRunId", "originalSourceSha", "originalVersion", "recoveryConfirmation"})
+                # Producer identity remains a declaration; it is not parsed from the token.
+                another_producer = selected.value(); another_producer["selection"]["recoveryRunId"] = "9001"
+                self.assertEqual(policy.Target.parse(another_producer).selection.recovery_run_id, "9001")
+                for platform, recovery in (("android", True), ("ios", False)):
+                    wrong = target(stage, platform, recovery).value()
+                    wrong["selection"]["recoveryConfirmation"] = grant
+                    with self.assertRaises((ValueError, TypeError)): policy.Target.parse(wrong)
+                for key, value in (("recoveryRunId", "latest"), ("recoveryRunId", None), ("force", True),
+                                   ("recovery_confirmation", grant)):
+                    wrong = selected.value(); wrong["selection"][key] = value
+                    with self.assertRaises((ValueError, TypeError)): policy.Target.parse(wrong)
+        for stage in ("candidate", "external-testing", "production-submit"):
+            for grant in (APPLE_ADOPTION, APPLE_UPLOAD, APPLE_CREATES):
+                allowed = (stage == "candidate") == (grant != APPLE_CREATES)
+                if allowed:
+                    self.assertEqual(apple_target(stage, grant).selection.recovery_confirmation, grant)
+                else:
+                    with self.assertRaises(ValueError): apple_target(stage, grant)
+        malformed = [None, "", 0, True, [], {}, " " + APPLE_ADOPTION, APPLE_ADOPTION + " ",
+            APPLE_ADOPTION + "\n", APPLE_ADOPTION + "\r\n", APPLE_ADOPTION + "\t", APPLE_ADOPTION + "\0",
+            APPLE_ADOPTION + "\u00a0", APPLE_ADOPTION + "\u2028", APPLE_ADOPTION + "\u200b",
+            APPLE_ADOPTION.replace(APPLE_INTENT, APPLE_INTENT.upper()),
+            APPLE_ADOPTION.replace("recover-ios", "Recover-ios"), APPLE_ADOPTION.replace(":", ":\n", 1),
+            "recover-ios-candidate:" + APPLE_INTENT[:-1] + ":B",
+            "recover-ios-candidate:" + APPLE_INTENT + "0:B", "recover-ios-candidate:" + APPLE_INTENT + ":",
+            APPLE_MAX_ADOPTION + "B", APPLE_UPLOAD[:-1], APPLE_UPLOAD + "0",
+            APPLE_UPLOAD.replace("2b", "2B")]
+        malformed += ["recover-ios-candidate:" + APPLE_INTENT + ":" + detail for detail in ("B/7", "B+7", "B:7", "B\\7", "é")]
+        for grant in malformed:
+            with self.subTest(malformed=grant), self.assertRaises((ValueError, TypeError)):
+                apple_target(grant=grant)
+        for grant in (APPLE_CREATES[:-1], APPLE_CREATES + "0", APPLE_CREATES + "\n", APPLE_CREATES.replace("3c", "3C")):
+            with self.subTest(malformed=grant), self.assertRaises(ValueError):
+                apple_target("external-testing", grant)
+
+    def test_apple_recovery_dispatch_uses_captured_text_and_unchanged_schedules(self):
+        for stage, grant in (("candidate", APPLE_ADOPTION), ("candidate", APPLE_UPLOAD),
+                             ("external-testing", APPLE_CREATES), ("production-submit", APPLE_CREATES)):
+            with self.subTest(stage=stage, grant=grant):
+                draft = apple_target(stage, grant).value()
+                selected = policy.Target.parse(draft)
+                result, prepare_reader = execute(selected=selected)
+                captured = policy.Prepared.parse(result["prepared"])
+                self.assertEqual([row.method for row in prepare_reader.calls], ["GET"] * 10)
+                replacement = APPLE_UPLOAD if grant == APPLE_ADOPTION else APPLE_ADOPTION if stage == "candidate" else APPLE_CREATES.replace("3c", "4d")
+                draft["selection"]["recoveryConfirmation"] = replacement
+                action = policy.Action.parse({"kind": "dispatch", "target": captured.target.value(), "prepared": captured.value(), "runId": None})
+                reader = Reader(action, bodies(selected))
+                result = policy.execute(action, reader, observed_at=TIME)
+                self.assertEqual((result["effect"], result["runId"]), ("accepted", RUN))
+                self.assertEqual([row.method for row in reader.calls], ["GET"] * 4 + ["POST"])
+                inputs = json.loads(reader.calls[-1].body)["inputs"]
+                self.assertEqual(inputs["recovery_confirmation"], grant)
+                self.assertEqual(inputs["recovery_run_id"], "103")
+                self.assertEqual(inputs["confirmation"], stage + ":ios:1.2.3:42")
+                self.assertEqual(inputs["desktop_source_sha"], SOURCE)
+                self.assertEqual(inputs["desktop_expected_ref"], "refs/heads/" + selected.branch)
+                self.assertNotIn("original_source_sha", inputs)
+                self.assertEqual(captured.target.selection.recovery_confirmation, grant)
+                with self.assertRaises(ValueError): reader.read("dispatch")
+                swapped = action.value(); swapped["target"]["selection"]["recoveryConfirmation"] = replacement
+                with self.assertRaises(ValueError): policy.Action.parse(swapped)
+                late = action.value(); late["recoveryConfirmation"] = replacement
+                with self.assertRaises(ValueError): policy.Action.parse(late)
+                unknown = bodies(selected); unknown["dispatch"] = transport.ReadFailure("network-unavailable")
+                unknown_reader = Reader(action, unknown)
+                result = policy.execute(action, unknown_reader, observed_at=TIME)
+                self.assertEqual((result["effect"], result["reason"]), ("potentially-applied", "network-unavailable"))
+                self.assertEqual([row.method for row in unknown_reader.calls], ["GET"] * 4 + ["POST"])
+                self.assertEqual(unknown_reader.calls[-1].body, reader.calls[-1].body)
+                with self.assertRaises(ValueError): unknown_reader.read("dispatch")
+                for kind, reads in (("track", 5), ("reconcile", 6)):
+                    result, observer = execute(kind, selected)
+                    self.assertEqual(result["reason"], "none")
+                    self.assertEqual([row.method for row in observer.calls], ["GET"] * reads)
+                    self.assertEqual(observer.schedule.action.prepared.target.selection.recovery_confirmation, grant)
+
     def test_selected_symlink_submodule_ancestor_and_incomplete_tree_refuse_before_version(self):
         for selected_path in (policy.CONFIG_PATH, target().workflow_path, "release/version.properties", "release"):
             for mode, kind in (("120000", "blob"), ("160000", "commit")):
@@ -287,48 +388,104 @@ class GitHubReleasePolicyTests(unittest.TestCase):
 
 class GitHubReleaseFrameTests(unittest.TestCase):
     def test_full64_maximum_retained_records_fit_the_private_result_without_truncation(self):
-        value = prepared(target(recovery=True)).value()
-        selected = value["target"]
-        selected.update(repository="a" * 39 + "/" + "b" * 100, branch="b" * 200, accountId=RUN, repositoryId=RUN)
-        version = {"name": "1.0+" + "v" * 60, "build": 2_100_000_000}
-        selected["selection"].update(recoveryRunId=RUN, originalVersion=version)
-        value.update(workflowId=RUN, currentVersion=version, expectedRef="refs/heads/" + selected["branch"],
-                     confirmation="candidate:android:" + version["name"] + ":2100000000",
-                     versionSource="a" * 248 + "/" + "é" * 124 + "/" + "v" * 14)
-        value["destination"].update(applicationId='"\\é' * 40, destination='"\\é' * 40)
-        value["checklist"] = []
-        size = lambda: len(policy._canonical(value))
-        for i in range(16):
-            value["checklist"].append({"name": f"MOBILE_RELEASE_FIXTURE_{i}", "kind": "secret", "reason": "r" * 192})
-            if size() > policy.MAX_PREPARED_BYTES:
-                value["checklist"].pop()
-                break
-        for field, maximum in (("destination", 256), ("applicationId", 255)):
-            while size() < policy.MAX_PREPARED_BYTES and len(value["destination"][field].encode()) < maximum:
-                value["destination"][field] += "x"
-        while size() < policy.MAX_PREPARED_BYTES:
-            self.assertLess(len(value["checklist"][-1]["name"]) - len("MOBILE_RELEASE_"), 96)
-            value["checklist"][-1]["name"] += "X"
-        self.assertEqual(size(), 3900)
-        policy.Prepared.parse(value)
-        rows = []
-        for i in range(64):
-            row = copy.deepcopy(value); row["target"]["marker"] = format(i, "032x")
-            row["displayTitle"] = "MRK Desktop candidate [" + row["target"]["marker"] + "]"
-            # Round-trip the real immutable intent serializer/parser, without
-            # opening a journal or touching any filesystem/account resource.
-            prior = policy.Prepared.parse(row)
-            self.assertEqual(journal.parse_intent(journal.intent_bytes(prior, family=Family.RELEASE), family=Family.RELEASE), prior)
-            rows.append({"prepared": row, "runId": str(int(RUN) - i)})
-        request = engine.parse_initial(frame({"protocol": policy.PROTOCOL, "id": "release-full64", "action": None,
-            "pendingScope": {key: selected[key] for key in ("projectBinding", "repository", "accountId", "repositoryId")},
-            "home": "/home/mrk"}), family=Family.RELEASE)
-        raw = engine.encode_result(request, None, rows)
-        self.assertLessEqual(len(raw), engine.MAX_RESULT_BYTES)
-        self.assertEqual(json.loads(raw)["pending"], rows)
-        with self.assertRaises(ValueError): engine.encode_result(request, None, rows + [rows[0]])
-        value["checklist"][-1]["reason"] += "x"
-        with self.assertRaises(ValueError): policy.Prepared.parse(value)
+        for grant in (None, APPLE_MAX_ADOPTION):
+            value = prepared(target(recovery=True) if grant is None else apple_target(grant=grant)).value()
+            selected = value["target"]
+            selected.update(repository="a" * 39 + "/" + "b" * 100, branch="b" * 200, accountId=RUN, repositoryId=RUN)
+            version = {"name": "1.0+" + "v" * 60 if grant is None else "1.2.3", "build": 2_100_000_000}
+            selected["selection"].update(recoveryRunId=RUN, originalVersion=version)
+            value.update(workflowId=RUN, currentVersion=version, expectedRef="refs/heads/" + selected["branch"],
+                         confirmation="candidate:" + selected["platform"] + ":" + version["name"] + ":2100000000",
+                         versionSource="a" * 248 + "/" + "é" * 124 + "/" + "v" * 14)
+            value["destination"].update(applicationId='"\\é' * 40, destination='"\\é' * 40)
+            value["checklist"] = []
+            size = lambda: len(policy._canonical(value))
+            for i in range(16):
+                value["checklist"].append({"name": f"MOBILE_RELEASE_FIXTURE_{i}", "kind": "secret", "reason": "r" * 192})
+                if size() > policy.MAX_PREPARED_BYTES:
+                    value["checklist"].pop()
+                    break
+            for field, maximum in (("destination", 256), ("applicationId", 255)):
+                while size() < policy.MAX_PREPARED_BYTES and len(value["destination"][field].encode()) < maximum:
+                    value["destination"][field] += "x"
+            while size() < policy.MAX_PREPARED_BYTES:
+                self.assertLess(len(value["checklist"][-1]["name"]) - len("MOBILE_RELEASE_"), 96)
+                value["checklist"][-1]["name"] += "X"
+            self.assertEqual(size(), 3900)
+            policy.Prepared.parse(value)
+            rows = []
+            for i in range(64):
+                row = copy.deepcopy(value); row["target"]["marker"] = format(i, "032x")
+                row["displayTitle"] = "MRK Desktop candidate [" + row["target"]["marker"] + "]"
+                # Round-trip the real immutable intent serializer/parser, without
+                # opening a journal or touching any filesystem/account resource.
+                prior = policy.Prepared.parse(row)
+                self.assertEqual(journal.parse_intent(journal.intent_bytes(prior, family=Family.RELEASE), family=Family.RELEASE), prior)
+                rows.append({"prepared": row, "runId": str(int(RUN) - i)})
+            request = engine.parse_initial(frame({"protocol": policy.PROTOCOL, "id": "release-full64", "action": None,
+                "pendingScope": {key: selected[key] for key in ("projectBinding", "repository", "accountId", "repositoryId")},
+                "home": "/home/mrk"}), family=Family.RELEASE)
+            raw = engine.encode_result(request, None, rows)
+            self.assertLessEqual(len(raw), engine.MAX_RESULT_BYTES)
+            self.assertEqual(json.loads(raw)["pending"], rows)
+            with self.assertRaises(ValueError): engine.encode_result(request, None, rows + [rows[0]])
+            retained = copy.deepcopy(rows)
+            mixed = copy.deepcopy(rows); mixed[1]["prepared"]["target"]["selection"].pop("recoveryConfirmation", None)
+            self.assertEqual(json.loads(engine.encode_result(request, None, mixed))["pending"], mixed)
+            unsupported = copy.deepcopy(rows); unsupported[1]["prepared"]["target"]["selection"]["recoveryConfirmation"] = None
+            with self.assertRaises(ValueError): engine.encode_result(request, None, unsupported)
+            over = copy.deepcopy(value)
+            self.assertLess(len(over["checklist"]), 16)
+            over["checklist"].append({"name": "MOBILE_RELEASE_OVERFLOW", "kind": "manual", "reason": "x"})
+            with self.assertRaises(ValueError): policy.Prepared.parse(over)
+            self.assertEqual(rows, retained)  # Refusal does not truncate or rewrite any original record.
+            value["checklist"][-1]["reason"] += "x"
+            with self.assertRaises(ValueError): policy.Prepared.parse(value)
+
+    def test_optional_apple_recovery_preserves_legacy_bytes_and_exact_new_journals(self):
+        legacy_keys = {"stage", "candidateRunId", "externalRunId", "recoveryRunId", "originalSourceSha", "originalVersion"}
+        for stage in ("candidate", "external-testing", "production-submit"):
+            for platform in ("android", "ios"):
+                for recovery in (False, True):
+                    with self.subTest(stage=stage, platform=platform, recovery=recovery):
+                        selected = target(stage, platform, recovery); prior = prepared(selected)
+                        self.assertIsNone(selected.selection.recovery_confirmation)
+                        self.assertEqual(set(selected.selection.value()), legacy_keys)
+                        legacy = prior.value()
+                        legacy["target"]["selection"] = {key: legacy["target"]["selection"][key] for key in legacy_keys}
+                        # Independently serialize the original six-key schema/envelope, not a migration.
+                        expected = json.dumps({"schemaVersion": 1, "protocol": "mrk-github-release/1", "prepared": legacy},
+                            ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+                        actual = journal.intent_bytes(prior, family=Family.RELEASE)
+                        self.assertEqual(actual, expected)
+                        self.assertEqual(journal.parse_intent(expected, family=Family.RELEASE), prior)
+                        digest = hashlib.sha256(expected).hexdigest()
+                        self.assertEqual(hashlib.sha256(actual).hexdigest(), digest)
+                        self.assertEqual(journal.parse_run(journal.run_bytes(digest, RUN), hashlib.sha256(actual).hexdigest()), RUN)
+                        inputs = {"platform": platform, "confirmation": prior.confirmation,
+                            "recovery_run_id": "103" if recovery else "", "recovery_confirmation": "",
+                            "desktop_request": "d" * 32, "desktop_source_sha": SOURCE, "desktop_expected_ref": "refs/heads/" + selected.branch}
+                        if stage != "candidate": inputs["candidate_run_id"] = "" if recovery else "101"
+                        if stage == "production-submit": inputs["external_run_id"] = "" if recovery else "102"
+                        expected_body = json.dumps({"ref": selected.branch, "return_run_details": True, "inputs": inputs},
+                            ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()
+                        self.assertEqual(policy.dispatch_body(prior), expected_body)
+        for stage, grant in (("candidate", APPLE_ADOPTION), ("candidate", APPLE_UPLOAD),
+                             ("external-testing", APPLE_CREATES), ("production-submit", APPLE_CREATES)):
+            prior = prepared(apple_target(stage, grant))
+            raw = journal.intent_bytes(prior, family=Family.RELEASE)
+            restored = journal.parse_intent(raw, family=Family.RELEASE)
+            self.assertEqual(restored, prior)
+            self.assertEqual(restored.target.selection.recovery_confirmation, grant)
+            self.assertEqual(journal.intent_bytes(restored, family=Family.RELEASE), raw)
+            # A legacy closed Selection reader must refuse a new grant, not drop it.
+            with self.assertRaises(ValueError): preflight._object(restored.target.selection.value(), legacy_keys)
+            for change in ({"recoveryConfirmation": None}, {"recoveryConfirmation": ""}, {"recovery_confirmation": grant}):
+                bad = json.loads(raw); bad["prepared"]["target"]["selection"].update(change)
+                with self.assertRaises(ValueError): journal.parse_intent(frame(bad), family=Family.RELEASE)
+            bad = json.loads(raw); bad["schemaVersion"] = 2
+            with self.assertRaises(ValueError): journal.parse_intent(frame(bad), family=Family.RELEASE)
+            with self.assertRaises(ValueError): journal.parse_intent(b" " + raw, family=Family.RELEASE)
 
     def test_protocol_journal_and_go_cannot_cross_preflight_family(self):
         raw = journal.intent_bytes(prepared(), family=Family.RELEASE)

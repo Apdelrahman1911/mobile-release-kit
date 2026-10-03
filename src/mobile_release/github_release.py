@@ -38,6 +38,7 @@ MAX_TREE_ENTRIES = 1000
 MAX_REQUEST_BODY = preflight.MAX_REQUEST_BODY
 MAX_PREPARED_BYTES = 3900  # Full64 status + review/run/envelopes fit unchanged256KiB; native checks before admission.
 MAX_RUN_BYTES = 4096
+MAX_RECOVERY_CONFIRMATION_BYTES = 342
 ASSURANCE = "github-workflow-observation-not-release-evidence"
 ORIGINAL_ASSURANCE = "declared-original-references-not-authenticated-release-evidence"
 REASONS = preflight.REASONS | {"config-invalid", "version-invalid", "platform-disabled", "branch-mismatch", "source-tree-unavailable"}
@@ -79,6 +80,23 @@ def _quote_path(value: str) -> str:
                             for b in part.encode("utf-8")) for part in value.split("/"))
 
 
+def _recovery_confirmation(value: object, *, stage: str) -> str:
+    # Format admission only. Original intent/artifact/inventory authority stays in core.
+    _require(type(value) is str and 0 < len(value) <= MAX_RECOVERY_CONFIRMATION_BYTES and value.isascii())
+    parts = value.split(":")
+    _require(len(parts) == 3)
+    prefix, intent, detail = parts
+    _match(intent, _DIGEST)
+    if stage == "candidate" and prefix == "recover-ios-candidate":
+        # Explicit Desktop build-ID profile, not a bound inferred from normalized_ios_build.
+        _require(re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", detail, re.ASCII) is not None)
+    else:
+        _require(stage == "candidate" and prefix == "retry-ios-candidate-upload"
+                 or stage in ("external-testing", "production-submit") and prefix == "retry-ios-operation-creates")
+        _match(detail, _DIGEST)
+    return value  # type: ignore[return-value]
+
+
 @dataclass(frozen=True, slots=True)
 class Selection:
     stage: str
@@ -87,11 +105,13 @@ class Selection:
     recovery_run_id: str | None
     original_source_sha: str | None
     original_version: ReleaseVersion | None
+    recovery_confirmation: str | None = None
 
     @classmethod
     def parse(cls, value: object, *, ios: bool) -> Selection:
+        extra = {"recoveryConfirmation"} if type(value) is dict and "recoveryConfirmation" in value else set()
         row = _object(value, {"stage", "candidateRunId", "externalRunId", "recoveryRunId",
-                              "originalSourceSha", "originalVersion"})
+                              "originalSourceSha", "originalVersion"} | extra)
         _require(type(row["stage"]) is str and row["stage"] in _STAGES)
         ids = [None if row[key] is None else _id(row[key]) for key in
                ("candidateRunId", "externalRunId", "recoveryRunId")]
@@ -104,12 +124,19 @@ class Selection:
         _require(stage == "production-submit" or ids[1] is None)
         _require(stage == "candidate" or ids[2] is not None or ids[0] is not None)
         _require(stage != "production-submit" or ids[2] is not None or ids[1] is not None)
-        return cls(stage, *ids, source, version)
+        recovery = None
+        if extra:
+            _require(ios and ids[2] is not None)
+            recovery = _recovery_confirmation(row["recoveryConfirmation"], stage=stage)
+        return cls(stage, *ids, source, version, recovery)
 
     def value(self) -> dict[str, Any]:
-        return {"stage": self.stage, "candidateRunId": self.candidate_run_id, "externalRunId": self.external_run_id,
-                "recoveryRunId": self.recovery_run_id, "originalSourceSha": self.original_source_sha,
-                "originalVersion": None if self.original_version is None else _version_value(self.original_version)}
+        row = {"stage": self.stage, "candidateRunId": self.candidate_run_id, "externalRunId": self.external_run_id,
+               "recoveryRunId": self.recovery_run_id, "originalSourceSha": self.original_source_sha,
+               "originalVersion": None if self.original_version is None else _version_value(self.original_version)}
+        if self.recovery_confirmation is not None:
+            row["recoveryConfirmation"] = self.recovery_confirmation
+        return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +288,8 @@ class Action:
 def dispatch_body(prepared: Prepared) -> bytes:
     target, selected = prepared.target, prepared.target.selection
     inputs = {"platform": target.platform, "confirmation": prepared.confirmation,
-              "recovery_run_id": selected.recovery_run_id or "", "recovery_confirmation": "",
+              "recovery_run_id": selected.recovery_run_id or "",
+              "recovery_confirmation": selected.recovery_confirmation if selected.recovery_confirmation is not None else "",
               "desktop_request": target.marker, "desktop_source_sha": prepared.source_sha,
               "desktop_expected_ref": "refs/heads/" + target.branch}
     if selected.stage != "candidate":

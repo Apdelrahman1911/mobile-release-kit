@@ -20,8 +20,9 @@ from . import android_build_tools as common
 PROFILE = "android-registered-macos-arm64-v1"
 PREFIX = "/Library/Application Support/MobileReleaseKit/android"
 OS_PROFILE = "macos26-arm64-sealed-system-v1"
-OS_FILES = ("/System/Library/CoreServices/SystemVersion.plist", "/bin/sh",
-            "/usr/bin/basename", "/usr/bin/dirname", "/usr/bin/sed", "/usr/bin/tr", "/usr/bin/uname", "/usr/bin/xargs")
+OS_FILES = ("/System/Library/CoreServices/SystemVersion.plist", "/bin/bash", "/bin/ls", "/bin/sh",
+            "/usr/bin/basename", "/usr/bin/dirname", "/usr/bin/expr", "/usr/bin/sed", "/usr/bin/tr",
+            "/usr/bin/uname", "/usr/bin/xargs")
 OS_ROOTS = ("/System/Library", "/usr/lib")
 HEADERS = ("registration.json", common.MANIFEST_NAME, "os-provider.json")
 HEADER_LIMITS = (4096, common.MAX_MANIFEST_BYTES, 64 * 1024)

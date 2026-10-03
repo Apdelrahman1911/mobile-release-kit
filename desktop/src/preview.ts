@@ -185,6 +185,7 @@ export const previewApi: DesktopApi = {
   subscribeProjectRecovery: recoveryUnavailable,
   androidToolchainCatalogStatus: androidCatalogUnavailable,
   refreshAndroidToolchainCatalog: androidCatalogUnavailable,
+  recoverAndroidToolchain: androidCatalogUnavailable,
   selectAndroidToolchain: androidCatalogUnavailable,
   cancelAndroidToolchainCatalog: androidCatalogUnavailable,
   subscribeAndroidToolchainCatalog: androidCatalogUnavailable,

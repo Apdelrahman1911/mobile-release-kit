@@ -8,6 +8,27 @@ pub mod wrapping_keychain;
 pub mod vault_filesystem;
 pub mod vault_helper_wire;
 pub mod vault_helper_filesystem;
+pub mod android_lease;
+pub mod android_registration;
+pub mod android_catalog_query;
+pub mod android_catalog_query_wire;
+pub mod android_service_prepare;
+#[cfg(feature = "android-registration-helper")]
+pub mod android_service_control;
+#[cfg(feature = "android-registration-helper")]
+pub mod android_service_resident;
+pub mod android_service_budget;
+#[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
+pub mod android_service_management;
+mod android_service_lease;
+mod android_service_client_data;
+pub const ANDROID_REGISTRATION_HELPER_BUILD: bool = cfg!(feature = "android-registration-helper");
+#[cfg(any(
+    all(feature = "android-registration-helper", not(mrk_android_registration_helper_native)),
+    all(mrk_android_registration_helper_native, not(feature = "android-registration-helper")),
+    all(feature = "android-registration-helper", any(feature = "vault-helper", feature = "installed-observation", mrk_wrapping_keychain_qualification))
+))]
+compile_error!("Android helper requires its isolated matching native Cargo role");
 pub const VAULT_HELPER_BUILD: bool = cfg!(feature = "vault-helper");
 #[cfg(any(
     all(feature = "vault-helper", not(mrk_wrapping_vault_helper_native)),

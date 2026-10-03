@@ -283,39 +283,320 @@ pub(super) fn refresh(state: &mut DocumentState) {
     }
 }
 
-// Count persistent session holdings conservatively (shared payloads may be
-// counted twice, never omitted). The old idle slot is retired by install/run_job
-// before any image bytes are allocated. Its controls cannot be recycled early.
+// The old idle Slot is retired by install/run_job before image bytes are
+// allocated; its controls are not recycled early. Persistent Session.bound
+// loans survive that retirement and must be followed even without records.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_arch = "aarch64")))]
+mod persistent_memory {
+    use super::*;
+    use std::{alloc::Layout, mem::size_of};
+
+    // Bookkeeping only: do not enlarge either product roster. Check the actual
+    // bound table below. Worst case:40 each payload/material/origin and9 each
+    // context/store/key. Live aliases use fewer entries, never extra byte credit.
+    const BOUND_ROOTS: usize = 8;
+    const IDENTITIES: usize = 3 * RECORD_LIMIT + 6 * BOUND_ROOTS + 3;
+    type Count<T> = Result<T, Reason>;
+    fn capacity<T>(value: Option<T>) -> Count<T> { value.ok_or(Reason::Capacity) }
+    fn arc_bytes<T>() -> Count<usize> {
+        let (layout, _) = Layout::new::<[usize; 2]>().extend(Layout::new::<T>()).map_err(|_| Reason::Capacity)?;
+        Ok(layout.pad_to_align().size())
+    }
+    struct Seen { ids: [usize; IDENTITIES], used: usize }
+    impl Seen {
+        fn new() -> Self { Self { ids: [0; IDENTITIES], used: 0 } }
+        fn insert<T>(&mut self, value: &Arc<T>) -> Count<bool> {
+            let id = Arc::as_ptr(value) as usize;
+            if self.ids[..self.used].contains(&id) { return Ok(false); }
+            if self.used == self.ids.len() { return Err(Reason::Capacity); }
+            self.ids[self.used] = id; self.used += 1; Ok(true)
+        }
+    }
+    struct Census { bytes: usize, seen: Seen }
+    impl Census {
+        fn new() -> Self { Self { bytes: CONTROL_RESERVE + DOCUMENT_CONTROL_RESERVE, seen: Seen::new() } }
+        fn add(&mut self, bytes: usize) -> Count<()> {
+            let total = capacity(self.bytes.checked_add(bytes))?;
+            if total > SESSION_BYTES { return Err(Reason::Capacity); }
+            self.bytes = total; Ok(())
+        }
+        fn cells<T>(&mut self, count: usize) -> Count<()> { self.add(capacity(count.checked_mul(size_of::<T>()))?) }
+        fn arc<T>(&mut self) -> Count<()> { self.add(arc_bytes::<T>()?) }
+        fn heap<T>(&mut self, including_inline: Option<usize>) -> Count<()> {
+            self.add(capacity(including_inline.and_then(|bytes| bytes.checked_sub(size_of::<T>())))?)
+        }
+        fn context(&mut self, value: &Arc<NativeContext>) -> Count<()> {
+            if !self.seen.insert(value)? { return Ok(()); }
+            self.arc::<NativeContext>()?; self.add(value.draft.capacity())?;
+            self.add(value.project_id.capacity())?; self.add(value.project.path.capacity())
+        }
+        fn origin(&mut self, value: &Arc<OriginWitness>) -> Count<()> {
+            if !self.seen.insert(value)? { return Ok(()); }
+            self.arc::<OriginWitness>()?; self.heap::<OriginWitness>(value.retained_bytes())
+        }
+        fn material(&mut self, value: &Arc<Material>) -> Count<()> {
+            if !self.seen.insert(value)? { return Ok(()); }
+            self.arc::<Material>()?;
+            match &value.origin {
+                // Different Material allocations may share one original witness.
+                MaterialOrigin::Selected(source) => { self.add(source.bytes.capacity())?; self.origin(&source.origin) },
+                // StoredBytes and StoredRef are inline in Material; only the
+                // retained byte Vec is additional heap, not another owned cell.
+                MaterialOrigin::Stored(source) => self.heap::<crate::vault_crypto::StoredBytes>(source.bytes.retained_bytes().ok()),
+            }
+        }
+        fn payload(&mut self, value: &Arc<Payload>) -> Count<()> {
+            if !self.seen.insert(value)? { return Ok(()); }
+            self.arc::<Payload>()?; self.add(RECORD_METADATA_BYTES)?;
+            if let Some(fields) = &value.fields { self.add(capacity(fields.retained_bytes())?)?; }
+            if let Some(material) = &value.material { self.material(material)?; } Ok(())
+        }
+        fn records(&mut self, values: &Vec<Record>) -> Count<()> {
+            if values.len() > RECORD_LIMIT { return Err(Reason::Capacity); }
+            self.cells::<Record>(values.capacity())?;
+            for value in values { self.add(value.key.id.0.capacity())?; self.payload(&value.payload)?; } Ok(())
+        }
+        fn assignments(&mut self, values: &Vec<Assignment>) -> Count<()> {
+            self.cells::<Assignment>(values.capacity())?;
+            for value in values { self.add(value.record_id.0.capacity())?; } Ok(())
+        }
+        fn vault_store(&mut self, value: &Arc<Mutex<crate::vault_store::StoreBook>>) -> Count<()> {
+            if !self.seen.insert(value)? { return Ok(()); }
+            let book = value.try_lock().map_err(|_| Reason::Busy)?;
+            if book.problem() == Some(crate::vault_store::Problem::CleanupUnknown)
+                || book.storage_outcome().is_some_and(|outcome| outcome.cleanup == crate::vault_store::Cleanup::Unknown) {
+                return Err(Reason::CleanupUnknown);
+            }
+            if !book.not_started() && !book.operation_quiescent() && !book.settled() { return Err(Reason::Busy); }
+            self.arc::<Mutex<crate::vault_store::StoreBook>>()?;
+            // Include the Mutex/Arc allocation once; the store helper includes
+            // its own inline value and refuses opaque pending/unknown Mac ACLs.
+            self.heap::<crate::vault_store::StoreBook>(book.retained_bytes())
+        }
+        fn vault_key(&mut self, value: &Arc<crate::vault_crypto::VaultKey>) -> Count<()> {
+            if !self.seen.insert(value)? { return Ok(()); }
+            self.arc::<crate::vault_crypto::VaultKey>()?;
+            self.heap::<crate::vault_crypto::VaultKey>(Some(value.retained_bytes()))
+        }
+        fn loan_backings(&mut self, context: &Arc<NativeContext>, payload: &Arc<Payload>,
+            store: &Arc<Mutex<crate::vault_store::StoreBook>>, key: &Arc<crate::vault_crypto::VaultKey>) -> Count<()> {
+            self.context(context)?; self.payload(payload)?; self.vault_store(store)?; self.vault_key(key)
+        }
+        fn vault_session(&mut self, value: &vault::Session) -> Count<()> {
+            if value.bound.len() != BOUND_ROOTS { return Err(Reason::Capacity); }
+            // data_bytes owns the inline Session/table and every present Box
+            // pointee. Loan visitation follows only their shared Arc backings.
+            self.add(capacity(value.data_bytes())?)?; self.vault_store(value.store())?;
+            if let Some(key) = value.key() { self.vault_key(key)?; }
+            for loan in value.bound.iter().flatten() {
+                self.loan_backings(&loan.context, &loan.payload, &loan.store, &loan.key)?;
+            }
+            Ok(())
+        }
+        fn document(&mut self, state: &DocumentState) -> Count<()> {
+            self.records(&state.records)?; self.assignments(&state.assignments)?;
+            if let Some(context) = &state.context { self.context(context)?; }
+            if let Some(session) = &state.vault { self.vault_session(session)?; } Ok(())
+        }
+    }
+    pub(super) fn persistent_bytes(state: &DocumentState) -> Count<usize> {
+        let mut census = Census::new(); census.document(state)?; Ok(census.bytes)
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    mod tests {
+        // Pure no-store DATA on both supported profiles. In particular Mac
+        // StoreBook::new allocates a native frame with no Drop cleanup: every
+        // store/document fixture is confined to the Linux-only module below.
+        use super::*;
+
+        fn context_data() -> Arc<NativeContext> {
+            Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
+                project: asset_source::RegisteredRoot { path: "/inert/project".into(),
+                    identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+                registry_generation: 1, draft: Vec::with_capacity(97), platform: Platform::Android,
+                stage: Stage::Candidate, purpose: Purpose::Store })
+        }
+        fn payload_data() -> Arc<Payload> {
+            let fields = commands::own_fields(Kind::GoogleWif,
+                &serde_json::json!({"provider": "p".repeat(257), "serviceAccount": null})).ok().expect("inert scalar DATA");
+            Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: Some(fields) })
+        }
+        #[test]
+        fn image_fixed_partition_boundary_overflow_and_incomplete_heap_refuse() {
+            assert_eq!((SESSION_BYTES, wire::BATCH_LIMIT, wire::MAX_FILES), (64 * 1024 * 1024, 24 * 1024 * 1024, 10));
+            assert_eq!((CONTROL_RESERVE, DOCUMENT_CONTROL_RESERVE, RECORD_LIMIT, BOUND_ROOTS), (1024 * 1024, 3 * 1024 * 1024, 32, 8));
+            assert_eq!(raw_allowance_from_persistent(SESSION_BYTES - wire::BATCH_LIMIT), Ok(wire::BATCH_LIMIT));
+            assert_eq!(raw_allowance_from_persistent(SESSION_BYTES - 1), Ok(1));
+            for bytes in [SESSION_BYTES, SESSION_BYTES + 1, usize::MAX] {
+                assert_eq!(raw_allowance_from_persistent(bytes), Err(Reason::Capacity));
+            }
+            let mut census = Census::new(); let before = census.bytes;
+            assert_eq!(census.add(usize::MAX), Err(Reason::Capacity));
+            assert_eq!(census.cells::<u64>(usize::MAX), Err(Reason::Capacity));
+            assert_eq!(census.heap::<Payload>(None), Err(Reason::Capacity));
+            assert_eq!(census.heap::<Payload>(Some(size_of::<Payload>() - 1)), Err(Reason::Capacity));
+            assert_eq!(census.bytes, before);
+            assert!(size_of::<Census>() <= GUI_CONTROL_RESERVE);
+        }
+        #[test]
+        fn image_identity_set_keeps_distinct_allocations_and_refuses_the_148th() {
+            assert_eq!(IDENTITIES, 147);
+            let values: Vec<_> = (0..IDENTITIES).map(|_| Arc::new(7u32)).collect();
+            let alias = values[0].clone(); let mut seen = Seen::new();
+            for value in &values { assert_eq!(seen.insert(value), Ok(true)); }
+            assert_eq!(seen.insert(&alias), Ok(false));
+            assert_eq!(seen.insert(&Arc::new(7u32)), Err(Reason::Capacity));
+            assert_eq!(seen.insert(&values[0]), Ok(false));
+        }
+        #[test]
+        fn image_record_assignment_payload_and_context_capacities_share_one_census() {
+            let payload = payload_data(); let context = context_data();
+            let payload_bytes = arc_bytes::<Payload>().unwrap() + RECORD_METADATA_BYTES + payload.fields.as_ref().unwrap().retained_bytes().unwrap();
+            let context_bytes = arc_bytes::<NativeContext>().unwrap() + context.draft.capacity() + context.project_id.capacity() + context.project.path.capacity();
+            let mut records = Vec::with_capacity(3);
+            records.push(Record { key: RecordKey { id: Token(String::with_capacity(71)), revision: 1 }, payload: payload.clone(), mutation_pending: false });
+            let mut assignments = Vec::with_capacity(2);
+            assignments.push(Assignment { kind: Kind::GoogleWif, record_id: Token(String::with_capacity(83)), record_revision: 1,
+                context_revision: 1, availability: AssignmentAvailability::Available });
+            let mut census = Census::new(); let before = census.bytes;
+            census.records(&records).unwrap(); census.assignments(&assignments).unwrap(); census.context(&context).unwrap();
+            assert_eq!(census.bytes - before, records.capacity() * size_of::<Record>() + records[0].key.id.0.capacity()
+                + assignments.capacity() * size_of::<Assignment>() + assignments[0].record_id.0.capacity() + payload_bytes + context_bytes);
+            let once = census.bytes;
+            census.payload(&payload.clone()).unwrap(); census.context(&context.clone()).unwrap(); assert_eq!(census.bytes, once);
+            let equal_payload = payload_data(); let equal_context = context_data();
+            census.payload(&equal_payload).unwrap(); census.context(&equal_context).unwrap();
+            assert_eq!(census.bytes, once + payload_bytes + context_bytes);
+            for _ in records.len()..=RECORD_LIMIT {
+                records.push(Record { key: RecordKey { id: Token(String::new()), revision: 1 }, payload: payload.clone(), mutation_pending: false });
+            }
+            assert_eq!(Census::new().records(&records), Err(Reason::Capacity));
+        }
+        #[test]
+        fn image_stored_heap_charges_spare_capacity_not_its_inline_cell_twice() {
+            let bytes = Vec::with_capacity(293); let retained = bytes.capacity();
+            let stored = crate::vault_crypto::StoredBytes::lifecycle_data(bytes);
+            assert!(stored.bytes().is_empty());
+            let mut census = Census::new(); let before = census.bytes;
+            // Exactly the production Stored material branch; its enclosing
+            // Material already owns the inline StoredBytes/StoredRef cells.
+            census.heap::<crate::vault_crypto::StoredBytes>(stored.retained_bytes().ok()).unwrap();
+            assert_eq!(census.bytes - before, retained);
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        mod linux_store_data {
+            // Linux's StoreBook::new is field-only. This fixture is deliberately
+            // unavailable on Mac: native frames require original native release.
+            use super::*;
+            type LoanData = (Arc<NativeContext>, Arc<Payload>, Arc<Mutex<crate::vault_store::StoreBook>>, Arc<crate::vault_crypto::VaultKey>);
+            fn loan_data() -> LoanData {
+                let id = |byte| crate::vault_format::Id::from_bytes([byte; 16]).unwrap();
+                let identity = crate::vault_format::Identity::new(id(1), id(2)).unwrap();
+                (context_data(), payload_data(), Arc::new(Mutex::new(crate::vault_store::StoreBook::new())),
+                    Arc::new(crate::vault_crypto::lifecycle_data_key(identity)))
+            }
+            #[test]
+            fn image_loan_only_backing_reduces_old_credit_and_reaches_one_byte_boundary() {
+                let (context, payload, store, key) = loan_data();
+                let mut state = super::super::super::super::tests::empty_state(); state.context = Some(context.clone());
+                assert!(state.records.is_empty() && state.vault.is_none());
+                // Model the already-counted current context and persistent
+                // store/key roots, not an admitted Session. A healthy bound
+                // payload can be absent from records while all three alias.
+                let old_roots = |census: &mut Census| {
+                    census.document(&state).unwrap(); census.vault_store(&store).unwrap(); census.vault_key(&key).unwrap();
+                };
+                let mut measured = Census::new(); old_roots(&mut measured); let base = measured.bytes;
+                measured.loan_backings(&context, &payload, &store, &key).unwrap(); let loan_bytes = measured.bytes - base;
+                let expected = arc_bytes::<Payload>().unwrap() + RECORD_METADATA_BYTES + payload.fields.as_ref().unwrap().retained_bytes().unwrap();
+                assert_eq!(loan_bytes, expected); // The old census omitted exactly this independent backing.
+                assert!(loan_bytes > RECORD_METADATA_BYTES && loan_bytes < wire::BATCH_LIMIT);
+                let mut census = Census::new(); old_roots(&mut census);
+                // Non-authorizing arithmetic prefix, not a fabricated64MiB
+                // document/native allocation. Omitting loan traversal, as the
+                // old census did, leaves the full24MiB credit at this boundary.
+                census.add(SESSION_BYTES - wire::BATCH_LIMIT - census.bytes).unwrap();
+                let omitted_loan_credit = raw_allowance_from_persistent(census.bytes).unwrap();
+                census.loan_backings(&context, &payload, &store, &key).unwrap();
+                assert_eq!(omitted_loan_credit, wire::BATCH_LIMIT);
+                assert_eq!(raw_allowance_from_persistent(census.bytes), Ok(omitted_loan_credit - loan_bytes));
+                let once = census.bytes; census.loan_backings(&context, &payload, &store, &key).unwrap(); assert_eq!(census.bytes, once);
+                let mut edge = Census::new(); old_roots(&mut edge); edge.add(SESSION_BYTES - 1 - loan_bytes - edge.bytes).unwrap();
+                edge.loan_backings(&context, &payload, &store, &key).unwrap();
+                assert_eq!(raw_allowance_from_persistent(edge.bytes), Ok(1));
+                edge.add(1).unwrap(); assert_eq!(raw_allowance_from_persistent(edge.bytes), Err(Reason::Capacity));
+                assert_eq!(edge.add(1), Err(Reason::Capacity)); assert_eq!(edge.add(usize::MAX), Err(Reason::Capacity));
+            }
+            #[test]
+            fn image_current_records_and_loan_roots_deduplicate_but_equal_originals_do_not() {
+                let (context, payload, store, key) = loan_data();
+                let mut state = super::super::super::super::tests::empty_state();
+                state.context = Some(context.clone());
+                state.records.push(Record { key: RecordKey { id: Token("a".repeat(32)), revision: 1 }, payload: payload.clone(), mutation_pending: false });
+                let mut census = Census::new(); census.document(&state).unwrap(); let before = census.bytes;
+                let mut store_key = Census::new(); let control = store_key.bytes;
+                store_key.vault_store(&store).unwrap(); store_key.vault_key(&key).unwrap();
+                census.loan_backings(&context, &payload, &store, &key).unwrap();
+                assert_eq!(census.bytes - before, store_key.bytes - control);
+                let once = census.bytes; census.loan_backings(&context.clone(), &payload.clone(), &store.clone(), &key.clone()).unwrap();
+                assert_eq!(census.bytes, once);
+                let (equal_context, equal_payload, equal_store, equal_key) = loan_data();
+                assert_eq!(context.project_id, equal_context.project_id); assert!(payload.kind == equal_payload.kind && key.identity() == equal_key.identity());
+                let mut distinct = Census::new(); distinct.loan_backings(&equal_context, &equal_payload, &equal_store, &equal_key).unwrap();
+                census.loan_backings(&equal_context, &equal_payload, &equal_store, &equal_key).unwrap();
+                assert_eq!(census.bytes - once, distinct.bytes - control);
+            }
+            #[test]
+            fn image_store_mutex_and_arc_are_charged_and_contention_or_poison_refuses() {
+                let store = Arc::new(Mutex::new(crate::vault_store::StoreBook::new()));
+                let book = store.lock().unwrap(); assert!(book.not_started());
+                let expected = arc_bytes::<Mutex<crate::vault_store::StoreBook>>().unwrap()
+                    + book.retained_bytes().unwrap() - size_of::<crate::vault_store::StoreBook>();
+                assert_eq!(Census::new().vault_store(&store), Err(Reason::Busy)); assert!(book.not_started()); drop(book);
+                let mut census = Census::new(); let before = census.bytes;
+                census.vault_store(&store).unwrap(); assert_eq!(census.bytes - before, expected);
+                census.vault_store(&store.clone()).unwrap(); assert_eq!(census.bytes - before, expected);
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _book = store.lock().unwrap(); panic!("inert Linux census poison");
+                }));
+                assert!(caught.is_err() && store.is_poisoned());
+                assert_eq!(Census::new().vault_store(&store), Err(Reason::Busy)); assert!(store.is_poisoned());
+            }
+            #[test]
+            fn image_distinct_selected_materials_share_only_the_original_witness() {
+                let source = asset_source::CapturedSource::memory_data(Vec::with_capacity(127)); let first_bytes = source.bytes.capacity();
+                let origin = source.origin.clone();
+                let second_source = asset_source::CapturedSource { bytes: Vec::with_capacity(263), origin: origin.clone() }; let second_bytes = second_source.bytes.capacity();
+                let observation = || credential_format::inspect(credential_format::FileKind::AndroidKeystore, &[], &mut || false).ok().expect("inert empty observation");
+                let first = Arc::new(Material { origin: MaterialOrigin::Selected(source), observation: observation() });
+                let second = Arc::new(Material { origin: MaterialOrigin::Selected(second_source), observation: observation() });
+                let origin_bytes = arc_bytes::<OriginWitness>().unwrap() + origin.retained_bytes().unwrap() - size_of::<OriginWitness>();
+                let mut census = Census::new(); let before = census.bytes;
+                census.material(&first).unwrap(); assert_eq!(census.bytes - before, arc_bytes::<Material>().unwrap() + first_bytes + origin_bytes);
+                let once = census.bytes; census.material(&second).unwrap();
+                assert_eq!(census.bytes - once, arc_bytes::<Material>().unwrap() + second_bytes);
+                let twice = census.bytes; census.material(&first).unwrap(); census.origin(&origin).unwrap(); assert_eq!(census.bytes, twice);
+            }
+        }
+    }
+}
 fn persistent_bytes(state: &DocumentState) -> Result<usize, Reason> {
-    let mut total = CONTROL_RESERVE + DOCUMENT_CONTROL_RESERVE;
-    let mut add = |bytes: usize| -> Result<(), Reason> {
-        total = total.checked_add(bytes).ok_or(Reason::Capacity)?; Ok(())
-    };
-    add(state.records.capacity().checked_mul(std::mem::size_of::<Record>()).ok_or(Reason::Capacity)?)?;
-    for record in &state.records {
-        add(RECORD_METADATA_BYTES)?; add(record.key.id.0.capacity())?;
-        if let Some(material) = &record.payload.material { add(material.retained_bytes().ok_or(Reason::Capacity)?)?; }
-        if let Some(fields) = &record.payload.fields { add(fields.retained_bytes().ok_or(Reason::Capacity)?)?; }
-    }
-    add(state.assignments.capacity().checked_mul(std::mem::size_of::<Assignment>()).ok_or(Reason::Capacity)?)?;
-    for assignment in &state.assignments { add(assignment.record_id.0.capacity())?; }
-    if let Some(context) = &state.context {
-        add(std::mem::size_of::<NativeContext>() + 2 * std::mem::size_of::<usize>())?;
-        add(context.draft.capacity())?; add(context.project_id.capacity())?; add(context.project.path.capacity())?;
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(session) = &state.vault {
-        add(session.data_bytes().ok_or(Reason::Capacity)?)?;
-        let store = session.store().try_lock().map_err(|_| Reason::Busy)?;
-        if !(store.not_started() || store.operation_quiescent() || store.settled()) { return Err(Reason::Busy); }
-        add(store.retained_bytes().ok_or(Reason::Capacity)?)?;
-        if let Some(key) = session.key() { add(key.retained_bytes())?; }
-    }
-    Ok(total)
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64")))]
+    { persistent_memory::persistent_bytes(state) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64"))))]
+    { let _ = state; Err(Reason::UnsupportedPlatform) }
+}
+fn raw_allowance_from_persistent(bytes: usize) -> Result<usize, Reason> {
+    SESSION_BYTES.checked_sub(bytes).map(|remaining| remaining.min(wire::BATCH_LIMIT))
+        .filter(|limit| *limit > 0).ok_or(Reason::Capacity)
 }
 fn raw_allowance(state: &DocumentState) -> Result<usize, Reason> {
-    SESSION_BYTES.checked_sub(persistent_bytes(state)?).map(|remaining| remaining.min(wire::BATCH_LIMIT))
-        .filter(|limit| *limit > 0).ok_or(Reason::Capacity)
+    raw_allowance_from_persistent(persistent_bytes(state)?)
 }
 fn selected_items(batch: &asset_source::CapturedPublicImageBatch) -> Result<Vec<wire::SelectedItem>, Reason> {
     let mut items = Vec::new(); items.try_reserve_exact(batch.images.len()).map_err(|_| Reason::Capacity)?;
@@ -474,24 +755,40 @@ impl DocumentBinding {
         drop(state); self.reconcile();
         self.metadata_images_selection_snapshot_locked(&mut self.lock())
     }
+    #[cfg(test)]
     pub(crate) fn metadata_images_edit_admit<T>(&self,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
-        self.registered_edit_admit(EditDomain::MetadataImages, project_id, enqueue)
+        self.metadata_images_edit_admit_published(project_id,|bridge,root,_publisher|enqueue(bridge,root))
     }
-    pub(crate) fn metadata_images_import_admit<T>(&self, project_id: &str, selection_token: &str,
-        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, wire::ImportData, &mut bool) -> Result<T, BridgeError>,
+    pub(crate) fn metadata_images_edit_admit_published<T>(&self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(EditDomain::MetadataImages, project_id, enqueue)
+    }
+    #[cfg(test)]
+    pub(crate) fn metadata_images_import_admit<T>(&self, project_id:&str, selection_token:&str,
+        enqueue:impl FnOnce(&DesktopBridge,crate::edit_owner::RegisteredEditRoot,wire::ImportData,&mut bool)->Result<T,BridgeError>
+    )->Result<T,BridgeError>{
+        self.metadata_images_import_admit_published(project_id,selection_token,|bridge,root,data,claimed,_publisher|
+            enqueue(bridge,root,data,claimed))
+    }
+    pub(crate) fn metadata_images_import_admit_published<T>(&self, project_id: &str, selection_token: &str,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, wire::ImportData, &mut bool, &RegistrationPublisher) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
         if !crate::protocol::valid_id(project_id) || !crate::edit_protocol::token(selection_token) { return Err(import_not_matched()); }
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)?;
+        let result=(|| {
         let mut state = self.lock();
         // Match before expiry/admission. Wrong tokens must not erase or STOP an
         // unrelated original selection; matching failures always retire it.
         let (binding, owner) = matched_selection(&state, project_id, selection_token).ok_or_else(import_not_matched)?;
         let mut edit_claimed = false;
         let result = (|| {
-            let registered = self.registered_edit_root_locked(&mut state, EditDomain::MetadataImages,
-                |_| Ok(project_id.to_owned()), Some(&binding))?;
+            let registered = self.registered_edit_root_locked_published(&mut state, EditDomain::MetadataImages,
+                |_| Ok(project_id.to_owned()), Some(&binding), &mut publisher)?;
             if !binding.matches(registered.generation, &registered.root) { return Err(refused(ImageReason::SourceChanged)); }
             let slot = state.slot.as_mut().filter(|slot| own_settled_selection(slot, &binding))
                 .ok_or_else(|| refused(ImageReason::Busy))?;
@@ -509,13 +806,16 @@ impl DocumentBinding {
             let data = wire::ImportData { context: binding.context.clone(), images: selected, protected_sources: batch.protected_sources, protected_objects };
             // The sole synchronous callback must retain/retire this one moved
             // batch. No restore, byte clone, new token or Open retry on refusal.
-            let result = enqueue(&self.inner.bridge, registered, data, &mut edit_claimed);
+            let result = enqueue(&self.inner.bridge, registered, data, &mut edit_claimed, &publisher);
             if result.is_ok() { slot.phase = Phase::Idle; slot.review_end = None; slot.settlement = Settlement::Known; }
             result
         })();
         let result = result.map_err(|error| retire_matching_import_failure(&mut state, &binding, &owner,
             edit_claimed, error, Instant::now()));
         self.bump(&mut state); drop(state);
+        result
+        })();
+        finish_registration_publisher(publisher);
         if result.is_err() { self.reconcile(); }
         result
     }

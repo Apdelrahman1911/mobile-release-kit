@@ -76,6 +76,39 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
     environment_fixture_core: Option<PathBuf>,
 }
 
+// App-M2 census of this retained RuntimeConfig only, not process/framework RSS.
+// No installed/native probes and no capability, one-use claim or weak binding
+// mutation. The original Arc cells remain charged after their claims are spent.
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+impl RuntimeConfig {
+    pub(crate) fn android_registration_retained_heap_bytes(&self,
+        document: &std::sync::Arc<()>) -> Option<usize> {
+        fn arc<T>() -> Option<usize> {
+            let (layout, _) = std::alloc::Layout::new::<[usize; 2]>()
+                .extend(std::alloc::Layout::new::<T>()).ok()?;
+            Some(layout.pad_to_align().size())
+        }
+        let binding = self.installed_session.original.document.try_lock().ok()?;
+        let mut bytes = self.bundle_root.capacity().checked_add(arc::<std::sync::atomic::AtomicBool>()?)?;
+        if !std::sync::Arc::ptr_eq(&self.android_owner_claimed, &self.diagnostics_owner_claimed) {
+            bytes = bytes.checked_add(arc::<std::sync::atomic::AtomicBool>()?)?;
+        }
+        bytes = bytes.checked_add(arc::<InstalledSessionOriginal>()?)?;
+        // The SAME current Document allocation is already charged by the
+        // borrowed Document census. A distinct Weak tombstone retains its own
+        // allocation even after its strong original has gone away.
+        if let Some(weak) = binding.as_ref() {
+            if weak.as_ptr() != std::sync::Arc::as_ptr(document)
+                && weak.as_ptr() != std::sync::Weak::<()>::new().as_ptr() {
+                bytes = bytes.checked_add(arc::<()>()?)?;
+            }
+        }
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell")))]
+        if let Some(path) = &self.environment_fixture_core { bytes = bytes.checked_add(path.capacity())?; }
+        Some(bytes)
+    }
+}
+
 #[derive(Debug)]
 pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
 

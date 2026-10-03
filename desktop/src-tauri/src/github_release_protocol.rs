@@ -23,6 +23,7 @@ pub(crate) const ORIGINAL_ASSURANCE: &str = "declared-original-references-not-au
 pub(crate) const DESTINATION_ASSURANCE: &str = "current-dispatch-config-not-authenticated-original-destination";
 pub(crate) const PREPARED_LIMIT: usize = 3900;
 pub(crate) const RUN_LIMIT: usize = 4096;
+pub(crate) const RECOVERY_CONFIRMATION_LIMIT: usize = 342;
 pub(crate) use crate::github_preflight_protocol::{hex, branch, Kind, Effect, RunStatus, Conclusion, Phase};
 fn journal(kind: Kind) -> &'static str { match kind {
     Kind::Prepare => "not-applicable", Kind::Dispatch => "durable-intent",
@@ -65,6 +66,24 @@ impl Version {
         && self.name.bytes().all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b))
         && (1..=2_100_000_000).contains(&self.build) }
 }
+// Missing is compatible with old journals; explicit null is never another spelling of absent.
+fn present_recovery_confirmation<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+fn recovery_confirmation(value: &str, stage: Stage) -> bool {
+    if value.len() > RECOVERY_CONFIRMATION_LIMIT || !value.is_ascii() { return false; }
+    let mut parts = value.split(':');
+    let (Some(prefix), Some(intent), Some(detail), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return false; };
+    if !hex(intent, 64) { return false; }
+    // This 255-byte ASCII build-ID rule is a Desktop profile, not core authentication.
+    match (stage, prefix) {
+        (Stage::Candidate, "recover-ios-candidate") => !detail.is_empty() && detail.len() <= 255
+            && detail.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+        (Stage::Candidate, "retry-ios-candidate-upload") => hex(detail, 64),
+        (Stage::ExternalTesting | Stage::ProductionSubmit, "retry-ios-operation-creates") => hex(detail, 64),
+        _ => false,
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Selection {
@@ -74,9 +93,11 @@ pub(crate) struct Selection {
     #[serde(deserialize_with = "nullable")] pub(crate) recovery_run_id: Option<String>,
     #[serde(deserialize_with = "nullable")] pub(crate) original_source_sha: Option<String>,
     #[serde(deserialize_with = "nullable")] pub(crate) original_version: Option<Version>,
+    #[serde(default, deserialize_with = "present_recovery_confirmation", skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_confirmation: Option<String>,
 }
 impl Selection {
-    pub(crate) fn valid(&self) -> bool {
+    pub(crate) fn valid(&self, platform: Platform) -> bool {
         let original = self.stage != Stage::Candidate || self.recovery_run_id.is_some();
         [&self.candidate_run_id, &self.external_run_id, &self.recovery_run_id].iter()
             .all(|v| v.as_ref().is_none_or(|id| numeric_id(id)))
@@ -87,6 +108,8 @@ impl Selection {
             && (self.stage == Stage::ProductionSubmit || self.external_run_id.is_none())
             && (self.stage == Stage::Candidate || self.recovery_run_id.is_some() || self.candidate_run_id.is_some())
             && (self.stage != Stage::ProductionSubmit || self.recovery_run_id.is_some() || self.external_run_id.is_some())
+            && self.recovery_confirmation.as_ref().is_none_or(|value| platform == Platform::Ios
+                && self.recovery_run_id.is_some() && recovery_confirmation(value, self.stage))
     }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -113,7 +136,7 @@ impl Target {
     pub(crate) fn valid(&self) -> bool {
         hex(&self.project_binding, 64) && coordinate(&self.repository) && numeric_id(&self.account_id)
             && numeric_id(&self.repository_id) && branch(&self.branch) && self.tooling_repository == TOOLING_REPOSITORY
-            && hex(&self.tooling_sha, 40) && hex(&self.marker, 32) && self.selection.valid()
+            && hex(&self.tooling_sha, 40) && hex(&self.marker, 32) && self.selection.valid(self.platform)
     }
     pub(crate) fn publisher_bound(&self) -> bool { self.valid() && TOOLING_SHA == Some(self.tooling_sha.as_str()) && publisher_bound() }
     pub(crate) fn title(&self) -> String { format!("MRK Desktop {} [{}]", self.selection.stage.text(), self.marker) }
@@ -409,7 +432,7 @@ pub(crate) fn decode_command(name: &str, value: &Value) -> Result<Command, Bridg
     let command = match name {
         "github_release_status" if value.as_object().is_some_and(|v| v.is_empty()) => Command::Status,
         "github_release_prepare" => { let v: PrepareArgs = read(value)?;
-            if !valid_id(&v.session_id) || v.expected_revision == 0 || v.expected_connection_revision == 0 || !branch(&v.branch) || !v.selection.valid() { return Err(BridgeError::invalid()); }
+            if !valid_id(&v.session_id) || v.expected_revision == 0 || v.expected_connection_revision == 0 || !branch(&v.branch) || !v.selection.valid(v.platform) { return Err(BridgeError::invalid()); }
             Command::Prepare(v) },
         "github_release_dispatch" => { let v: DispatchArgs = read(value)?;
             if !valid_id(&v.session_id) || v.expected_revision == 0 || !hex(&v.consent_id, 32) || !v.confirm || !plain(&v.confirmation, 160) { return Err(BridgeError::invalid()); }
@@ -439,7 +462,7 @@ mod tests {
             external_run_id: (stage == Stage::ProductionSubmit && !recovery).then(|| "102".into()),
             recovery_run_id: recovery.then(|| "103".into()),
             original_source_sha: original.then(|| "f".repeat(40)),
-            original_version: original.then(|| Version { name: "1.2.3".into(), build: 42 }) };
+            original_version: original.then(|| Version { name: "1.2.3".into(), build: 42 }), recovery_confirmation: None };
         let target = Target { project_binding: "b".repeat(64), repository: "owner/app".into(),
             account_id: "11".into(), repository_id: "22".into(), branch: "release/ui".into(),
             tooling_repository: TOOLING_REPOSITORY.into(), tooling_sha: "c".repeat(40),
@@ -474,6 +497,109 @@ mod tests {
         assert!(decode_command("github_release_prepare", &both).is_err());
         let mut invented = args; invented["selection"]["recoveryConfirmation"] = Value::String("INERT".into());
         assert!(decode_command("github_release_prepare", &invented).is_err());
+    }
+
+    fn assert_recovery_at_both_joins(target: &Value, expected: bool) {
+        assert_eq!(serde_json::from_value::<Target>(target.clone()).is_ok_and(|value| value.valid()), expected);
+        let args = serde_json::json!({"sessionId":"session-1", "expectedRevision":1, "expectedConnectionRevision":2,
+            "branch":"release/ui", "platform":target["platform"], "selection":target["selection"]});
+        assert_eq!(decode_command("github_release_prepare", &args).is_ok(), expected);
+    }
+
+    #[test]
+    fn apple_recovery_confirmation_forms_are_closed_at_prepare_and_target_joins() {
+        let intent = "1a".repeat(32);
+        let adoption = format!("recover-ios-candidate:{intent}:Build_7.-");
+        let upload = format!("retry-ios-candidate-upload:{intent}:{}", "2b".repeat(32));
+        let creates = format!("retry-ios-operation-creates:{intent}:{}", "3c".repeat(32));
+        let maximum = format!("recover-ios-candidate:{intent}:{}", "B".repeat(255));
+        assert_eq!((maximum.len(), upload.len(), creates.len()), (342, 156, 157));
+        for (stage, grant) in [(Stage::Candidate, adoption.clone()), (Stage::Candidate, upload.clone()),
+            (Stage::ExternalTesting, creates.clone()), (Stage::ProductionSubmit, creates.clone()),
+            (Stage::Candidate, format!("recover-ios-candidate:{intent}:B")), (Stage::Candidate, maximum.clone())] {
+            let mut selected = review(stage, Platform::Ios, true);
+            selected.target.selection.recovery_confirmation = Some(grant.clone()); assert!(selected.valid());
+            let target = serde_json::to_value(&selected.target).unwrap(); assert_recovery_at_both_joins(&target, true);
+            let restored: Prepared = serde_json::from_slice(&serde_json::to_vec(&selected).unwrap()).unwrap();
+            assert_eq!(restored, selected);
+            let mut producer = target.clone(); producer["selection"]["recoveryRunId"] = Value::String("9001".into());
+            assert_recovery_at_both_joins(&producer, true); // Producer is not decoded from the grant.
+            let mut android = target.clone(); android["platform"] = Value::String("android".into());
+            assert_recovery_at_both_joins(&android, false);
+            let mut no_recovery = serde_json::to_value(&review(stage, Platform::Ios, false).target).unwrap();
+            no_recovery["selection"]["recoveryConfirmation"] = Value::String(grant.clone());
+            assert_recovery_at_both_joins(&no_recovery, false);
+            for (key, value) in [("recoveryRunId", Value::Null), ("recoveryRunId", Value::String("latest".into())),
+                ("force", Value::Bool(true)), ("recovery_confirmation", Value::String(grant))] {
+                let mut bad = target.clone(); bad["selection"][key] = value; assert_recovery_at_both_joins(&bad, false);
+            }
+        }
+        for stage in [Stage::Candidate, Stage::ExternalTesting, Stage::ProductionSubmit] {
+            for grant in [&adoption, &upload, &creates] {
+                let mut target = serde_json::to_value(&review(stage, Platform::Ios, true).target).unwrap();
+                target["selection"]["recoveryConfirmation"] = Value::String(grant.clone());
+                assert_recovery_at_both_joins(&target, (stage == Stage::Candidate) == (grant != &creates));
+            }
+        }
+        let target = serde_json::to_value(&review(Stage::Candidate, Platform::Ios, true).target).unwrap();
+        let mut malformed = vec![Value::Null, Value::Bool(true), serde_json::json!(1), serde_json::json!([]), serde_json::json!({})];
+        for value in [String::new(), format!(" {adoption}"), format!("{adoption} "), format!("{adoption}\n"),
+            format!("{adoption}\r\n"), format!("{adoption}\t"), format!("{adoption}\0"), format!("{adoption}\u{a0}"),
+            format!("{adoption}\u{2028}"), format!("{adoption}\u{200b}"), adoption.replace(intent.as_str(), &intent.to_uppercase()),
+            adoption.replacen("recover-ios", "Recover-ios", 1), adoption.replacen(':', ":\n", 1),
+            format!("recover-ios-candidate:{}:B", &intent[..63]), format!("recover-ios-candidate:{intent}0:B"),
+            format!("recover-ios-candidate:{intent}:"), format!("{maximum}B"), upload[..upload.len() - 1].into(),
+            format!("{upload}0"), upload.replace("2b", "2B")] {
+            malformed.push(Value::String(value));
+        }
+        for detail in ["B/7", "B+7", "B:7", "B\\7", "é"] {
+            malformed.push(Value::String(format!("recover-ios-candidate:{intent}:{detail}")));
+        }
+        for value in malformed {
+            let mut bad = target.clone(); bad["selection"]["recoveryConfirmation"] = value;
+            assert_recovery_at_both_joins(&bad, false);
+        }
+        for value in [creates[..creates.len() - 1].to_owned(), format!("{creates}0"), format!("{creates}\n"), creates.replace("3c", "3C")] {
+            let mut bad = serde_json::to_value(&review(Stage::ExternalTesting, Platform::Ios, true).target).unwrap();
+            bad["selection"]["recoveryConfirmation"] = Value::String(value); assert_recovery_at_both_joins(&bad, false);
+        }
+    }
+
+    #[test]
+    fn optional_apple_confirmation_preserves_legacy_bytes_and_cannot_be_added_at_dispatch() {
+        let mut selected = review(Stage::Candidate, Platform::Ios, true);
+        let legacy = format!("{{\"stage\":\"candidate\",\"candidateRunId\":null,\"externalRunId\":null,\"recoveryRunId\":\"103\",\"originalSourceSha\":\"{}\",\"originalVersion\":{{\"name\":\"1.2.3\",\"build\":42}}}}", "f".repeat(40));
+        assert_eq!(serde_json::to_vec(&selected.target.selection).unwrap(), legacy.as_bytes());
+        let restored: Selection = serde_json::from_str(&legacy).unwrap();
+        assert!(restored.recovery_confirmation.is_none()); assert!(restored.valid(Platform::Ios));
+        assert_eq!(serde_json::to_string(&restored).unwrap(), legacy);
+        let old = serde_json::to_value(&selected).unwrap();
+        assert!(old["target"]["selection"].get("recoveryConfirmation").is_none());
+        assert_eq!(serde_json::from_value::<Prepared>(old).unwrap(), selected);
+        let mut explicit_null = serde_json::to_value(&restored).unwrap(); explicit_null["recoveryConfirmation"] = Value::Null;
+        assert!(serde_json::from_value::<Selection>(explicit_null).is_err());
+        let grant = format!("recover-ios-candidate:{}:Build_7.-", "1a".repeat(32));
+        selected.target.selection.recovery_confirmation = Some(grant.clone()); assert!(selected.valid());
+        let args = serde_json::json!({"sessionId":"session-1", "expectedRevision":3,
+            "consentId":selected.target.marker, "confirm":true, "confirmation":selected.confirmation});
+        match decode_command("github_release_dispatch", &args).unwrap() {
+            Command::Dispatch(value) => assert!(value.matches_review(&selected)),
+            _ => panic!("wrong command family"),
+        }
+        for (key, value) in [("recoveryConfirmation", Value::String(grant.clone())), ("selection", serde_json::to_value(&selected.target.selection).unwrap())] {
+            let mut late = args.clone(); late[key] = value; assert!(decode_command("github_release_dispatch", &late).is_err());
+        }
+        let action = Action { kind: Kind::Dispatch, target: selected.target.clone(), prepared: Some(selected), run_id: None };
+        assert!(action.valid());
+        let request = Request { action: Some(action.clone()), pending_scope: None, home: Some("/home/mrk".into()) };
+        let raw = encode_initial("release-apple", &request).unwrap();
+        let captured: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(captured["action"]["target"]["selection"]["recoveryConfirmation"], grant);
+        assert_eq!(captured["action"]["prepared"]["target"], captured["action"]["target"]);
+        let mut swapped = action;
+        swapped.target.selection.recovery_confirmation = Some(format!("retry-ios-candidate-upload:{}:{}", "1a".repeat(32), "2b".repeat(32)));
+        assert!(!swapped.valid());
+        assert!(encode_initial("release-apple", &Request { action: Some(swapped), pending_scope: None, home: Some("/home/mrk".into()) }).is_err());
     }
 
     #[test]
@@ -547,66 +673,77 @@ mod tests {
 
     #[test]
     fn full_retained_status_counts_utf8_escaping_all_records_and_current_result() {
-        let mut selected = review(Stage::Candidate, Platform::Android, true);
-        selected.target.repository = format!("{}/{}", "a".repeat(39), "b".repeat(100));
-        selected.target.branch = "b".repeat(200); selected.expected_ref = selected.target.full_ref();
-        selected.target.account_id = "18446744073709551615".into();
-        selected.target.repository_id = selected.target.account_id.clone(); selected.workflow_id = selected.target.account_id.clone();
-        selected.target.selection.recovery_run_id = Some(selected.target.account_id.clone());
-        let version = format!("1.0+{}", "v".repeat(60));
-        selected.target.selection.original_version = Some(Version { name: version.clone(), build: 2_100_000_000 });
-        selected.current_version = Version { name: version.clone(), build: 2_100_000_000 };
-        selected.confirmation = format!("candidate:android:{version}:2100000000");
-        selected.version_source = format!("{}/{}/{}", "a".repeat(248), "é".repeat(124), "v".repeat(14));
-        assert_eq!(selected.version_source.len(), 512);
-        // These characters need JSON escaping, while the path uses multibyte
-        // UTF-8. Count serialization, never string length/code point estimates.
-        selected.destination.application_id = "\"\\é".repeat(40);
-        selected.destination.destination = "\"\\é".repeat(40);
-        for i in 0..16 {
-            selected.checklist.push(Requirement { name: format!("MOBILE_RELEASE_FIXTURE_{i}"), kind: "secret".into(), reason: "r".repeat(192) });
-            if serde_json::to_vec(&selected).unwrap().len() > PREPARED_LIMIT { selected.checklist.pop(); break; }
-        }
-        for field in [0, 1] {
-            loop {
-                let n = serde_json::to_vec(&selected).unwrap().len();
-                if n == PREPARED_LIMIT { break; }
-                let value = if field == 0 { &mut selected.destination.destination } else { &mut selected.destination.application_id };
-                if value.len() >= if field == 0 { 256 } else { 255 } { break; }
-                value.push('x');
+        for platform in [Platform::Android, Platform::Ios] {
+            let mut selected = review(Stage::Candidate, platform, true);
+            if platform == Platform::Ios {
+                selected.target.selection.recovery_confirmation = Some(format!("recover-ios-candidate:{}:{}", "1a".repeat(32), "B".repeat(255)));
             }
+            selected.target.repository = format!("{}/{}", "a".repeat(39), "b".repeat(100));
+            selected.target.branch = "b".repeat(200); selected.expected_ref = selected.target.full_ref();
+            selected.target.account_id = "18446744073709551615".into();
+            selected.target.repository_id = selected.target.account_id.clone(); selected.workflow_id = selected.target.account_id.clone();
+            selected.target.selection.recovery_run_id = Some(selected.target.account_id.clone());
+            let version = if platform == Platform::Android { format!("1.0+{}", "v".repeat(60)) } else { "1.2.3".into() };
+            selected.target.selection.original_version = Some(Version { name: version.clone(), build: 2_100_000_000 });
+            selected.current_version = Version { name: version.clone(), build: 2_100_000_000 };
+            selected.confirmation = format!("candidate:{}:{version}:2100000000", platform.text());
+            selected.version_source = format!("{}/{}/{}", "a".repeat(248), "é".repeat(124), "v".repeat(14));
+            assert_eq!(selected.version_source.len(), 512);
+            // These characters need JSON escaping, while the path uses multibyte
+            // UTF-8. Count serialization, never string length/code point estimates.
+            selected.destination.application_id = "\"\\é".repeat(40);
+            selected.destination.destination = "\"\\é".repeat(40);
+            for i in 0..16 {
+                selected.checklist.push(Requirement { name: format!("MOBILE_RELEASE_FIXTURE_{i}"), kind: "secret".into(), reason: "r".repeat(192) });
+                if serde_json::to_vec(&selected).unwrap().len() > PREPARED_LIMIT { selected.checklist.pop(); break; }
+            }
+            for field in [0, 1] {
+                loop {
+                    let n = serde_json::to_vec(&selected).unwrap().len();
+                    if n == PREPARED_LIMIT { break; }
+                    let value = if field == 0 { &mut selected.destination.destination } else { &mut selected.destination.application_id };
+                    if value.len() >= if field == 0 { 256 } else { 255 } { break; }
+                    value.push('x');
+                }
+            }
+            while serde_json::to_vec(&selected).unwrap().len() < PREPARED_LIMIT {
+                let name = &mut selected.checklist.last_mut().unwrap().name;
+                assert!(name.strip_prefix("MOBILE_RELEASE_").unwrap().len() < 96); name.push('X');
+            }
+            assert!(selected.valid()); assert_eq!(serde_json::to_vec(&selected).unwrap().len(), PREPARED_LIMIT);
+            let mut pending = Vec::new();
+            for i in 0..RECORD_LIMIT {
+                let mut row = selected.clone(); row.target.marker = format!("{i:032x}"); row.display_title = row.target.title();
+                assert!(row.valid());
+                pending.push(PendingRecord { prepared: row, run_id: Some((u64::MAX - i as u64).to_string()) });
+            }
+            let run = Run { id: u64::MAX.to_string(), attempt: 1, status: RunStatus::Completed,
+                conclusion: Some(Conclusion::StartupFailure), observed_at: "9999-12-31T23:59:59Z".into(),
+                url: format!("https://github.com/{}/actions/runs/{}", selected.target.repository, u64::MAX), assurance: ASSURANCE.into(),
+                jobs: [JobKind::InputGuard, JobKind::AndroidResolve, JobKind::AndroidOnline, JobKind::AndroidBuild, JobKind::AndroidStore,
+                       JobKind::IosResolve, JobKind::IosOnline, JobKind::IosBuild, JobKind::IosStore].into_iter().enumerate().map(|(i, kind)| Job {
+                           id: (u64::MAX - i as u64).to_string(), kind, status: RunStatus::Completed, conclusion: Some(Conclusion::StartupFailure) }).collect() };
+            assert!(run.valid(&selected));
+            let mut status = Status { schema_version: 1, revision: u32::MAX, session_id: Some("s".repeat(64)), available: false,
+                reason: Reason::NotFoundOrInaccessible,
+                operation: Some(Operation { id: "o".repeat(64), kind: Kind::Reconcile, phase: Phase::CleanupUnknown,
+                    reason: Reason::NotFoundOrInaccessible, effect: Effect::PotentiallyApplied }),
+                prepared: Some(selected), consent_expires_at: Some("9999-12-31T23:59:59Z".into()), pending, run: Some(run) };
+            // Even this conservative simultaneous prepared+run envelope must fit;
+            // production normally publishes only the result of its one operation.
+            let serialized = serde_json::to_vec(&status).unwrap();
+            let ceiling = complete_status_ceiling().unwrap();
+            assert!(serialized.len() <= ceiling && ceiling <= RESPONSE_LIMIT && status.fits_wire());
+            assert!(bounds(&serde_json::from_slice(&serialized).unwrap(), RESPONSE_LIMIT, 20_000, 16));
+            assert!(ceiling + (RECORD_LIMIT + 1) * 100 > RESPONSE_LIMIT); // The former4000 cap was not enough.
+            let retained = status.pending.clone();
+            let mut over = status.prepared.as_ref().unwrap().clone(); assert!(over.checklist.len() < 16);
+            over.checklist.push(Requirement { name: "MOBILE_RELEASE_OVERFLOW".into(), kind: "manual".into(), reason: "x".into() });
+            assert!(!over.valid()); assert_eq!(status.pending, retained);
+            let mut mixed = status.clone(); mixed.pending[1].prepared.target.selection.recovery_confirmation = None;
+            assert!(mixed.pending.iter().all(PendingRecord::valid) && mixed.fits_wire());
+            status.pending.push(status.pending[0].clone()); assert!(!status.fits_wire());
         }
-        while serde_json::to_vec(&selected).unwrap().len() < PREPARED_LIMIT {
-            let name = &mut selected.checklist.last_mut().unwrap().name;
-            assert!(name.strip_prefix("MOBILE_RELEASE_").unwrap().len() < 96); name.push('X');
-        }
-        assert!(selected.valid()); assert_eq!(serde_json::to_vec(&selected).unwrap().len(), PREPARED_LIMIT);
-        let mut pending = Vec::new();
-        for i in 0..RECORD_LIMIT {
-            let mut row = selected.clone(); row.target.marker = format!("{i:032x}"); row.display_title = row.target.title();
-            assert!(row.valid());
-            pending.push(PendingRecord { prepared: row, run_id: Some((u64::MAX - i as u64).to_string()) });
-        }
-        let run = Run { id: u64::MAX.to_string(), attempt: 1, status: RunStatus::Completed,
-            conclusion: Some(Conclusion::StartupFailure), observed_at: "9999-12-31T23:59:59Z".into(),
-            url: format!("https://github.com/{}/actions/runs/{}", selected.target.repository, u64::MAX), assurance: ASSURANCE.into(),
-            jobs: [JobKind::InputGuard, JobKind::AndroidResolve, JobKind::AndroidOnline, JobKind::AndroidBuild, JobKind::AndroidStore,
-                   JobKind::IosResolve, JobKind::IosOnline, JobKind::IosBuild, JobKind::IosStore].into_iter().enumerate().map(|(i, kind)| Job {
-                       id: (u64::MAX - i as u64).to_string(), kind, status: RunStatus::Completed, conclusion: Some(Conclusion::StartupFailure) }).collect() };
-        assert!(run.valid(&selected));
-        let mut status = Status { schema_version: 1, revision: u32::MAX, session_id: Some("s".repeat(64)), available: false,
-            reason: Reason::NotFoundOrInaccessible,
-            operation: Some(Operation { id: "o".repeat(64), kind: Kind::Reconcile, phase: Phase::CleanupUnknown,
-                reason: Reason::NotFoundOrInaccessible, effect: Effect::PotentiallyApplied }),
-            prepared: Some(selected), consent_expires_at: Some("9999-12-31T23:59:59Z".into()), pending, run: Some(run) };
-        // Even this conservative simultaneous prepared+run envelope must fit;
-        // production normally publishes only the result of its one operation.
-        let serialized = serde_json::to_vec(&status).unwrap();
-        let ceiling = complete_status_ceiling().unwrap();
-        assert!(serialized.len() <= ceiling && ceiling <= RESPONSE_LIMIT && status.fits_wire());
-        assert!(bounds(&serde_json::from_slice(&serialized).unwrap(), RESPONSE_LIMIT, 20_000, 16));
-        assert!(ceiling + (RECORD_LIMIT + 1) * 100 > RESPONSE_LIMIT); // The former4000 cap was not enough.
-        status.pending.push(status.pending[0].clone()); assert!(!status.fits_wire());
     }
 }
 
@@ -620,7 +757,7 @@ impl Target {
             bytes = bytes.checked_add(value.capacity())?;
         }
         for value in [&self.selection.candidate_run_id, &self.selection.external_run_id,
-            &self.selection.recovery_run_id, &self.selection.original_source_sha] {
+            &self.selection.recovery_run_id, &self.selection.original_source_sha, &self.selection.recovery_confirmation] {
             bytes = bytes.checked_add(value.as_ref().map_or(0, String::capacity))?;
         }
         if let Some(version) = &self.selection.original_version { bytes = bytes.checked_add(version.name.capacity())?; }

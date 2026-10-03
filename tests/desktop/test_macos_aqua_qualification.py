@@ -365,7 +365,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(label), 1)
         position = workflow.index(label)
         self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
-        for later in ("Compile headless Mac libraries and run twenty exact DATA regressions first",
+        for later in ("Compile headless Mac libraries and run twenty-seven exact DATA regressions first",
                       "Fail fast on native Scripts ownership and package format (never Installer)",
                       "Download only the exact accepted M archive (no rebuild or fallback)",
                       "Compile the fixed debug actual-main observer and normal embedded frontend once",
@@ -389,7 +389,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertNotIn("discover(", step)
         self.assertNotIn("loadTestsFrom", step)
 
-        headless_label = "      - name: Compile headless Mac libraries and run twenty exact DATA regressions first\n"
+        headless_label = "      - name: Compile headless Mac libraries and run twenty-seven exact DATA regressions first\n"
         self.assertEqual(workflow.count(headless_label), 1)
         self.assertLess(workflow.index(headless_label), workflow.index(
             "      - name: Fail fast on native Scripts ownership and package format (never Installer)\n"))
@@ -421,16 +421,23 @@ class AquaDataTests(unittest.TestCase):
             "asset_session::vault::tests::schema_three_advertises_storage_modes_without_opening_or_probing_a_vault",
             "asset_session::vault::tests::encrypted_projection_redacts_locked_read_only_and_mutating_authority",
             "runtime::persistence_selection_keeps_original_document_and_fixed_helper_pin_bounds",
+            "asset_session::vault::tests::boxed_loan_cells_are_charged_once_each_while_arc_backing_deduplicates",
+            "asset_session::vault::tests::prospective_loan_pointee_preserves_resident_boundary_and_checked_overlap",
+            "asset_session::vault::tests::refused_new_or_replacement_loan_keeps_loaded_and_original_box_unchanged",
+            "asset_session::images::persistent_memory::tests::image_fixed_partition_boundary_overflow_and_incomplete_heap_refuse",
+            "asset_session::images::persistent_memory::tests::image_identity_set_keeps_distinct_allocations_and_refuses_the_148th",
+            "asset_session::images::persistent_memory::tests::image_record_assignment_payload_and_context_capacities_share_one_census",
+            "asset_session::images::persistent_memory::tests::image_stored_heap_charges_spare_capacity_not_its_inline_cell_twice",
         ))
         native_names = headless.split("          native_names = (\n", 1)[1].split("          )\n", 1)[0]
         self.assertCountEqual(M.re.findall(r'"([^"]+)"', native_names), (
             "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
             "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
         ))
-        self.assertIn('"scope": "eighteen-main-and-two-native-macos-headless-data-regressions"', headless)
+        self.assertIn('"scope": "twenty-five-main-and-two-native-macos-headless-data-regressions"', headless)
         table = headless.split("          libraries = (\n", 1)[1].split("          )\n", 1)[0]
         self.assertEqual(table,
-            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 18, "headless"),\n'
+            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 25, "headless"),\n'
             '              ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",\n'
             '               ["default"], native_names, 2, "headless-native"),\n')
         for required in ("if len(targets) != 2:", "for role, directory, package, library, features, test_names, count, prefix in libraries:",
@@ -6561,7 +6568,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Select fixed frontend compiler",
             "Record exact source and actual tool bindings only after route admission",
             "Check current owner pins before native preparation",
-            "Compile headless Mac libraries and run twenty exact DATA regressions first",
+            "Compile headless Mac libraries and run twenty-seven exact DATA regressions first",
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Acquire and verify the two fixed Android support archives as DATA",
             "Download only the exact accepted M archive (no rebuild or fallback)",

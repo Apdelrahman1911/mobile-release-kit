@@ -156,7 +156,7 @@ struct OwnerState {
     terminal: bool, unknown: bool,
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     native_unknown_pending: bool,
-    reply: Option<oneshot::Sender<Result<Value, BridgeError>>>,
+    reply: Option<PassiveReply>,
     driver_join: ManagementJoin, watchdog_join: ManagementJoin,
     driver_end: Option<DriverEnd>, watchdog_end: Option<WatchdogEnd>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
@@ -229,8 +229,60 @@ impl AdmissionRequest<'_> {
         }
     }
 }
+// Closed original-return arms, not a callback registry. Early Unknown takes
+// only a sender; the typed arm retains the same Document/lane completion.
+enum PassiveReply {
+    Value { sender: Option<oneshot::Sender<Result<Value, BridgeError>>> },
+    ReleaseVersionObserve {
+        sender: Option<oneshot::Sender<Result<crate::release_version_protocol::Observation, BridgeError>>>,
+        completion: crate::asset_session::SavedObservationCompletion,
+    },
+}
+enum FailedPassiveReply {
+    Value(oneshot::Sender<Result<Value, BridgeError>>),
+    ReleaseVersionObserve(oneshot::Sender<Result<crate::release_version_protocol::Observation, BridgeError>>),
+}
+impl FailedPassiveReply {
+    fn send(self, error: BridgeError) { match self {
+        Self::Value(sender) => { let _ = sender.send(Err(error)); },
+        Self::ReleaseVersionObserve(sender) => { let _ = sender.send(Err(error)); },
+    } }
+}
+impl PassiveReply {
+    fn sender_for_unknown(&mut self) -> Option<FailedPassiveReply> {
+        match self {
+            Self::Value { sender } => sender.take().map(FailedPassiveReply::Value),
+            Self::ReleaseVersionObserve { sender, completion } => {
+                completion.unknown();
+                sender.take().map(FailedPassiveReply::ReleaseVersionObserve)
+            },
+        }
+    }
+    fn arm(&self) -> Result<(), BridgeError> {
+        match self { Self::Value { .. } => Ok(()), Self::ReleaseVersionObserve { completion, .. } => completion.arm() }
+    }
+    fn retire(self, value: Result<Value, BridgeError>, was_unknown: bool) {
+        match self {
+            Self::Value { sender } => { if let Some(sender) = sender { let _ = sender.send(value); } },
+            Self::ReleaseVersionObserve { sender, mut completion } => {
+                // Parse ONCE, at this actual original retirement, before delivery.
+                // Receiver abandonment never skips the native Document return.
+                let mut observation = value.and_then(crate::release_version_protocol::result);
+                if let Err(error) = completion.complete(observation.as_ref().ok(), was_unknown) {
+                    observation = Err(error);
+                }
+                completion.returned();
+                if let Some(sender) = sender { let _ = sender.send(observation); }
+            },
+        }
+    }
+}
 enum CompletionTarget {
     Passive(oneshot::Sender<Result<Value, BridgeError>>),
+    ReleaseVersionObserve {
+        sender: oneshot::Sender<Result<crate::release_version_protocol::Observation, BridgeError>>,
+        completion: crate::asset_session::SavedObservationCompletion,
+    },
     GitHub(Arc<Mutex<GitHubReadReceipt>>),
     Preflight(Arc<Mutex<GitHubPreflightReceipt>>),
     Release(Arc<Mutex<GitHubReleaseReceipt>>),
@@ -292,6 +344,9 @@ enum WatchdogEnd {
 
 impl OwnerState {
     fn new(endpoint: Instant, reply: Option<oneshot::Sender<Result<Value, BridgeError>>>) -> Self {
+        Self::with_reply(endpoint, reply.map(|sender| PassiveReply::Value { sender: Some(sender) }))
+    }
+    fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
         Self { endpoint, cleanup_endpoint: None, error: None, terminal: false, unknown: false, reply,
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             native_unknown_pending: false,
@@ -606,7 +661,10 @@ impl Owner {
         inner.disabled.store(true, Ordering::SeqCst);
         state.unknown = true;
         state.fail_at(BridgeError::cleanup_unknown(), Instant::now());
-        let reply = state.reply.take();
+        let reply = match state.reply.as_mut() {
+            Some(reply @ PassiveReply::ReleaseVersionObserve { .. }) => reply.sender_for_unknown(),
+            _ => state.reply.take().and_then(|mut reply| reply.sender_for_unknown()),
+        };
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let cause = state.error.as_ref().and_then(BridgeError::linux_passive_cause);
         drop(state);
@@ -629,7 +687,7 @@ impl Owner {
             let error = BridgeError::cleanup_unknown();
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let error = error.with_linux_passive_cause(cause);
-            let _ = reply.send(Err(error));
+            reply.send(error);
         }
         self.stop.send_replace(true);
         inner.changed.notify_waiters();
@@ -679,7 +737,7 @@ impl Owner {
                 let result = result.and_then(|value| match value {
                     ReadOutcome::Passive(value) => Ok(value), _ => Err(BridgeError::protocol()),
                 });
-                if let Some(reply) = reply { let _ = reply.send(result); }
+                if let Some(reply) = reply { reply.retire(result, was_unknown); }
             }
             Profile::GitHubReadOnly => {
                 // A private typed result never passes through passive Value or
@@ -761,6 +819,20 @@ impl PassiveQuery {
     }
 }
 
+/// Typed data observer of the SAME original passive Owner. It owns no authority
+/// installation step and dropping it cannot erase the retained return arm.
+pub(crate) struct SavedObservationQuery {
+    inner: Arc<Inner>, owner: Arc<Owner>,
+    receiver: oneshot::Receiver<Result<crate::release_version_protocol::Observation, BridgeError>>,
+}
+impl SavedObservationQuery {
+    pub(crate) async fn wait(self) -> Result<crate::release_version_protocol::Observation, BridgeError> {
+        self.receiver.await.unwrap_or_else(|_| {
+            owner_unknown!(self.owner, &self.inner, None, ReplyLoss); Err(BridgeError::cleanup_unknown())
+        })
+    }
+}
+
 impl Supervisor {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn installed_preflight_prepare_marker(&self, gate: &crate::asset_session::GitHubPreflightGoGate,
@@ -826,6 +898,14 @@ impl Supervisor {
         Ok(PassiveQuery { inner: self.inner.clone(), owner, receiver })
     }
 
+    pub(crate) fn start_saved_observation(&self, params: Value,
+        completion: crate::asset_session::SavedObservationCompletion) -> Result<SavedObservationQuery, BridgeError> {
+        let (sender, receiver) = oneshot::channel();
+        let owner = self.admit(AdmissionRequest::Passive { method: Method::ReleaseVersionObserve, params: &params },
+            CompletionTarget::ReleaseVersionObserve { sender, completion })?;
+        Ok(SavedObservationQuery { inner: self.inner.clone(), owner, receiver })
+    }
+
     /// Synchronous admission: the original roster exists before a native session
     /// stores this ticket. No wrapping query future, separate token owner or task.
     pub(crate) fn start_github_readonly(&self, repository: &str, expected_account_id: Option<&str>,
@@ -855,7 +935,10 @@ impl Supervisor {
         let endpoint = Instant::now() + OPERATION_TIME;
         let profile = request.profile();
         let (reply, github_receipt, preflight_receipt, release_receipt) = match (profile, completion) {
-            (Profile::Passive(_), CompletionTarget::Passive(reply)) => (Some(reply), None, None, None),
+            (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+                (Some(PassiveReply::Value { sender: Some(sender) }), None, None, None),
+            (Profile::Passive(Method::ReleaseVersionObserve), CompletionTarget::ReleaseVersionObserve { sender, completion }) =>
+                (Some(PassiveReply::ReleaseVersionObserve { sender: Some(sender), completion }), None, None, None),
             (Profile::GitHubReadOnly, CompletionTarget::GitHub(receipt)) => (None, Some(receipt), None, None),
             (Profile::GitHubPreflight, CompletionTarget::Preflight(receipt)) => (None, None, Some(receipt), None),
             (Profile::GitHubRelease, CompletionTarget::Release(receipt)) => (None, None, None, Some(receipt)),
@@ -875,7 +958,7 @@ impl Supervisor {
         let (stop, _) = watch::channel(false);
         let owner = Arc::new(Owner {
             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate,
-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new(OwnerState::new(endpoint, reply)),
+            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new(OwnerState::with_reply(endpoint, reply)),
             resources: AsyncMutex::new(Resources {
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 passive: if passive_selected(profile) {
@@ -910,6 +993,9 @@ impl Supervisor {
             // Serialize registration with shutdown's stop-and-inventory boundary.
             if self.stopping() { return Err(BridgeError::shutdown()); }
             if self.disabled() { return Err(BridgeError::cleanup_unknown()); }
+            // Arm immediately before the original roster insertion. Every normal
+            // Err above is known nonentry; an armed panic/loss retains the lane.
+            if let Some(reply) = lock(&owner.state).reply.as_ref() { reply.arm()?; }
             owners.insert(key, owner.clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -4726,6 +4812,44 @@ mod tests {
     // Default cases are pure bookkeeping. Ignored native cases require their
     // separate hosted/installed prerequisites; selection is not qualification.
     use super::*;
+
+    #[test]
+    fn typed_saved_parse_refusal_returns_despite_receiver_abandonment() {
+        let (completion, probe) = crate::asset_session::SavedObservationCompletion::control_fixture();
+        let (sender, receiver) = oneshot::channel();
+        let reply = PassiveReply::ReleaseVersionObserve { sender: Some(sender), completion };
+        reply.arm().unwrap();
+        assert!(!probe.returned() && !probe.gate_open());
+        drop(receiver);
+        // Invalid protocol DATA exercises the actual parse-refusal retirement,
+        // not a constructed positive Observation or a substitute completion.
+        reply.retire(Ok(serde_json::json!({})), false);
+        assert!(probe.returned() && probe.completion_returned() && probe.gate_open());
+        assert!(!probe.unknown() && !probe.has_binding());
+    }
+
+    #[test]
+    fn typed_saved_early_unknown_keeps_completion_after_sender_only_delivery() {
+        let (completion, probe) = crate::asset_session::SavedObservationCompletion::control_fixture();
+        let (sender, mut receiver) = oneshot::channel();
+        let mut reply = PassiveReply::ReleaseVersionObserve { sender: Some(sender), completion };
+        reply.arm().unwrap();
+        // This is the same finite arm called by actual Owner::unknown_policy;
+        // no inert Owner or forged driver/source join supplies the completion.
+        reply.sender_for_unknown().unwrap().send(BridgeError::cleanup_unknown());
+        assert_eq!(receiver.try_recv().unwrap().err(), Some(BridgeError::cleanup_unknown()));
+        assert!(matches!(&reply, PassiveReply::ReleaseVersionObserve { sender: None, .. }));
+        assert!(probe.unknown() && !probe.returned() && !probe.completion_returned());
+        assert!(!probe.has_binding() && !probe.gate_open());
+        #[cfg(feature = "desktop-shell")]
+        assert!(!probe.can_exit());
+        reply.retire(Ok(serde_json::json!({})), true);
+        assert!(probe.completion_returned() && probe.unknown() && !probe.returned());
+        assert!(!probe.has_binding() && !probe.gate_open());
+        #[cfg(feature = "desktop-shell")]
+        assert!(!probe.can_exit());
+    }
+
     pub(super) fn inert_owner() -> Owner {
         let (stop, receiver) = watch::channel(false);
         drop(receiver);

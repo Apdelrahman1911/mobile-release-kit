@@ -5,7 +5,7 @@
 //! No owner, launch, file access, tool admission, permit or qualification here.
 //! A parsed core terminal and a settled frame decoder NEVER establish native
 //! finality: the original runtime/process/pipe/close/join owners must still settle.
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{fmt, path::Path};
 use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error::BridgeError,
@@ -484,18 +484,68 @@ pub(crate) enum CheckId { AabStructure, AabManifest, ApplicationId, BuildNumber,
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Finding { pub(crate) ordinal: u32, pub(crate) check: CheckId, pub(crate) status: CoreStatus }
+/// The wire still contains a map of the same nine closed enum keys. Missing
+/// keys stay absent (not zero); there is no opaque BTree node allocation behind
+/// an otherwise stable terminal retained by the Android owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CoreCounts([Option<u32>; 9]);
+impl CoreCounts {
+    fn index(status: CoreStatus) -> usize { match status {
+        CoreStatus::Pass => 0, CoreStatus::Fail => 1, CoreStatus::Missing => 2,
+        CoreStatus::Blocked => 3, CoreStatus::Invalid => 4, CoreStatus::Skip => 5,
+        CoreStatus::Manual => 6, CoreStatus::Configured => 7, CoreStatus::NotApplicable => 8,
+    } }
+    fn len(&self) -> usize { self.0.iter().filter(|value| value.is_some()).count() }
+    fn observed_zero() -> Self { Self([Some(0); 9]) }
+    fn increment(&mut self, status: CoreStatus) -> Option<()> {
+        let value = self.0[Self::index(status)].as_mut()?;
+        *value = value.checked_add(1)?; Some(())
+    }
+}
+impl Serialize for CoreCounts {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.len()))?;
+        // This is the former BTreeMap<CoreStatus, _> enum/Ord order, not a new
+        // alphabetic ordering of public labels.
+        for status in CORE_STATUSES {
+            if let Some(value) = self.0[Self::index(status)] { map.serialize_entry(&status, &value)?; }
+        }
+        map.end()
+    }
+}
+impl<'de> Deserialize<'de> for CoreCounts {
+    fn deserialize<D: de::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        struct CountsVisitor;
+        impl<'de> Visitor<'de> for CountsVisitor {
+            type Value = CoreCounts;
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("the closed Android core-status count map")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut result = CoreCounts([None; 9]);
+                while let Some((status, count)) = map.next_entry::<CoreStatus, u32>()? {
+                    let slot = &mut result.0[CoreCounts::index(status)];
+                    if slot.is_some() { return Err(de::Error::custom("duplicate core-status count")); }
+                    *slot = Some(count);
+                }
+                Ok(result)
+            }
+        }
+        decoder.deserialize_map(CountsVisitor)
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Summary {
-    pub(crate) total: u32, pub(crate) shown: u32, pub(crate) omitted: u32, pub(crate) counts: BTreeMap<CoreStatus, u32>,
+    pub(crate) total: u32, pub(crate) shown: u32, pub(crate) omitted: u32, pub(crate) counts: CoreCounts,
 }
 fn inspection(findings: &[Finding], summary: &Summary) -> bool {
     if findings.len() > MAX_FINDINGS || summary.total as usize != findings.len() || summary.shown != summary.total
         || summary.omitted != 0 || summary.counts.len() != CORE_STATUSES.len() { return false; }
-    let mut observed: BTreeMap<CoreStatus, u32> = CORE_STATUSES.into_iter().map(|status| (status, 0)).collect();
+    let mut observed = CoreCounts::observed_zero();
     for (ordinal, row) in findings.iter().enumerate() {
-        if row.ordinal as usize != ordinal { return false; }
-        *observed.entry(row.status).or_default() += 1;
+        if row.ordinal as usize != ordinal || observed.increment(row.status).is_none() { return false; }
     }
     observed == summary.counts
 }
@@ -722,6 +772,81 @@ pub(crate) struct Terminal {
     pub(crate) activity: Activity, pub(crate) disposition: Disposition, pub(crate) result: Option<ResultData>,
     pub(crate) lifetime: Lifetime,
 }
+// Pure finite app-owned DATA census. Inline values are charged by the owner;
+// these methods count only their actual String/Vec backing. They neither
+// serialize/clone nor interpret a terminal as original native finality.
+fn retained_strings<const N: usize>(values: [&String; N]) -> Option<usize> {
+    values.into_iter().try_fold(0usize, |bytes, value| bytes.checked_add(value.capacity()))
+}
+fn retained_version(value: &SavedVersion) -> Option<usize> {
+    retained_strings([&value.source, &value.sha256, &value.name])
+}
+fn retained_validation(value: &ArtifactValidation) -> usize {
+    value.upload_certificate_sha256.as_ref().map_or(0, String::capacity)
+}
+fn retained_inputs(project_id: &String, content: &Content, version: &SavedVersion,
+    validation: &ArtifactValidation) -> Option<usize> {
+    retained_strings([project_id, &content.sha256])?.checked_add(retained_version(version)?)?
+        .checked_add(retained_validation(validation))
+}
+impl Prepare {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)
+    }
+}
+impl Context {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)
+    }
+}
+impl MacToolchainSelection {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.instance, &self.record_sha256, &self.inventory_sha256, &self.os_provider_sha256])
+    }
+}
+impl Selection {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.module, &self.variant, &self.application_id, &self.task])
+    }
+}
+impl Activity {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        self.findings.capacity().checked_mul(std::mem::size_of::<Finding>())?
+            .checked_add(self.selection.as_ref().map_or(Some(0), Selection::retained_heap_bytes)?)
+    }
+}
+impl Artifact {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.logical_name, &self.kind, &self.file_name, &self.sha256, &self.freshness])?
+            .checked_add(self.architectures.capacity().checked_mul(std::mem::size_of::<Abi>())?)
+    }
+}
+impl Assurances {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        retained_strings([&self.application_version, &self.signature, &self.signer, &self.toolkit_signing,
+            &self.store_operation, &self.source_binding, &self.release_readiness])
+    }
+}
+impl ResultData {
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        let bytes = retained_strings([&self.scope, &self.used_config.sha256, &self.toolchain_profile])?
+            .checked_add(retained_version(&self.used_version)?)?.checked_add(retained_validation(&self.artifact_validation))?
+            .checked_add(self.selection.retained_heap_bytes()?)?
+            .checked_add(self.toolchain_selection.as_ref().map_or(Some(0), MacToolchainSelection::retained_heap_bytes)?)?
+            .checked_add(self.findings.capacity().checked_mul(std::mem::size_of::<Finding>())?)?
+            .checked_add(self.artifacts.capacity().checked_mul(std::mem::size_of::<Artifact>())?)?
+            .checked_add(self.assurances.retained_heap_bytes()?)?
+            .checked_add(self.limitations.capacity().checked_mul(std::mem::size_of::<Limitation>())?)?;
+        self.artifacts.iter().try_fold(bytes, |bytes, artifact| bytes.checked_add(artifact.retained_heap_bytes()?))
+    }
+}
+impl Terminal {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        self.context.retained_heap_bytes()?.checked_add(self.activity.retained_heap_bytes()?)?
+            .checked_add(self.result.as_ref().map_or(Some(0), ResultData::retained_heap_bytes)?)
+    }
+}
+
 fn artifact_reason(reason: Reason) -> bool {
     matches!(reason, Reason::ArtifactMissing | Reason::ArtifactAmbiguous | Reason::ArtifactUnsafe | Reason::ArtifactChanged)
 }
@@ -1505,6 +1630,42 @@ pub(crate) mod tests {
         let mut value = complete(); set_rows(&mut value, &many, "passed", "not-checked"); assert!(parse_terminal(&value).is_ok());
         many.push(("aab-manifest", "FAIL")); set_rows(&mut value, &many, "passed", "failed"); assert!(parse_terminal(&value).is_err());
         let mut value = complete(); value["result"]["limitations"].as_array_mut().unwrap().reverse(); assert!(parse_terminal(&value).is_err());
+    }
+
+    #[test]
+    fn fixed_core_counts_preserve_map_bytes_absence_and_rejection() {
+        let legacy: std::collections::BTreeMap<CoreStatus, u32> =
+            CORE_STATUSES.into_iter().map(|status| (status, 0)).collect();
+        let fixed = CoreCounts::observed_zero();
+        assert_eq!(serde_json::to_vec(&fixed).unwrap(), serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(serde_json::from_slice::<CoreCounts>(&serde_json::to_vec(&legacy).unwrap()).unwrap(), fixed);
+        let mut absent = serde_json::to_value(&fixed).unwrap();
+        absent.as_object_mut().unwrap().remove("SKIP");
+        let missing: CoreCounts = serde_json::from_value(absent).unwrap();
+        assert_eq!(missing.len(), 8);
+        assert_ne!(missing, fixed);
+        assert!(!inspection(&[], &Summary { total: 0, shown: 0, omitted: 0, counts: missing }));
+        for bad in [r#"{"PASS":0,"PASS":0}"#, r#"{"NEW":0}"#, r#"{"PASS":4294967296}"#,
+            r#"{"PASS":-1}"#, r#"{"PASS":1.5}"#, r#"[]"#] {
+            assert!(serde_json::from_str::<CoreCounts>(bad).is_err());
+        }
+        let mut overflow = fixed;
+        overflow.0[CoreCounts::index(CoreStatus::Pass)] = Some(u32::MAX);
+        assert!(overflow.increment(CoreStatus::Pass).is_none());
+    }
+    #[test]
+    fn stable_terminal_census_counts_spare_backing_without_serialization_or_disposal() {
+        let data = complete();
+        let context: Context = serde_json::from_value(data["context"].clone()).unwrap();
+        let mut terminal = parse_terminal(&data).unwrap();
+        let first = terminal.retained_heap_bytes().unwrap();
+        let capacity = terminal.activity.findings.capacity();
+        terminal.activity.findings.reserve_exact(17);
+        let extra = (terminal.activity.findings.capacity() - capacity) * std::mem::size_of::<Finding>();
+        assert_eq!(terminal.retained_heap_bytes(), Some(first + extra));
+        assert_eq!(terminal.context, context);
+        assert_eq!(terminal.activity.findings.len(), data["activity"]["findings"].as_array().unwrap().len());
+        assert!(terminal.result.is_some());
     }
 
     #[test]

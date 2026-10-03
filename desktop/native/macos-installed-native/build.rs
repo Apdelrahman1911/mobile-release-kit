@@ -16,6 +16,12 @@ fn main() {
         "native qualification handshake cfg is build-script output only");
     let observation = std::env::var_os("CARGO_FEATURE_INSTALLED_OBSERVATION").is_some();
     let helper = std::env::var_os("CARGO_FEATURE_VAULT_HELPER").is_some();
+    let android_helper = std::env::var_os("CARGO_FEATURE_ANDROID_REGISTRATION_HELPER").is_some();
+    println!("cargo:rustc-check-cfg=cfg(mrk_android_registration_helper_native)");
+    assert!(std::env::var_os("CARGO_CFG_MRK_ANDROID_REGISTRATION_HELPER_NATIVE").is_none(),
+        "Android helper native handshake is build-script output only");
+    assert!(!android_helper || !helper && !observation && !qualification,
+        "Android helper cannot contain vault/observation/fixture roles");
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_vault_helper_native)");
     assert!(std::env::var_os("CARGO_CFG_MRK_WRAPPING_VAULT_HELPER_NATIVE").is_none(),
         "vault helper native handshake is build-script output only");
@@ -38,6 +44,8 @@ fn main() {
         println!("cargo:rustc-cfg=mrk_wrapping_keychain_qualification_native");
     }
     println!("cargo:rerun-if-changed=src/native.m");
+    println!("cargo:rerun-if-changed=src/android_registration.m");
+    println!("cargo:rerun-if-changed=src/android_service_management.m");
     println!("cargo:rerun-if-changed=src/vault_filesystem.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain.m");
     println!("cargo:rerun-if-changed=src/wrapping_interaction_policy.h");
@@ -53,6 +61,10 @@ fn main() {
         build.file("src/vault_helper_auth.m");
         println!("cargo:rustc-cfg=mrk_wrapping_vault_helper_native");
     }
+    if android_helper {
+        build.define("MRK_ANDROID_REGISTRATION_HELPER", Some("1"));
+        println!("cargo:rustc-cfg=mrk_android_registration_helper_native");
+    }
     if observation {
         build.define("MRK_INSTALLED_OBSERVATION", None);
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
@@ -61,10 +73,11 @@ fn main() {
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION", Some("1"));
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION_DEBUG", Some("1"));
     }
-    build.file("src/native.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").file("src/vault_helper_control.m").flag("-fno-objc-arc").flag("-fblocks")
+    build.file("src/native.m").file("src/android_registration.m").file("src/android_service_management.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").file("src/vault_helper_control.m").flag("-fno-objc-arc").flag("-fblocks")
         .flag("-mmacosx-version-min=26.0").warnings(true).compile("mrk_macos_installed_native");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=ServiceManagement");
     println!("cargo:rustc-link-lib=framework=Security");
     println!("cargo:rustc-link-lib=framework=CoreFoundation");
 }

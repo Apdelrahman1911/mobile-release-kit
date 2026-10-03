@@ -2136,9 +2136,11 @@ version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
  "cms",
+ "crc32fast",
  "der",
  "getrandom 0.3.4",
  "gtk",
+ "miniz_oxide 0.9.1",
  "mrk-linux-mount-observation",
  "mrk-macos-installed-native",
  "mrk-windows-installed-native",

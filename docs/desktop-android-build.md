@@ -82,6 +82,27 @@ readback is command-free. SDK license provenance/consent, loader and provider
 qualification, and actual native consumption remain separate requirements.
 The source host policy and preparation gates stay disabled until qualified.
 
+### macOS ARM64 supplier scope (not yet qualified)
+
+The macOS candidate covers the fixed Java/AGP Android AAB build with plain-console
+Gradle, followed by the fixed bundletool manifest inspection and optional
+upload-signature checks. It does not qualify NDK/RenderScript, Rosetta, rich
+console modes, or arbitrary plugin-selected native toolchains.
+
+Complete vendor distributions remain intact and authenticated. SDK35's three
+Bash launchers and Intel-only legacy linker/libraries are classified explicitly;
+retaining them does not make them ARM64 launch roots. Known foreign resources
+inside Gradle and bundletool archives also remain in their original archives.
+Required ARM64 tools and JNI still need genuine native loader verification.
+
+Gradle uses the same task-owned directory for native extraction in its client and
+single-use build JVM. Project settings cannot replace that directory, select Jansi
+providers, or falsify the JVM platform. Native extraction is real task output,
+including Gradle's copied Intel Jansi resource even with a plain console, and must
+fit the existing output and cleanup limits. These controls are not a project-code
+sandbox. The compiled supplier remains unavailable until source correspondence,
+integration, independent acceptance and real macOS-native qualification pass.
+
 ## Review before starting
 
 Building runs the project's Gradle scripts and plugins. Use only a project you

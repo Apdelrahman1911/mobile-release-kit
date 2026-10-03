@@ -349,13 +349,11 @@ impl DesktopBridge {
         document.passive_query(self, Method::ProjectSnapshot, json!({"root": root}))?.wait().await
     }
     pub(crate) async fn observe_release_version(&self, document: &crate::asset_session::DocumentBinding, input: crate::release_version_protocol::Request) -> Result<crate::release_version_protocol::Observation, BridgeError> {
-        // Native-selected root only. The existing passive owner/runtime gate is
-        // unchanged; this observation creates no write or preflight authority.
-        let root = self.project_root(&input.project_id).map_err(crate::release_version_protocol::public_error)?;
-        let params = crate::release_version_protocol::params(&root)?;
-        let value = document.passive_query(self, Method::ReleaseVersionObserve, params).map_err(crate::release_version_protocol::public_error)?.wait().await
-            .map_err(crate::release_version_protocol::public_error)?;
-        crate::release_version_protocol::result(value)
+        // Admission/root/stamp and completion belong to the original Document
+        // and Supervisor. Nothing after this await can install authority.
+        document.saved_observation(self, &input.project_id)
+            .map_err(crate::release_version_protocol::public_error)?.wait().await
+            .map_err(crate::release_version_protocol::public_error)
     }
     pub(crate) async fn observe_candidate_evidence(&self, root: &crate::asset_source::RegisteredRoot) -> Result<crate::candidate_evidence_protocol::Observation, BridgeError> {
         // Only the separate native evidence registry can supply this identity.
@@ -445,6 +443,20 @@ impl DesktopBridge {
         let root = self.project_root(&project_id)?;
         self.edits.open(window, project_id, root)
     }
+    pub(crate) fn open_config_edit_published(&self, publisher: &crate::saved_command_owner::AndroidRegistrationPublisher, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
+        self.preflight.ensure_idle()?;
+        self.android_build.ensure_idle()?;
+        self.project_recovery.ensure_idle()?;
+        self.ios_archive.ensure_idle()?;
+        self.diagnostics.ensure_idle()?;
+        if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+        if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+        // The same exact native-selected root is retained separately from its
+        // display string. The edit registry linearizes registration with STOP
+        // and document invalidation after this in-memory lookup.
+        let root = self.project_root(&project_id)?;
+        self.edits.open_published(publisher, window, project_id, root)
+    }
     pub(crate) fn open_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         project_id: String) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
         // A ticket contains only preallocated identity/executor DATA. The real
@@ -452,56 +464,56 @@ impl DesktopBridge {
         // the shared owner's synchronous claim/enqueue, with no path fallback.
         let ticket = self.edits.workflow_open_ticket(window)?;
         let selected = project_id.clone();
-        document.workflow_edit_admit(|_| Ok(selected), |bridge, registration|
-            bridge.edits.open_workflow(window, project_id, registration, ticket))
+        document.workflow_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_workflow_published(publisher, window, project_id, registration, ticket))
     }
     pub(crate) fn prepare_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::github_workflow_edit_protocol::PrepareWorkflowEdit) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
         let session_id = args.session_id.clone();
-        document.workflow_edit_admit(|bridge| bridge.edits.workflow_project(window, &session_id), |bridge, registration|
-            bridge.edits.prepare_workflow(window, args, registration))
+        document.workflow_edit_admit_published(|bridge| bridge.edits.workflow_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_workflow_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session_id: &str, plan_token: &str) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
-        document.workflow_edit_admit(|bridge| bridge.edits.workflow_project(window, session_id), |bridge, registration|
-            bridge.edits.apply_workflow(window, session_id, plan_token, registration))
+        document.workflow_edit_admit_published(|bridge| bridge.edits.workflow_project(window, session_id), |bridge, registration, publisher|
+            bridge.edits.apply_workflow_published(publisher, window, session_id, plan_token, registration))
     }
     pub(crate) fn open_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
         let ticket = self.edits.metadata_text_open_ticket(window)?;
         let context = args.context();
         let selected = args.project_id.clone();
-        document.metadata_text_edit_admit(|_| Ok(selected), |bridge, registration|
-            bridge.edits.open_metadata_text(window, args.project_id, context, registration, ticket))
+        document.metadata_text_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_metadata_text_published(publisher, window, args.project_id, context, registration, ticket))
     }
     pub(crate) fn prepare_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::metadata_text_edit_protocol::PrepareMetadataTextEdit) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
         let session_id = args.session_id.clone();
-        document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration|
-            bridge.edits.prepare_metadata_text(window, args, registration))
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_metadata_text_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session_id: &str, plan_token: &str) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
-        document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration|
-            bridge.edits.apply_metadata_text(window, session_id, plan_token, registration))
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_text_published(publisher, window, session_id, plan_token, registration))
     }
     pub(crate) fn open_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::release_version_edit_commands::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
         let ticket = self.edits.release_version_open_ticket(window)?;
         let selected = args.project_id.clone();
-        document.release_version_edit_admit(|_| Ok(selected), |bridge, registration|
-            bridge.edits.open_release_version(window, args.project_id, registration, ticket))
+        document.release_version_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_release_version_published(publisher, window, args.project_id, registration, ticket))
     }
     pub(crate) fn prepare_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::release_version_edit_protocol::PrepareReleaseVersionEdit) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
         let session_id = args.session_id.clone();
-        document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration|
-            bridge.edits.prepare_release_version(window, args, registration))
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_release_version_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
-        document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration|
-            bridge.edits.apply_release_version(window, session_id, plan_token, registration))
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration, publisher|
+            bridge.edits.apply_release_version_published(publisher, window, session_id, plan_token, registration))
     }
     pub(crate) fn metadata_images_selection_available(&self) -> bool {
         self.edits.metadata_images_selection_profile_available()
@@ -512,8 +524,8 @@ impl DesktopBridge {
         // must still be retired when ticket/admission preparation fails.
         let ticket = self.edits.metadata_images_open_ticket(window);
         let selected = args.project_id.clone();
-        document.metadata_images_import_admit(&selected, &args.selection_token, |bridge, registration, data, claimed|
-            bridge.edits.open_metadata_images(window, args.project_id, data, registration, ticket?, claimed))
+        document.metadata_images_import_admit_published(&selected, &args.selection_token, |bridge, registration, data, claimed, publisher|
+            bridge.edits.open_metadata_images_published(publisher, window, args.project_id, data, registration, ticket?, claimed))
     }
     pub(crate) fn open_metadata_images_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::metadata_images_commands::RecoveryOpen) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
@@ -521,22 +533,22 @@ impl DesktopBridge {
         let ticket = self.edits.metadata_images_open_ticket(window).map_err(recovery_not_admitted)?;
         let selected = args.project_id.clone();
         let mut entered_original_open = false;
-        let result = document.metadata_images_edit_admit(|_| Ok(selected), |bridge, registration| {
+        let result = document.metadata_images_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher| {
             entered_original_open = true;
-            bridge.edits.open_metadata_images_recovery(window, args.project_id, registration, ticket)
+            bridge.edits.open_metadata_images_recovery_published(publisher, window, args.project_id, registration, ticket)
         });
         result.map_err(|error| if entered_original_open { error } else { recovery_not_admitted(error) })
     }
     pub(crate) fn prepare_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::metadata_images_edit_protocol::PrepareMetadataImagesEdit) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
         let session = args.session_id.clone();
-        document.metadata_images_edit_admit(|bridge| bridge.edits.metadata_images_project(window, &session), |bridge, registration|
-            bridge.edits.prepare_metadata_images(window, args, registration))
+        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, &session), |bridge, registration, publisher|
+            bridge.edits.prepare_metadata_images_published(publisher, window, args, registration))
     }
     pub(crate) fn apply_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         session: &str, plan: &str) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
-        document.metadata_images_edit_admit(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration|
-            bridge.edits.apply_metadata_images(window, session, plan, registration))
+        document.metadata_images_edit_admit_published(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_images_published(publisher, window, session, plan, registration))
     }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.

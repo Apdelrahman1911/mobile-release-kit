@@ -106,6 +106,37 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         self.assertNotIn("persistent encrypted storage remains unavailable", guidance)
 
 
+    def test_current_launches_use_one_admitted_account_and_preserve_prefixture_admission(self):
+        source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        basic = source.split("func testLaunchCancelAndQuit() throws {", 1)[1]
+        basic = basic.split("// Finite synthetic files only.", 1)[0]
+        admission = source.split("private func admittedJourneyApplication() throws -> (URL, HostedAccount) {", 1)[1]
+        admission = admission.split("@MainActor private func launchForJourney()", 1)[0]
+        launch = source.split("@MainActor private func launchForJourney()", 1)[1]
+        launch = launch.split("private enum PrivateInput", 1)[0]
+        for block in (basic, admission):
+            self.assertEqual(block.count("let account = try admitHostedAccount()"), 1)
+        self.assertIn("return (url, account)", admission)
+        self.assertIn("let (url, account) = try admittedJourneyApplication()", launch)
+        self.assertNotIn("admitHostedAccount()", launch)
+        environments = re.findall(r"app\.launchEnvironment = \[(.*?)\n        \]", source, re.S)
+        self.assertEqual(len(environments), 2)
+        expected = [
+            '"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",',
+            '"HOME": account.home, "USER": account.name, "LOGNAME": account.name,',
+            '"LANG": "en_US.UTF-8",',
+            '"LC_ALL": "en_US.UTF-8", "TZ": "UTC"',
+        ]
+        for environment in environments:
+            self.assertEqual([line.strip() for line in environment.strip().splitlines()], expected)
+        persistence = source.split("@MainActor func testSyntheticPersistentCredentials() throws {", 1)[1]
+        persistence = persistence.split('stage("persistence-launch")', 1)[0]
+        self.assertLess(persistence.index("_ = try admittedJourneyApplication()"),
+                        persistence.index("try fixture.admitDefaultVault()"))
+        self.assertLess(persistence.index("try fixture.admitDefaultVault()"),
+                        persistence.index("try fixture.prepare(.persistentCredentials)"))
+        self.assertNotIn("testHostedAccountAdmissionOnly", source)
+
     def test_local_project_journey_precedes_persistence_without_changing_its_gates(self):
         source = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_bytes()
         blocks = re.findall(rb"(?ms)^      - name: .*?(?=^      - name: |\Z)", source)
@@ -119,14 +150,18 @@ class NormalPersistenceSourceTests(unittest.TestCase):
             self.assertEqual(ids.count(identifier), 1, identifier)
         start = ids.index(order[0])
         self.assertEqual(tuple(ids[start:start + len(order)]), order)
-        # These are the cddcb74 project blocks with reviewed explicit shell
-        # failure exits, not native-success receipts. Keep success-only admission,
-        # package/test count bindings, deadlines and finality limitations intact.
+        # Reviewed finite file-budget guards and explicit original-status exits,
+        # not native-success receipts. Keep success-only admission, package/test
+        # count bindings, deadlines and finality limitations intact.
         pins = {
-            b"normal_project_ui_test": "f4157aceed5a13a08c6081b318ba2da5a7e692a92017a2f87486d3ddce6cb4d1",
+            b"normal_ui_build": "b240c46f7cdad329dbdff8b51a3be428ea2c3ef78e3ff66373393367d1115e5f",
+            b"normal_ui_test": "4d0e38e398d1e49b804177f65deb7aa4abe59ed8fc8e2c6d8d56dcf9e676c1d5",
+            b"normal_project_ui_test": "161d12ffaada989d866466ec297dd17ed64de10ac6b84bc9cc1973e76d7d07fb",
             b"normal_project_ui_result": "20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d",
+            b"normal_persistence_ui_test": "01bded1ba9c28bff4d9ce7a224665cc8e2a1bcb1327a2f097da4bde50fec390e",
         }
         for identifier, expected in pins.items():
+            self.assertEqual(ids.count(identifier), 1, identifier)
             self.assertEqual(hashlib.sha256(blocks[ids.index(identifier)]).hexdigest(), expected)
         self.assertEqual(source.count(
             b"-only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages"

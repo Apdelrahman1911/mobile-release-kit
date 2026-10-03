@@ -14,6 +14,18 @@ use crate::{asset_commands::{self as commands, AssetError, CommandError, Fields,
     github_connection_protocol::{self as github_wire, Reason as GitHubReason},
     github_connection_session::{self as github_session, ConnectionState}};
 
+#[path = "asset_session_saved_observation.rs"]
+mod saved_observation;
+use saved_observation::{SavedObservationLane, SavedInputBinding};
+pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput};
+#[path = "asset_session_android_registration.rs"]
+mod android_registration;
+use crate::saved_command_owner::{AndroidRegistrationPublisher as RegistrationPublisher,
+    AndroidRegistrationPublisherKind as RegistrationPublisherKind};
+fn finish_registration_publisher(publisher: RegistrationPublisher) {
+    if publisher.accepted() { publisher.finish(); } else { publisher.reject(); }
+}
+
 const MAIN: &str = "main";
 const WORK: Duration = Duration::from_secs(10);
 const CLEANUP: Duration = Duration::from_secs(2);
@@ -54,6 +66,7 @@ mod images;
 mod installation;
 #[path = "asset_session_installation_memory.rs"]
 mod installation_memory;
+pub(crate) use installation_memory::AndroidRegistrationCensus;
 
 // Explicitly ignored component fixture only: no installed window, persistent
 // provider admission or renderer command is enabled by compiling this module.
@@ -650,6 +663,7 @@ struct DocumentState {
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     compatibility_picker_pending: bool,
+    saved_observation: Option<Arc<SavedObservationLane>>, saved_input: Option<SavedInputBinding>,
     session_owner_reason: Option<Reason>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     first_origin: Option<installed_session_observation::FirstOrigin>,
@@ -905,6 +919,7 @@ fn quit_question_admitted(state: &DocumentState) -> bool {
 struct Inner {
     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
     session_identity: Arc<()>,
+    android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_session: Mutex<Option<installed_session_observation::Book>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
@@ -1477,7 +1492,9 @@ mod lookup_memory {
             self.add(std::mem::size_of::<Slot>())?;
             if let Some(assessment) = &slot.assessment { self.assessment(assessment)?; }
             if let Some(payload) = &slot.vault.loaded { self.payload(payload)?; }
-            if let Some(loan) = &slot.vault.previous_bound { self.vault_loan(loan)?; }
+            if let Some(loan) = &slot.vault.previous_bound {
+                self.add(vault::BOUND_LOAN_BYTES)?; self.vault_loan(loan)?;
+            }
             if let Some(store) = &slot.vault.lease { self.vault_store(store)?; }
             if let Some(label) = &slot.vault.label { self.add(label.capacity())?; }
             if let Some(context) = &slot.context { self.context(context)?; }
@@ -1879,7 +1896,8 @@ fn ios_archive_document_gate(state: &DocumentState, profile: Option<crate::ios_a
 impl DocumentBinding {
     pub(crate) fn new(bridge: Arc<DesktopBridge>) -> Self {
         let (changes, _) = watch::channel(0);
-        let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()),
+        let android_registration_control = bridge.android_build.registration_control();
+        let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()), android_registration_control,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_session: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
@@ -1890,7 +1908,7 @@ impl DocumentBinding {
             github_fixture: None,
             state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, session_owner_reason: None,
+            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -1901,6 +1919,7 @@ impl DocumentBinding {
         // DesktopBridge constructor. A later document cannot rebind its lease.
         document.inner.bridge.supervisor.bind_original_session_document(&document.inner.session_identity);
         document.inner.bridge.android_build.bind_original_document(&document.inner.session_identity);
+        document.inner.bridge.edits.bind_saved_registration(&document.inner.session_identity, document.inner.android_registration_control.clone());
         document.inner.bridge.diagnostics.bind_original_document(&document.inner.session_identity);
         document
     }
@@ -2104,7 +2123,7 @@ impl DocumentBinding {
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::observe_stop(state, Instant::now());
         if state.exhausted { return; }
-        if state.unknown { state.github.unknown(); state.evidence.revoke(true); }
+        if state.unknown { self.inner.android_registration_control.poisoned(); state.saved_input = None; state.github.unknown(); state.evidence.revoke(true); }
         images::refresh(state);
         let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return; };
         state.evidence.revision = revision;
@@ -2114,6 +2133,7 @@ impl DocumentBinding {
         }
     }
     fn exhaust(&self, state: &mut DocumentState, _origin: UnknownOrigin) {
+        self.inner.android_registration_control.poisoned(); state.saved_input = None;
         first_unknown_origin!(state, _origin, None);
         state.exhausted = true; state.unknown = true; state.stopping = true; state.lost_observed = true;
         state.github.exhaust();
@@ -2127,7 +2147,7 @@ impl DocumentBinding {
         self.inner.bridge.edits.document_lost(MAIN);
         self.inner.bridge.diagnostics.document_lost();
         self.inner.bridge.preflight.document_lost();
-        self.inner.bridge.android_build.document_lost(); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost();
+        self.inner.bridge.android_build.document_lost_published(None); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost();
         state.revision = u32::MAX; self.inner.changes.send_replace(u32::MAX);
     }
     fn next_operation(&self, state: &mut DocumentState) -> Result<u32, AssetError> {
@@ -2135,7 +2155,9 @@ impl DocumentBinding {
         state.next_operation = next; Ok(next)
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
-    fn loss_locked(&self, state: &mut DocumentState) {
+    fn loss_locked(&self, state: &mut DocumentState, publisher: Option<&RegistrationPublisher>) {
+        state.saved_input = None;
+        if publisher.is_none() { self.inner.android_registration_control.poisoned(); }
         state.lost_observed = true;
         state.evidence.revoke(false);
         state.github.retire(GitHubReason::Cancelled);
@@ -2144,26 +2166,53 @@ impl DocumentBinding {
         stop_quit(state, Instant::now());
         // This actual loss path is synchronous under the same admission lock.
         // EditOwner's first-loss tombstone was preallocated, with no loss RNG.
-        self.inner.bridge.edits.document_lost(MAIN);
+        self.inner.bridge.edits.document_lost_published(MAIN, publisher);
         self.inner.bridge.diagnostics.document_lost(); self.inner.bridge.preflight.document_lost();
-        self.inner.bridge.android_build.document_lost(); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.bump(state);
+        self.inner.bridge.android_build.document_lost_published(publisher); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.bump(state);
     }
-    fn apply(&self, state: &mut DocumentState, action: DocumentAction) {
+    fn apply(&self, state: &mut DocumentState, action: DocumentAction, publisher: Option<&RegistrationPublisher>) {
         match action {
             DocumentAction::Bind => {
-                if self.inner.bridge.edits.initial_document(MAIN).is_err() { state.lifetime.invalidate(); self.loss_locked(state); }
+                if self.inner.bridge.edits.initial_document_published(MAIN, publisher).is_err() { state.lifetime.invalidate(); self.loss_locked(state, publisher); }
                 else { self.bump(state); }
             }
-            DocumentAction::Lost => self.loss_locked(state), DocumentAction::None => {},
+            DocumentAction::Lost => self.loss_locked(state, publisher), DocumentAction::None => {},
         }
     }
     pub(crate) fn observe(&self, event: impl FnOnce(&mut DocumentLifetime) -> DocumentAction) {
-        let mut state = self.lock(); let action = event(&mut state.lifetime); self.apply(&mut state, action);
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, true).ok();
+        {
+            let mut state = self.lock(); let action = event(&mut state.lifetime);
+            if action != DocumentAction::None {
+                if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost); }
+                state.saved_input = None;
+            }
+            self.apply(&mut state, action, publisher.as_ref().filter(|p| p.accepted()));
+        }
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); }
     }
     pub(crate) fn navigation(&self, trusted: bool) -> bool {
-        let mut state = self.lock(); let (allowed, action) = state.lifetime.navigation(trusted); self.apply(&mut state, action); allowed
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, true).ok();
+        let allowed = {
+            let mut state = self.lock(); let (allowed, action) = state.lifetime.navigation(trusted);
+            if action != DocumentAction::None {
+                if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost); }
+                state.saved_input = None;
+            }
+            self.apply(&mut state, action, publisher.as_ref().filter(|p| p.accepted())); allowed
+        };
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } allowed
     }
-    pub(crate) fn lost(&self) { self.observe(DocumentLifetime::invalidate); }
+    pub(crate) fn lost(&self) {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, true).ok();
+        // Authenticated native loss is unconditional: original STOP BEFORE Doc.
+        if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost); }
+        {
+            let mut state = self.lock(); let action = state.lifetime.invalidate(); state.saved_input = None;
+            self.apply(&mut state, action, publisher.as_ref().filter(|p| p.accepted()));
+        }
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); }
+    }
     pub(crate) fn hook_installed(&self) { self.observe(DocumentLifetime::crash_hook_installed); }
     fn environment_gate(&self, state: &DocumentState) -> crate::environment_diagnostics_protocol::Availability {
         use crate::environment_diagnostics_protocol::Availability;
@@ -2199,6 +2248,7 @@ impl DocumentBinding {
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
@@ -2245,7 +2295,7 @@ impl DocumentBinding {
     }
     fn android_build_gate(&self, state: &DocumentState) -> crate::android_build_protocol::Availability {
         use crate::android_build_protocol::Availability;
-        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+        if state.unknown || state.exhausted || self.inner.android_registration_control.is_unknown() || self.inner.bridge.supervisor.disabled()
             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
             || self.inner.bridge.preflight.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled()) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
@@ -2256,6 +2306,7 @@ impl DocumentBinding {
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
@@ -2263,14 +2314,28 @@ impl DocumentBinding {
         Availability::Available
     }
 
+    fn android_registration_mismatch_locked(&self, state: &mut DocumentState, publisher: &mut RegistrationPublisher)
+        -> Result<(), BridgeError> {
+        if !self.inner.bridge.android_build.registration_matches(self.inner.bridge.registry_generation()) {
+            if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
+            state.saved_input = None;
+            self.inner.bridge.android_build.context_changed_published(Some(publisher));
+        }
+        Ok(())
+    }
     pub(crate) fn android_tool_sources_status(&self) -> Result<crate::android_tool_sources::Status, BridgeError> {
         self.reconcile();
-        let mut state = self.lock(); self.expire(&mut state, Instant::now());
-        if !self.inner.bridge.android_build.registration_matches(self.inner.bridge.registry_generation()) {
-            self.inner.bridge.android_build.context_changed();
-        }
-        self.observe_android_source_slot(&state);
-        self.inner.bridge.android_build.sources_status(self.android_build_gate(&state))
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false).ok();
+        let result = (|| {
+            let mut state = self.lock(); self.expire(&mut state, Instant::now());
+            if let Some(publisher) = publisher.as_mut() { self.android_registration_mismatch_locked(&mut state, publisher)?; }
+            self.observe_android_source_slot(&state);
+            let gate = if publisher.is_none() && !self.inner.android_registration_control.is_unknown() {
+                crate::android_build_protocol::Availability::Busy
+            } else { self.android_build_gate(&state) };
+            self.inner.bridge.android_build.sources_status(gate)
+        })();
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } result
     }
     pub(crate) fn cancel_android_tool_source(&self, input: crate::android_tool_sources::Cancel) -> Result<crate::android_tool_sources::Status, BridgeError> {
         let mut state = self.lock();
@@ -2309,12 +2374,26 @@ impl DocumentBinding {
     pub(crate) fn android_build_relay_lost(&self) {
         // Loss retires consent/STOP under the same gate. It is not settlement,
         // owner deletion, a replacement run or permission to reopen the slot.
-        let _state = self.lock(); self.inner.bridge.android_build.document_lost();
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,true).ok();
+        if let Some(publisher)=publisher.as_mut(){let _=publisher.accept(crate::android_registration_app_protocol::Reason::DocumentLost);}
+        {
+            let mut state=self.lock();state.saved_input=None;
+            self.inner.bridge.android_build.document_lost_published(publisher.as_ref());
+        }
+        if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
     }
     pub(crate) fn android_build_status(&self) -> Result<crate::android_build_protocol::Status, BridgeError> {
-        let state = self.lock();
-        if !self.inner.bridge.android_build.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.android_build.context_changed(); }
-        self.inner.bridge.android_build.status(self.android_build_gate(&state))
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false).ok();
+        let result = (|| {
+            let mut state = self.lock();
+            if let Some(publisher) = publisher.as_mut() { self.android_registration_mismatch_locked(&mut state, publisher)?; }
+            // A saturated read remains nonactionable DATA; it is not relay loss.
+            let gate = if publisher.is_none() && !self.inner.android_registration_control.is_unknown() {
+                crate::android_build_protocol::Availability::Busy
+            } else { self.android_build_gate(&state) };
+            self.inner.bridge.android_build.status(gate)
+        })();
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } result
     }
     pub(crate) fn prepare_android_build(&self, args: crate::android_build_protocol::Prepare) -> Result<crate::android_build_protocol::Status, BridgeError> {
         let mut state = self.lock();
@@ -2358,6 +2437,7 @@ impl DocumentBinding {
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
@@ -2417,6 +2497,7 @@ impl DocumentBinding {
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+            || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
@@ -2476,6 +2557,9 @@ impl DocumentBinding {
         let state = self.lock();
         if !std::ptr::eq(bridge, self.inner.bridge.as_ref()) { return Err(BridgeError::invalid()); }
         passive_document_gate(&state)?;
+        if state.saved_observation.as_ref().is_some_and(|lane| !lane.returned()) {
+            return Err(BridgeError::new("busy", "The original saved observation has not returned."));
+        }
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
@@ -2581,8 +2665,15 @@ impl DocumentBinding {
     /// Configuration operations retire saved-command consent/STOP under the
     /// same document mutex, then wait for original settlement before writing.
     /// Their existing root/owner semantics and diagnostics exclusion remain.
+    #[cfg(test)]
     pub(crate) fn configuration_edit_admit<T>(&self, action: impl FnOnce(&DesktopBridge) -> Result<T, BridgeError>) -> Result<T, BridgeError> {
-        let state = self.lock();
+        self.configuration_edit_admit_published(|bridge, _publisher| action(bridge))
+    }
+    pub(crate) fn configuration_edit_admit_published<T>(&self,
+        action: impl FnOnce(&DesktopBridge, &RegistrationPublisher) -> Result<T, BridgeError>) -> Result<T, BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+        let mut state = self.lock();
         if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
         if !state.lifetime.original_bound() || state.lost_observed { return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain.")); }
         if state.stopping { return Err(BridgeError::shutdown()); }
@@ -2590,21 +2681,29 @@ impl DocumentBinding {
         if state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
             && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(evidence_wire::refused(EvidenceProblem::Busy)); }
         if project_path_pending(&state) || images::pending(&state) { return Err(BridgeError::new("busy", "Finish the original native file selection first.")); }
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
+        state.saved_input = None;
         self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
         self.inner.bridge.ios_archive.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
-        action(&self.inner.bridge)
+        action(&self.inner.bridge, &publisher)
+        })();
+        finish_registration_publisher(publisher); result
     }
     #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_begin(&self) -> Result<(), BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
         let mut state = self.lock();
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
+        state.saved_input = None;
         self.inner.bridge.diagnostics.context_changed();
         self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
@@ -2613,6 +2712,8 @@ impl DocumentBinding {
         if state.stopping { return Err(BridgeError::shutdown()); }
         if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
         state.compatibility_picker_pending = true; self.bump(&mut state); Ok(())
+        })();
+        finish_registration_publisher(publisher); result
     }
     #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn compatibility_picker_end(&self) {
@@ -2641,12 +2742,18 @@ impl DocumentBinding {
     }
     #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "windows"))))]
     pub(crate) fn compatibility_quit_result(&self, accepted: bool) {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::Quit, true).ok();
+        {
         let mut state = self.lock(); state.quit_pending = false;
         if accepted {
+            if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
+            state.saved_input = None;
             state.stopping = true; self.inner.bridge.diagnostics.request_shutdown();
-            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.android_build.request_shutdown(); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
+            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
         }
         self.bump(&mut state);
+        }
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); }
     }
     fn common_gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
         common_document_gate(state, session, || {
@@ -2945,6 +3052,7 @@ impl DocumentBinding {
     /// are synchronous, bounded in-memory work only; open entropy must already
     /// be in the EditOwner's private ticket. The asset qualification gate is
     /// deliberately NOT workflow qualification.
+    #[cfg(test)]
     pub(crate) fn workflow_edit_admit<T>(
         &self,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
@@ -2952,6 +3060,7 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit(crate::edit_protocol::EditDomain::GitHubWorkflows, project_id, enqueue)
     }
+    #[cfg(test)]
     pub(crate) fn metadata_text_edit_admit<T>(
         &self,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
@@ -2959,6 +3068,7 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
     }
+    #[cfg(test)]
     pub(crate) fn release_version_edit_admit<T>(
         &self,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
@@ -2968,19 +3078,54 @@ impl DocumentBinding {
     }
     // Only the four explicitly registered-root domains use this same mutex and
     // proof. A proof never qualifies a writer or changes configuration custody.
+    #[cfg(test)]
     fn registered_edit_admit<T>(
         &self, domain: crate::edit_protocol::EditDomain,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
-        let mut state = self.lock();
-        let registered = self.registered_edit_root_locked(&mut state, domain, project_id, None)?;
-        enqueue(&self.inner.bridge, registered)
+        self.registered_edit_admit_published(domain, project_id, |bridge, registered, _publisher| enqueue(bridge, registered))
     }
-    fn registered_edit_root_locked(
+    pub(crate) fn workflow_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::WorkflowRegistration, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::GitHubWorkflows, project_id, enqueue)
+    }
+    pub(crate) fn metadata_text_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
+    }
+    pub(crate) fn release_version_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
+    }
+    // Only the four explicitly registered-root domains use this same mutex and
+    // proof. A proof never qualifies a writer or changes configuration custody.
+    fn registered_edit_admit_published<T>(
+        &self, domain: crate::edit_protocol::EditDomain,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+            let mut state = self.lock();
+            let registered = self.registered_edit_root_locked_published(&mut state, domain, project_id, None, &mut publisher)?;
+            enqueue(&self.inner.bridge, registered, &publisher)
+        })();
+        finish_registration_publisher(publisher); result
+    }
+    fn registered_edit_root_locked_published(
         &self, state: &mut DocumentState, domain: crate::edit_protocol::EditDomain,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
-        selected_images: Option<&Arc<images::Binding>>,
+        selected_images: Option<&Arc<images::Binding>>, publisher: &mut RegistrationPublisher,
     ) -> Result<crate::edit_owner::RegisteredEditRoot, BridgeError> {
         if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText
             | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages)
@@ -2992,8 +3137,10 @@ impl DocumentBinding {
         }
         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+        if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
+        state.saved_input = None;
         self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.android_build.context_changed_published(Some(&*publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?;
@@ -3014,7 +3161,7 @@ impl DocumentBinding {
             Reason::CleanupUnknown => {
                 // Registry poison is sticky and revokes the original edit;
                 // an error reply alone must not leave a live review token.
-                self.inner.bridge.edits.document_lost(MAIN);
+                self.inner.bridge.edits.document_lost_published(MAIN, Some(&*publisher));
                 BridgeError::cleanup_unknown()
             }
             Reason::Unqualified => BridgeError::unavailable("The selected project has no qualified native root identity."),
@@ -3218,10 +3365,15 @@ impl DocumentBinding {
                 context.refuse(); return Err(AssetError::new(Reason::Unqualified));
             }
         }
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)
+            .map_err(|error|AssetError::new(if error.code=="busy"{Reason::Busy}else{Reason::CleanupUnknown}))?;
+        let result=(|| {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
         lookup_allocation_gate(&state)?; // Before draft/project/field backing copies.
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?;
+        state.saved_input=None;
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.gate(&state, true)?;
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::context_gate(&state, registry_generation)?;
@@ -3240,6 +3392,8 @@ impl DocumentBinding {
         state.retiring = true;
         self.bump(&mut state); let status = self.snapshot(&state); drop(state); drop((old, retired_slot_context));
         let mut state = self.lock(); state.retiring = false; Ok(status)
+        })();
+        finish_registration_publisher(publisher);result
     }
     pub(crate) fn discard(&self, id: u32) -> Result<AssetStatus, AssetError> {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
@@ -3254,13 +3408,19 @@ impl DocumentBinding {
         drop(state); Ok(self.status())
     }
     pub(crate) fn lock_session(&self) -> Result<AssetStatus, AssetError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::CredentialLock, false)
+            .map_err(|error| AssetError::new(if error.code == "busy" { Reason::Busy } else { Reason::CleanupUnknown }))?;
+        let result = (|| {
         let mut state = self.lock();
         // Credential Lock is not another image-cancel route. Refuse before
         // invalidating consent/context/vault state or requesting any STOP.
         credential_lock_gate(&state)?;
+        publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)
+            .map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+        state.saved_input = None;
         // Lock retires context DATA; STOP does not claim either saved-command
         // owner's resources settled or turn vault lock into GitHub Disconnect.
-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
+        self.inner.bridge.preflight.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed();
         invalidate_all(&mut state); state.lock_pending = true;
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         vault::revoke_all(&mut state);
@@ -3269,6 +3429,8 @@ impl DocumentBinding {
             slot.stop(Reason::UserCancelled, Instant::now());
         }
         self.bump(&mut state); drop(state); Ok(self.status())
+        })();
+        finish_registration_publisher(publisher); result
     }
 }
 
@@ -3656,6 +3818,8 @@ impl Drop for CoordinatorEnd {
 
 impl DocumentBinding {
     fn gui_response(&self, owner: &Arc<OriginalWork>, response: NativeResponse, quit: bool) -> Option<bool> {
+        let mut publisher = if quit { self.inner.android_registration_control.reserve(RegistrationPublisherKind::Quit, true).ok() } else { None };
+        let result = (|| {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
         let mut facts = owner.gui.facts()?;
         if facts.response { return None; }
@@ -3678,12 +3842,14 @@ impl DocumentBinding {
                 // Actual native OK linearizes with admission, not a later
                 // dialog-return or renderer callback. Cancel changes none of
                 // the settled assignments and never renews review time.
+                if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
+                state.saved_input = None;
                 state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
                 state.evidence.revoke(false);
                 state.github.retire(GitHubReason::Cancelled);
                 self.inner.bridge.diagnostics.request_shutdown();
                 self.inner.bridge.preflight.request_shutdown();
-                self.inner.bridge.android_build.request_shutdown(); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
+                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
                 stop_quit(&mut state, now);
                 fixture_event!(owner, QuitStop, 1);
@@ -3696,6 +3862,8 @@ impl DocumentBinding {
             } else { slot.stop(Reason::UserCancelled, now); }
         }
         drop(facts); self.bump(&mut state); owner.gui.changed(); Some(read_one_path)
+        })();
+        if let Some(publisher) = publisher { finish_registration_publisher(publisher); } result
     }
 
     fn phase(&self, owner: &Arc<OriginalWork>, phase: Phase) -> Result<(), Reason> {
@@ -3740,6 +3908,21 @@ impl DocumentBinding {
     fn reconcile_scope(&self, evidence_family: Option<bool>) { self.reconcile_checked(evidence_family, None); }
     fn reconcile_installation(&self, id: u32) { self.reconcile_checked(None, Some(id)); }
     fn reconcile_checked(&self, evidence_family: Option<bool>, installation_id: Option<u32>) {
+        let mut publisher=match self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false) {
+            Ok(publisher)=>Some(publisher),
+            // Polling is optional. Leave already-owned closed DATA staged for
+            // the next original poll; saturation is not an invented loss event.
+            Err(error) if error.code=="busy"=>return,
+            Err(_)=>None,
+        };
+        self.reconcile_checked_published(evidence_family,installation_id,publisher.as_mut());
+        if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
+        if evidence_family.is_none() && installation_id.is_none(){
+            let state=self.lock();self.reconcile_android_registration_locked(&state);
+        }
+    }
+    fn reconcile_checked_published(&self,evidence_family:Option<bool>,installation_id:Option<u32>,
+        mut publisher:Option<&mut RegistrationPublisher>) {
         let mut release: Option<Arc<OriginalWork>> = None;
         let mut state = self.lock();
         // Status may have waited while its old idle slot was replaced. Never
@@ -3830,7 +4013,7 @@ impl DocumentBinding {
                 state.slot = Some(slot); state.retiring = true; self.bump(&mut state);
                 drop(state); drop(orphan_result);
                 let mut state = self.lock(); state.retiring = false; self.bump(&mut state); drop(state);
-                self.reconcile(); return;
+                self.reconcile_checked_published(None,None,publisher.as_deref_mut()); return;
             }
             self.bump(&mut state);
         }
@@ -3860,7 +4043,7 @@ impl DocumentBinding {
                     let disposed = owner.release_retirement();
                     let mut state = self.lock(); state.retiring = false;
                     if !disposed { self.coordinator_failed(&mut state, UnknownOrigin::RetirementDrain, Some(&owner)); return; }
-                    self.bump(&mut state); drop(state); self.reconcile(); return;
+                    self.bump(&mut state); drop(state); self.reconcile_checked_published(None,None,publisher.as_deref_mut()); return;
                 }
                 self.bump(&mut state);
             }
@@ -3908,7 +4091,7 @@ impl DocumentBinding {
             // At most one such pass for this one-shot owner: storage is gone,
             // entered/error/Unknown facts are untouched. Continue ordinary
             // publication/retirement now instead of waiting for slot replacement.
-            self.reconcile(); return;
+            self.reconcile_checked_published(None,None,publisher.as_deref_mut()); return;
         }
 
         let resources = slot.owner.resources_settled();
@@ -3931,7 +4114,7 @@ impl DocumentBinding {
             slot.owner.set_endpoint(None);
             if !state.quit_pending && !state.unknown {
                 if let Some(staged) = slot.staged.take() {
-                    self.publish(&mut state, &mut slot, staged);
+                    self.publish_published(&mut state, &mut slot, staged,publisher.as_deref_mut());
                     self.bump(&mut state);
                 }
             }
@@ -4040,7 +4223,14 @@ impl DocumentBinding {
         }
     }
 
-    fn publish(&self, state: &mut DocumentState, slot: &mut Slot, staged: Staged) {
+    #[cfg(test)]
+    fn publish(&self,state:&mut DocumentState,slot:&mut Slot,staged:Staged){
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,true).ok();
+        self.publish_published(state,slot,staged,publisher.as_mut());
+        if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
+    }
+    fn publish_published(&self, state: &mut DocumentState, slot: &mut Slot, staged: Staged,
+        mut publisher:Option<&mut RegistrationPublisher>) {
         // This function performs bounded memory-only publication. Every source,
         // GTK, parser and original coordinator/child join has already settled.
         if let Err(error) = session_staged_kind_gate(state, slot, &staged) {
@@ -4048,6 +4238,19 @@ impl DocumentBinding {
             // rather than dropping it in this document-locked publication path.
             slot.staged = Some(staged); slot.error = Some(error.into());
             slot.stop(error.reason, Instant::now()); return;
+        }
+        if matches!(&staged,Staged::Project{..}|Staged::AndroidSource{..}){
+            let Some(publisher)=publisher.as_deref_mut() else{
+                self.inner.android_registration_control.poisoned();state.unknown=true;
+                slot.staged=Some(staged);slot.stop(Reason::CleanupUnknown,Instant::now());return;
+            };
+            let reason=if matches!(&staged,Staged::AndroidSource{..}){
+                crate::android_registration_app_protocol::Reason::SourceChanged
+            }else{crate::android_registration_app_protocol::Reason::ContextChanged};
+            if !publisher.accepted() && publisher.accept(reason).is_err(){
+                state.unknown=true;slot.staged=Some(staged);slot.stop(Reason::CleanupUnknown,Instant::now());return;
+            }
+            state.saved_input=None;
         }
         match staged {
             Staged::Installation(matching) => installation::publish(state, slot, matching),
@@ -4063,7 +4266,9 @@ impl DocumentBinding {
                 if !registered.is_ok_and(|(generation, root)| generation == binding.generation && root == binding.root) {
                     slot.stop(Reason::ContextStale, Instant::now()); return;
                 }
-                if self.inner.bridge.android_build.publish_source(&slot.owner, proof).is_err() {
+                let published = publisher.as_deref().ok_or_else(BridgeError::cleanup_unknown)
+                    .and_then(|publisher| self.inner.bridge.android_build.publish_source(&slot.owner, proof, publisher));
+                if published.is_err() {
                     slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; return;
                 }
                 slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
@@ -4808,9 +5013,14 @@ impl DocumentBinding {
     }
 
     pub(crate) fn choose_project(&self, app: tauri::AppHandle) -> Result<u32, AssetError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)
+            .map_err(|error|AssetError::new(if error.code=="busy"{Reason::Busy}else{Reason::CleanupUnknown}))?;
+        let result=(|| {
+        self.reconcile_checked_published(None, None, Some(&mut publisher)); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?; }
+        state.saved_input=None;
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.common_gate(&state, false)?;
+        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.common_gate(&state, false)?;
         if !self.project_selection_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         idle(&state)?;
         // Acquire the registry's checked generation before any native work;
@@ -4831,6 +5041,8 @@ impl DocumentBinding {
         let vault = None;
         let start = self.install(&mut state, slot, Job::Project { app, generation, origins, vault })?;
         drop(state); let _ = start.send(()); Ok(id)
+        })();
+        finish_registration_publisher(publisher);result
     }
     pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
@@ -4881,7 +5093,9 @@ impl DocumentBinding {
         { let _ = (app, input); return Err(crate::android_tool_sources::unavailable()); }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
-            self.reconcile();
+            let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false)?;
+            let result=(|| {
+            self.reconcile_checked_published(None, None, Some(&mut publisher));
             let mut state = self.lock(); self.expire(&mut state, Instant::now());
             let gate = self.android_build_gate(&state);
             // Ordinary installed main-window/picker profile only. Test controls,
@@ -4897,6 +5111,8 @@ impl DocumentBinding {
                 || before.source_generation != input.source_generation { return Err(crate::android_tool_sources::invalid()); }
             let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&input.project_id), None)
                 .map_err(|_| crate::android_tool_sources::unavailable())?;
+            if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::SourceChanged)?; }
+            state.saved_input=None;
             let id = self.next_operation(&mut state).map_err(|_| BridgeError::cleanup_unknown())?;
             if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(BridgeError::cleanup_unknown()); }
             let binding = Arc::new(AndroidSourceBinding { project_id: input.project_id.clone(), generation, root: root.clone(), role: input.role });
@@ -4907,7 +5123,7 @@ impl DocumentBinding {
                 .map_err(|_| BridgeError::cleanup_unknown())?;
             // Actual asset coordinator/GUI/source/child roster already exists,
             // with GO still closed. Save that SAME original in Android Registry.
-            if let Err(error) = self.inner.bridge.android_build.admit_source(&self.inner.session_identity, &input, generation, root, owner, gate) {
+            if let Err(error) = self.inner.bridge.android_build.admit_source(&self.inner.session_identity, &input, generation, root, owner, &publisher, gate) {
                 drop(state); drop(start); return Err(error);
             }
             let status = match self.inner.bridge.android_build.sources_status(self.android_build_gate(&state)) {
@@ -4916,6 +5132,8 @@ impl DocumentBinding {
             drop(state);
             if start.send(()).is_err() { return Err(BridgeError::cleanup_unknown()); }
             Ok(status)
+            })();
+            finish_registration_publisher(publisher);result
         }
     }
 
@@ -5002,7 +5220,9 @@ impl DocumentBinding {
     pub(crate) fn can_exit(&self) -> bool {
         let (ready, quit) = {
             let state = self.lock();
-            (state.stopping && state.quit_accepted && assets_can_exit_locked(&state) && state.github.material_settled(), state.quit.clone())
+            (state.stopping && state.quit_accepted && assets_can_exit_locked(&state) && state.github.material_settled()
+                && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
+                && self.inner.android_registration_control.can_exit(), state.quit.clone())
         };
         // The app's data-only observer does not run general session publication.
         // Only this already-ended quit original is joined here.
@@ -6550,7 +6770,7 @@ pub(crate) fn assert_project_path_document_contracts() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
@@ -6683,7 +6903,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
@@ -6779,7 +6999,7 @@ mod tests {
     pub(super) fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, session_owner_reason: None,
+            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]

@@ -43,6 +43,10 @@ fn active_with_context(application: SavedCommandOwner, context: Context) -> (Sav
     let owner = Arc::new(Session { domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, native_failure: Mutex::new(None),
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        android_control: None,
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        android_close: None,
         stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
@@ -579,8 +583,9 @@ async fn missing_android_tool_custody_refuses_before_inspection_or_acquisition()
     let book = owner.resources.lock().await;
     assert!(book.inspection.is_none() && book.acquisition.is_none() && book.child.is_none());
     assert!(book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none());
-    assert!(!native_final(&book, SavedCommandDomain::AndroidBuild));
-    assert!(native_final(&book, SavedCommandDomain::OfflinePreflight)); // Added conjunct never borrows Offline tools.
+    assert!(!native_final(&book, &owner));
+    let (_offline_application, offline_owner) = active(SavedCommandDomain::OfflinePreflight);
+    assert!(native_final(&book, &offline_owner)); // Added conjunct never borrows Offline tools.
     assert!(!owner.startup.lock().unwrap().attempted && owner.request.lock().await.is_none());
     let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
     assert_eq!((a.projection.reason, a.projection.outcome), (Reason::ToolchainUnavailable, Some(Outcome::Refused)));
@@ -635,16 +640,17 @@ fn offline_installed_closer_requires_original_core_lifetime_not_policy_pass() {
 
 #[test]
 fn selected_offline_runtime_cannot_use_the_unselected_native_finality_shortcut() {
+    let (_offline_application, owner) = active(SavedCommandDomain::OfflinePreflight);
     let mut book = Resources::default();
-    assert!(native_final(&book, SavedCommandDomain::OfflinePreflight));
+    assert!(native_final(&book, &owner));
     book.offline_selected = true;
-    assert!(!native_final(&book, SavedCommandDomain::OfflinePreflight));
+    assert!(!native_final(&book, &owner));
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
         book.offline_installed = Some(Arc::new(Mutex::new(OfflinePreflightRuntimeSlots::new())));
-        assert!(!native_final(&book, SavedCommandDomain::OfflinePreflight));
+        assert!(!native_final(&book, &owner));
         book.offline_selected = false; // Stray original slot is not a dev/headless exemption either.
-        assert!(!native_final(&book, SavedCommandDomain::OfflinePreflight));
+        assert!(!native_final(&book, &owner));
     }
 }
 
@@ -704,7 +710,7 @@ async fn failed_original_startup_tasks_keep_ready_errors_and_are_not_repolled() 
         // Actual failed Ready joins prove only that these no-launch borrowers
         // returned. Missing books/native finality still cannot become Complete.
         assert!(native_consumers_returned(&book, &owner.startup.lock().unwrap(), &application.inner, &owner));
-        assert!(book.native.is_none() && !book.native_started && !native_final(&book, owner.domain));
+        assert!(book.native.is_none() && !book.native_started && !native_final(&book, &owner));
     }
     continue_original(&application.inner, &owner).await; // Re-polling either completed handle would panic.
     let book = owner.resources.lock().await;

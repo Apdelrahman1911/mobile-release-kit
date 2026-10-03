@@ -447,10 +447,13 @@ class SelectionDataTests(unittest.TestCase):
         result = subject._selection_data(data, profile_data(), root_module=True)
         self.assertEqual(dict(result)["module_gradle_properties"], b"x=y")
 
-    def test_aapt2_and_jna_project_selection_cannot_override_fixed_launches(self):
+    def test_aapt2_native_jansi_and_platform_selection_cannot_override_fixed_launches(self):
         conflicts = ("android.aapt2FromMavenOverride", "android.aapt2Version", "android.aapt2Platform",
                      "jna.nosys", "jna.boot.library.path", "jna.boot.library.name", "jna.tmpdir",
-                     "jna.nounpack", "jnidispatch.path")
+                     "jna.nounpack", "jnidispatch.path", "org.gradle.native", "org.gradle.native.dir",
+                     "org.gradle.internal.native.enabled", "library.jansi.path", "library.jansi.version",
+                     "jansi.tmpdir", "jansi.force", "jansi.passthrough", "jansi.strip",
+                     "os.arch", "os.name", "os.version", "sun.arch.data.model", "com.ibm.vm.bitmode")
         for field in ("local_properties", "root_gradle_properties", "module_gradle_properties"):
             for key in conflicts:
                 for selection in (key, key.upper(), "systemProp." + key, "SYSTEMPROP." + key.upper()):
@@ -593,7 +596,8 @@ class OwnerAndCommandDataTests(unittest.TestCase):
         tools = inert_tools()
         poison = {name: "ambient-not-forwarded" for name in ("JAVA_OPTS", "GRADLE_OPTS", "JAVA_TOOL_OPTIONS",
                   "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH", "PYTHONPATH", "ENV", "BASH_ENV",
-                  "LD_PRELOAD", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "MOBILE_RELEASE_BUILD_NUMBER")}
+                  "LD_PRELOAD", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "MOBILE_RELEASE_BUILD_NUMBER",
+                  "GRADLE_NATIVE_DIR", "JANSI_TMPDIR", "TERM", "COLORTERM")}
         with patch.object(subject.os, "environ", poison), patch.object(tools, "check") as checked, \
              patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK):
             env = tools.command_environment(WORK, tools.release)
@@ -609,7 +613,7 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             self.assertEqual(env["ANDROID_SDK_ROOT"], ROOT + "/sdk")
             self.assertEqual(shlex.split(env["JAVA_OPTS"]), list(subject._jvm_arguments(WORK)))
             for option in ("-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
-                           f"-Djna.tmpdir={WORK}"):
+                           f"-Djna.tmpdir={WORK}", f"-Dorg.gradle.native.dir={WORK}"):
                 self.assertIn(option, shlex.split(env["JAVA_OPTS"]))
             self.assertNotIn("-Djna.nounpack=true", shlex.split(env["JAVA_OPTS"]))
             self.assertFalse(set(poison).difference({"JAVA_OPTS", "MOBILE_RELEASE_BUILD_NUMBER"}).intersection(env))
@@ -638,6 +642,12 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             # POSIX round-trip DATA only; the actual installed script/daemon
             # parser and launch-control support still require native qualification.
             self.assertEqual(shlex.split(jvm), list(subject._jvm_arguments(WORK)))
+            env = tools.command_environment(WORK, tools.release)
+            native_dir = f"-Dorg.gradle.native.dir={WORK}"
+            self.assertEqual(shlex.split(jvm).count(native_dir), 1)
+            self.assertEqual(shlex.split(env["JAVA_OPTS"]).count(native_dir), 1)
+            for startup in (shlex.split(jvm), shlex.split(env["JAVA_OPTS"])):
+                self.assertFalse(any(value.startswith(("-Dos.arch=", "-Dos.name=")) for value in startup))
             for key, value in subject._fixed_properties(ROOT):
                 self.assertIn(f"-D{key}={value}", argv); self.assertIn(f"-P{key}={value}", argv)
             self.assertIn(f"-Pandroid.aapt2FromMavenOverride={ROOT}/gradle/native/aapt2/aapt2", argv)
@@ -1141,6 +1151,9 @@ class MacToolAdmissionDataTests(unittest.TestCase):
         selected = subject._binding(native)
         profile = mac.parse_profile(raw, provider, record, selected)
         self.assertEqual(profile.java_home, "jdk/Inert Vendor.jdk/Contents/Home")
+        self.assertEqual(tuple(file.path for file in profile.native_files), mac.OS_FILES)
+        self.assertEqual(len(profile.native_files), 11)
+        self.assertTrue({"/bin/bash", "/bin/ls", "/usr/bin/expr"}.issubset(mac.OS_FILES))
         self.assertEqual(dict(profile.roles)["java"], f"{profile.java_home}/bin/java")
         self.assertEqual(dict(selected.selection)["catalogGeneration"], 3)
         linux = subject._binding(encoded()[1])
@@ -1181,6 +1194,9 @@ class MacToolAdmissionDataTests(unittest.TestCase):
         changed["files"].sort(key=lambda row: row["path"]); cases.append((changed, os_data))
         changed, os_data = mac_documents(); os_data["shell"] = "/usr/bin/dash"; cases.append((changed, os_data))
         changed, os_data = mac_documents(); os_data["files"].pop(); cases.append((changed, os_data))
+        changed, os_data = mac_documents()
+        os_data["files"] = [row for row in os_data["files"] if row["path"] not in {"/bin/bash", "/bin/ls", "/usr/bin/expr"}]
+        cases.append((changed, os_data))
         for changed, os_data in cases:
             raw, os_raw, record, native = mac_encoded(changed, os_data)
             with self.subTest(changed=changed["roles"]), self.assertRaises(subject.AndroidToolError):
@@ -1207,6 +1223,11 @@ class MacToolAdmissionDataTests(unittest.TestCase):
             self.assertNotIn("JAVA_TOOL_OPTIONS", environment)
             self.assertNotIn("DYLD_LIBRARY_PATH", environment)
             self.assertIn(f"-Duser.home={WORK}", shlex.split(environment["JAVA_OPTS"]))
+            startup = shlex.split(environment["JAVA_OPTS"])
+            build_jvm = shlex.split(next(value.split("=", 1)[1] for value in command if value.startswith("-Dorg.gradle.jvmargs=")))
+            self.assertEqual(startup, build_jvm)
+            self.assertEqual(startup.count(f"-Dorg.gradle.native.dir={WORK}"), 1)
+            self.assertFalse(any(value.startswith(("-Dos.arch=", "-Dos.name=")) for value in startup))
             self.assertEqual(tools.bundletool_command(snapshot)[0], f"{home}/bin/java")
             self.assertEqual(tools.jarsigner_command(snapshot)[0], f"{home}/bin/jarsigner")
             self.assertEqual(tools.keytool_command(snapshot)[0], f"{home}/bin/keytool")

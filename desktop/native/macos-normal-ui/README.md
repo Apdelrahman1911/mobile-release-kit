@@ -13,6 +13,14 @@ Installer and pass the independent nonroot byte/mode readback. Never point
 this scenario at a shared/personal desktop: XCTest launch may terminate an
 already-running application. A non-running precondition is mandatory.
 
+Account admission uses one bounded `getpwuid_r` lookup of the original UID,
+requiring its matching UID/GID, `runner` name and `/Users/runner` account home.
+Foundation's sandbox home is diagnostic, not account authority. Both app-launch
+paths use those admitted account values and do not forward the test runner's
+`TMPDIR` or `CFFIXED_USER_HOME`. Persistent fixture preparation still requires
+account admission before inspecting the default vault namespace. The separate
+account-only native pass does not qualify app launch, persistence or finality.
+
 The tiny target has no package dependencies and no app-under-test build target.
 It uses ad-hoc local signing for its test runner only; no signing account,
 provisioning profile or production credential is needed. The workflow selects

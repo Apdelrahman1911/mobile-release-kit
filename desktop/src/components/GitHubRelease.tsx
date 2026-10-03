@@ -2,11 +2,12 @@ import { useId } from 'react';
 import type { HelpContent } from '../types.ts';
 import type { GitHubReleaseController } from '../githubReleaseController.ts';
 import type { GitHubReleasePlatform, GitHubReleaseStage, GitHubReleaseView } from '../githubReleaseTypes.ts';
-import { GITHUB_RELEASE_REASON_HELP } from '../githubReleaseProtocol.ts';
+import { connectionNumericId } from '../githubConnectionProtocol.ts';
+import { GITHUB_RELEASE_REASON_HELP, githubReleaseRecoveryConfirmation } from '../githubReleaseProtocol.ts';
 import { Badge, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
-const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'run' | 'recovery' | 'consent' | 'pending', HelpContent> = {
+const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'run' | 'recovery' | 'additionalRecovery' | 'consent' | 'pending', HelpContent> = {
   stage: { label: 'Release step', requiredness: 'required', requiredWhen: 'For every workflow review.',
     what: 'The existing protected release workflow to request for one platform.',
     why: 'A candidate builds once; later steps reuse its authenticated release evidence rather than rebuilding a different artifact.',
@@ -46,12 +47,18 @@ const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'ru
     why: 'A timeout or lost response can follow successful Store effects. The core must preserve original operation identity and completed progress.',
     where: 'Use the original failed workflow’s retained recovery evidence and its evidence-producing run ID.',
     format: 'Enable recovery, enter that original run ID, source and version. Optional predecessor IDs, if supplied, must also be the original producers.',
-    failure: 'This is not permission to retry blindly or undo effects. Advanced Apple ambiguous-operation confirmation grants are not available in this UI; the existing core will refuse when they are required.' },
+    failure: 'This is not permission to retry blindly or undo effects. If the Apple core requests an additional ambiguity confirmation, assess the original effects independently before using the optional field below.' },
+  additionalRecovery: { label: 'Additional Apple recovery confirmation', requiredness: 'optional', requiredWhen: 'Only when the protected core requests one for this exact iOS recovery step.',
+    what: 'Exact extra consent for candidate adoption, original-IPA upload retry, or retry of a precise missing-create inventory. It is not authenticated evidence or a generic force flag.',
+    why: 'An absent build or lost response does not prove no effect occurred. The core authenticates original intent, artifact or create inventory and current state; Desktop checks text format only.',
+    where: 'Copy the complete requested text from the original protected workflow/core diagnostic and independently assess the ambiguity. Keep the selected evidence-producing run ID; the workflow resolves original authorization separately.',
+    format: 'recover-ios-candidate:<64 lowercase intent hex>:<Apple build ID>, retry-ios-candidate-upload:<64 lowercase intent hex>:<64 lowercase original IPA hex>, or retry-ios-operation-creates:<64 lowercase intent hex>:<64 lowercase canonical inventory hex>. Desktop accepts an ASCII build ID of 1–255 letters, digits, underscores, dots or hyphens. No spaces or newlines.',
+    failure: 'Adoption can still change compliance/notifications. Upload/create retry requires original authority, a fresh distinct workflow_dispatch attempt 1 and no prior current claim; the core claims before mutation. Keep the original IPA and its current signing checks. No absence inference, rebuild, rollback, public rollout or ownership bypass is authorized.' },
   consent: { label: 'One-use Store-impacting workflow confirmation', requiredness: 'required', requiredWhen: 'After a successful Prepare, before Dispatch.',
     what: 'Permission to submit one exact protected release workflow that can sign, upload, change testing state or submit for review.',
     why: 'These are real remote effects, unlike offline checks. The short-lived native review is consumed once even if the acknowledgement is lost.',
     where: 'Review current dispatch source, original declarations, effects, and required environment below; then type the exact displayed confirmation.',
-    format: 'Type stage:platform:version:build exactly and select the explicit consent checkbox.',
+    format: 'Type stage:platform:version:build exactly and select the explicit Store-effect consent checkbox, including any displayed additional Apple recovery confirmation.',
     failure: 'Changed selection, expired/reused consent or wrong text is refused. No automatic resend follows uncertainty. The workflow still enforces provenance, approvals and Store safeguards.' },
   pending: { label: 'Original requests and recovery observations', requiredness: 'optional', requiredWhen: 'After dispatch or a lost acknowledgement.',
     what: 'Private local request records, separated from nonpublishing preflight records. They contain no session token or private Store responses.',
@@ -65,6 +72,15 @@ const EFFECTS: Record<GitHubReleaseStage, { title: string; android: string; ios:
   'external-testing': { title: 'External testing', android: 'Promote the original candidate to the configured external testing track without rebuilding it.', ios: 'Reuse the original TestFlight build, configure the external group and submit Beta App Review where required.' },
   'production-submit': { title: 'Production submission', android: 'Prepare the original release as a Google Play production draft. This workflow does not serve that draft to production users.', ios: 'Prepare the original App Store version and submit App Review with manual release. This workflow does not authorize automatic public release.' },
 };
+const RECOVERY_EFFECTS = {
+  'recover-ios-candidate': { title: 'Candidate adoption', effect: 'Adopt the matching Apple build without duplicate upload. Completing the candidate may still update export compliance or notifications.' },
+  'retry-ios-candidate-upload': { title: 'Original-IPA upload retry', effect: 'Permit a new upload of the exact original IPA only after core authorization, absence polling and current signing checks. Do not rebuild or replace the IPA.' },
+  'retry-ios-operation-creates': { title: 'Exact missing-create retry', effect: 'Permit only the authenticated missing creates for this original step, with core inventory, public-state, parent, dependency and one-use claim checks.' },
+} as const;
+function recoveryEffect(value: string | undefined) {
+  const prefix = value?.split(':')[0];
+  return prefix !== undefined && Object.hasOwn(RECOVERY_EFFECTS, prefix) ? RECOVERY_EFFECTS[prefix as keyof typeof RECOVERY_EFFECTS] : null;
+}
 
 export function GitHubRelease({ state, controller, onHelp, compact = false, onShow, onGitHub }: {
   state: GitHubReleaseView; controller: GitHubReleaseController; onHelp: (help: HelpContent) => void;
@@ -74,6 +90,9 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
   const reason = controller.startReason(), prepareReason = controller.prepareReason(), dispatchReason = controller.dispatchReason();
   const original = state.stage !== null && (state.stage !== 'candidate' || state.recovery);
   const effects = state.stage && state.platform ? EFFECTS[state.stage][state.platform] : null;
+  const showRecoveryConfirmation = state.platform === 'ios' && state.stage !== null && state.recovery && connectionNumericId(state.recoveryRunId);
+  const recoveryFormatValid = githubReleaseRecoveryConfirmation(state.recoveryConfirmation, state.stage);
+  const preparedRecovery = recoveryEffect(prepared?.target.selection.recoveryConfirmation);
   if (compact && !state.pending && !state.uncertain && (!op || op.phase === 'settled')) return null;
   const controls = <div className="button-row">
     <button type="button" className="button secondary" disabled={state.mode !== 'native' || state.observing} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={16} />Read local Status</button>
@@ -112,7 +131,7 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
       <p className="save-note">Uses the original GitHub connection; Store secrets remain in the protected workflow environment.<HelpButton content={HELP.access} onHelp={onHelp} /></p>
       <div className="field-label-row"><input id={`${id}-recovery`} type="checkbox" checked={state.recovery} onChange={(event) => controller.setRecovery(event.target.checked)} /><label htmlFor={`${id}-recovery`}>Recover an assessed original attempt of this same step</label><Badge>Optional</Badge><HelpButton content={HELP.recovery} onHelp={onHelp} /></div>
       {state.recovery && <>{field('recoveryRunId', 'Original recovery evidence producer run ID', true, HELP.recovery, '123456789')}
-        <p className="save-note">Use the original step’s retained recovery evidence. Recovery is not a fresh release or a blind retry. Advanced Apple ambiguous-operation grants remain unavailable here.</p></>}
+        <p className="save-note">Use the original step’s retained recovery evidence. Recovery is not a fresh release or a blind retry. This is the evidence-producing run; the workflow resolves original authorization from its evidence.</p></>}
       {state.stage && state.stage !== 'candidate' && <>{field('candidateRunId', 'Candidate evidence producer run ID', !state.recovery, HELP.run, '123456789')}
         {state.stage === 'production-submit' && field('externalRunId', 'External-testing evidence producer run ID', !state.recovery, HELP.run, '123456790')}
         <p className="save-note">Find exact producer IDs in the retained release documents, not “latest run”. Recovery can derive predecessors from its authenticated original evidence.</p></>}
@@ -122,12 +141,29 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
         {field('originalVersionBuild', 'Original build number', true, HELP.original, '42')}
         <p className="review-caution">These are declarations, not authenticated release evidence. The original version enters the exact confirmation; the declared source is retained for review, not sent as another workflow source check. The core authenticates actual producer relationships and provenance before Store effects.</p>
       </article>}
+      {showRecoveryConfirmation && <article className="github-environment" aria-label="Additional Apple recovery confirmation">
+        <div className="field-label-row"><label htmlFor={`${id}-recovery-confirmation`}>Additional Apple recovery confirmation</label><Badge>Optional</Badge><HelpButton content={HELP.additionalRecovery} onHelp={onHelp} /></div>
+        <p id={`${id}-recovery-confirmation-help`} className="save-note">Leave empty for ordinary recovery. Only paste the complete text requested by the original protected workflow/core diagnostic after independently assessing ambiguous prior effects. Pasting replaces this whole value; nothing is trimmed, normalized or truncated.</p>
+        <p className="save-note">{state.stage === 'candidate' ? <>Supported forms: <code>{'recover-ios-candidate:<intent-sha256>:<Apple-build-id>'}</code> or <code>{'retry-ios-candidate-upload:<intent-sha256>:<original-IPA-sha256>'}</code>.</> : <>Supported form: <code>{'retry-ios-operation-creates:<intent-sha256>:<canonical-create-inventory-sha256>'}</code>. The core, not this shared prefix, authenticates the external/production stage and inventory.</>} Digests must be 64 lowercase hex characters; Desktop build IDs use 1–255 ASCII letters, digits, underscores, dots or hyphens.</p>
+        <textarea id={`${id}-recovery-confirmation`} rows={3} value={state.recoveryConfirmation} autoComplete="off" autoCapitalize="none" spellCheck={false}
+          aria-describedby={`${id}-recovery-confirmation-help ${id}-recovery-confirmation-status`}
+          aria-invalid={state.recoveryConfirmationRejected || state.recoveryConfirmation !== '' && !recoveryFormatValid}
+          onChange={(event) => controller.setRecoveryConfirmation(event.target.value)}
+          onPaste={(event) => { event.preventDefault(); controller.setRecoveryConfirmation(event.clipboardData.getData('text/plain')); }} />
+        <p id={`${id}-recovery-confirmation-status`} className={state.recoveryConfirmationRejected || state.recoveryConfirmation !== '' && !recoveryFormatValid ? 'review-caution' : 'save-note'}
+          role={state.recoveryConfirmationRejected || state.recoveryConfirmation !== '' && !recoveryFormatValid ? 'alert' : 'status'}>
+          {state.recoveryConfirmationRejected ? 'Input rejected (maximum 342 ASCII bytes), not shortened or treated as an empty grant. Clear explicitly or paste a supported complete value.' : state.recoveryConfirmation === '' ? 'No additional Apple recovery confirmation selected.' : recoveryFormatValid ? <>Format checked only — this text and its hashes/ID are declarations, not authenticated evidence. {recoveryEffect(state.recoveryConfirmation)?.effect}</> : 'Invalid exact text for this step. Spaces, newlines, unsupported characters or a wrong prefix are refused.'}
+        </p>
+        <button type="button" className="button small secondary" disabled={state.recoveryConfirmation === '' && !state.recoveryConfirmationRejected} onClick={() => controller.setRecoveryConfirmation('')}>Clear additional confirmation</button>
+        <p className="review-caution">Repeated absence is not authorization. Preserve the original IPA; the core retains current signing checks. Upload/create retry requires original authority and a fresh distinct workflow_dispatch attempt 1 with no prior current claim. No public rollout, rollback, remote cancel, local signing recovery or ownership bypass is granted.</p>
+      </article>}
       <h3>2. Prepare a read-only review</h3>
       <p className="save-note">Checks the canonical caller, committed configuration, selected regular-file Git entries and version. Complete trees over 1,000 entries or 256 KiB and truncated trees are unsupported, not ready.</p>
       <div className="button-row"><button type="button" className="button primary" disabled={prepareReason !== null} onClick={() => controller.prepare()}>Prepare release review · read GitHub only</button></div>
       {prepareReason && <p className="save-note">{prepareReason}</p>}
       {prepared && <article className="github-environment" aria-label="Exact protected release review"><div className="inline-heading"><h3>3. Review effects and confirm once</h3><HelpButton content={HELP.consent} onHelp={onHelp} /></div>
         <p className="review-caution">{EFFECTS[prepared.target.selection.stage][prepared.target.platform]}</p>
+        {preparedRecovery && <p className="review-caution"><strong>Additional recovery request: {preparedRecovery.title}.</strong> {preparedRecovery.effect} This is format-checked consent text only; the protected core must authenticate the original binding and current state before effects.</p>}
         <dl className="github-facts">
           <div><dt>Repository / account</dt><dd>{prepared.target.repository} · repository {prepared.target.repositoryId} · account {prepared.target.accountId}</dd></div>
           <div><dt>Current dispatch branch / source commit</dt><dd><code>{prepared.expectedRef}</code><br /><code>{prepared.sourceSha}</code></dd></div>
@@ -139,6 +175,7 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
           <div><dt>Publisher-bound toolkit commit</dt><dd><code>{prepared.target.toolingSha}</code></dd></div>
           <div><dt>Declared original artifact</dt><dd>{prepared.target.selection.originalVersion ? <>{prepared.target.selection.originalVersion.name} · build {prepared.target.selection.originalVersion.build}<br /><code>{prepared.target.selection.originalSourceSha}</code></> : 'Fresh candidate: uses the current committed version.'}</dd></div>
           <div><dt>Declared original producer IDs</dt><dd>Candidate: {prepared.target.selection.candidateRunId ?? 'none'} · external: {prepared.target.selection.externalRunId ?? 'none'} · recovery: {prepared.target.selection.recoveryRunId ?? 'none'}</dd></div>
+          {prepared.target.selection.recoveryConfirmation !== undefined && <div><dt>Exact additional Apple confirmation · declaration only</dt><dd><code>{prepared.target.selection.recoveryConfirmation}</code></dd></div>}
           <div><dt>Exact request title</dt><dd><code>{prepared.displayTitle}</code></dd></div>
           <div><dt>Consent ceiling · display only</dt><dd><time dateTime={status?.consentExpiresAt ?? undefined}>{status?.consentExpiresAt}</time></dd></div>
         </dl>
@@ -148,7 +185,7 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
         <div className="field-label-row"><label htmlFor={`${id}-confirmation`}>Type this exact release confirmation</label><Badge>Required</Badge><HelpButton content={HELP.consent} onHelp={onHelp} /></div>
         <p><code>{prepared.confirmation}</code></p>
         <input id={`${id}-confirmation`} type="text" value={state.confirmation} maxLength={160} autoComplete="off" autoCapitalize="none" spellCheck={false} onChange={(event) => controller.setConfirmation(event.target.value)} />
-        <div className="field-label-row"><input id={`${id}-consent`} type="checkbox" checked={state.confirmed} onChange={(event) => controller.setConfirmed(event.target.checked)} /><label htmlFor={`${id}-consent`}>I reviewed these real Store effects, original declarations and configured environment, and trust the protected branch’s workflow writers. Submit this request once.</label></div>
+        <div className="field-label-row"><input id={`${id}-consent`} type="checkbox" checked={state.confirmed} onChange={(event) => controller.setConfirmed(event.target.checked)} /><label htmlFor={`${id}-consent`}>I reviewed these real Store effects, original declarations, any additional Apple recovery confirmation and configured environment, and trust the protected branch’s workflow writers. Submit this exact request once.</label></div>
         <div className="button-row"><button type="button" className="button primary" disabled={dispatchReason !== null} onClick={() => controller.dispatch()}>Dispatch this protected release request once</button></div>
         {dispatchReason && <p className="save-note">{dispatchReason}</p>}
       </article>}

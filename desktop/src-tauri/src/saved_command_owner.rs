@@ -25,7 +25,45 @@ use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntim
 mod android_catalog;
 #[path = "saved_command_android_sources.rs"]
 mod android_sources;
+#[path = "saved_command_android_registration.rs"]
+mod android_registration;
+pub(crate) type AndroidRegistrationSnapshot = android_registration::Snapshot;
+pub(crate) type AndroidRegistrationChecked = android_registration::Checked;
+pub(crate) type AndroidRegistrationAdmitted = android_registration::Admitted;
+pub(crate) type AndroidRegistrationFinalization = android_registration::Finalization;
+pub(crate) type AndroidRegistrationCancelPublisher = android_registration::CancelPublisher;
+pub(crate) use android_registration::{ControlSlot as AndroidRegistrationControl, Publisher as AndroidRegistrationPublisher, PublisherKind as AndroidRegistrationPublisherKind};
+pub(crate) use android_registration::WorkGate as AndroidRegistrationWorkGate;
 pub(crate) type AndroidCatalogAdmitted = android_catalog::Admitted;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+#[path = "saved_command_android_leased.rs"]
+mod android_leased;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+use android_leased::{AndroidNativeBooks,AndroidUseControl,AndroidCloseSlot,AndroidObservationSlot};
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]
+enum AndroidNativeBooks {} // Uninhabited: helper graph has no app-tool owner fallback.
+
+/// Private, non-Clone, consuming proof, constructible only in this original
+/// owner's actual Start/Catalog join edges. No Boolean/ID/renderer factory.
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+pub(crate) struct AndroidOriginalJoins(AndroidJoinedOriginal);
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+enum AndroidJoinedOriginal {Start(Arc<Session>),Catalog(Arc<android_catalog::Operation>)}
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+impl AndroidOriginalJoins {
+    pub(crate) fn accepts_original(self,identity:&crate::android_shared_lease_macos::OriginalUseIdentity)->bool{
+        match self.0 {
+            AndroidJoinedOriginal::Start(owner) => {
+                owner.android_control.as_ref().is_some_and(|control|control.identity().same_original(identity))
+                    && owner.driver_joined.load(Ordering::SeqCst) && !owner.driver_failed.load(Ordering::SeqCst)
+                    && !owner.manager_failed.load(Ordering::SeqCst) && !owner.resource_unknown.load(Ordering::SeqCst)
+                    && owner.driver_return.lock().is_ok_and(|returned|matches!(returned.as_ref(),Some(Ok(()))))
+                    && owner.manager_return.lock().is_ok_and(|returned|matches!(returned.as_ref(),Some(Ok(()))))
+            },
+            AndroidJoinedOriginal::Catalog(original)=>original.join_witness_matches(identity),
+        }
+    }
+}
 
 // Qualification is domain-local. No environment/GitHub/offline permit, parsed
 // tool binding, hash, mode or host profile can qualify Android build custody.
@@ -578,6 +616,7 @@ struct Inner {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
     ios_observation_identity: Arc<()>,
     android_original_owner: bool, android_document: Mutex<Option<std::sync::Weak<()>>>,
+    android_registration_control: Arc<android_registration::ControlSlot>,
     domain: SavedCommandDomain, runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -587,6 +626,7 @@ struct Registry {
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
     capability: Availability, prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
     recovery: Option<Arc<IOSRecoveryObservation>>, android_catalog: android_catalog::Catalog, android_sources: android_sources::Sources,
+    android_registration: android_registration::Registration,
 }
 struct Prepared { projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
     material: Option<Arc<IOSSigningMaterial>>, recovery: Option<Arc<IOSRecoveryObservation>>,
@@ -707,6 +747,10 @@ struct Session {
     material: Mutex<Option<Arc<IOSSigningMaterial>>>, material_retired: AtomicBool,
     recovery: Option<Arc<IOSRecoveryObservation>>,
     android_selection: Option<Arc<android_catalog::Selection>>,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+    android_control: Option<Arc<AndroidUseControl>>,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+    android_close: Option<Arc<AndroidCloseSlot>>,
     native_failure: Mutex<Option<(Reason,Instant)>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
     native_audit_cutoff: watch::Sender<Instant>, native_cleanup_cutoff: watch::Sender<Instant>,
@@ -740,6 +784,7 @@ impl Session {
     fn observe_failure_at(&self, reason: Reason, at: Instant, unknown: bool) {
         // The caller already captured F. Preserve its finite reason without
         // acquiring Registry or replacing this original Session's min latch.
+        self.note_android_local(at,unknown);
         let first = match self.native_failure.lock() {
             Ok(mut first) => {
                 if first.is_none_or(|(_, before)| at < before) { *first = Some((reason, at)); }
@@ -748,7 +793,7 @@ impl Session {
             Err(_) => { self.resource_unknown.store(true, Ordering::SeqCst); Some(self.clocks.admitted) },
         };
         if unknown { self.resource_unknown.store(true, Ordering::SeqCst); }
-        let audit = self.clocks.audit_end(first); let cleanup = self.clocks.cleanup_end(first);
+        let audit = self.audit_end(first); let cleanup = self.cleanup_end(first);
         self.native_audit_cutoff.send_if_modified(|current| if audit < *current { *current = audit; true } else { false });
         self.native_cleanup_cutoff.send_if_modified(|current| if cleanup < *current { *current = cleanup; true } else { false });
         self.stop.send_replace(true); self.wake.notify_waiters();
@@ -763,6 +808,67 @@ impl Session {
         let expired = self.native_failure.is_poisoned() || Instant::now() >= *self.native_cleanup_cutoff.borrow();
         if expired { self.resource_unknown.store(true, Ordering::SeqCst); self.wake.notify_waiters(); }
         expired
+    }
+    fn leased_android(&self)->bool {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        {return self.android_control.is_some();}
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
+        {false}
+    }
+    fn note_android_local(&self,at:Instant,unknown:bool) {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if let Some(control)=&self.android_control{
+            // at is this caller's already captured genuine event. Do not
+            // resample in a supplied-time reducer or re-map remote DATA.
+            control.local(at,at,unknown);
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
+        let _=(at,unknown);
+    }
+    fn sample_android_control(&self) {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if let Some(control)=&self.android_control{
+            let data=control.data();
+            let audit=control.cutoff(None,self.clocks.work);
+            let cleanup=control.cutoff(None,self.clocks.finality);
+            self.native_audit_cutoff.send_if_modified(|current|if audit<*current{*current=audit;true}else{false});
+            self.native_cleanup_cutoff.send_if_modified(|current|if cleanup<*current{*current=cleanup;true}else{false});
+            let failure=data.local_first.is_some() || data.failure.is_some_and(|value|value.first.is_some());
+            let unknown=data.unknown && !self.resource_unknown.swap(true,Ordering::SeqCst);
+            if failure || data.unknown {
+                let stopped=self.stop.send_if_modified(|current|if !*current{*current=true;true}else{false});
+                if stopped || unknown{self.wake.notify_waiters();}
+            }
+        }
+    }
+    fn android_control_stopped(&self)->bool {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        {return self.android_control.as_ref().is_some_and(|control|control.stopped());}
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
+        {false}
+    }
+    fn finality_end(&self,first:Option<Instant>)->Instant {
+        let end=self.clocks.settlement(first);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if let Some(control)=&self.android_control{return control.cutoff(first,end);}
+        end
+    }
+    fn audit_end(&self,first:Option<Instant>)->Instant {
+        let end=self.clocks.audit_end(first);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if let Some(control)=&self.android_control{return control.cutoff(first,end);}
+        end
+    }
+    fn cleanup_end(&self,first:Option<Instant>)->Instant {
+        let end=self.clocks.cleanup_end(first);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if let Some(control)=&self.android_control{return control.cutoff(first,end);}
+        end
+    }
+    async fn android_control_tick(&self) {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if self.android_control.is_some(){tokio::time::sleep(android_leased::CONTROL_POLL).await;return;}
+        pending::<()>().await
     }
     fn recovery_matches(&self) -> bool {
         match (&self.context, &self.recovery) {
@@ -814,6 +920,8 @@ struct Resources {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     native_return: Option<Result<NativeSettlement, tokio::task::JoinError>>,
     native_started: bool, native_joined: bool, native_failed: bool,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+    android_observations: Option<AndroidObservationSlot>,
     child: Option<Child>, waited: Option<ExitStatus>, wait_failed: bool,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
@@ -887,121 +995,6 @@ impl AndroidNativeBooks {
         NativeSettlement { originals_closed, integrity }
     }
     fn settled(&self) -> bool { self.phase == NativePhase::Settled && self.runtime.settled() && self.tools.settled() }
-}
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-struct AndroidNativeBooks {
-    runtime: crate::installed_runtime::AndroidBuildRuntimeSlots,
-    tools: crate::installed_runtime::AndroidToolchainSlots,
-    selection: Option<VerifiedRuntime>, phase: NativePhase,
-    failure: Option<(AdmissionFailure,Instant)>, settlement_started: bool,
-    audit: watch::Receiver<Instant>, cleanup: watch::Receiver<Instant>,
-}
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-impl AndroidNativeBooks {
-    fn new(selected: android_wire::MacToolchainSelection, audit: watch::Receiver<Instant>, cleanup: watch::Receiver<Instant>) -> Self {
-        Self {runtime:crate::installed_runtime::AndroidBuildRuntimeSlots::new(audit.clone()),
-            tools:crate::installed_runtime::AndroidToolchainSlots::new(selected,audit.clone()),
-            selection:None,phase:NativePhase::New,failure:None,settlement_started:false,audit,cleanup}
-    }
-    fn first_failure(&self) -> Option<(AdmissionFailure,Instant)> {
-        [self.failure,self.runtime.first_failure(),self.tools.first_failure()]
-            .into_iter().flatten().min_by_key(|(_,at)|*at)
-    }
-    fn fail(&mut self,failure:AdmissionFailure) {
-        let observed=self.first_failure().unwrap_or((failure,Instant::now()));
-        if self.failure.is_none_or(|(_,at)|observed.1<at){self.failure=Some(observed);}
-        self.phase=NativePhase::Refused;
-    }
-    fn publish(&self,publish:&mut dyn FnMut(AdmissionFailure,Instant)) {
-        if let Some((failure,at))=self.first_failure(){publish(failure,at);}
-    }
-    fn retained_bytes(&self) -> Option<usize> {
-        self.runtime.retained_bytes()?.checked_add(self.tools.retained_bytes()?)
-    }
-    fn inspect_once(&mut self,runtime:&RuntimeConfig,end:Instant,stop:&watch::Receiver<bool>,
-        publish:&mut dyn FnMut(AdmissionFailure,Instant)) -> Result<VerifiedRuntime,BridgeError> {
-        if self.phase!=NativePhase::New {return Err(BridgeError::cleanup_unknown());}
-        self.phase=NativePhase::Inspecting;
-        let selected=match runtime.resolve_android_build_installed(&mut self.runtime,end,stop) {
-            Ok(selected)=>selected,
-            Err(error)=>{self.fail(AdmissionFailure::Inventory);self.publish(publish);return Err(error);},
-        };
-        self.selection=Some(VerifiedRuntime{python:selected.python.clone(),bootstrap:selected.bootstrap.clone(),
-            core:selected.core.clone(),cwd:selected.cwd.clone()});
-        if let Err(failure)=self.tools.inspect_once(end,stop) {
-            self.fail(failure);self.publish(publish);return Err(SavedCommandDomain::AndroidBuild.unavailable());
-        }
-        self.phase=NativePhase::Ready;Ok(selected)
-    }
-    fn selected_binding(&self,expected:&VerifiedRuntime) -> Result<(),AdmissionFailure> {
-        if self.phase!=NativePhase::Ready || self.first_failure().is_some() || self.settlement_started{return Err(AdmissionFailure::AlreadyUsed);}
-        let selected=self.selection.as_ref().ok_or(AdmissionFailure::Unknown)?;
-        if (&selected.python,&selected.bootstrap,&selected.core,&selected.cwd)
-            !=(&expected.python,&expected.bootstrap,&expected.core,&expected.cwd){return Err(AdmissionFailure::Identity);}
-        Ok(())
-    }
-    fn request_binding(&self,expected:&VerifiedRuntime) -> Result<android_wire::ToolchainBinding,AdmissionFailure> {
-        self.selected_binding(expected)?;self.tools.binding_data()
-    }
-    fn check_before_spawn(&mut self,selected:&VerifiedRuntime,end:Instant,stop:&watch::Receiver<bool>,
-        publish:&mut dyn FnMut(AdmissionFailure,Instant)) -> Result<(),AdmissionFailure> {
-        let result=(||{
-            self.selected_binding(selected)?;
-            self.runtime.transfer_once()?;
-            let original=self.runtime.capability()?.prepare_once(end,stop)?;
-            if (&original.python,&original.bootstrap,&original.core,&original.cwd)
-                !=(&selected.python,&selected.bootstrap,&selected.core,&selected.cwd){return Err(AdmissionFailure::Identity);}
-            self.tools.check_before_spawn(end,stop)
-        })();
-        if let Err(failure)=result{self.fail(failure);self.publish(publish);}
-        result
-    }
-    fn claim_once(&mut self) -> Result<(),AdmissionFailure> {
-        if self.phase!=NativePhase::Ready || self.first_failure().is_some() || self.settlement_started{return Err(AdmissionFailure::AlreadyUsed);}
-        self.runtime.capability()?.claim_once()?;
-        self.phase=NativePhase::Claimed;Ok(())
-    }
-    fn interrupted(&mut self) {
-        self.fail(AdmissionFailure::Unknown);self.phase=NativePhase::Unknown;
-        self.runtime.mark_interrupted();self.tools.mark_interrupted();
-    }
-    fn settle(&mut self,used:bool,end:Instant,publish:&mut dyn FnMut(AdmissionFailure,Instant)) -> NativeSettlement {
-        if self.settlement_started || self.phase==NativePhase::Claimed && !used {
-            publish(AdmissionFailure::Unknown,Instant::now());
-            return NativeSettlement{originals_closed:false,integrity:false};
-        }
-        self.settlement_started=true;self.phase=NativePhase::Settling;
-        self.publish(publish);
-        let mut integrity=!used || self.first_failure().is_none();
-        if used {
-            // Publish each first failure before the other independent original
-            // audit begins. Do not delay F until a later array expression ends.
-            if let Err(failure)=self.runtime.android_check_after_use(end,&self.audit) {
-                self.fail(failure);self.publish(publish);integrity=false;
-            }
-            if let Err(failure)=self.tools.check_after_use(end) {
-                self.fail(failure);self.publish(publish);integrity=false;
-            }
-        }
-        // Integrity reads above remain audit-bounded. Frees/FD consumes use
-        // only the separately delivered ORIGINAL cleanup projection.
-        let cleanup_end=*self.cleanup.borrow();
-        let tools=self.tools.settle_originals(cleanup_end,&self.cleanup,publish);
-        let runtime=self.runtime.settle_originals(cleanup_end,&self.cleanup,publish);
-        self.publish(publish);
-        let originals_closed=tools==CloseOutcome::Settled && runtime==CloseOutcome::Settled
-            && self.tools.settled() && self.runtime.settled() && self.retained_bytes()==Some(0);
-        self.phase=if originals_closed{NativePhase::Settled}else{NativePhase::Unknown};
-        NativeSettlement{originals_closed,integrity}
-    }
-    fn settled(&self) -> bool {
-        self.phase==NativePhase::Settled && self.runtime.settled() && self.tools.settled() && self.retained_bytes()==Some(0)
-    }
-}
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-enum MacNativeBook {
-    Android(Arc<Mutex<AndroidNativeBooks>>),
-    IOS(Arc<Mutex<IOSNativeBooks>>),
 }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 struct IOSNativeBooks {
@@ -1150,7 +1143,7 @@ fn original_session(r: &Registry, owner: &Session) -> bool {
 // Unknown owner or release its exclusion after H/earlier F+10.
 fn final_clock_clear(r: &Registry, owner: &Session, now: Instant) -> bool {
     original_session(r, owner) && !r.disabled && !r.exhausted && !owner.resource_unknown.load(Ordering::SeqCst)
-        && r.active.as_ref().is_some_and(|a| !a.unknown && now < owner.clocks.settlement(a.first_stop))
+        && r.active.as_ref().is_some_and(|a| !a.unknown && now < owner.finality_end(a.first_stop))
 }
 fn native_worker_lost(book: &Resources, owner: &Session) {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -1174,7 +1167,8 @@ fn native_worker_lost(book: &Resources, owner: &Session) {
         return;
     }
     if owner.domain != SavedCommandDomain::AndroidBuild { return; }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
     if let Some(native) = &book.native {
         // Called ONLY after the actual original worker's failed Ready return.
         let mut native=match native.lock(){Ok(native)=>native,Err(error)=>error.into_inner()};
@@ -1183,7 +1177,8 @@ fn native_worker_lost(book: &Resources, owner: &Session) {
         native.publish(&mut |failure,at|owner.observe_android_failure(failure,at));
     }
 }
-fn native_final(book: &Resources, domain: SavedCommandDomain) -> bool {
+fn native_final(book: &Resources, owner: &Session) -> bool {
+    let domain=owner.domain;
     if domain == SavedCommandDomain::OfflinePreflight { return offline_installed_final(book); }
     if domain == SavedCommandDomain::ProjectRecovery { return recovery_installed_final(book); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1194,20 +1189,23 @@ fn native_final(book: &Resources, domain: SavedCommandDomain) -> bool {
     }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
+        if domain==SavedCommandDomain::AndroidBuild {
+            // This branch is frozen/control DATA ONLY. The actual observer
+            // captured observation readiness before transferring the whole
+            // SH tail. Never re-enter native books for settled/bytes here.
+            #[cfg(not(feature = "macos-android-registration-helper"))]
+            {return owner.android_close.as_ref().is_some_and(|close|close.known());}
+            #[cfg(feature = "macos-android-registration-helper")]
+            {return false;}
+        }
+        domain==SavedCommandDomain::IOSArchive && book.native.is_none()
+            && book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
             && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, integrity: true })))
-            && match domain {
-                SavedCommandDomain::AndroidBuild=>book.ios_native.is_none() && book.native.as_ref()
-                    .is_some_and(|native|native.try_lock().is_ok_and(|native|native.settled() && native.retained_bytes()==Some(0))),
-                SavedCommandDomain::IOSArchive=>book.native.is_none() && book.ios_native.as_ref()
-                    .is_some_and(|native|native.try_lock().is_ok_and(|native|native.settled())),
-                _=>false,
-            }
+            && book.ios_native.as_ref().is_some_and(|native|native.try_lock().is_ok_and(|native|native.settled()))
     }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = book; false }
 }
-
 struct WriteEnd { sent: bool, closed: bool, failed: bool }
 struct ReadEnd { frames: usize, eof: bool, closed: bool, failed: bool, decoder_settled: bool }
 struct Admitted { status: Status, release: Option<oneshot::Sender<()>> }
@@ -1243,6 +1241,9 @@ impl SavedCommandOwner {
     pub(crate) fn android_build(runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>) -> Self {
         Self::new_selected(runtime, SavedCommandDomain::AndroidBuild, toolchain)
     }
+    pub(crate) fn android_registration_control(&self) -> Arc<AndroidRegistrationControl> {
+        self.inner.android_registration_control.clone()
+    }
     pub(crate) fn bind_original_android_document(&self, identity: &Arc<()>) {
         if self.inner.domain != SavedCommandDomain::AndroidBuild || !self.inner.android_original_owner { return; }
         let Ok(mut original) = self.inner.android_document.lock() else { return; };
@@ -1256,7 +1257,9 @@ impl SavedCommandOwner {
     pub(crate) fn android_normal_selected(&self, identity: &Arc<()>) -> bool {
         let r = self.inner.lock();
         !r.disabled && !r.exhausted && !r.stopping && !r.document_lost && !self.inner.poisoned.load(Ordering::SeqCst)
-            && !r.android_catalog.unknown() && !r.android_sources.unknown() && !r.android_sources.busy() && self.inner.android_installed_selected(Some(identity),r.android_catalog.selection())
+            && !r.android_catalog.unknown() && !r.android_sources.unknown() && !r.android_registration.unknown()
+            && !r.android_sources.busy() && !r.android_registration.busy()
+            && self.inner.android_installed_selected(Some(identity),r.android_catalog.selection())
     }
     fn require_domain(&self, domain: SavedCommandDomain) -> Result<(), BridgeError> {
         if self.inner.domain == domain { Ok(()) } else { Err(self.inner.domain.invalid_owner()) }
@@ -1381,9 +1384,11 @@ impl SavedCommandOwner {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
             ios_observation_identity: Arc::new(()),
             android_original_owner, android_document: Mutex::new(None),
+            android_registration_control: Arc::new(android_registration::ControlSlot::default()),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
-            prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default(),
+            android_registration: android_registration::Registration::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
             fixture: Mutex::new(None),
@@ -1391,10 +1396,20 @@ impl SavedCommandOwner {
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.inner.lock().stopping }
-    pub(crate) fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || r.exhausted || r.android_catalog.unknown() || r.android_sources.unknown() || self.inner.poisoned.load(Ordering::SeqCst) }
+    pub(crate) fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || r.exhausted
+        || r.android_catalog.unknown() || r.android_sources.unknown() || r.android_registration.unknown()
+        || self.inner.android_registration_control.is_unknown() || self.inner.poisoned.load(Ordering::SeqCst) }
     pub(crate) fn can_exit(&self) -> bool { self.reconcile(); let r = self.inner.lock();
-        !self.inner.poisoned.load(Ordering::SeqCst) && r.active.is_none() && r.prepared.is_none() && !r.android_catalog.busy() && !r.android_sources.busy() }
-    pub(crate) fn busy(&self) -> bool { !self.can_exit() }
+        !self.inner.poisoned.load(Ordering::SeqCst) && r.active.is_none() && r.prepared.is_none()
+            && !r.android_catalog.busy() && !r.android_sources.busy()
+            && !r.android_registration.busy() && !r.android_registration.unknown()
+            && self.inner.android_registration_control.can_exit() }
+    pub(crate) fn busy(&self) -> bool {
+        self.reconcile(); let r = self.inner.lock();
+        self.inner.poisoned.load(Ordering::SeqCst) || r.active.is_some() || r.prepared.is_some()
+            || r.android_catalog.busy() || r.android_sources.busy() || r.android_registration.busy()
+            || r.android_registration.unknown() || self.inner.android_registration_control.owns_work()
+    }
     pub(crate) fn ensure_idle(&self) -> Result<(), BridgeError> {
         if self.disabled() { Err(BridgeError::cleanup_unknown()) } else if self.stopping() { Err(BridgeError::shutdown()) }
         else if self.busy() { Err(self.inner.domain.busy()) } else { Ok(()) }
@@ -1541,10 +1556,28 @@ impl SavedCommandOwner {
         let context = prepared.projection.context;
         let projection = RunProjection { operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        let android_native=if self.inner.domain==SavedCommandDomain::AndroidBuild{
+            prepared.android_selection.as_ref().map(|selected|AndroidNativeBooks::new(
+                selected.data().clone(),audit_cutoff.clone(),cleanup_cutoff.clone(),clocks))
+        }else{None};
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        let android_control=android_native.as_ref().map(|native|native.control.clone());
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if self.inner.domain==SavedCommandDomain::AndroidBuild
+            && android_native.as_ref().is_none_or(|native|!native.reserved_before_go()){
+            return Err(self.inner.domain.unavailable());
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        let android_close=android_control.as_ref().map(|control|AndroidCloseSlot::reserved(executor.clone(),control.clone()));
         let owner = Arc::new(Session { domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!clocks.signed),
             recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), native_failure: Mutex::new(None),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+            android_control,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+            android_close,
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
@@ -1559,11 +1592,12 @@ impl SavedCommandOwner {
                 native: if self.inner.domain == SavedCommandDomain::AndroidBuild {
                     self.inner.toolchain.clone().map(|profile| Arc::new(Mutex::new(AndroidNativeBooks::new(profile, audit_cutoff))))
                 } else { None },
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                native: if self.inner.domain == SavedCommandDomain::AndroidBuild {
-                    prepared.android_selection.as_ref().map(|selected| Arc::new(Mutex::new(
-                        AndroidNativeBooks::new(selected.data().clone(),audit_cutoff.clone(),cleanup_cutoff))))
-                } else {None},
+                #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+                android_observations: android_native.as_ref().map(|_|AndroidObservationSlot::default()),
+                #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+                native: android_native.map(|native|Arc::new(Mutex::new(native))),
+                #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]
+                native: None,
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 ios_native: (self.inner.domain == SavedCommandDomain::IOSArchive)
                     .then(|| Arc::new(Mutex::new(IOSNativeBooks::new_selected(audit_cutoff, clocks.signed, clocks.recovery)))),
@@ -1639,23 +1673,51 @@ impl SavedCommandOwner {
         // Original startup DATA only; no reconciliation, mutation or blocking.
         self.inner.registry.try_lock().ok().map(|registry| registry.document_lost)
     }
+    fn lifecycle_publisher(&self, reason: crate::android_registration_app_protocol::Reason)
+        -> Option<android_registration::Publisher> {
+        let mut publisher = self.inner.android_registration_control.reserve(android_registration::PublisherKind::General, true).ok()?;
+        publisher.accept(reason).ok()?;
+        Some(publisher)
+    }
+    fn lifecycle_time(&self, publisher: Option<&android_registration::Publisher>) -> Instant {
+        if let Some(publisher) = publisher.filter(|publisher|
+            publisher.accepted() && publisher.same_slot(&self.inner.android_registration_control)) { return publisher.at(); }
+        // An impossible/missing outer publication is not a fresh known F. Keep
+        // the SAME book Unknown; remaining projections only revoke authority.
+        self.inner.android_registration_control.poisoned();
+        Instant::now()
+    }
     pub(crate) fn document_lost(&self) {
+        let publisher = self.lifecycle_publisher(crate::android_registration_app_protocol::Reason::DocumentLost);
+        self.document_lost_published(publisher.as_ref());
+        if let Some(publisher) = publisher { publisher.finish(); }
+    }
+    pub(crate) fn document_lost_published(&self, publisher: Option<&android_registration::Publisher>) {
+        let at = self.lifecycle_time(publisher);
         let mut r = self.inner.lock(); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
-        r.android_catalog.stop(crate::android_toolchain_catalog::Reason::DocumentLost,Instant::now());
-        r.android_sources.stop(crate::android_tool_sources::Reason::DocumentLost,Instant::now());
+        r.android_catalog.stop(crate::android_toolchain_catalog::Reason::DocumentLost,at);
+        r.android_sources.stop(crate::android_tool_sources::Reason::DocumentLost,at);
+        r.android_registration.stop(crate::android_registration_app_protocol::Reason::DocumentLost,at);
         r.recovery = None;
         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         self.inner.retire_prepared(&mut r, Reason::DocumentLost);
-        if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::DocumentLost, Instant::now()); }
+        if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::DocumentLost, at); }
         self.inner.bump(&mut r);
     }
     pub(crate) fn context_changed(&self) {
+        let publisher = self.lifecycle_publisher(crate::android_registration_app_protocol::Reason::ContextChanged);
+        self.context_changed_published(publisher.as_ref());
+        if let Some(publisher) = publisher { publisher.finish(); }
+    }
+    pub(crate) fn context_changed_published(&self, publisher: Option<&android_registration::Publisher>) {
+        let at = self.lifecycle_time(publisher);
         let mut r = self.inner.lock(); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
-        if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,Instant::now())
-            | r.android_sources.stop(crate::android_tool_sources::Reason::ContextChanged,Instant::now()){self.inner.bump(&mut r);}
+        if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,at)
+            | r.android_sources.stop(crate::android_tool_sources::Reason::ContextChanged,at)
+            | r.android_registration.stop(crate::android_registration_app_protocol::Reason::ContextChanged,at){self.inner.bump(&mut r);}
         r.recovery = None;
         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
-        if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::ContextChanged, Instant::now()); }
+        if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::ContextChanged, at); }
     }
     pub(crate) fn registration_matches(&self, registration: u32) -> bool {
         let r = self.inner.lock(); r.active.as_ref().is_none_or(|a| a.owner.registration == registration)
@@ -1663,14 +1725,22 @@ impl SavedCommandOwner {
             && r.recovery_review.as_ref().is_none_or(|reviewed| reviewed.registration == registration)
             && r.recovery.as_ref().is_none_or(|o| o.original.registration == registration)
             && r.android_sources.registration_matches(registration)
+            && r.android_registration.registration_matches(registration)
     }
     pub(crate) fn request_shutdown(&self) {
+        let publisher = self.lifecycle_publisher(crate::android_registration_app_protocol::Reason::Shutdown);
+        self.request_shutdown_published(publisher.as_ref());
+        if let Some(publisher) = publisher { publisher.finish(); }
+    }
+    pub(crate) fn request_shutdown_published(&self, publisher: Option<&android_registration::Publisher>) {
+        let at = self.lifecycle_time(publisher);
         let mut r = self.inner.lock(); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
-        r.android_catalog.stop(crate::android_toolchain_catalog::Reason::Shutdown,Instant::now());
-        r.android_sources.stop(crate::android_tool_sources::Reason::Shutdown,Instant::now());
+        r.android_catalog.stop(crate::android_toolchain_catalog::Reason::Shutdown,at);
+        r.android_sources.stop(crate::android_tool_sources::Reason::Shutdown,at);
+        r.android_registration.stop(crate::android_registration_app_protocol::Reason::Shutdown,at);
         r.recovery = None;
         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
-        if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::Shutdown, Instant::now()); }
+        if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::Shutdown, at); }
         self.inner.bump(&mut r);
     }
     pub(crate) async fn shutdown(&self) -> Result<(), BridgeError> {
@@ -1684,8 +1754,27 @@ impl SavedCommandOwner {
     fn reconcile(&self) {
         let owner = {
             let mut r = self.inner.lock(); self.inner.expire_prepared(&mut r, Instant::now());
-            let changed=r.android_catalog.reconcile(&self.inner);
-            let newly_unknown=r.android_catalog.unknown() && !r.disabled;
+            let mut changed=r.android_catalog.reconcile(&self.inner);
+            let at=Instant::now();
+            if !r.android_registration.sources_match(&r.android_sources) {
+                // Real accepted source/lifecycle entry already fenced the
+                // original BEFORE projection. Missing that F is a broken
+                // publisher census, not permission to invent a late F here.
+                if let Some((reason, first)) = r.android_registration.invalidation_failure() {
+                    changed |= r.android_registration.stop(reason, first);
+                } else {
+                    self.inner.android_registration_control.poisoned();
+                    self.inner.poisoned.store(true, Ordering::SeqCst);
+                    changed |= r.android_registration.exhaust(at);
+                }
+            }
+            if (r.disabled || r.exhausted || r.android_catalog.unknown() || r.android_sources.unknown()
+                || self.inner.poisoned.load(Ordering::SeqCst)) && !r.android_registration.unknown(){
+                changed|=r.android_registration.exhaust(at);
+            }
+            changed|=r.android_registration.reconcile(&self.inner);
+            let newly_unknown=(r.android_catalog.unknown() || r.android_sources.unknown()
+                || r.android_registration.unknown()) && !r.disabled;
             if newly_unknown{r.disabled=true;}
             if changed||newly_unknown{self.inner.bump(&mut r);}
             r.active.as_ref().map(|a| a.owner.clone())
@@ -1796,6 +1885,68 @@ impl Wake for FinalWake {
 }
 fn record_join<T>(slot: &Mutex<Option<Result<T, tokio::task::JoinError>>>, result: Result<T, tokio::task::JoinError>) -> bool {
     match slot.lock() { Ok(mut slot) if slot.is_none() => { *slot = Some(result); true }, _ => false }
+}
+/// Pure readiness/custody helper, not another task or a receipt factory.
+/// Acquire the fixed ORIGINAL return slot before polling. A poisoned vacant
+/// slot still retains the actual return plus Unknown; an occupied slot is never
+/// polled again. No result may be discarded by fallible post-Ready recording.
+fn poll_android_original<T>(handle:&mut Option<JoinHandle<T>>,
+    returned:&Mutex<Option<Result<T,tokio::task::JoinError>>>,seen:&AtomicBool,
+    context:&mut TaskContext<'_>,mut unknown:impl FnMut())->Poll<bool>{
+    let (mut slot,clean)=match returned.lock(){
+        Ok(slot)=>(slot,true),Err(error)=>{unknown();(error.into_inner(),false)},
+    };
+    if seen.load(Ordering::SeqCst) || slot.is_some(){unknown();return Poll::Ready(false);}
+    let Some(handle)=handle.as_mut()else{unknown();return Poll::Ready(false);};
+    let Poll::Ready(result)=Pin::new(handle).poll(context)else{return Poll::Pending;};
+    let joined=result.is_ok();
+    *slot=Some(result);seen.store(true,Ordering::SeqCst);
+    // The guard is gone before any next wait/close/finality decision.
+    drop(slot);
+    if !joined || !clean{unknown();}
+    Poll::Ready(joined && clean)
+}
+
+#[cfg(test)]
+mod android_join_slot_data_tests {
+    use super::*;
+    struct NoWake;
+    impl Wake for NoWake {fn wake(self:Arc<Self>){}}
+    #[test]
+    fn empty_or_already_seen_slots_never_synthesize_an_original_join(){
+        let waker=Waker::from(Arc::new(NoWake));let mut context=TaskContext::from_waker(&waker);
+        let returned=Mutex::new(None::<Result<u8,tokio::task::JoinError>>);
+        let seen=AtomicBool::new(false);let unknown=AtomicBool::new(false);
+        let mut handle=None::<JoinHandle<u8>>;
+        assert!(matches!(poll_android_original(&mut handle,&returned,&seen,&mut context,
+            ||unknown.store(true,Ordering::SeqCst)),Poll::Ready(false)));
+        assert!(unknown.load(Ordering::SeqCst) && !seen.load(Ordering::SeqCst));
+        assert!(returned.lock().unwrap().is_none());
+        unknown.store(false,Ordering::SeqCst);seen.store(true,Ordering::SeqCst);
+        assert!(matches!(poll_android_original(&mut handle,&returned,&seen,&mut context,
+            ||unknown.store(true,Ordering::SeqCst)),Poll::Ready(false)));
+        assert!(unknown.load(Ordering::SeqCst) && returned.lock().unwrap().is_none());
+    }
+    #[test]
+    fn occupied_or_poisoned_data_stays_in_its_same_original_slot(){
+        // Scalar DATA only: no task, file, native tail or join witness is minted.
+        let waker=Waker::from(Arc::new(NoWake));let mut context=TaskContext::from_waker(&waker);
+        let returned=Mutex::new(Some(Ok::<_,tokio::task::JoinError>([7u8;32])));
+        let seen=AtomicBool::new(false);let unknown=AtomicBool::new(false);
+        let mut handle=None::<JoinHandle<[u8;32]>>;
+        assert!(matches!(poll_android_original(&mut handle,&returned,&seen,&mut context,
+            ||unknown.store(true,Ordering::SeqCst)),Poll::Ready(false)));
+        assert!(unknown.load(Ordering::SeqCst));
+        assert!(matches!(returned.lock().unwrap().as_ref(),Some(Ok(value)) if *value==[7;32]));
+        let _=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
+            let _held=returned.lock().unwrap();panic!("inert original slot poison");
+        }));
+        unknown.store(false,Ordering::SeqCst);
+        assert!(matches!(poll_android_original(&mut handle,&returned,&seen,&mut context,
+            ||unknown.store(true,Ordering::SeqCst)),Poll::Ready(false)));
+        assert!(unknown.load(Ordering::SeqCst) && !seen.load(Ordering::SeqCst));
+        assert!(matches!(returned.lock().unwrap_err().into_inner().as_ref(),Some(Ok(value)) if *value==[7;32]));
+    }
 }
 fn set_failure_outcome(p: &mut RunProjection) {
     if p.reason == Reason::None {
@@ -1924,13 +2075,20 @@ impl Inner {
         }
     }
     fn lock(&self) -> MutexGuard<'_, Registry> {
-        match self.registry.lock() { Ok(r) => r, Err(error) => { self.poisoned.store(true, Ordering::SeqCst); error.into_inner() } }
+        match self.registry.lock() { Ok(r) => r, Err(error) => { self.poisoned.store(true, Ordering::SeqCst); self.android_registration_control.poisoned(); error.into_inner() } }
     }
     fn bump(&self, r: &mut Registry) {
+        if r.disabled || r.exhausted || r.android_catalog.unknown() || r.android_sources.unknown()
+            || r.android_registration.unknown() || self.poisoned.load(Ordering::SeqCst) {
+            self.android_registration_control.poisoned();
+        }
         if r.exhausted { return; }
         match r.revision.checked_add(1).filter(|n| *n < u32::MAX) {
             Some(next) => r.revision = next,
-            None => { r.exhausted = true; r.disabled = true; r.android_catalog.exhaust(); r.android_sources.exhaust();
+            None => { let at=Instant::now();
+                self.android_registration_control.poisoned();
+                r.exhausted = true; r.disabled = true; r.android_catalog.exhaust(); r.android_sources.exhaust();
+                r.android_registration.exhaust(at);
                 if let Some(prepared) = r.prepared.take() { r.last = Some(retire(prepared.projection, Reason::CleanupUnknown)); }
                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
             },
@@ -1947,7 +2105,8 @@ impl Inner {
         if r.prepared.as_ref().is_some_and(|p| now >= p.expires) { self.retire_prepared(r, Reason::IntentExpired); }
     }
     fn availability(&self, r: &Registry, gate: Availability) -> Availability {
-        if r.disabled || r.exhausted || r.android_catalog.unknown() || r.android_sources.unknown() || self.poisoned.load(Ordering::SeqCst) || gate == Availability::CleanupUnknown { Availability::CleanupUnknown }
+        if r.disabled || r.exhausted || r.android_catalog.unknown() || r.android_sources.unknown()
+            || r.android_registration.unknown() || self.poisoned.load(Ordering::SeqCst) || gate == Availability::CleanupUnknown { Availability::CleanupUnknown }
         else if r.stopping || gate == Availability::Shutdown { Availability::Shutdown }
         // No original can have started on an unsupported backend. Its missing
         // editing/crash hook must not falsely lock unrelated passive services.
@@ -1955,7 +2114,8 @@ impl Inner {
         else if r.active.is_none() && r.prepared.is_none()
             && (Profile::current(self.domain).is_none() || gate == Availability::UnsupportedPlatform) { Availability::UnsupportedPlatform }
         else if r.document_lost || gate == Availability::DocumentLost { Availability::DocumentLost }
-        else if r.active.is_some() || r.prepared.is_some() || r.android_catalog.busy() || r.android_sources.busy() || gate == Availability::Busy { Availability::Busy }
+        else if r.active.is_some() || r.prepared.is_some() || r.android_catalog.busy() || r.android_sources.busy()
+            || r.android_registration.busy() || gate == Availability::Busy { Availability::Busy }
         else if !self.qualified(r.android_catalog.selection()) {
             match self.domain {
                 SavedCommandDomain::OfflinePreflight | SavedCommandDomain::IOSArchive => Availability::RuntimeUnqualified,
@@ -1999,13 +2159,14 @@ impl Inner {
     }
     fn stop_locked(&self, r: &mut Registry, owner: &Session, reason: Reason, at: Instant) {
         let Some(active) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
+        owner.note_android_local(at,reason==Reason::CleanupUnknown);
         let at = at.min(owner.clocks.work).max(owner.clocks.admitted); let mut changed = false;
         let earlier = active.first_stop.is_none_or(|first| at < first);
         if earlier { active.first_stop = Some(at); changed = true; }
-        let cleanup = owner.clocks.cleanup_end(active.first_stop);
+        let cleanup = owner.cleanup_end(active.first_stop);
         owner.native_cleanup_cutoff.send_if_modified(|current| if cleanup < *current { *current = cleanup; true } else { false });
         if matches!(owner.domain, SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive) {
-            let end = owner.clocks.audit_end(active.first_stop);
+            let end = owner.audit_end(active.first_stop);
             owner.native_audit_cutoff.send_if_modified(|current| {
                 if end < *current { *current = end; true } else { false }
             });
@@ -2040,7 +2201,21 @@ impl Inner {
             Ok(first)=>*first,Err(_)=>{owner.resource_unknown.store(true,Ordering::SeqCst);None},
         };
         if let Some((reason,at))=native_failure {self.stop_locked(r,owner,reason,at);}
-        let finality_due = r.active.as_ref().is_some_and(|a| !a.unknown && now >= owner.clocks.settlement(a.first_stop));
+        owner.sample_android_control();
+        if owner.android_control_stopped() {
+            // Control may carry a conservatively inverse-mapped pre-T F.
+            // It tightens every endpoint, but never feeds the local event
+            // latch or replaces the reason of an earlier genuine local event.
+            let mut changed=false;
+            if let Some(active)=r.active.as_mut().filter(|a|a.owner.id==owner.id) {
+                if active.projection.reason==Reason::None {
+                    active.projection.reason=Reason::ToolchainUnavailable;set_failure_outcome(&mut active.projection);changed=true;
+                }
+                if !active.unknown && active.projection.phase!=Phase::Stopping {active.projection.phase=Phase::Stopping;changed=true;}
+            }
+            if changed{self.bump(r);}
+        }
+        let finality_due = r.active.as_ref().is_some_and(|a| !a.unknown && now >= owner.finality_end(a.first_stop));
         if finality_due || self.poisoned.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { self.unknown_locked_at(r, owner, now); }
     }
     fn stop(&self, owner: &Session, reason: Reason) { let mut r = self.lock(); self.advance_locked(&mut r, owner, Instant::now()); self.stop_locked(&mut r, owner, reason, Instant::now()); }
@@ -2048,7 +2223,9 @@ impl Inner {
     fn endpoint(&self, owner: &Session) -> Option<Instant> {
         let mut r = self.lock(); self.advance_locked(&mut r, owner, Instant::now());
         let a = r.active.as_ref().filter(|a| a.owner.id == owner.id)?;
-        if a.unknown { None } else if a.first_stop.is_some() { Some(owner.clocks.settlement(a.first_stop)) } else { Some(owner.clocks.work) }
+        if a.unknown {None} else if a.first_stop.is_some() || owner.android_control_stopped() {
+            Some(owner.finality_end(a.first_stop))
+        } else {Some(owner.clocks.work.min(owner.finality_end(None)))}
     }
     fn accept(&self, owner: &Session, frame: Frame) { self.accept_at(owner, frame, Instant::now()); }
     fn accept_at(&self, owner: &Session, frame: Frame, now: Instant) {
@@ -2381,7 +2558,8 @@ async fn join_slot<T>(slot: &mut Option<JoinHandle<T>>) -> Result<T, tokio::task
 async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, owner: &Session) -> Result<T, tokio::task::JoinError> {
     loop {
         let wake = owner.wake.notified(); let end = inner.endpoint(owner);
-        tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {} }
+        tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {},
+            _ = owner.android_control_tick(), if end.is_some() => {} }
     }
 }
 fn offline_installed_final(book: &Resources) -> bool {
@@ -2794,7 +2972,7 @@ fn spawn_android_original(inner: &Inner, owner: &Session, runtime: VerifiedRunti
             inner.stop(owner, Reason::RuntimeUnavailable); inner.unknown(owner); },
     }
 }
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
 fn spawn_android_original(inner:&Inner,owner:&Session,runtime:VerifiedRuntime,native:Option<Arc<Mutex<AndroidNativeBooks>>>) {
     if owner.domain!=SavedCommandDomain::AndroidBuild || inner.domain!=owner.domain
         || !inner.qualified(owner.android_selection.as_ref()) || Profile::current(owner.domain)!=Some(owner.profile) {
@@ -2893,6 +3071,14 @@ fn native_consumers_returned(book: &Resources, startup: &Startup, inner: &Inner,
 }
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if owner.domain==SavedCommandDomain::AndroidBuild {
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        android_leased::settle_start_observations(book,inner,owner).await;
+        #[cfg(feature = "macos-android-registration-helper")]
+        inner.unknown(owner);
+        return;
+    }
     if !book.native_started {
         let used = {
             let startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
@@ -2902,11 +3088,8 @@ async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Ses
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let selected = (owner.domain == SavedCommandDomain::AndroidBuild).then(|| book.native.clone()).flatten();
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        let selected=match owner.domain {
-            SavedCommandDomain::AndroidBuild if book.ios_native.is_none()=>book.native.clone().map(MacNativeBook::Android),
-            SavedCommandDomain::IOSArchive if book.native.is_none()=>book.ios_native.clone().map(MacNativeBook::IOS),
-            _=>None,
-        };
+        let selected=(owner.domain==SavedCommandDomain::IOSArchive && book.native.is_none())
+            .then(||book.ios_native.clone()).flatten();
         let Some(native) = selected else { inner.unknown(owner); return; };
         // Each book operation ALSO reads this same original Session cutoff, so
         // an earlier F during the audit tightens the running borrow immediately.
@@ -2923,16 +3106,10 @@ async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Ses
                 Err(error) => { let mut native = error.into_inner(); native.interrupted(); native.settle(used, end) },
             }}
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            {match native {
-                MacNativeBook::Android(native)=>{
-                    let mut native=match native.lock(){Ok(native)=>native,Err(error)=>{let mut native=error.into_inner();native.interrupted();native}};
-                    native.settle(used,end,&mut |failure,at|original_owner.observe_android_failure(failure,at))
-                },
-                MacNativeBook::IOS(native)=>match native.lock(){
-                    Ok(mut native)=>native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first)),
-                    Err(error)=>{let mut native=error.into_inner();native.interrupted();
-                        native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first))},
-                },
+            {match native.lock(){
+                Ok(mut native)=>native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first)),
+                Err(error)=>{let mut native=error.into_inner();native.interrupted();
+                    native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first))},
             }}
         }));
         let _ = release.send(());
@@ -3040,13 +3217,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     let mut native = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
                     native.inspect_once(end, &stop)
                 }
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
                 {
                     let native=native.ok_or_else(||domain.unavailable())?;
                     let mut native=native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
                     native.inspect_once(&runtime,end,&stop,&mut |failure,at|inspection_owner.observe_android_failure(failure,at))
                 }
-                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                    all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))))]
                 { let _ = stop; Err(domain.unavailable()) }
             },
             SavedCommandDomain::IOSArchive => {
@@ -3081,14 +3259,16 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         (Context::ProjectRecovery(context), Profile::ProjectRecovery(profile)) =>
             recovery_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, owner.recovery_stamp.as_deref()),
         (Context::AndroidBuild(context), Profile::AndroidBuild(profile)) => {
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
             {
                 let binding = book.native.as_ref().and_then(|native| native.lock().ok())
                     .and_then(|native| native.request_binding(&runtime).ok());
                 match binding { Some(binding) => android_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding),
                     None => Err(owner.domain.unavailable()) }
             }
-            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))))]
             { let _ = (context, profile); Err(owner.domain.unavailable()) }
         }
         (Context::IOSArchive(context), Profile::IOSArchive(profile)) => {
@@ -3162,9 +3342,11 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     spawn_original(&acquisition_inner, &acquisition_owner, runtime);
                 },
                 SavedCommandDomain::AndroidBuild => {
-                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                        all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
                     spawn_android_original(&acquisition_inner, &acquisition_owner, runtime, acquisition_native);
-                    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                        all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))))]
                     acquisition_inner.stop(&acquisition_owner, Reason::ToolchainUnavailable);
                 },
                 SavedCommandDomain::IOSArchive => {
@@ -3342,8 +3524,10 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         // repair of the lost receipt or successful result after manager loss.
         monitor_original(&inner, &owner).await;
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+    let mut android_close_started=false;
     let settled = {
-        let book = owner.resources.lock().await;
+        let mut book = owner.resources.lock().await;
         let startup = match owner.startup.lock() { Ok(s) => s, Err(e) => { owner.resource_unknown.store(true, Ordering::SeqCst); e.into_inner() } };
         let startup_settled = book.inspection.is_none() && book.acquisition.is_none() && !book.inspection_failed && !book.acquisition_failed
             && !startup.failed && (!startup.attempted || startup.returned && book.acquisition_joined);
@@ -3367,10 +3551,48 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
                 && book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
         } else { true };
-        manager_joined && startup_settled && io_joined && io && protocol && native_final(&book, owner.domain)
+        let dependents=manager_joined && startup_settled && io_joined && io && protocol
             && owner.driver_joined.load(Ordering::SeqCst)
-            && !owner.resource_unknown.load(Ordering::SeqCst)
+            && !owner.resource_unknown.load(Ordering::SeqCst);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if owner.leased_android() {
+            // All original dependent joins, EOF/decoder/terminal/disposition
+            // facts and the intermediate native observation return precede
+            // creation of this private consuming witness. Raw nonzero child
+            // exit remains Unknown; no pre-close terminal certifies it.
+            let observation_ready=book.ios_native.is_none() && book.android_observations.as_ref()
+                .is_some_and(AndroidObservationSlot::frozen_ready);
+            if !dependents || !observation_ready {false}
+            else if let (Some(close),Some(slot))=(&owner.android_close,book.android_observations.as_mut()) {
+                match slot.returned.as_mut() {
+                    Some(Ok(data)) if data.entered && data.tail.is_some()=>{
+                        let joins=AndroidOriginalJoins(AndroidJoinedOriginal::Start(owner.clone()));
+                        android_close_started=close.start(&mut data.tail,joins);
+                        // Last resource-book access. Only scalar/control/frozen
+                        // data follows the moved tail; guards are released
+                        // before the same close JoinHandle is awaited below.
+                        android_close_started
+                    },
+                    Some(Ok(data)) if !data.entered && data.tail.is_none()=>{
+                        let joins=AndroidOriginalJoins(AndroidJoinedOriginal::Start(owner.clone()));
+                        close.finish_unentered(joins)
+                    },
+                    _=>false,
+                }
+            }else{false}
+        }else{dependents && native_final(&book,&owner)}
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
+        {dependents && native_final(&book,&owner)}
     };
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+    let settled=if owner.leased_android() {
+        // NO Resources/native/Registry/Document lock is held during this wait.
+        // A blocked/lost close remains the same original slot plus Unknown;
+        // the already-existing watchdog continues its independent control tick.
+        let closed=if android_close_started {android_leased::join_start_close(&inner,&owner).await}
+            else{owner.android_close.as_ref().is_some_and(|close|close.known())};
+        settled && closed && inner.endpoint(&owner).is_some()
+    }else{settled};
     if !settled { inner.unknown(&owner); }
     // Final observer owns no unjoined child/IO/acquisition at this point. Its
     // ORIGINAL handle remains with the watchdog until its actual Ready join.
@@ -3567,6 +3789,10 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
             context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
             recovery_stamp: None, request: AsyncMutex::new(None), material: Mutex::new(None), material_retired: AtomicBool::new(true),
             recovery: None, android_selection: None, native_failure: Mutex::new(None),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+            android_control: None,
+            #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+            android_close: None,
             stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
             driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),

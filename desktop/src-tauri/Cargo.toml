@@ -53,6 +53,8 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+# Separate fixed headless Android registration helper; never unified into UI.
+macos-android-registration-helper = ["mrk-macos-installed-native/android-registration-helper"]
 # Separate fixed eight-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
 # Explicit engineering observer controls; absent from every shipping profile.
@@ -84,6 +86,9 @@ nix = { version = "=0.30.1", default-features = false, features = ["fs", "poll"]
 # Read Darwin's actual per-descriptor mount flags; no mount operation is used.
 nix = { version = "=0.30.1", default-features = false, features = ["fs", "mount", "user"] }
 mrk-macos-installed-native = { path = "../native/macos-installed-native" }
+# Bounded SAME-original DATA ZIP member streaming; neither executes a vendor.
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
+crc32fast = "=1.5.2"
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dev-dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["time"] }

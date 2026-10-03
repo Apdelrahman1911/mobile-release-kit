@@ -367,6 +367,17 @@ def _fixed_properties(root: str, java_home: str = "jdk") -> tuple[tuple[str, str
             ("kotlin.daemon.enabled", "false"))
 
 
+def _native_selection_property(key: str) -> bool:
+    # Native resources are selected by the genuine JVM platform, never project
+    # properties. The same task-owned extraction root is fixed at both Gradle
+    # JVM startups; a systemProp spelling is not a separate configuration path.
+    target = key.casefold().removeprefix("systemprop.")
+    return (target in {"org.gradle.native", "os.arch", "os.name", "os.version",
+                       "sun.arch.data.model", "com.ibm.vm.bitmode"}
+            or target.startswith(("org.gradle.native.", "org.gradle.internal.native.",
+                                  "library.jansi.", "jansi.", "jna.", "jnidispatch.")))
+
+
 def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tuple[tuple[str, bytes | None], ...]:
     data = _keys(data, set(SELECTION_FIELDS))
     _need(all(value is None or type(value) is bytes for value in data.values()))
@@ -384,7 +395,7 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
     for key, value in local.items():
         target = key.casefold().removeprefix("systemprop.")
         _need(target not in {"android.aapt2frommavenoverride", "android.aapt2version", "android.aapt2platform"}
-              and not target.startswith(("jna.", "jnidispatch.")))
+              and not _native_selection_property(key))
         if key == "sdk.dir":
             _need(value == f"{profile.binding.root}/sdk")
         else:
@@ -400,6 +411,7 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
     for field in ("root_gradle_properties", "module_gradle_properties"):
         properties = {} if data[field] is None else _properties(data[field])
         for key, value in properties.items():
+            _need(not _native_selection_property(key))
             if key in fixed:
                 _need(value == fixed[key])
             else:
@@ -416,10 +428,15 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
 
 
 def _jvm_arguments(work: Path, *, bundletool: bool = False) -> tuple[str, ...]:
-    return ("-Xms64m", "-Xmx1024m" if bundletool else "-Xmx2048m", "-XX:MaxMetaspaceSize=512m",
-            "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}",
-            "-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
-            f"-Djna.tmpdir={work}")
+    arguments = ("-Xms64m", "-Xmx1024m" if bundletool else "-Xmx2048m", "-XX:MaxMetaspaceSize=512m",
+                 "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}",
+                 "-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+                 f"-Djna.tmpdir={work}")
+    # Both JAVA_OPTS (the Gradle client) and org.gradle.jvmargs (the single-use
+    # build JVM) consume this exact tuple. work is the existing original owned
+    # directory, not a new path-based grant. Gradle's version/platform/Jansi
+    # descendants remain real output under its unchanged accounting and cleanup.
+    return arguments if bundletool else (*arguments, f"-Dorg.gradle.native.dir={work}")
 
 
 def _identity(observed: os.stat_result, *, directory: bool = False, stable_contents: bool = True,

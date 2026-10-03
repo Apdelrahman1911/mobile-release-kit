@@ -18,6 +18,9 @@ impl AndroidBuildOwner {
     pub(crate) fn new(runtime: RuntimeConfig, toolchain: Option<crate::android_toolchain::AndroidToolchainProfile>) -> Self {
         Self { saved: SavedCommandOwner::android_build(runtime, toolchain) }
     }
+    pub(crate) fn registration_control(&self) -> std::sync::Arc<crate::saved_command_owner::AndroidRegistrationControl> {
+        self.saved.android_registration_control()
+    }
     pub(crate) fn bind_original_document(&self, identity: &std::sync::Arc<()>) {
         self.saved.bind_original_android_document(identity);
     }
@@ -42,14 +45,16 @@ impl AndroidBuildOwner {
         self.saved.android_sources_status(gate)
     }
     pub(crate) fn admit_source(&self, document: &std::sync::Arc<()>, input: &crate::android_tool_sources::Choose,
-        registration: u32, project: RegisteredRoot, owner: std::sync::Arc<crate::asset_session::OriginalWork>, gate: Availability) -> Result<(), BridgeError> {
-        self.saved.admit_android_source_pick(document, input, registration, project, owner, gate)
+        registration: u32, project: RegisteredRoot, owner: std::sync::Arc<crate::asset_session::OriginalWork>,
+        publisher: &crate::saved_command_owner::AndroidRegistrationPublisher, gate: Availability) -> Result<(), BridgeError> {
+        self.saved.admit_android_source_pick(document, input, registration, project, owner, publisher, gate)
     }
     pub(crate) fn source_stop(&self, owner: &std::sync::Arc<crate::asset_session::OriginalWork>) -> Option<(crate::asset_commands::Reason, Instant)> {
         self.saved.android_source_stop(owner)
     }
-    pub(crate) fn publish_source(&self, owner: &std::sync::Arc<crate::asset_session::OriginalWork>, proof: crate::asset_source::ProjectProbe) -> Result<(), BridgeError> {
-        self.saved.publish_android_source(owner, proof)
+    pub(crate) fn publish_source(&self, owner: &std::sync::Arc<crate::asset_session::OriginalWork>, proof: crate::asset_source::ProjectProbe,
+        publisher: &crate::saved_command_owner::AndroidRegistrationPublisher) -> Result<(), BridgeError> {
+        self.saved.publish_android_source(owner, proof, publisher)
     }
     pub(crate) fn observe_source(&self, owner: &std::sync::Arc<crate::asset_session::OriginalWork>, phase: crate::asset_session::Phase,
         reason: crate::asset_commands::Reason, unknown: bool) {
@@ -59,12 +64,50 @@ impl AndroidBuildOwner {
         self.saved.cancel_android_source(input, gate)
     }
 
+    pub(crate) fn registration_status(&self,gate:Availability)
+        -> Result<crate::android_registration_app_protocol::Status,BridgeError> {
+        self.saved.android_tool_registration_status(gate)
+    }
+    pub(crate) fn inspection_snapshot(&self,document:&std::sync::Arc<()>,at:Instant,
+        input:crate::android_registration_app_protocol::Inspect,registration:u32,project:RegisteredRoot,saved:crate::asset_session::ValidatedSavedInput,gate:Availability)
+        -> Result<crate::saved_command_owner::AndroidRegistrationSnapshot,BridgeError> {
+        self.saved.snapshot_android_tool_inspection(document,at,input,registration,project,saved,gate)
+    }
+    pub(crate) fn registration_snapshot(&self,document:&std::sync::Arc<()>,at:Instant,
+        input:crate::android_registration_app_protocol::Register,registration:u32,project:RegisteredRoot,saved:crate::asset_session::ValidatedSavedInput,gate:Availability)
+        -> Result<crate::saved_command_owner::AndroidRegistrationSnapshot,BridgeError> {
+        self.saved.snapshot_android_tool_registration(document,at,input,registration,project,saved,gate)
+    }
+    pub(crate) fn admit_registration(&self,document:&std::sync::Arc<()>,
+        checked:&crate::saved_command_owner::AndroidRegistrationChecked,current:crate::asset_session::ValidatedSavedInput,
+        registration:u32,project:&RegisteredRoot,census:&crate::asset_session::AndroidRegistrationCensus<'_>,gate:Availability)
+        -> Result<crate::saved_command_owner::AndroidRegistrationAdmitted,BridgeError> {
+        self.saved.admit_android_tool_registration(document,checked,current,registration,project,census,gate)
+    }
+    pub(crate) fn registration_finalization(&self)->Option<crate::saved_command_owner::AndroidRegistrationFinalization>{
+        self.saved.android_registration_finalization()
+    }
+    pub(crate) fn finalize_registration(&self,request:&crate::saved_command_owner::AndroidRegistrationFinalization,
+        current:Option<&crate::asset_session::ValidatedSavedInput>,gate:Availability){
+        self.saved.finalize_android_registration(request,current,gate);
+    }
+    pub(crate) fn cancel_registration(&self,input:&crate::android_registration_app_protocol::Cancel,
+        publication:Option<&crate::saved_command_owner::AndroidRegistrationCancelPublisher>,gate:Availability)
+        -> Result<crate::android_registration_app_protocol::Status,BridgeError> {
+        self.saved.cancel_android_tool_registration(input,publication,gate)
+    }
+
     pub(crate) fn catalog_status(&self,gate:Availability) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
         self.saved.android_catalog_status(gate)
     }
     pub(crate) fn refresh_catalog(&self,document:&std::sync::Arc<()>,admitted:Instant,gate:Availability)
         -> Result<crate::saved_command_owner::AndroidCatalogAdmitted,BridgeError> {
         self.saved.refresh_android_catalog(document,admitted,gate)
+    }
+    pub(crate) fn recover_catalog(&self,document:&std::sync::Arc<()>,admitted:Instant,
+        input:crate::android_toolchain_catalog::Recover,gate:Availability)
+        -> Result<crate::saved_command_owner::AndroidCatalogAdmitted,BridgeError> {
+        self.saved.recover_android_catalog(document,admitted,input,gate)
     }
     pub(crate) fn select_catalog(&self,input:crate::android_toolchain_catalog::Select,gate:Availability)
         -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
@@ -100,6 +143,9 @@ impl AndroidBuildOwner {
     pub(crate) fn context_changed(&self) { self.saved.context_changed(); }
     pub(crate) fn registration_matches(&self, registration: u32) -> bool { self.saved.registration_matches(registration) }
     pub(crate) fn request_shutdown(&self) { self.saved.request_shutdown(); }
+    pub(crate) fn document_lost_published(&self,publisher:Option<&crate::saved_command_owner::AndroidRegistrationPublisher>) { self.saved.document_lost_published(publisher); }
+    pub(crate) fn context_changed_published(&self,publisher:Option<&crate::saved_command_owner::AndroidRegistrationPublisher>) { self.saved.context_changed_published(publisher); }
+    pub(crate) fn request_shutdown_published(&self,publisher:Option<&crate::saved_command_owner::AndroidRegistrationPublisher>) { self.saved.request_shutdown_published(publisher); }
     pub(crate) async fn shutdown(&self) -> Result<(), BridgeError> { self.saved.shutdown().await }
     // Tests borrow this exact original owner. Inner/Session/handle fields remain
     // private in saved_command_owner; this creates no synthetic receipt/permit.

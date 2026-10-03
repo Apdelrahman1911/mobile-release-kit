@@ -4,6 +4,7 @@ import { connectionBounded as bounded, connectionKeys as keys, connectionNumeric
 import type { GitHubReleaseError, GitHubReleasePrepared, GitHubReleaseReason, GitHubReleaseStatus, GitHubReleaseSelection } from './githubReleaseTypes.ts';
 
 export const GITHUB_RELEASE_EVENT = 'github-release-status';
+export const GITHUB_RELEASE_RECOVERY_CONFIRMATION_MAX_BYTES = 342;
 export const GITHUB_RELEASE_REASONS = ['none', 'unqualified', 'publisher-unconfigured', 'not-connected', 'busy', 'invalid-input',
   'target-changed', 'expired', 'rate-limited', 'cancelled', 'cleanup-unknown', 'runtime-unavailable', 'consent-expired',
   'caller-mismatch', 'workflow-unavailable', 'source-changed', 'unresolved-run', 'ambiguous-run', 'run-changed', 'jobs-incomplete',
@@ -66,8 +67,23 @@ function version(value: unknown): value is { name: string; build: number } {
   return keys(value, ['name', 'build']) && typeof value.name === 'string' && value.name.length > 0 && value.name.length <= 64
     && !/[^A-Za-z0-9.+-]/.test(value.name) && Number.isSafeInteger(value.build) && Number(value.build) >= 1 && Number(value.build) <= 2_100_000_000;
 }
-export function githubReleaseSelection(value: unknown): value is GitHubReleaseSelection {
-  if (!keys(value, ['stage', 'candidateRunId', 'externalRunId', 'recoveryRunId', 'originalSourceSha', 'originalVersion'])
+// Desktop admission profile only; hashes/IDs remain unauthenticated declarations.
+// Reject non-ASCII/whitespace before parsing; JS end anchors must not admit a final newline.
+export function githubReleaseRecoveryConfirmation(value: unknown, stage: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > GITHUB_RELEASE_RECOVERY_CONFIRMATION_MAX_BYTES
+      || /[^A-Za-z0-9_.:-]/.test(value)) return false;
+  const parts = value.split(':');
+  if (parts.length !== 3 || !hex(parts[1], 64)) return false;
+  const prefix = parts[0], detail = parts[2]!;
+  if (stage === 'candidate') return prefix === 'recover-ios-candidate'
+    ? detail.length >= 1 && detail.length <= 255 && !/[^A-Za-z0-9_.-]/.test(detail)
+    : prefix === 'retry-ios-candidate-upload' && hex(detail, 64);
+  return (stage === 'external-testing' || stage === 'production-submit')
+    && prefix === 'retry-ios-operation-creates' && hex(detail, 64);
+}
+export function githubReleaseSelection(value: unknown, platform?: unknown): value is GitHubReleaseSelection {
+  const names = ['stage', 'candidateRunId', 'externalRunId', 'recoveryRunId', 'originalSourceSha', 'originalVersion'];
+  if (!(keys(value, names) || keys(value, [...names, 'recoveryConfirmation']))
       || !oneOf(value.stage, ['candidate', 'external-testing', 'production-submit'])
       || ![value.candidateRunId, value.externalRunId, value.recoveryRunId].every((id) => id === null || numericId(id))) return false;
   const original = value.stage !== 'candidate' || value.recoveryRunId !== null;
@@ -76,7 +92,9 @@ export function githubReleaseSelection(value: unknown): value is GitHubReleaseSe
     && (value.stage !== 'candidate' || value.candidateRunId === null && value.externalRunId === null)
     && (value.stage === 'production-submit' || value.externalRunId === null)
     && (value.stage === 'candidate' || value.recoveryRunId !== null || value.candidateRunId !== null)
-    && (value.stage !== 'production-submit' || value.recoveryRunId !== null || value.externalRunId !== null);
+    && (value.stage !== 'production-submit' || value.recoveryRunId !== null || value.externalRunId !== null)
+    && (!Object.hasOwn(value, 'recoveryConfirmation') || platform === 'ios' && value.recoveryRunId !== null
+      && githubReleaseRecoveryConfirmation(value.recoveryConfirmation, value.stage));
 }
 function plain(value: unknown, maximum: number): value is string {
   return typeof value === 'string' && value.length > 0 && new TextEncoder().encode(value).byteLength <= maximum && !/[\x00-\x1f\x7f]/.test(value);
@@ -85,7 +103,7 @@ function prepared(value: unknown): value is GitHubReleasePrepared {
   if (!keys(value, ['target', 'sourceSha', 'sourceTree', 'workflowId', 'workflowPath', 'callerSha256', 'observedAt', 'expectedRef',
       'displayTitle', 'configSha256', 'versionSource', 'versionSha256', 'currentVersion', 'destination', 'checklist', 'environment', 'confirmation', 'originalAssurance'])
       || !keys(value.target, ['projectBinding', 'repository', 'accountId', 'repositoryId', 'branch', 'toolingRepository', 'toolingSha', 'platform', 'marker', 'selection'])
-      || !githubReleaseSelection(value.target.selection) || !version(value.currentVersion)
+      || !githubReleaseSelection(value.target.selection, value.target.platform) || !version(value.currentVersion)
       || !keys(value.destination, ['applicationId', 'destination', 'assurance']) || !Array.isArray(value.checklist) || value.checklist.length > 16) return false;
   const t = value.target, selected = value.target.selection, original = selected.originalVersion ?? value.currentVersion;
   const names = new Set<string>();
@@ -177,7 +195,7 @@ export function githubReleaseRequestFits(command: GitHubReleaseCommand, value: u
     else if (command !== 'github_release_pending') return false;
     if (!keys(value, names) || !opaqueId(value.sessionId) || !revision(value.expectedRevision)) return false;
     switch (command) {
-      case 'github_release_prepare': return revision(value.expectedConnectionRevision) && githubReleaseBranch(value.branch) && oneOf(value.platform, ['android', 'ios']) && githubReleaseSelection(value.selection);
+      case 'github_release_prepare': return revision(value.expectedConnectionRevision) && githubReleaseBranch(value.branch) && oneOf(value.platform, ['android', 'ios']) && githubReleaseSelection(value.selection, value.platform);
       case 'github_release_dispatch': return hex(value.consentId, 32) && value.confirm === true && plain(value.confirmation, 160);
       case 'github_release_track': case 'github_release_reconcile': return hex(value.marker, 32);
       case 'github_release_pending': return true;

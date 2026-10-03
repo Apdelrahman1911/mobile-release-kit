@@ -7,6 +7,7 @@ export interface GitHubReleaseVersion { name: string; build: number }
 export interface GitHubReleaseSelection {
   stage: GitHubReleaseStage; candidateRunId: string | null; externalRunId: string | null; recoveryRunId: string | null;
   originalSourceSha: string | null; originalVersion: GitHubReleaseVersion | null;
+  recoveryConfirmation?: string; // Omitted when absent, preserving original pending-record bytes.
 }
 export type GitHubReleaseKind = 'prepare' | 'dispatch' | 'track' | 'reconcile' | 'pending';
 export type GitHubReleaseReason = 'none' | 'unqualified' | 'publisher-unconfigured' | 'not-connected' | 'busy' |
@@ -61,5 +62,6 @@ export interface GitHubReleaseView {
   branch: string; platform: GitHubReleasePlatform | null; stage: GitHubReleaseStage | null; recovery: boolean;
   candidateRunId: string; externalRunId: string; recoveryRunId: string; originalSourceSha: string;
   originalVersionName: string; originalVersionBuild: string; confirmation: string; confirmed: boolean;
+  recoveryConfirmation: string; recoveryConfirmationRejected: boolean;
   pending: boolean; observing: boolean; cancelling: boolean; uncertain: boolean; error: GitHubReleaseReason | null;
 }

@@ -54,14 +54,16 @@ impl Descriptor {
         StoredRef { identity, record: self.authenticated.record, revision: self.authenticated.revision, original: self.original }
     }
 }
-// Fixed inline cells: no growing decrypted cache. These are retained only by
-// explicit final Bind, never Save or Unlock. Arc duplicates share the original
-// charged backing; every census and retirement visitor below follows them.
+// Fixed eight-slot table, not a growing decrypted cache. Empty holders are
+// pointer-sized; each present Box pointee is charged before final Bind and
+// remains charged while moved through replacement/retirement. The shared Arc
+// backing is still deduplicated by the existing document censuses.
 const BOUND_LOAN_LIMIT: usize = 8;
 pub(super) struct BoundLoan {
     pub(super) context: Arc<NativeContext>, pub(super) payload: Arc<Payload>, reference: StoredRef,
     pub(super) store: Arc<Mutex<store::StoreBook>>, pub(super) key: Arc<crypto::VaultKey>,
 }
+pub(super) const BOUND_LOAN_BYTES: usize = std::mem::size_of::<BoundLoan>();
 impl BoundLoan {
     fn current(&self, state: &DocumentState, session: &Session) -> bool {
         !state.session && !state.stopping && !state.unknown && !state.exhausted && !state.lock_pending
@@ -84,7 +86,7 @@ pub(super) struct Session {
     store: Arc<Mutex<store::StoreBook>>, root: Option<store::RootWitness>, header: Option<[u8; format::HEADER_BYTES]>,
     identity: Option<format::Identity>, key: Option<Arc<crypto::VaultKey>>, rows: Vec<Descriptor>, inventory: Vec<format::Id>,
     state: State, reason: Reason, revoked: bool, read_only: bool, registry_generation: u32, release_end: Option<Instant>,
-    pub(super) bound: [Option<BoundLoan>; BOUND_LOAN_LIMIT],
+    pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT],
 }
 impl Session {
     fn new(store: Arc<Mutex<store::StoreBook>>, generation: u32) -> Self {
@@ -99,6 +101,9 @@ impl Session {
             .checked_add(self.inventory.capacity().checked_mul(std::mem::size_of::<format::Id>())?)?;
         for row in &self.rows { total = total.checked_add(row.authenticated.descriptor.retained_bytes().ok()?)?; }
         if let Some(root) = &self.root { total = total.checked_add(root.retained_bytes()?)?; }
+        // Direct data_bytes consumers also need these actual pointees, not
+        // merely the inline Box handles. Shared Arc backing is visited apart.
+        total = total.checked_add(self.bound.iter().flatten().count().checked_mul(BOUND_LOAN_BYTES)?)?;
         Some(total)
     }
     pub(super) fn store(&self) -> &Arc<Mutex<store::StoreBook>> { &self.store }
@@ -123,7 +128,7 @@ pub(super) struct Work {
 pub(super) struct Retired {
     pub(super) session: Option<Session>, pub(super) keys: [Option<Arc<crypto::VaultKey>>; 2],
     pub(super) loaded: Option<Arc<Payload>>, label: Option<String>, rows: Vec<Descriptor>,
-    pub(super) bound: [Option<BoundLoan>; BOUND_LOAN_LIMIT], pub(super) previous_bound: Option<BoundLoan>,
+    pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT], pub(super) previous_bound: Option<Box<BoundLoan>>,
 }
 impl Retired {
     pub(super) fn empty(&self) -> bool {
@@ -131,7 +136,9 @@ impl Retired {
             && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none()
     }
     pub(super) fn data_bytes(&self) -> Option<usize> {
-        std::mem::size_of::<Self>().checked_add(self.label.as_ref().map_or(0, String::capacity))?.checked_add(rows_bytes(&self.rows)?)
+        std::mem::size_of::<Self>().checked_add(self.label.as_ref().map_or(0, String::capacity))?.checked_add(rows_bytes(&self.rows)?)?
+            .checked_add(self.bound.iter().flatten().count().checked_mul(BOUND_LOAN_BYTES)?)?
+            .checked_add(if self.previous_bound.is_some() { BOUND_LOAN_BYTES } else { 0 })
     }
 }
 impl Work {
@@ -147,7 +154,7 @@ impl Work {
 #[derive(Default)]
 pub(super) struct SlotData {
     pub(super) label: Option<String>, pub(super) loaded: Option<Arc<Payload>>, reference: Option<StoredRef>,
-    pub(super) previous_bound: Option<BoundLoan>,
+    pub(super) previous_bound: Option<Box<BoundLoan>>,
     initialize: Option<format::Identity>, generation: Option<u32>, pub(super) lease: Option<Arc<Mutex<store::StoreBook>>>,
     outcome: Option<store::StorageOutcome>,
 }
@@ -394,6 +401,10 @@ pub(super) fn assigned_payload<'a>(state: &'a DocumentState, key: &RecordKey, ki
     session.bound.iter().flatten().find(|loan| loan.reference.matches(key) && loan.payload.kind == kind
         && Arc::ptr_eq(&loan.context, context) && loan.current(state, session)).map(|loan| &loan.payload)
 }
+fn bind_resident_fits(live: usize, assignment_bytes: usize) -> bool {
+    live.checked_add(assignment_bytes).and_then(|bytes| bytes.checked_add(BOUND_LOAN_BYTES))
+        .is_some_and(|bytes| bytes <= store::RESIDENT_BYTES)
+}
 // The caller reserves the assignment cell first, retains the document lock and
 // publishes the assignment immediately after this succeeds. No fallible action,
 // allocation or native IO occurs between the two publications.
@@ -432,15 +443,14 @@ pub(super) fn bind_payload(state: &mut DocumentState, slot: &mut Slot, assignmen
     }
     let index = session.bound.iter().position(|loan| loan.as_ref().is_some_and(|loan| loan.payload.kind == assignment.kind))
         .or_else(|| session.bound.iter().position(Option::is_none)).ok_or(Reason::Capacity)?;
-    // Temporary loaded bytes are not permission to grow permanent resident
-    // holdings. Include the caller-local assignment token; inline loan cells are
-    // already precharged in Session/Slot/Retired, and shared Arcs deduplicate.
+    // Include the caller-local assignment token AND the prospective new Box
+    // before allocating or moving loaded DATA. The old replacement is still
+    // retained/counted; its exact Box moves to previous_bound without refund.
     let live = lookup_memory::pending_slot_bytes(state, slot).map_err(|_| Reason::Capacity)?;
-    if live.checked_add(assignment.record_id.0.capacity()).is_none_or(|bytes| bytes > store::RESIDENT_BYTES) {
-        return Err(Reason::Capacity);
-    }
-    let loan = BoundLoan { context: context.clone(), reference, payload: slot.vault.loaded.take().expect("checked loaded original"),
-        store: session.store.clone(), key: key.clone() };
+    if !bind_resident_fits(live, assignment.record_id.0.capacity()) { return Err(Reason::Capacity); }
+    let loan = Box::new(BoundLoan { context: context.clone(), reference,
+        payload: slot.vault.loaded.take().expect("checked loaded original"),
+        store: session.store.clone(), key: key.clone() });
     let session = state.vault.as_mut().expect("checked same document vault");
     slot.vault.previous_bound = session.bound[index].replace(loan);
     Ok(())
@@ -1065,6 +1075,81 @@ mod tests {
             platform: Platform::Ios, stage: Stage::Candidate, purpose: Purpose::Signing }));
         state
     }
+    fn same_backing_loan(value: &BoundLoan) -> Box<BoundLoan> {
+        // Deliberately distinct DATA cells sharing the same four Arc originals.
+        // This is not a second published assignment or a native lifetime.
+        Box::new(BoundLoan { context: value.context.clone(), payload: value.payload.clone(), reference: value.reference,
+            store: value.store.clone(), key: value.key.clone() })
+    }
+    fn installation_loan_tally(state: &DocumentState) -> Option<usize> {
+        let result = installation_memory::tally_data(state);
+        if cfg!(all(feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu")) {
+            // Existing opaque Linux-shell fixture holdings deliberately refuse
+            // this census. Preserve that typed refusal, not a fake byte count.
+            assert_eq!(result, Err(Reason::Capacity)); None
+        } else { Some(result.unwrap()) }
+    }
+    #[test]
+    fn boxed_loan_cells_are_charged_once_each_while_arc_backing_deduplicates() {
+        let mut state = loan_state(); publish_loan_data(&mut state, Kind::GoogleWif, 3);
+        let owner = state.slot.as_ref().unwrap().owner.clone();
+        let single_data = state.vault.as_ref().unwrap().data_bytes().unwrap();
+        let first = state.vault.as_mut().unwrap().bound[0].take().unwrap();
+        assert_eq!(state.vault.as_ref().unwrap().data_bytes().unwrap(), single_data - BOUND_LOAN_BYTES);
+        state.vault.as_mut().unwrap().bound[0] = Some(first);
+        let lookup = live(&state, &owner);
+        let installation = installation_loan_tally(&state);
+        for index in 1..BOUND_LOAN_LIMIT {
+            let extra = same_backing_loan(state.vault.as_ref().unwrap().bound[0].as_deref().unwrap());
+            state.vault.as_mut().unwrap().bound[index] = Some(extra);
+            assert_eq!(state.vault.as_ref().unwrap().data_bytes().unwrap(), single_data + index * BOUND_LOAN_BYTES);
+            assert_eq!(live(&state, &owner), lookup + index * BOUND_LOAN_BYTES);
+            assert_eq!(installation_loan_tally(&state), installation.map(|bytes| bytes + index * BOUND_LOAN_BYTES));
+        }
+        let previous = same_backing_loan(state.vault.as_ref().unwrap().bound[0].as_deref().unwrap());
+        state.slot.as_mut().unwrap().vault.previous_bound = Some(previous);
+        assert_eq!(live(&state, &owner), lookup + BOUND_LOAN_LIMIT * BOUND_LOAN_BYTES);
+        assert_eq!(installation_loan_tally(&state), installation.map(|bytes| bytes + BOUND_LOAN_LIMIT * BOUND_LOAN_BYTES));
+        let mut retired = Retired::default(); let empty_retired = retired.data_bytes().unwrap();
+        retired.previous_bound = state.slot.as_mut().unwrap().vault.previous_bound.take();
+        for index in 0..BOUND_LOAN_LIMIT {
+            retired.bound[index] = state.vault.as_mut().unwrap().bound[index].take();
+            assert_eq!(retired.data_bytes().unwrap(), empty_retired + (index + 2) * BOUND_LOAN_BYTES);
+        }
+        assert_eq!(state.vault.as_ref().unwrap().data_bytes().unwrap(), single_data - BOUND_LOAN_BYTES);
+    }
+    #[test]
+    fn prospective_loan_pointee_preserves_resident_boundary_and_checked_overlap() {
+        let token = 32;
+        assert!(bind_resident_fits(store::RESIDENT_BYTES - BOUND_LOAN_BYTES - token, token));
+        assert!(!bind_resident_fits(store::RESIDENT_BYTES - BOUND_LOAN_BYTES - token + 1, token));
+        assert!(!bind_resident_fits(usize::MAX, 1));
+        assert!(!bind_resident_fits(0, usize::MAX));
+        assert_eq!(store::RESIDENT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(BOUND_LOAN_LIMIT, 8);
+    }
+    #[test]
+    fn refused_new_or_replacement_loan_keeps_loaded_and_original_box_unchanged() {
+        for replacement in [false, true] {
+            let mut state = loan_state();
+            if replacement { publish_loan_data(&mut state, Kind::GoogleWif, 3); }
+            let old = state.vault.as_ref().unwrap().bound[0].as_deref().map(std::ptr::from_ref);
+            drop(state.slot.take()); // Discard only the prior inert DATA fixture.
+            let (mut slot, mut assignment) = loan_slot(&mut state, Kind::GoogleWif, 4);
+            let loaded = slot.vault.loaded.as_ref().unwrap().clone();
+            let live = lookup_memory::pending_slot_bytes(&state, &slot).unwrap();
+            assert!(bind_resident_fits(live, assignment.record_id.0.capacity()));
+            // At most one64MiB public-token backing, discarded at each DATA
+            // iteration. No large bytes are filled and no native call occurs.
+            let mut token = String::with_capacity(store::RESIDENT_BYTES);
+            token.push_str(&assignment.record_id.0); assignment.record_id = Token(token);
+            assert_eq!(bind_payload(&mut state, &mut slot, &assignment), Err(Reason::Capacity));
+            assert!(Arc::ptr_eq(slot.vault.loaded.as_ref().unwrap(), &loaded));
+            assert!(slot.vault.previous_bound.is_none());
+            assert_eq!(state.vault.as_ref().unwrap().bound[0].as_deref().map(std::ptr::from_ref), old);
+        }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn explicit_vault_loans_supply_two_signing_inputs_and_preserve_actual_borrowed_backing_on_lock() {
         let mut state = loan_state();
@@ -1097,9 +1182,10 @@ mod tests {
     }
     #[test]
     fn bound_loan_publication_refuses_changed_lineage_or_unsettled_original_without_taking_payload() {
+        let kind = if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Kind::AppleP12 } else { Kind::GoogleWif };
         for changed in 0..8 {
             let mut state = loan_state(); drop(state.slot.take());
-            let (mut slot, assignment) = loan_slot(&mut state, Kind::AppleP12, 3);
+            let (mut slot, assignment) = loan_slot(&mut state, kind, 3);
             match changed {
                 0 => state.vault.as_mut().unwrap().rows[0].authenticated.revision.random = id(202),
                 1 => slot.vault.lease = Some(Arc::new(Mutex::new(store::StoreBook::new()))),
@@ -1117,9 +1203,12 @@ mod tests {
     }
     #[test]
     fn loan_currentness_rejects_equal_counter_replacement_new_context_registry_and_reassignment() {
+        let kind = if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Kind::AppleP12 } else { Kind::GoogleWif };
         for changed in 0..6 {
-            let mut state = loan_state(); let key = publish_loan_data(&mut state, Kind::AppleP12, 3);
+            let mut state = loan_state(); let key = publish_loan_data(&mut state, kind, 3);
             let native = state.context.as_ref().unwrap().clone();
+            assert!(assigned_payload(&state, &key, kind, &native).is_some());
+            assert!(assignment_available(&state, &state.assignments[0]));
             match changed {
                 0 => state.vault.as_mut().unwrap().rows[0].authenticated.revision.random = id(202),
                 1 => state.context = Some(context_data()),
@@ -1128,7 +1217,7 @@ mod tests {
                 4 => state.assignments[0].availability = AssignmentAvailability::Unavailable,
                 _ => state.vault.as_mut().unwrap().revoked = true,
             }
-            assert!(assigned_payload(&state, &key, Kind::AppleP12, &native).is_none(), "changed={changed}");
+            assert!(assigned_payload(&state, &key, kind, &native).is_none(), "changed={changed}");
             assert!(!assignment_available(&state, &state.assignments[0]));
         }
     }
@@ -1140,13 +1229,16 @@ mod tests {
         publish_loan_data(&mut state, Kind::GoogleWif, 4);
         assert_eq!(state.vault.as_ref().unwrap().bound.iter().flatten().count(), 1);
         let owner = state.slot.as_ref().unwrap().owner.clone(); let before = live(&state, &owner);
+        let original_box = std::ptr::from_ref(state.slot.as_ref().unwrap().vault.previous_bound.as_deref().unwrap());
         let mut slot = state.slot.take().unwrap();
         let retired = take_retirement(&mut state, &mut slot);
-        assert!(retired.previous_bound.is_some());
+        assert_eq!(retired.previous_bound.as_deref().map(std::ptr::from_ref), Some(original_box));
         restore_retirement(&mut state, &mut slot, retired); state.slot = Some(slot);
+        assert_eq!(state.slot.as_ref().unwrap().vault.previous_bound.as_deref().map(std::ptr::from_ref), Some(original_box));
         assert_eq!(live(&state, &owner), before);
         let mut slot = state.slot.take().unwrap(); let retired = take_retirement(&mut state, &mut slot);
         owner.retain_retirement(Retirement { vault: retired, ..Retirement::default() }).ok().unwrap(); state.slot = Some(slot);
+        assert_eq!(owner.retirement.lock().unwrap().vault.previous_bound.as_deref().map(std::ptr::from_ref), Some(original_box));
         assert_eq!(live(&state, &owner), before); assert!(original.upgrade().is_some());
         assert!(owner.release_retirement()); assert!(original.upgrade().is_none());
         assert!(live(&state, &owner) < before);

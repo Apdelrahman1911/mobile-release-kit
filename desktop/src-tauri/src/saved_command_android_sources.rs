@@ -2,22 +2,85 @@
 //! Registry stores the SAME OriginalWork, not a second native or cleanup owner.
 use super::*;
 use crate::{android_tool_sources as wire, asset_session::OriginalWork};
-use std::collections::BTreeMap;
+
+/// Exactly the existing three public roles, with no heap-node census guess.
+struct SelectedSet([(wire::Role, Option<Selected>); 3]);
+impl SelectedSet {
+    fn new() -> Self { Self([(wire::Role::Jdk, None), (wire::Role::Sdk, None), (wire::Role::Gradle, None)]) }
+    fn iter(&self) -> impl Iterator<Item = (&wire::Role, &Selected)> {
+        self.0.iter().filter_map(|(role, value)| value.as_ref().map(|value| (role, value)))
+    }
+    fn get(&self, role: wire::Role) -> Option<&Selected> { self.0.iter().find(|(key, _)| *key == role)?.1.as_ref() }
+    fn is_empty(&self) -> bool { self.0.iter().all(|(_, value)| value.is_none()) }
+    fn clear(&mut self) { for (_, value) in &mut self.0 { *value = None; } }
+    fn insert(&mut self, role: wire::Role, selected: Selected) {
+        let index = match role { wire::Role::Jdk => 0, wire::Role::Sdk => 1, wire::Role::Gradle => 2 };
+        self.0[index].1 = Some(selected);
+    }
+}
+/// Non-Serialize comparison/provenance snapshot, constructed only from the
+/// owner's SAME selected roots and picker originals under its short lock.
+pub(crate) struct SourceSnapshot {
+    pub(super) project_id: String, pub(super) registration: u32,
+    pub(super) project: RegisteredRoot, pub(super) generation: u32,
+    roots: [RegisteredRoot; 3], originals: [Arc<OriginalWork>; 3],
+}
+impl SourceSnapshot {
+    pub(crate) fn picker_originals(&self) -> &[Arc<OriginalWork>; 3] { &self.originals }
+    pub(super) fn roots(&self) -> &[RegisteredRoot; 3] { &self.roots }
+    /// Caller MUST release Document AND Registry before this actual proof.
+    pub(crate) fn originals_settled(&self) -> bool {
+        self.originals.iter().all(|original| original.android_source_selected_settled())
+    }
+    pub(super) fn retained_bytes(&self) -> Option<usize> {
+        self.roots.iter().try_fold(std::mem::size_of::<Self>().checked_add(self.project_id.capacity())?
+            .checked_add(self.project.path.capacity())?, |sum, root| sum.checked_add(root.path.capacity()))
+    }
+}
 
 pub(super) struct Sources {
     generation: u32, capability: Option<Availability>, unknown: bool,
-    binding: Option<(String, u32, RegisteredRoot)>, selected: BTreeMap<wire::Role, Selected>,
+    binding: Option<(String, u32, RegisteredRoot)>, selected: SelectedSet,
     active: Option<Pick>, last: Option<wire::Operation>, phase: wire::Phase, reason: wire::Reason,
 }
 struct Selected { root: RegisteredRoot, original: Arc<OriginalWork> }
 struct Pick { original: Arc<OriginalWork>, operation: wire::Operation, first: Option<(wire::Reason, Instant)> }
 impl Default for Sources {
-    fn default() -> Self { Self { generation: 0, capability: None, unknown: false, binding: None, selected: BTreeMap::new(),
+    fn default() -> Self { Self { generation: 0, capability: None, unknown: false, binding: None, selected: SelectedSet::new(),
         active: None, last: None, phase: wire::Phase::Idle, reason: wire::Reason::NotInspected } }
 }
 impl Sources {
+    pub(super) fn snapshot(&self) -> Option<SourceSnapshot> {
+        if self.unknown || self.active.is_some() || self.generation == 0 { return None; }
+        let (project_id, registration, project) = self.binding.as_ref()?;
+        let jdk = self.selected.get(wire::Role::Jdk)?;
+        let sdk = self.selected.get(wire::Role::Sdk)?;
+        let gradle = self.selected.get(wire::Role::Gradle)?;
+        Some(SourceSnapshot { project_id: project_id.clone(), registration: *registration,
+            project: project.clone(), generation: self.generation,
+            roots: [jdk.root.clone(), sdk.root.clone(), gradle.root.clone()],
+            originals: [jdk.original.clone(), sdk.original.clone(), gradle.original.clone()] })
+    }
+    pub(super) fn same_snapshot(&self, snapshot: &SourceSnapshot) -> bool {
+        !self.unknown && self.active.is_none() && self.generation == snapshot.generation
+            && self.binding.as_ref().is_some_and(|(project_id, registration, project)|
+                project_id == &snapshot.project_id && *registration == snapshot.registration && project == &snapshot.project)
+            && [wire::Role::Jdk, wire::Role::Sdk, wire::Role::Gradle].into_iter().enumerate().all(|(index, role)|
+                self.selected.get(role).is_some_and(|selected| selected.root == snapshot.roots[index]
+                    && Arc::ptr_eq(&selected.original, &snapshot.originals[index])))
+    }
+    pub(super) fn retained_data_bytes(&self) -> Option<usize> {
+        // OriginalWork allocations are traversed through the Document's SAME
+        // external-picker census. Only this registry's own inline/path DATA here.
+        if self.unknown || self.active.is_some() { return None; }
+        let mut bytes = std::mem::size_of::<Self>();
+        if let Some((project_id, _, root)) = &self.binding {
+            bytes = bytes.checked_add(project_id.capacity())?.checked_add(root.path.capacity())?;
+        }
+        self.selected.iter().try_fold(bytes, |sum, (_, selected)| sum.checked_add(selected.root.path.capacity()))
+    }
     // The installation census cannot see these retained roots/original Arcs
-    // through DocumentState. Empty BTreeMap/None keep only fixed control DATA.
+    // through DocumentState. Empty fixed selection/None keep only control DATA.
     fn installation_custody_empty(&self) -> bool {
         !self.unknown && self.binding.is_none() && self.selected.is_empty() && self.active.is_none()
     }
@@ -67,10 +130,13 @@ impl SavedCommandOwner {
             && self.inner.registry.try_lock().is_ok_and(|registry| {
                 !registry.disabled && !registry.exhausted && !registry.stopping
                     && !registry.document_lost && registry.android_sources.installation_custody_empty()
+                    && registry.android_registration.installation_empty()
+                    && self.inner.android_registration_control.empty()
             })
     }
     fn android_sources_gate(&self, registry: &Registry, gate: Availability) -> Availability {
         if registry.disabled || registry.exhausted || registry.android_sources.unknown() || registry.android_catalog.unknown()
+            || registry.android_registration.unknown() || self.inner.android_registration_control.is_unknown()
             || self.inner.poisoned.load(Ordering::SeqCst) || gate == Availability::CleanupUnknown { return Availability::CleanupUnknown; }
         if registry.stopping || gate == Availability::Shutdown { return Availability::Shutdown; }
         if registry.document_lost || gate == Availability::DocumentLost { return Availability::DocumentLost; }
@@ -79,7 +145,8 @@ impl SavedCommandOwner {
         }
         if !self.inner.android_runtime_selected(None) { return Availability::RuntimeUnqualified; }
         if registry.active.is_some() || registry.prepared.is_some() || registry.android_catalog.busy()
-            || registry.android_sources.busy() || gate == Availability::Busy { return Availability::Busy; }
+            || registry.android_sources.busy() || registry.android_registration.busy()
+            || self.inner.android_registration_control.owns_work() || gate == Availability::Busy { return Availability::Busy; }
         gate
     }
     fn android_sources_snapshot(&self, registry: &mut Registry, gate: android_wire::Availability) -> Result<wire::Status, BridgeError> {
@@ -97,7 +164,12 @@ impl SavedCommandOwner {
     /// The Document has already installed this inert original behind closed GO.
     /// No worker starts until its caller drops Document AND Registry, then GO.
     pub(crate) fn admit_android_source_pick(&self, document: &Arc<()>, input: &wire::Choose,
-        registration: u32, project: RegisteredRoot, owner: Arc<OriginalWork>, gate: android_wire::Availability) -> Result<(), BridgeError> {
+        registration: u32, project: RegisteredRoot, owner: Arc<OriginalWork>,
+        publisher: &android_registration::Publisher, gate: android_wire::Availability) -> Result<(), BridgeError> {
+        if !publisher.accepted() || !publisher.same_slot(&self.inner.android_registration_control) {
+            self.inner.android_registration_control.poisoned(); return Err(BridgeError::cleanup_unknown());
+        }
+        let changed_at=publisher.at();
         let mut registry = self.inner.lock();
         if self.android_sources_gate(&registry, Availability::from_android(gate)) != Availability::Available
             || !self.inner.android_original_document_matches(Some(document)) || input.schema_version != 1
@@ -109,7 +181,8 @@ impl SavedCommandOwner {
         // These choices do not become a catalog selection. Any existing consent
         // must be deliberately prepared again after later tool registration.
         self.inner.retire_prepared(&mut registry, Reason::ContextChanged);
-        registry.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged, Instant::now());
+        registry.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged, changed_at);
+        registry.android_registration.stop(crate::android_registration_app_protocol::Reason::SourceChanged,changed_at);
         let sources = &mut registry.android_sources;
         if !sources.binding.as_ref().is_some_and(|(id, current, root)| id == &input.project_id && *current == registration && root == &project) {
             sources.selected.clear();
@@ -135,11 +208,16 @@ impl SavedCommandOwner {
     /// Called by the actual Document publication after its positive original
     /// coordinator/child/native closes. Recheck before taking Registry, avoiding
     /// any GUI/Registry inversion. A DTO can never construct ProjectProbe.
-    pub(crate) fn publish_android_source(&self, owner: &Arc<OriginalWork>, proof: crate::asset_source::ProjectProbe) -> Result<(), BridgeError> {
+    pub(crate) fn publish_android_source(&self, owner: &Arc<OriginalWork>, proof: crate::asset_source::ProjectProbe,
+        publisher: &android_registration::Publisher) -> Result<(), BridgeError> {
+        if !publisher.accepted() || !publisher.same_slot(&self.inner.android_registration_control) {
+            self.inner.android_registration_control.poisoned(); return Err(BridgeError::cleanup_unknown());
+        }
         if !owner.android_source_selected_settled() { return Err(BridgeError::cleanup_unknown()); }
         let mut registry = self.inner.lock();
-        if registry.disabled || registry.exhausted || registry.stopping || registry.document_lost
-            || registry.android_sources.unknown || !registry.android_sources.same_original(owner)
+        if self.inner.android_registration_control.is_unknown() || registry.disabled || registry.exhausted || registry.stopping || registry.document_lost
+            || registry.android_sources.unknown || registry.android_registration.unknown() || registry.android_registration.busy()
+            || !registry.android_sources.same_original(owner)
             || registry.android_sources.binding.is_none()
             || registry.android_sources.active.as_ref().is_some_and(|pick| pick.first.is_some()) { return Err(wire::unavailable()); }
         let pick = registry.android_sources.active.take().ok_or_else(wire::unavailable)?;

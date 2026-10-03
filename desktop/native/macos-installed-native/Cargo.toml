@@ -12,6 +12,8 @@ default = []
 installed-observation = []
 # Only the separate fixed helper Cargo graph selects this role.
 vault-helper = []
+# Separate fixed protected Android registration service; never a UI/vault role.
+android-registration-helper = []
 
 [build-dependencies]
 cc = "=1.4.6"

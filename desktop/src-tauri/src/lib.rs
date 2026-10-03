@@ -26,7 +26,35 @@ mod ios_toolchain;
 mod android_toolchain;
 mod android_toolchain_catalog;
 mod android_tool_sources;
+mod android_registration_protocol;
+mod android_registration_app_protocol;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod android_shared_lease_macos;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+mod android_catalog_query_client;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]
+mod android_catalog_query_helper;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]
+mod android_registration_publisher;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]
+pub mod android_registration_helper;
+#[cfg(all(feature = "macos-android-registration-helper", any(
+    not(all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell", feature = "custom-protocol",
+    feature = "development-runtime", feature = "ubuntu-runtime-publisher", feature = "windows-runtime-publisher",
+    feature = "macos-installed-installer", feature = "macos-installed-observation", feature = "windows-installed-observation"
+)))]
+compile_error!("Android registration helper requires its isolated headless Mac ARM64 Cargo role");
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const _: () = assert!(mrk_macos_installed_native::ANDROID_REGISTRATION_HELPER_BUILD == cfg!(feature = "macos-android-registration-helper"),
+    "ordinary app and separate Android helper Cargo roles must never feature-unify");
 mod android_toolchain_macos_policy;
+mod android_native_macos_profile;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+mod android_supplier_macos_source;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+mod android_sdk_metadata_macos;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+mod android_supplier_macos;
 mod saved_command_owner;
 pub mod runtime;
 // Pure fixed-layout DATA is also used by portable contract tests.

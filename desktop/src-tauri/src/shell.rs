@@ -339,6 +339,34 @@ async fn cancel_android_tool_source(webview: Webview, request: tauri::ipc::Reque
     state.document.cancel_android_tool_source(input)
 }
 #[tauri::command]
+async fn android_tool_registration_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_registration_app_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_registration_app_protocol::invalid())?;
+    crate::android_registration_app_protocol::status_request(android_registration_request_body(request.body())?)?;
+    state.document.android_tool_registration_status()
+}
+#[tauri::command]
+async fn inspect_android_tool_sources(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_registration_app_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_registration_app_protocol::invalid())?;
+    let input = crate::android_registration_app_protocol::Inspect::parse(android_registration_request_body(request.body())?)?;
+    state.document.inspect_android_tool_sources(input)
+}
+#[tauri::command]
+async fn register_android_tool_sources(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_registration_app_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_registration_app_protocol::invalid())?;
+    let input = crate::android_registration_app_protocol::Register::parse(android_registration_request_body(request.body())?)?;
+    state.document.register_android_tool_sources(input)
+}
+#[tauri::command]
+async fn cancel_android_tool_registration(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_registration_app_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_registration_app_protocol::invalid())?;
+    let input = crate::android_registration_app_protocol::Cancel::parse(android_registration_request_body(request.body())?)?;
+    state.document.cancel_android_tool_registration(input)
+}
+#[tauri::command]
 async fn android_toolchain_catalog_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
@@ -626,6 +654,13 @@ fn android_sources_request_body(body: &tauri::ipc::InvokeBody) -> Result<&[u8], 
         _ => Err(crate::android_tool_sources::invalid()),
     }
 }
+fn android_registration_request_body(body: &tauri::ipc::InvokeBody) -> Result<&[u8], BridgeError> {
+    match body {
+        // Raw bytes preserve duplicate-key evidence and the native request cap.
+        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= crate::android_registration_app_protocol::REQUEST_LIMIT => Ok(bytes),
+        _ => Err(crate::android_registration_app_protocol::invalid()),
+    }
+}
 fn android_catalog_request_body(body: &tauri::ipc::InvokeBody) -> Result<&[u8], BridgeError> {
     match body {
         // Native duplicate-key and original-byte bounds precede DTO copying.
@@ -683,7 +718,7 @@ async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, st
     if let Some(q) = &state.observation { q.open_request(&args.project_id); }
     // The same real document gate checks quit and retires saved consent/STOP
     // before checking idle. An outer idle-only gate would skip retirement.
-    let result = state.document.configuration_edit_admit(|bridge| bridge.open_config_edit(window, args.project_id));
+    let result = state.document.configuration_edit_admit_published(|bridge, publisher| bridge.open_config_edit_published(publisher, window, args.project_id));
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.open_result(&result, &state.bridge.edits); }
     result
@@ -695,7 +730,7 @@ async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>,
     let args = edit_commands::prepare(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.prepare_request(&args); }
-    let result = state.document.configuration_edit_admit(|bridge| bridge.edits.prepare(window, args));
+    let result = state.document.configuration_edit_admit_published(|bridge, publisher| bridge.edits.prepare_published(publisher, window, args));
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.prepare_result(&result, &state.bridge.edits); }
     result
@@ -707,7 +742,7 @@ async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, s
     let args = edit_commands::apply(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.apply_request(&args.session_id, &args.plan_token); }
-    let result = state.document.configuration_edit_admit(|bridge| bridge.edits.apply(window, &args.session_id, &args.plan_token));
+    let result = state.document.configuration_edit_admit_published(|bridge, publisher| bridge.edits.apply_published(publisher, window, &args.session_id, &args.plan_token));
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.apply_result(&result, &state.bridge.edits); }
     result
@@ -1529,6 +1564,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_build_revision = None;
         let mut android_catalog_revision = None;
         let mut android_sources_revision = None;
+        let mut android_registration_revision = None;
         let mut android_build_relay_failed = false;
         let mut ios_archive_revision = None;
         let mut ios_archive_relay_failed = false;
@@ -1655,6 +1691,19 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                         if android_sources_revision != Some(status.status_revision) {
                             android_sources_revision = Some(status.status_revision);
                             if app.emit_to(MAIN_WINDOW, crate::android_tool_sources::EVENT, &status).is_err() {
+                                android_build_relay_failed = true; document.android_build_relay_lost();
+                            }
+                        }
+                    },
+                    Err(_) => { android_build_relay_failed = true; document.android_build_relay_lost(); },
+                }
+            }
+            if !android_build_relay_failed {
+                match document.android_tool_registration_status() {
+                    Ok(status) => {
+                        if android_registration_revision != Some(status.status_revision) {
+                            android_registration_revision = Some(status.status_revision);
+                            if app.emit_to(MAIN_WINDOW, crate::android_registration_app_protocol::EVENT, &status).is_err() {
                                 android_build_relay_failed = true; document.android_build_relay_lost();
                             }
                         }
@@ -3126,6 +3175,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             prepare_android_build, start_android_build, android_build_status, cancel_android_build,
             android_toolchain_catalog_status, refresh_android_toolchain_catalog, select_android_toolchain, cancel_android_toolchain_catalog,
             android_tool_sources_status, choose_android_tool_source, cancel_android_tool_source,
+            android_tool_registration_status, inspect_android_tool_sources, register_android_tool_sources, cancel_android_tool_registration,
             prepare_project_recovery, start_project_recovery, project_recovery_status, cancel_project_recovery,
             prepare_ios_archive, start_ios_archive, ios_archive_status, cancel_ios_archive,
             validate_config, suggest_config, preview_config,

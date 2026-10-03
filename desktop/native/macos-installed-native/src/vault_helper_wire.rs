@@ -152,6 +152,19 @@ impl ClockBridge {
         if end>=self.after {self.raw.checked_add(u64::try_from(end.duration_since(self.after).as_nanos()).ok()?)}
         else {self.raw.checked_sub(u64::try_from(self.after.duration_since(end).as_nanos()).ok()?).filter(|v|*v!=0)}
     }
+    /// Pure inverse lower bound from this same original bracket. Query admission
+    /// must separately authenticate origin<=event<=observed raw now and reject
+    /// clock regression. This method alone grants NO admission/clock authority.
+    /// Unlike failure_bound, admission-inclusive F may predate the bracket.
+    /// No uptime call, last mutation, new bracket or post-close native call.
+    pub fn earlier_instant_data(&self,event:u64)->Option<Instant> {
+        if event==0 { return None; }
+        if event>=self.raw {
+            self.before.checked_add(Duration::from_nanos(event-self.raw))
+        } else {
+            self.before.checked_sub(Duration::from_nanos(self.raw-event))
+        }
+    }
     fn local_failure_bound(&self,event:Instant,observed:Instant,raw_now:u64)->Option<u64>{
         if event<self.after || event>observed || observed<self.after || raw_now<self.last{return None;}
         let bound=self.earlier_endpoint(event)?;
@@ -210,5 +223,30 @@ mod tests {
         assert_eq!(bridge.endpoint(after+Duration::from_nanos(10)),Some(110));
         assert_eq!(bridge.earlier_endpoint(before),Some(95));
         let near=ClockBridge{raw:u64::MAX,..bridge};assert_eq!(near.endpoint(after+Duration::from_nanos(1)),None);
+    }
+}
+
+
+#[cfg(test)]
+mod query_clock_data_tests {
+    use super::*;
+    #[test]
+    fn admission_inclusive_inverse_is_pure_checked_and_keeps_pre_bracket_failure() {
+        let before=Instant::now();
+        let bridge=ClockBridge { before,after:before+Duration::from_nanos(7),raw:100,last:111 };
+        assert_eq!(bridge.earlier_instant_data(99),before.checked_sub(Duration::from_nanos(1)));
+        assert_eq!(bridge.earlier_instant_data(100),Some(before));
+        assert_eq!(bridge.earlier_instant_data(107),before.checked_add(Duration::from_nanos(7)));
+        assert_eq!(bridge.earlier_instant_data(0),None);
+        assert_eq!(bridge.last,111); // no native read or mutable clock observation
+        assert!(bridge.earlier_instant_data(99).is_none_or(|event|event<before));
+        // Boundary arithmetic uses checked Instant operations, including hosts
+        // whose Instant representation refuses a very old result.
+        let edge=ClockBridge { before,after:before,raw:u64::MAX,last:u64::MAX };
+        assert_eq!(edge.earlier_instant_data(1),
+            before.checked_sub(Duration::from_nanos(u64::MAX-1)));
+        let small=ClockBridge { before,after:before,raw:1,last:1 };
+        assert_eq!(small.earlier_instant_data(u64::MAX),
+            before.checked_add(Duration::from_nanos(u64::MAX-1),));
     }
 }

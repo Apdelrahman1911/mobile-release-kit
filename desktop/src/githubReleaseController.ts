@@ -2,9 +2,9 @@
 // durable intent, the one POST, and original-worker finality. No automatic
 // network polling/retry, replacement owner, or browser fallback lives here.
 import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
-import { sameConnectionData } from './githubConnectionProtocol.ts';
-import { GITHUB_RELEASE_REASON_HELP, githubReleaseBranch, githubReleaseError,
-  parseGitHubReleaseStatus, githubReleaseSelection } from './githubReleaseProtocol.ts';
+import { connectionNumericId, sameConnectionData } from './githubConnectionProtocol.ts';
+import { GITHUB_RELEASE_REASON_HELP, GITHUB_RELEASE_RECOVERY_CONFIRMATION_MAX_BYTES, githubReleaseBranch, githubReleaseError,
+  parseGitHubReleaseStatus, githubReleaseRecoveryConfirmation, githubReleaseSelection } from './githubReleaseProtocol.ts';
 import type { GitHubReleaseApi, GitHubReleaseKind, GitHubReleasePlatform, GitHubReleasePrepared,
   GitHubReleaseReason, GitHubReleaseRecord, GitHubReleaseStatus, GitHubReleaseView, GitHubReleaseSelection, GitHubReleaseStage } from './githubReleaseTypes.ts';
 
@@ -58,7 +58,7 @@ function progress(old: GitHubReleaseStatus, next: GitHubReleaseStatus): boolean 
 
 export class GitHubReleaseController {
   private state: GitHubReleaseView = freeze({ mode: 'unavailable', status: null, branch: '', platform: null, stage: null, recovery: false, candidateRunId: '', externalRunId: '', recoveryRunId: '', originalSourceSha: '', originalVersionName: '', originalVersionBuild: '', confirmation: '',
-    confirmed: false, pending: false, observing: false, cancelling: false, uncertain: false, error: null });
+    recoveryConfirmation: '', recoveryConfirmationRejected: false, confirmed: false, pending: false, observing: false, cancelling: false, uncertain: false, error: null });
   private listeners = new Set<() => void>();
   private api: Port | null = null;
   private observer: Observer | null = null;
@@ -90,25 +90,36 @@ export class GitHubReleaseController {
     const next = context(this.connection());
     if (!sameConnectionData(this.current, next)) {
       this.current = next;
-      this.invalidate({ branch: '', platform: null, stage: null, recovery: false, candidateRunId: '', externalRunId: '', recoveryRunId: '', originalSourceSha: '', originalVersionName: '', originalVersionBuild: '', error: this.pending ? 'target-changed' : null });
+      this.invalidate({ branch: '', platform: null, stage: null, recovery: false, candidateRunId: '', externalRunId: '', recoveryRunId: '', originalSourceSha: '', originalVersionName: '', originalVersionBuild: '', recoveryConfirmation: '', recoveryConfirmationRejected: false, error: this.pending ? 'target-changed' : null });
     }
   };
   setBranch(value: string): void {
     if (this.disposed || typeof value !== 'string' || value.length > 200 || value === this.state.branch) return;
-    this.invalidate({ branch: value, error: null });
+    this.invalidate({ branch: value, recoveryConfirmation: '', recoveryConfirmationRejected: false, error: null });
   }
   setPlatform(value: GitHubReleasePlatform | null): void {
     if (this.disposed || value !== null && !['android', 'ios'].includes(value) || value === this.state.platform) return;
-    this.invalidate({ platform: value, error: null });
+    this.invalidate({ platform: value, recoveryConfirmation: '', recoveryConfirmationRejected: false, error: null });
   }
   setStage(value: GitHubReleaseStage | null): void {
     if (this.disposed || value !== null && !['candidate', 'external-testing', 'production-submit'].includes(value) || value === this.state.stage) return;
-    this.invalidate({ stage: value, error: null });
+    this.invalidate({ stage: value, recoveryConfirmation: '', recoveryConfirmationRejected: false, error: null });
   }
-  setRecovery(value: boolean): void { if (this.state.recovery !== value) this.invalidate({ recovery: value === true, error: null }); }
+  setRecovery(value: boolean): void { if (this.state.recovery !== value) this.invalidate({ recovery: value === true, recoveryConfirmation: '', recoveryConfirmationRejected: false, error: null }); }
   setInput(name: 'candidateRunId' | 'externalRunId' | 'recoveryRunId' | 'originalSourceSha' | 'originalVersionName' | 'originalVersionBuild', value: string): void {
     if (this.disposed || typeof value !== 'string' || value.length > 64 || value === this.state[name]) return;
-    this.invalidate({ [name]: value, error: null });
+    this.invalidate({ [name]: value, recoveryConfirmation: '', recoveryConfirmationRejected: false, error: null });
+  }
+  setRecoveryConfirmation(value: string): void {
+    if (this.disposed) return;
+    if (typeof value !== 'string' || value.length > GITHUB_RELEASE_RECOVERY_CONFIRMATION_MAX_BYTES
+        || new TextEncoder().encode(value).byteLength > GITHUB_RELEASE_RECOVERY_CONFIRMATION_MAX_BYTES) {
+      // Drop an over-bound draft, never truncate it or silently prepare without it.
+      this.invalidate({ recoveryConfirmation: '', recoveryConfirmationRejected: true, error: 'invalid-input' }); return;
+    }
+    if (value === this.state.recoveryConfirmation && !this.state.recoveryConfirmationRejected) return;
+    this.invalidate({ recoveryConfirmation: value, recoveryConfirmationRejected: false,
+      error: value === '' || githubReleaseRecoveryConfirmation(value, this.state.stage) ? null : 'invalid-input' });
   }
   setConfirmation(value: string): void {
     if (typeof value !== 'string' || value.length > 160) return;
@@ -116,15 +127,16 @@ export class GitHubReleaseController {
   }
   selection(): GitHubReleaseSelection | null {
     const s = this.state;
-    if (s.stage === null) return null;
+    if (s.stage === null || s.recoveryConfirmationRejected) return null;
     const original = s.stage !== 'candidate' || s.recovery;
     const selected = { stage: s.stage,
       candidateRunId: s.stage === 'candidate' ? null : s.candidateRunId || null,
       externalRunId: s.stage === 'production-submit' ? s.externalRunId || null : null,
       recoveryRunId: s.recovery ? s.recoveryRunId || null : null,
       originalSourceSha: original ? s.originalSourceSha : null,
-      originalVersion: original ? { name: s.originalVersionName, build: /^[1-9][0-9]{0,9}$/.test(s.originalVersionBuild) ? Number(s.originalVersionBuild) : 0 } : null };
-    return (!s.recovery || selected.recoveryRunId !== null) && githubReleaseSelection(selected) ? selected : null;
+      originalVersion: original ? { name: s.originalVersionName, build: /^[1-9][0-9]{0,9}$/.test(s.originalVersionBuild) ? Number(s.originalVersionBuild) : 0 } : null,
+      ...(s.recoveryConfirmation === '' ? {} : { recoveryConfirmation: s.recoveryConfirmation }) };
+    return (!s.recovery || selected.recoveryRunId !== null) && githubReleaseSelection(selected, s.platform) ? selected : null;
   }
   setConfirmed(value: boolean): void { this.update({ confirmed: value === true && this.currentPrepared() !== null }); }
   private needsOriginal(observer: Observer): boolean {
@@ -147,7 +159,7 @@ export class GitHubReleaseController {
   }
   async connect(api: Port | null): Promise<void> {
     if (this.disposed || this.api === api) return;
-    this.api = api; this.syncContext(); this.invalidate({ mode: api?.mode ?? 'unavailable' });
+    this.api = api; this.syncContext(); this.invalidate({ mode: api?.mode ?? 'unavailable', recoveryConfirmation: '', recoveryConfirmationRejected: false });
     await this.maintain()?.ready;
   }
   private async monitor(o: Observer): Promise<void> {
@@ -235,6 +247,9 @@ export class GitHubReleaseController {
   prepareReason(): string | null {
     return this.startReason() ?? (!githubReleaseBranch(this.state.branch) ? 'Enter an explicit branch name, such as main or release/next; no tags or refs/ prefix.' :
       this.state.platform === null ? 'Choose Android or iOS. Each review requests only one platform.' :
+      this.state.recoveryConfirmationRejected ? 'The additional Apple recovery confirmation was rejected, not shortened or treated as absent. Clear it explicitly or paste the complete supported text (at most 342 ASCII bytes).' :
+      this.state.recoveryConfirmation !== '' && (this.state.platform !== 'ios' || !this.state.recovery || !connectionNumericId(this.state.recoveryRunId)
+        || !githubReleaseRecoveryConfirmation(this.state.recoveryConfirmation, this.state.stage)) ? 'Use the exact additional Apple confirmation for this iOS recovery step and producer. Whitespace, newlines and unsupported forms are refused; the core authenticates its original intent and effects.' :
       this.selection() === null ? 'Choose a release step and supply its original version, source commit and evidence-producing run IDs where required.' : null);
   }
   dispatchReason(): string | null {
