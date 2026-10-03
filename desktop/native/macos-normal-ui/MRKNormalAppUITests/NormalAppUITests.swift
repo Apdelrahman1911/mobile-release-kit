@@ -1564,6 +1564,139 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
+    // One ordinary current diagnostics run, not full doctor or project-code execution.
+    // No new observer, IPC, app hook or fixture bytes; queries use shipped AX content.
+    @MainActor private func diagnosticsCoreReport(_ panel: XCUIElement) throws -> Int {
+        let texts = panel.staticTexts.allElementsBoundByIndex
+        try require(!texts.isEmpty && texts.count <= 256, "diagnostics accessible report exceeds its finite bound")
+        let starts = texts.indices.filter { texts[$0].label == "Core outcome" }
+        try require(starts.count == 1, "original core report anchor is missing or ambiguous")
+        let start = starts[0]
+        // Two presentation rows, then the nine immutable lifetime key/value rows.
+        // Never filter away unknown rows or combine text from another AX subtree.
+        try require(start + 22 <= texts.count, "original core report rows are incomplete")
+        let rows = texts[start..<(start + 22)].map { $0.label }
+        try require(rows.allSatisfy { $0.utf8.count <= 64 }, "core scalar presentation is not bounded")
+        try require(rows[0] == "Core outcome" && rows[1] == "complete" && rows[2] == "Commands attempted",
+                    "the actual core outcome is not a complete finite check")
+        guard let attempts = Int(rows[3]), (1...4).contains(attempts), rows[3] == String(attempts) else {
+            throw Refusal.condition("actual core command count is not one through four")
+        }
+        let expected = ["complete": "true", "fatal": "false", "contained": "true",
+                        "commandDispatched": "true", "commands": String(attempts), "inputClosed": "true",
+                        "handlersRestored": "true", "toolDescriptorsClosed": "true", "stopObserved": "none"]
+        var observed: [String: String] = [:]
+        for offset in stride(from: 4, to: 22, by: 2) {
+            try require(expected[rows[offset]] != nil && observed[rows[offset]] == nil,
+                        "original core lifetime row is foreign or repeated")
+            observed[rows[offset]] = rows[offset + 1]
+        }
+        try require(observed == expected, "immutable core lifetime observations are incomplete")
+        // These core facts are provisional on their own, never native finality.
+        return attempts
+    }
+
+    @MainActor func testSyntheticProjectBuildToolDiagnostics() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("diagnostics-launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary diagnostics launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("diagnostics-fixture") { try fixture.prepare() }
+        try stage("diagnostics-project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath)
+            try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "diagnostics project path is not exact")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        var panel: XCUIElement?
+        try stage("diagnostics-context") {
+            try press(renderer, "Environment", renderer: renderer)
+            try select(renderer, label: "Release platform", value: "Android", renderer: renderer)
+            try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer)
+            panel = try waitElement(named(renderer, "Observed build-tool checks")
+                .containing(.button, identifier: "Check build tools"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        guard let panel else { throw Refusal.condition("original diagnostics section is missing") }
+        let failures = ["Original finality or status integrity is unknown", "Diagnostics status needs attention",
+                        "Start reply unconfirmed", "Earlier / stale tool observations", "Phase: retained-unknown",
+                        "Outcome: partial", "Outcome: failed", "Outcome: cancelled", "Outcome: timed-out", "Outcome: unavailable"]
+        var commandsAttempted = 0
+        try stage("diagnostics-original-report") {
+            try require(panel.staticTexts.matching(identifier: "Tool observations from this run").count == 0
+                        && panel.staticTexts.matching(identifier: "Earlier / stale tool observations").count == 0,
+                        "a previous diagnostics report cannot supply this journey")
+            // Availability admits only the click. It is not a tool/core result.
+            let start = try waitElement(panel.buttons.matching(identifier: "Check build tools"), in: panel,
+                                        enabled: true, timeout: 10, failures: failures)
+            try reveal(start, in: renderer)
+            guard let wholeDeadline = journeyDeadline else { throw Refusal.condition("original journey clock missing") }
+            journeyDeadline = min(wholeDeadline, ProcessInfo.processInfo.systemUptime + 15)
+            defer { journeyDeadline = wholeDeadline } // Restore that SAME absolute outer deadline, never renew it.
+            start.click() // The sole Start. Native work6/finality10 clocks are unchanged.
+            let fresh = panel.staticTexts.matching(identifier: "Tool observations from this run")
+            let phase = panel.staticTexts.matching(identifier: "Phase: settled")
+            let outcome = panel.staticTexts.matching(identifier: "Outcome: complete")
+            let finality = panel.staticTexts.matching(identifier: "Native finality: settled")
+            let context = panel.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH %@",
+                "Android / build · draft ", " · core host macos"))
+            let provenance = panel.staticTexts.matching(NSPredicate(format: "label ENDSWITH %@",
+                " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe."))
+            let failed = panel.staticTexts.matching(NSPredicate(format: "label IN %@", failures))
+            let targets: NSDictionary = ["fresh": fresh.element(boundBy: 0), "phase": phase.element(boundBy: 0),
+                "outcome": outcome.element(boundBy: 0), "finality": finality.element(boundBy: 0),
+                "context": context.element(boundBy: 0), "provenance": provenance.element(boundBy: 0),
+                "failed": failed.element(boundBy: 0)]
+            let ready = NSPredicate(format: "(fresh.exists == true AND phase.exists == true AND outcome.exists == true AND finality.exists == true AND context.exists == true AND provenance.exists == true) OR failed.exists == true")
+            try require(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: targets)],
+                                      timeout: try remaining(15)) == .completed && failed.count == 0,
+                        "original diagnostics report or native settlement was not confirmed")
+            for query in [fresh, phase, outcome, finality, context, provenance] {
+                _ = try unique(query, "current acknowledged diagnostics report is missing or ambiguous")
+            }
+            let originalContext = context.element(boundBy: 0).label
+            for label in ["macOS developer selection", "Git version", "Java runtime version", "Java compiler version"] {
+                _ = try unique(panel.staticTexts.matching(identifier: label), "fixed Android diagnostics card is missing or repeated")
+            }
+            try require(panel.staticTexts.matching(identifier: "Xcode version and build").count == 0,
+                        "this is the four-card Android roster, not an iOS Xcode qualification")
+            try expand(panel, prefix: "Core resource observations — provisional, not native finality", renderer: renderer)
+            _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
+            commandsAttempted = try diagnosticsCoreReport(panel)
+            _ = try remaining(15)
+            try require(failed.count == 0 && context.element(boundBy: 0).label == originalContext,
+                        "original report context changed during readback")
+            for query in [fresh, phase, outcome, finality, provenance] {
+                _ = try unique(query, "same original report did not remain current and settled")
+            }
+            // Missing/unselected/version-mismatch rows are observations, not failures.
+            // No all-tool compatibility, full doctor, SDK or release-readiness claim.
+            try fixture.assertUnchanged()
+        }
+        try stage("diagnostics-readback-and-quit") {
+            try require((1...4).contains(commandsAttempted), "no original core command count was observed")
+            try fixture.assertUnchanged()
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal diagnostics Quit unavailable")
+            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal diagnostics Quit did not reach notRunning")
+            normalQuitObserved = true
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        // This marker alone is NOT a test-count, POSIX-exit or native-resource receipt.
+        print("MRK_MACOS_NORMAL_DIAGNOSTICS_UI=ordinary-ui-observed-original-diagnostics-report-and-settled-projection;commandsAttempted=\(commandsAttempted);cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
     override func tearDown() async throws {
         var cleanupFailure: Error?
         do {

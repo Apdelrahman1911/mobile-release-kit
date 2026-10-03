@@ -623,6 +623,12 @@ jobs:
               "templates/workflows/mobile-candidate.yml",
               "templates/workflows/mobile-external-testing.yml",
               "templates/workflows/mobile-production-submit.yml",
+              "tests/desktop/test_macos_normal_diagnostics_source.py",
+              "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift",
+              "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json",
+              "desktop/src/components/EnvironmentDiagnostics.tsx",
+              "desktop/src/environmentDiagnosticsController.ts",
+              "desktop/src-tauri/src/environment_diagnostics_owner.rs",
           )
           source_bodies = {}
           for name in source_names:
@@ -718,9 +724,11 @@ jobs:
               "test_github_release.GitHubReleasePolicyTests.test_selection_is_closed_original_data_never_current_version_substitution",
               "test_github_release.GitHubReleasePolicyTests.test_single_dispatch_latches_uncertainty_and_refuses_replacement_source",
               "test_github_release.GitHubReleasePolicyTests.test_original_attempt_observation_requires_stage_jobs_not_build_repetition",
+              "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection",
+              "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result",
           ]
-          if len(names) != 79 or len(set(names)) != 79: raise ValueError("fixed selection")
-          if hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() != "81ca0c9325763f3aaf2a181e521d7b6adde06b7c0321eecacfc2b93a78c3c051":
+          if len(names) != 81 or len(set(names)) != 81: raise ValueError("fixed selection")
+          if hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() != "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4":
               raise ValueError("fixed selected IDs digest")
           data = root / "data-contracts"
           os.mkdir(data, 0o700)
@@ -752,17 +760,18 @@ jobs:
               module, cls, method = name.split(".")
               if module not in ("test_workflow_transaction_profile", "test_candidate_evidence", "test_lifecycle_evidence",
                                 "test_metadata_images_edit", "test_metadata_images_recovery",
-                                "test_github_preflight_frames", "test_github_preflight", "test_github_release") or not method.startswith("test_"):
+                                "test_github_preflight_frames", "test_github_preflight", "test_github_release",
+                                "test_macos_normal_diagnostics_source") or not method.startswith("test_"):
                   raise ValueError("fixed selected method required")
               suite.addTest(getattr(importlib.import_module(module), cls)(method))
-          if suite.countTestCases() != 79 or [case.id() for case in suite] != NAMES:
+          if suite.countTestCases() != 81 or [case.id() for case in suite] != NAMES:
               raise ValueError("exact original test IDs/count required")
           result = unittest.TextTestRunner(verbosity=2, failfast=False).run(suite)
           facts = {"testsRun": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
                    "skipped": len(result.skipped), "expectedFailures": len(result.expectedFailures),
                    "unexpectedSuccesses": len(result.unexpectedSuccesses), "testIds": NAMES, "actualHostBeforeAndAfter": bool(original_host())}
           print(json.dumps(facts, sort_keys=True, separators=(",", ":")), flush=True)
-          raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 79 and facts["actualHostBeforeAndAfter"]
+          raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 81 and facts["actualHostBeforeAndAfter"]
                            and not any(facts[key] for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")) else 1)
           '''
           receipt = {"schemaVersion": 1, "scope": "fixed-native-data-contracts-and-selected-host-python-regressions",
@@ -775,9 +784,9 @@ jobs:
                                        "MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256",
                                        "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_GITHUB_PREFLIGHT_TOOLING_SHA",
                                        "MRK_GITHUB_RELEASE_TOOLING_SHA", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR")},
-                     "pythonTestIds": names, "pythonExpectedCount": 79, "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
-                     "githubActionCount": 22,
-                     "frozenSelectionSha256": "81ca0c9325763f3aaf2a181e521d7b6adde06b7c0321eecacfc2b93a78c3c051",
+                     "pythonTestIds": names, "pythonExpectedCount": 81, "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
+                     "githubActionCount": 22, "normalDiagnosticsSourceCount": 2,
+                     "frozenSelectionSha256": "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4",
                      "aggregate": {"name": "observer_data_checks", "count": 1, "harness": False, "libtestCount": None,
                                    "sourceSha256": hashlib.sha256((start + aggregate).encode()).hexdigest(), "directSourceContractCalls": contract_calls},
                      "commands": [], "passed": False, "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
@@ -944,7 +953,7 @@ jobs:
                       receipt["artifact"]["originalClosed"] = True
                   else:
                       counts = json.loads(raw)
-                      if (counts.get("testsRun") != 79 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
+                      if (counts.get("testsRun") != 81 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
                               or any(type(counts.get(key)) is not int or counts[key] != 0
                                      for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"))):
                           raise ValueError("exact native Python original counts required")
@@ -971,7 +980,7 @@ jobs:
               receipt["failure"] = failure
               put("result.json", (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
           if failure is not None: raise SystemExit(1)
-          print("One native aggregate and 79 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
+          print("One native aggregate and 81 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
           PY_DATA_CONTRACTS
       - name: Assemble and ad-hoc sign the app only (never --deep or the runtime)
         timeout-minutes: 3
@@ -1988,6 +1997,256 @@ jobs:
           finally: os.close(fd)
           print("One ordinary synthetic persistence UI journey passed; restart, signing and all-worker finality remain unproved.")
           PY_PERSISTENCE_RESULT
+      - name: Observe one original build-tool diagnostics report through the ordinary Mac UI
+        id: normal_diagnostics_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success'
+        timeout-minutes: 7
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
+          set +e
+          ulimit -f 1048576
+          file_limit_status=$?
+          set -e
+          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-test-file-limit.status" || exit $?
+          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
+          set +e
+          "$MRK_PYTHON" -I -S -B - <<'PY_UI_FILE_BUDGET'
+          import json, os, resource
+          expected = 1024 * 1024 * 1024
+          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
+          source = os.environ["GITHUB_SHA"]
+          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
+              raise ValueError("ordinary XCTest file-budget source binding differs")
+          admitted = actual == (expected, expected)
+          value = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
+                   "sourceCommit": source, "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                   "phase": "diagnostics-test", "expectedBytes": expected, "softBytes": actual[0], "hardBytes": actual[1],
+                   "admitted": admitted, "nativeSuccessInferred": False, "serviceLimitsObserved": False,
+                   "productQualified": False}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 4096: raise ValueError("ordinary XCTest file-budget fact bound")
+          fd = os.open(os.path.join(os.environ["MRK_MACOS_WORK"], "normal-ui/diagnostics-test-file-budget.json"),
+                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as output:
+                  output.write(data); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          if not admitted:
+              raise ValueError("actual ordinary XCTest file allowance differs from the finite reviewed budget")
+          PY_UI_FILE_BUDGET
+          file_budget_status=$?
+          set -e
+          printf '%s\n' "$file_budget_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-test-file-budget.status" || exit $?
+          [[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
+          # One 300s journey, after the accepted persistence gate; outer ceiling420s.
+          set +e
+          clean /usr/bin/xcodebuild test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
+            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/diagnostics-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectBuildToolDiagnostics \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
+            -disableAutomaticPackageResolution \
+            > "$MRK_MACOS_WORK/normal-ui/diagnostics-test.log" 2>&1
+          test_status=$?
+          set -e
+          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-test.status"
+          # Never export the raw XCTest tail: do not publish arbitrary UI labels or host output.
+          # These finite stage/count facts are diagnostics, not test/finality receipts.
+          "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS_SAFE_FACTS'
+          import json, os, re, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"]) / "normal-ui"
+          path = root / "diagnostics-test.log"
+          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+          try:
+              before = os.fstat(fd)
+              if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                      or before.st_mode & 0o022 or not 0 <= before.st_size <= 16 * 1024 * 1024):
+                  raise ValueError("fixed UI diagnostic log shape refused")
+              offset = max(0, before.st_size - 262144)
+              os.lseek(fd, offset, os.SEEK_SET)
+              with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(262145)
+              identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                                    s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+              if (len(data) != before.st_size - offset or identity(before) != identity(os.fstat(fd))
+                      or identity(before) != identity(os.stat(path, follow_symlinks=False))):
+                  raise ValueError("fixed UI diagnostic log changed")
+          finally: os.close(fd)
+          stages = {"diagnostics-" + name for name in ("launch", "fixture", "project-open", "context", "original-report", "readback-and-quit")}
+          events = []
+          for raw in data.splitlines():
+              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]+);result=(started|passed|failed)(;laterStages=not-run)?", raw.strip())
+              if match and match[1].decode("ascii") in stages:
+                  events.append({"stage": match[1].decode("ascii"), "result": match[2].decode("ascii")})
+              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_QUERY=stage:([a-z0-9-]+);buttons:([0-9]{1,3});textFields:([0-9]{1,3});comboBoxes:([0-9]{1,3});sheets:([0-9]{1,2})", raw.strip())
+              if match and match[1].decode("ascii") in stages:
+                  counts = list(map(int, match.groups()[1:]))
+                  if all(value <= 256 for value in counts[:3]) and counts[3] <= 16:
+                      events.append({"stage": match[1].decode("ascii"), "roleCounts": counts})
+              if len(events) > 64: raise ValueError("fixed UI diagnostic event bound")
+          result = {"schemaVersion": 1, "scope": "normal-build-tool-check-ui-diagnostics-only",
+                    "sourceCommit": os.environ["GITHUB_SHA"], "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
+                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "boundedTailBytes": len(data), "originalLogBytes": before.st_size, "events": events,
+                    "nativeSuccessInferred": False, "rawTextExported": False}
+          fd = os.open(root / "diagnostics-safe-facts.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "w", closefd=False) as output:
+                  json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          PY_DIAGNOSTICS_SAFE_FACTS
+          [[ "$test_status" == 0 ]] || exit "$test_status"
+      - name: Bind the single diagnostics journey to original XCTest and the same ordinary package
+        id: normal_diagnostics_ui_result
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
+            --path "$MRK_MACOS_WORK/normal-ui/diagnostics-test.xcresult" --compact \
+            > "$MRK_MACOS_WORK/normal-ui/diagnostics-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/diagnostics-summary.stderr"
+          summary_status=$?
+          set -e
+          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-summary.status"
+          [[ "$summary_status" == 0 ]] || exit "$summary_status"
+          "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS_RESULT'
+          import hashlib, json, os, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          def read(path, limit):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                          or before.st_mode & 0o022 or not 0 <= before.st_size <= limit):
+                      raise ValueError("diagnostics result input shape refused")
+                  with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                  identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                                        s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                  if (len(data) != before.st_size or identity(before) != identity(os.fstat(fd))
+                          or identity(before) != identity(os.stat(path, follow_symlinks=False))):
+                      raise ValueError("diagnostics result input changed")
+                  return data
+              finally: os.close(fd)
+          def unique(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value: raise ValueError("duplicate result field")
+                  value[key] = item
+              return value
+          def document(path, limit=65536):
+              return json.loads(read(root / path, limit), object_pairs_hook=unique)
+          source = os.environ["GITHUB_SHA"]
+          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
+              raise ValueError("diagnostics result source binding differs")
+          preview = document("preview/PREVIEW.json")
+          if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != source
+                  or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                  or preview["platform"] != "macOS26-arm64" or preview["instrumented"] is not False
+                  or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
+              raise ValueError("diagnostics UI result is not bound to this original normal package")
+          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          prior_hashes = {}
+          for name, scope, test, passed in (
+                  ("result.json", "normal-app-launch-cancel-navigation-quit-ui-only", "testLaunchCancelAndQuit", "launchRenderCancelNavigationQuitUI"),
+                  ("project-result.json", "normal-app-project-config-workflows-text-version-images-ui", "testSyntheticProjectLocalEditsAndImages", "localProjectEditsAndImagesUI"),
+                  ("persistence-result.json", "normal-app-synthetic-persistent-credentials-ui", "testSyntheticPersistentCredentials", "syntheticPersistenceCRUDUI")):
+              raw = read(root / "normal-ui" / name, 65536)
+              prior = json.loads(raw, object_pairs_hook=unique)
+              if (prior["scope"] != scope or prior["applicationSourceCommit"] != source or prior["harnessSourceCommit"] != source
+                      or prior["sourceTree"] != preview["sourceTree"] or prior["runId"] != preview["runId"] or prior["runAttempt"] != preview["runAttempt"]
+                      or prior["packageSha256"] != preview["packageSha256"] or prior["signedAppBinarySha256"] != preview["signedAppBinarySha256"]
+                      or prior["runtimeManifestSha256"] != preview["runtimeManifestSha256"] or prior[passed] != "passed"
+                      or prior["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/" + test
+                      or any(type(prior["testCounts"].get(key)) is not int or prior["testCounts"][key] != value for key, value in expected.items())):
+                  raise ValueError("diagnostics journey requires the same original accepted basic/project/persistence gates")
+              prior_hashes[name] = hashlib.sha256(raw).hexdigest()
+          for name in ("build", "diagnostics-test-file-limit", "diagnostics-test-file-budget", "diagnostics-test", "diagnostics-summary"):
+              if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
+                  raise ValueError("original diagnostics native command or file guard did not pass")
+          budget_bytes = read(root / "normal-ui/diagnostics-test-file-budget.json", 4096)
+          budget = json.loads(budget_bytes, object_pairs_hook=unique)
+          expected_budget = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
+                             "sourceCommit": source, "workflowSourceCommit": source,
+                             "runId": preview["runId"], "runAttempt": preview["runAttempt"], "phase": "diagnostics-test",
+                             "expectedBytes": 1073741824, "softBytes": 1073741824, "hardBytes": 1073741824,
+                             "admitted": True, "nativeSuccessInferred": False, "serviceLimitsObserved": False, "productQualified": False}
+          if (type(budget) is not dict or set(budget) != set(expected_budget)
+                  or any(type(budget[key]) is not type(value) or budget[key] != value for key, value in expected_budget.items())):
+              raise ValueError("the actual original one-GiB diagnostics file-budget binding differs")
+          summary_bytes = read(root / "normal-ui/diagnostics-summary.raw.json", 262144)
+          summary = json.loads(summary_bytes, object_pairs_hook=unique)
+          if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
+              raise ValueError("exact one-pass, zero-failure/skip/expected-failure diagnostics XCTest result required")
+          # The sole source-fixed -only-testing selector and this original one-test result
+          # bind the in-test report assertions. Log markers alone never grant success.
+          facts_bytes = read(root / "normal-ui/diagnostics-safe-facts.json", 65536)
+          facts = json.loads(facts_bytes, object_pairs_hook=unique)
+          if (facts["scope"] != "normal-build-tool-check-ui-diagnostics-only" or facts["sourceCommit"] != source
+                  or facts["workflowSourceCommit"] != source or facts["runId"] != preview["runId"] or facts["runAttempt"] != preview["runAttempt"]
+                  or facts["nativeSuccessInferred"] is not False or facts["rawTextExported"] is not False):
+              raise ValueError("bounded diagnostics facts are not from this original invocation")
+          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
+                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
+          result = {"schemaVersion": 1, "scope": "ordinary-ui-observed-original-diagnostics-report-and-settled-projection",
+                    "applicationSourceCommit": source, "harnessSourceCommit": source, "sourceTree": preview["sourceTree"],
+                    "workflow": ".github/workflows/desktop-macos-installed.yml", "runId": preview["runId"], "runAttempt": preview["runAttempt"],
+                    "platform": preview["platform"], "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
+                    "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
+                    "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
+                    "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "originalCommandStatuses": {"sharedBuild": 0, "diagnosticsTestFileLimit": 0, "diagnosticsTestFileBudget": 0,
+                                                "diagnosticsTest": 0, "diagnosticsSummary": 0},
+                    "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectBuildToolDiagnostics", "testCounts": expected,
+                    "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(), "priorResultSha256": prior_hashes,
+                    "fileBudgetSha256": hashlib.sha256(budget_bytes).hexdigest(), "safeFactsSha256": hashlib.sha256(facts_bytes).hexdigest(),
+                    "diagnosticsReportAndSettledProjectionUI": "passed", "originalStartProvenance": "acknowledged-current-context",
+                    "diagnosticsPlatform": "android", "diagnosticsCoreHost": "macos", "coreOutcomeObserved": "complete",
+                    "coreCommandsAttemptedAssertion": "one-through-four", "nativeProjectionObserved": {"phase": "settled", "finality": "settled"},
+                    "applicationStateAfterNormalQuit": "notRunning", "cleanExitStatus": None,
+                    "allWorkerFinality": "not-established-by-XCTest-UI-state", "independentOwnerResourceProof": False,
+                    "fullDoctorExecuted": False, "offlinePreflightExecuted": False, "projectRecoveryExecuted": False,
+                    "allToolVersionsMatched": None, "releaseReadinessEstablished": False,
+                    "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+          data = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 65536: raise ValueError("closed diagnostics result exceeds its finite bound")
+          fd = os.open(root / "normal-ui/diagnostics-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as output:
+                  output.write(data); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          print("One ordinary original diagnostics report and settled projection observed; full doctor and independent all-worker finality remain unproved.")
+          PY_DIAGNOSTICS_RESULT
+
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
         if: always() && steps.work.outputs.root != ''
@@ -2050,6 +2309,13 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/project-summary.status
             ${{ steps.work.outputs.root }}/normal-ui/project-summary.stderr.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/project-result.json
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-limit.status
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-budget.status
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-budget.json
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-safe-facts.json
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-summary.status
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-result.json
             ${{ steps.work.outputs.root }}/package-format-input.json
             ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
             ${{ steps.work.outputs.root }}/package-format-prepare.json
@@ -2116,7 +2382,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -2150,7 +2416,7 @@ jobs:
                   or binding["frontendAbsentAtAdmission"] is not True or not shutil.rmtree.avoids_symlink_attacks):
               raise ValueError("task cleanup original refused")
           for path in (root / "cargo-target", root / "vault-helper-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
-                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/tmp",
+                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", root / "normal-ui/tmp",
                        root / "data-contracts/tmp"):
               try: selected = os.lstat(path)
               except FileNotFoundError: continue
@@ -2159,7 +2425,8 @@ jobs:
               shutil.rmtree(path)
           for name in ("build.log", "test.log", "summary.raw.json", "summary.stderr",
                        "persistence-test.log", "persistence-summary.raw.json", "persistence-summary.stderr",
-                       "project-test.log", "project-summary.raw.json", "project-summary.stderr"):
+                       "project-test.log", "project-summary.raw.json", "project-summary.stderr",
+                       "diagnostics-test.log", "diagnostics-summary.raw.json", "diagnostics-summary.stderr"):
               path = root / "normal-ui" / name
               try: selected = os.lstat(path)
               except FileNotFoundError: continue

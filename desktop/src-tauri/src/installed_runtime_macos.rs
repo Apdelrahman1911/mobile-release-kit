@@ -20,7 +20,7 @@ pub(crate) use android_tools::{AndroidToolchainSlots, AndroidCatalogSlots};
 mod android_leased;
 #[cfg(not(feature = "macos-android-registration-helper"))]
 pub(crate) use android_leased::{LeasedAndroidToolchainSlots, LeasedAndroidCatalogSlots,
-    CatalogMode, CatalogCandidate, RowCode, admission_issue as android_lease_admission_issue};
+    CatalogMode, CatalogCandidate, CatalogRow, RowCode, admission_issue as android_lease_admission_issue};
 #[path = "android_runtime_macos.rs"]
 mod android_runtime;
 pub(crate) use android_runtime::{AndroidBuildRuntimeSlots, AndroidBuildInstalledRuntime};
