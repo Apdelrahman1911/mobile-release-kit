@@ -22,6 +22,19 @@ root-owned path authentication. The entry links only system libSystem/dyld;
 `otool` rejects extra linked images, RPATH, dynamic-loader environment commands,
 routine commands and initializer sections before any launch observation.
 
+Darwin assigns new directories and files their parent directory's group, which
+need not be the runner's primary group. Before creating any child or running a
+tool, the adapter exclusively creates its private0700 root, opens that original
+without following links, and checks named/FD identity, owner and mode. Only on
+that just-created original may it select the runner's primary group with
+`fchown(fd, -1, gid)`; it then rechecks identity/ownership/mode and closes each
+original once. This is initial creation, **not** permission repair or adoption
+of an existing path. A collision, failed selection/proof or close error refuses.
+The empty, single-link0444 gate must independently match the same account before
+the first compiler/tool call. Bounded actual root/gate stat diagnostics are
+retained; they are not native ownership/finality receipts. Child directories,
+the gate and native records inherit the selected root group.
+
 ## Three observations, using the same entry image
 
 1. With the adapter's independently opened EX held, direct entry refuses before
@@ -101,3 +114,11 @@ question. Neither this AppKit probe nor Linux DATA tests qualify Tauri,
 credential-caller authentication, the production retained-entry layout, ten
 runtime constructor joins, the vault helper, 3/8-FD child transfers, provider
 re-entry, capacity accounting, update/remove or distribution.
+
+Apple's [`mkdir(2)`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mkdir.2.html)
+and [`open(2)`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/open.2.html)
+document parent-group inheritance. The original994188a run37084951661/1 returned
+65 at the entry's root admission, before any lock observation. Its artifact did
+not contain root stat fields, so the exact historical failed predicate remains
+unobserved. Correcting the preparation assumption does not convert that failure
+into a pass; a fresh native observation is required.

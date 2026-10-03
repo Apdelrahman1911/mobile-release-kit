@@ -166,6 +166,75 @@ def write_new(path, body, mode=0o600):
         os.close(fd)
 
 
+def fixture_stat(original):
+    """Bounded synthetic diagnostics, never a custody or finality receipt."""
+    return dict(zip(("device", "inode", "mode", "uid", "gid", "links", "bytes"), original[:7]))
+
+
+def prepare_work_root(work, uid, gid, diagnostics):
+    """Initialize only the newly created original; never adopt or repair."""
+    parent = created = None
+    failure = None
+    diagnostics.update(accountUid=uid, accountGid=gid, rootCreated=False,
+                       initialGroupSelected=False, rootPrepared=False, closeFailures=[])
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        diagnostics["stage"] = "parent-admission"
+        parent = os.open(work.parent, flags)
+        parent_original = signature(os.fstat(parent))
+        diagnostics["parent"] = fixture_stat(parent_original)
+        need(parent_original[2] == stat.S_IFDIR | 0o1777 and parent_original[3] == 0
+             and signature(os.stat(work.parent, follow_symlinks=False))[:5] == parent_original[:5],
+             "fixture-parent-original")
+        diagnostics["stage"] = "root-create"
+        os.mkdir(work.name, 0o700, dir_fd=parent)  # Occupied names always refuse.
+        diagnostics["rootCreated"] = True
+        created = os.open(work.name, flags, dir_fd=parent)
+        diagnostics["stage"] = "root-custody"
+        original = signature(os.fstat(created))
+        diagnostics["initialRoot"] = fixture_stat(original)
+        need(original[2] == stat.S_IFDIR | 0o700 and original[3] == uid
+             and signature(os.stat(work.name, dir_fd=parent, follow_symlinks=False)) == original,
+             "fixture-created-root-custody")
+        # Darwin inherits the parent directory's group, even without setgid.
+        # Select the group on this fresh private original before any children.
+        diagnostics["stage"] = "root-group-selection"
+        if original[4] != gid:
+            os.fchown(created, -1, gid)
+            diagnostics["initialGroupSelected"] = True
+        current = signature(os.fstat(created))
+        diagnostics["finalRoot"] = fixture_stat(current)
+        need(current[:4] == original[:4] and current[4] == gid and current[5:8] == original[5:8]
+             and (diagnostics["initialGroupSelected"] or current == original)
+             and signature(os.stat(work.name, dir_fd=parent, follow_symlinks=False)) == current,
+             "fixture-created-root-group")
+    except BaseException as error:
+        failure = error
+    finally:
+        # Each successful open has exactly one consuming close, even if the
+        # other close or an earlier operation failed. Never retry an FD number.
+        for label, fd in (("root", created), ("parent", parent)):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except BaseException:
+                    diagnostics["closeFailures"].append(label)
+                    if failure is None:
+                        failure = Refused("fixture-" + label + "-close")
+    if failure is not None:
+        raise failure
+    diagnostics.update(stage="root-prepared", rootPrepared=True)
+    return current[:5]  # Establish the cleanup original only after selection.
+
+
+def admit_gate(path, uid, gid, diagnostics):
+    body, original = read_file(path, 0)  # Original FD/name proof, no links or data.
+    diagnostics["gate"] = fixture_stat(original)
+    need(not body and original[2] == stat.S_IFREG | 0o444 and original[3:5] == (uid, gid)
+         and original[5:7] == (1, 0), "fixture-gate-shape-owner")
+    return original
+
+
 def tree(root):
     result, total = {}, 0
     for folder, dirs, files in os.walk(root, followlinks=False):
@@ -226,12 +295,14 @@ def main():
                       sourceFiles={k: {"bytes": v["bytes"], "sha256": v["sha256"]} for k, v in before.items()})
         os.umask(0o077)
         work = Path("/private/tmp") / f"mrk-macos-m2-entry-{sha}-{run}-{attempt}"
-        work.mkdir(mode=0o700)
-        work_original = signature(work.lstat())[:5]
+        report["stage"] = "fixture-root-preparation"
+        report["fixtureAdmission"] = {}
+        work_original = prepare_work_root(work, uid, gid, report["fixtureAdmission"])
         for name in ("build", "tmp", "app-tmp", "evidence"):
             (work / name).mkdir(mode=0o700)
         write_new(work / "maintenance-use.lock", b"", 0o444)
-        gate_original = signature((work / "maintenance-use.lock").lstat())
+        report["stage"] = "fixture-gate-admission"
+        gate_original = admit_gate(work / "maintenance-use.lock", uid, gid, report["fixtureAdmission"])
         suffix = f"{sha}-{run}-{attempt}"
         entry_id, payload_id = "dev.mobile-release-kit.m2-entry." + suffix, "dev.mobile-release-kit.m2-payload." + suffix
         header = (f"#define MRK_ROOT {json.dumps(str(work))}\n#define MRK_SOURCE {json.dumps(sha)}\n"
@@ -246,6 +317,7 @@ def main():
 
         def check_sources():
             need(snapshot(root, pins) == before, "source-changed")
+            need(signature(work.lstat())[:5] == work_original, "work-changed")
             need(signature((work / "maintenance-use.lock").lstat()) == gate_original, "gate-changed")
 
         def call(role, argv, timeout):
@@ -397,7 +469,8 @@ def main():
         except BaseException:
             return 1
     else:
-        print(json.dumps({"schemaVersion": 1, "feasibilityObserved": False, "stage": report["stage"], "error": report["error"]}, sort_keys=True))
+        print(json.dumps({"schemaVersion": 1, "feasibilityObserved": False, "stage": report["stage"],
+                          "error": report["error"], "fixtureAdmission": report.get("fixtureAdmission")}, sort_keys=True))
     return 0 if success else 1
 
 

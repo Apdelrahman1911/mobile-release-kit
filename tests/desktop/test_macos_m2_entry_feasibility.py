@@ -1,9 +1,13 @@
-"""DATA-only protocol regressions; no compile, launch, AppKit or process owner."""
+"""DATA/inert-FS regressions; no compile, launch, AppKit or process owner."""
+from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 @unittest.skipIf(sys.platform == "win32", "The hosted Mac DATA adapter imports POSIX APIs")
@@ -47,6 +51,171 @@ class M2EntryDataTests(unittest.TestCase):
 
     def parse(self, value):
         return self.adapter.native_data(self.wire(value), self.SOURCE)
+
+    @contextmanager
+    def created_root(self, gid=0):
+        """Replace every filesystem call; object tokens cannot name real FDs."""
+        adapter = self.adapter
+        parent, root = object(), object()
+        work = Path("/private/tmp/mrk-m2-inert-root")
+        def info(inode, mode, uid, group):
+            return dict(st_dev=7, st_ino=inode, st_mode=mode, st_uid=uid, st_gid=group,
+                        st_nlink=2, st_size=64, st_mtime_ns=100, st_ctime_ns=100)
+        state = SimpleNamespace(parent=info(1, stat.S_IFDIR | 0o1777, 0, 0),
+                                root=info(2, stat.S_IFDIR | 0o700, 501, gid),
+                                parent_named={}, root_named={}, events=[], closed=[],
+                                collision=False, group_error=False, group_unchanged=False,
+                                after_group_named={}, close_failures=set(), diagnostics={})
+
+        def opened(name, flags, *, dir_fd=None):
+            self.assertEqual(flags, adapter.os.O_RDONLY | adapter.os.O_DIRECTORY | adapter.os.O_NOFOLLOW
+                             | adapter.os.O_NONBLOCK | adapter.os.O_CLOEXEC)
+            if dir_fd is None:
+                self.assertEqual(name, work.parent)
+                state.events.append("open-parent")
+                return parent
+            self.assertIs(dir_fd, parent)
+            self.assertEqual(name, work.name)
+            state.events.append("open-root")
+            return root
+
+        def mkdir(name, mode, *, dir_fd):
+            self.assertEqual((name, mode), (work.name, 0o700))
+            self.assertIs(dir_fd, parent)
+            state.events.append("mkdir")
+            if state.collision:
+                raise FileExistsError("inert collision")
+
+        def fstat(fd):
+            self.assertIn(fd, (parent, root))
+            return SimpleNamespace(**(state.parent if fd is parent else state.root))
+
+        def named(name, *, follow_symlinks, dir_fd=None):
+            self.assertFalse(follow_symlinks)
+            if dir_fd is None:
+                self.assertEqual(name, work.parent)
+                return SimpleNamespace(**{**state.parent, **state.parent_named})
+            self.assertIs(dir_fd, parent)
+            self.assertEqual(name, work.name)
+            state.events.append("named-root")
+            return SimpleNamespace(**{**state.root, **state.root_named})
+
+        def chown(fd, uid, group):
+            self.assertIs(fd, root)
+            self.assertEqual((uid, group), (-1, 20))
+            state.events.append("select-group")
+            if state.group_error:
+                raise OSError("inert group failure")
+            if not state.group_unchanged:
+                state.root.update(st_gid=group, st_ctime_ns=101)
+            state.root_named.update(state.after_group_named)
+
+        def close(fd):
+            self.assertIn(fd, (parent, root))
+            self.assertNotIn(fd, state.closed)
+            state.closed.append(fd)
+            label = "root" if fd is root else "parent"
+            state.events.append("close-" + label)
+            if label in state.close_failures:
+                raise OSError("inert close failure")
+
+        with patch.object(adapter.os, "open", side_effect=opened), \
+                patch.object(adapter.os, "mkdir", side_effect=mkdir), \
+                patch.object(adapter.os, "fstat", side_effect=fstat), \
+                patch.object(adapter.os, "stat", side_effect=named), \
+                patch.object(adapter.os, "fchown", side_effect=chown), \
+                patch.object(adapter.os, "close", side_effect=close):
+            state.prepare = lambda: adapter.prepare_work_root(work, 501, 20, state.diagnostics)
+            yield state
+
+    def test_new_root_selects_inherited_group_before_establishing_original(self):
+        for inherited in (0, 20):
+            with self.subTest(inherited=inherited), self.created_root(inherited) as state:
+                original = state.prepare()
+                self.assertEqual(original, (7, 2, stat.S_IFDIR | 0o700, 501, 20))
+                self.assertEqual(state.events.count("select-group"), int(inherited != 20))
+                self.assertEqual(state.events[-2:], ["close-root", "close-parent"])
+                self.assertEqual(state.diagnostics["initialRoot"]["gid"], inherited)
+                self.assertEqual(state.diagnostics["finalRoot"]["gid"], 20)
+                self.assertTrue(state.diagnostics["rootPrepared"])
+                self.assertEqual(state.diagnostics["closeFailures"], [])
+                if inherited != 20:
+                    self.assertLess(state.events.index("named-root"), state.events.index("select-group"))
+
+    def test_occupied_or_unproved_root_never_selects_a_group(self):
+        cases = (("collision", None, None), ("parent", "st_mode", stat.S_IFDIR | 0o777),
+                 ("parent", "st_uid", 501), ("parent_named", "st_ino", 99),
+                 ("root", "st_uid", 502), ("root", "st_mode", stat.S_IFDIR | 0o750),
+                 ("root_named", "st_ino", 99), ("root_named", "st_ctime_ns", 101))
+        for target, field, value in cases:
+            with self.subTest(target=target, field=field), self.created_root() as state:
+                if target == "collision":
+                    state.collision = True
+                else:
+                    getattr(state, target)[field] = value
+                with self.assertRaises((self.adapter.Refused, FileExistsError)):
+                    state.prepare()
+                self.assertNotIn("select-group", state.events)
+                self.assertFalse(state.diagnostics["rootPrepared"])
+                self.assertEqual(state.events[-1], "close-parent")
+                if target in ("parent", "parent_named", "collision"):
+                    self.assertNotIn("open-root", state.events)
+
+    def test_group_change_or_named_postcondition_failure_cannot_prepare_root(self):
+        for case in ("group_error", "group_unchanged", "named-changed"):
+            with self.subTest(case=case), self.created_root() as state:
+                if case == "named-changed":
+                    state.after_group_named["st_ino"] = 99
+                else:
+                    setattr(state, case, True)
+                with self.assertRaises((self.adapter.Refused, OSError)):
+                    state.prepare()
+                self.assertFalse(state.diagnostics["rootPrepared"])
+                self.assertEqual(state.events[-2:], ["close-root", "close-parent"])
+                self.assertEqual(state.events.count("select-group"), 1)
+
+    def test_close_failures_are_collected_once_and_block_root_admission(self):
+        for failures in ({"root"}, {"parent"}, {"root", "parent"}):
+            with self.subTest(failures=failures), self.created_root() as state:
+                state.close_failures = failures
+                with self.assertRaisesRegex(self.adapter.Refused, "fixture-(root|parent)-close"):
+                    state.prepare()
+                self.assertFalse(state.diagnostics["rootPrepared"])
+                self.assertEqual(set(state.diagnostics["closeFailures"]), failures)
+                self.assertEqual(state.events[-2:], ["close-root", "close-parent"])
+        with self.created_root() as state:
+            state.group_error, state.close_failures = True, {"root"}
+            with self.assertRaisesRegex(OSError, "inert group failure"):
+                state.prepare()
+            self.assertEqual(state.diagnostics["closeFailures"], ["root"])
+            self.assertEqual(state.events[-2:], ["close-root", "close-parent"])
+
+    def test_gate_admission_requires_native_shape_and_selected_root_account(self):
+        valid = (7, 3, stat.S_IFREG | 0o444, 501, 20, 1, 0, 100, 100)
+        diagnostics = {}
+        path = Path("/private/tmp/mrk-m2-inert-root/maintenance-use.lock")
+        with patch.object(self.adapter, "read_file", return_value=(b"", valid)) as reader:
+            self.assertEqual(self.adapter.admit_gate(path, 501, 20, diagnostics), valid)
+            reader.assert_called_once_with(path, 0)
+        self.assertEqual(diagnostics["gate"]["gid"], 20)
+        for index, value in ((2, stat.S_IFREG | 0o644), (2, stat.S_IFDIR | 0o444),
+                             (3, 502), (4, 0), (5, 2), (6, 1)):
+            changed = list(valid); changed[index] = value
+            with self.subTest(index=index, value=value), \
+                    patch.object(self.adapter, "read_file", return_value=(b"", tuple(changed))), \
+                    self.assertRaisesRegex(self.adapter.Refused, "fixture-gate-shape-owner"):
+                self.adapter.admit_gate(path, 501, 20, {})
+
+    def test_fixture_admission_precedes_every_native_tool_call(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "desktop/tools/macos_m2_entry_feasibility.py").read_text()
+        main = source[source.index("def main():"):]
+        phases = [main.index(part) for part in (
+            'work_original = prepare_work_root(', 'for name in ("build", "tmp", "app-tmp", "evidence"):',
+            'write_new(work / "maintenance-use.lock"', 'gate_original = admit_gate(',
+            'write_new(work / "build/fixture_config.h"', 'version = zero("compiler-version"')]
+        self.assertEqual(phases, sorted(phases))
+        self.assertIn('signature(work.lstat())[:5] == work_original, "work-changed"', main)
 
     def test_distinct_entry_and_payload_identities_do_not_invent_product_finality(self):
         value = self.value()
