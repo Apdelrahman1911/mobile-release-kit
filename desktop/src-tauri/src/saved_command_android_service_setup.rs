@@ -722,7 +722,10 @@ async fn coordinate(original:Arc<SetupOriginal>,mut release:oneshot::Receiver<()
         if released && worker_enter.is_some() && gate.try_work()==Some(true){
             if worker_enter.take().is_none_or(|sender|sender.send(()).is_err()){original.control.mark_unknown(Instant::now());}
         }
-        let mut cx=TaskContext::from_waker(&waker);let joined=poll_worker(&original,&mut worker,&mut cx);
+        let joined = {
+            let mut cx = TaskContext::from_waker(&waker);
+            poll_worker(&original, &mut worker, &mut cx)
+        };
         if let Poll::Ready(known)=joined{
             drop(worker);return known && original.known_return() && Instant::now()<original.control.endpoint();
         }
