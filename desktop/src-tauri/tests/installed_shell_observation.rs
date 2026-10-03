@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    not(feature = "macos-android-registration-helper"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation",
@@ -23,11 +24,24 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/android_build_protocol.rs"] mod android_build_protocol;
 #[path = "../src/android_build_owner.rs"] mod android_build_owner;
 #[path = "../src/android_tool_sources.rs"] mod android_tool_sources;
+#[path = "../src/android_registration_protocol.rs"] mod android_registration_protocol;
+#[path = "../src/android_registration_app_protocol.rs"] mod android_registration_app_protocol;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "../src/android_shared_lease_macos.rs"] mod android_shared_lease_macos;
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+#[path = "../src/android_catalog_query_client.rs"] mod android_catalog_query_client;
 #[path = "../src/project_recovery_protocol.rs"] mod project_recovery_protocol;
 #[path = "../src/project_recovery_owner.rs"] mod project_recovery_owner;
 #[path = "../src/android_toolchain.rs"] mod android_toolchain;
 #[path = "../src/android_toolchain_catalog.rs"] mod android_toolchain_catalog;
 #[path = "../src/android_toolchain_macos_policy.rs"] mod android_toolchain_macos_policy;
+#[path = "../src/android_native_macos_profile.rs"] mod android_native_macos_profile;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[path = "../src/android_supplier_macos_source.rs"] mod android_supplier_macos_source;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[path = "../src/android_sdk_metadata_macos.rs"] mod android_sdk_metadata_macos;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[path = "../src/android_supplier_macos.rs"] mod android_supplier_macos;
 #[path = "../src/ios_archive_protocol.rs"] mod ios_archive_protocol;
 #[path = "../src/ios_archive_owner.rs"] mod ios_archive_owner;
 #[path = "../src/ios_toolchain.rs"] mod ios_toolchain;

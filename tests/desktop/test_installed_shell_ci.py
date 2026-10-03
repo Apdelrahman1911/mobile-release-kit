@@ -1165,13 +1165,39 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         observer = (root / "tests/installed_shell_observation.rs").read_text()
         production = set(re.findall(r"^(?:pub )?mod ([a-z0-9_]+);$", library, re.MULTILINE))
         observed = set(re.findall(r'^#\[path = "\.\./src/[^"\n]+\.rs"\] mod ([a-z0-9_]+);$', observer, re.MULTILINE))
-        self.assertEqual(production - observed, {"runtime_publication", "runtime_publication_windows"})
+        publishers = {"runtime_publication", "runtime_publication_windows"}
+        android_helpers = {"android_catalog_query_helper", "android_registration_publisher", "android_registration_helper"}
+        self.assertEqual(production - observed, publishers | android_helpers)
         self.assertEqual(observed - production, set())
+        # These are separate Cargo helper roles, not missing app dependencies.
+        helper_cfg = '#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]\n'
+        for name in android_helpers:
+            visibility = "pub " if name == "android_registration_helper" else ""
+            self.assertIn(helper_cfg + visibility + "mod " + name + ";", library)
+            self.assertEqual(library.count("mod " + name + ";"), 1)
+            self.assertNotIn("mod " + name + ";", observer)
+        mac = '#[cfg(all(target_os = "macos", target_arch = "aarch64"))]\n'
+        data = '#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]\n'
+        client = '#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]\n'
+        for name, expected in (
+                ("android_registration_protocol", ""), ("android_registration_app_protocol", ""),
+                ("android_native_macos_profile", ""), ("android_shared_lease_macos", mac),
+                ("android_catalog_query_client", client), ("android_supplier_macos_source", data),
+                ("android_sdk_metadata_macos", data), ("android_supplier_macos", data)):
+            # Exact adjacent attributes catch changed/missing cfgs as well as a
+            # missing or duplicated source declaration, before a native build.
+            attributes = r"((?:#\[[^\n]+\]\n)*)"
+            declared = re.findall(r"^" + attributes + r"mod " + name + r";$", library, re.MULTILINE)
+            included = re.findall(r"^" + attributes + re.escape(
+                '#[path = "../src/' + name + '.rs"] mod ' + name + ';') + r"$", observer, re.MULTILINE)
+            self.assertEqual(declared, [expected], name)
+            self.assertEqual(included, [expected], name)
+            self.assertEqual(observer.count("mod " + name + ";"), 1, name)
         windows = '#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]\n'
         self.assertIn(windows + 'mod installed_runtime_windows;', library)
         self.assertIn(windows + '#[path = "../src/installed_runtime_windows.rs"] mod installed_runtime_windows;', observer)
         self.assertEqual(observer.count('mod installed_runtime_windows;'), 1)
-        for publisher in ("runtime_publication", "runtime_publication_windows"):
+        for publisher in publishers:
             self.assertNotIn('mod ' + publisher + ';', observer)
         guard = '#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]\n'
         self.assertIn(guard + 'mod vault_keyring_linux;', library)
@@ -1181,6 +1207,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertIn('#![forbid(unsafe_code)]', observer)
         self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",', observer)
         self.assertIn('not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")', observer)
+        self.assertIn('not(feature = "macos-android-registration-helper")', observer.split("compile_error!", 1)[0])
         self.assertIn('fn main() -> std::process::ExitCode { shell::installed_observation::main() }', observer)
 
     def test_shell_source_manifest_accepts_actual_version_qualified_hashing_profile(self):

@@ -286,6 +286,11 @@ jobs:
           module = importlib.util.module_from_spec(spec)
           sys.modules[spec.name] = module
           spec.loader.exec_module(module)
+          roster_path = pathlib.Path("tests/desktop/test_installed_shell_ci.py").absolute()
+          roster_spec = importlib.util.spec_from_file_location("_mrk_macos_observer_roster_preflight", roster_path)
+          roster_module = importlib.util.module_from_spec(roster_spec)
+          sys.modules[roster_spec.name] = roster_module
+          roster_spec.loader.exec_module(roster_module)
           suite = unittest.TestSuite([
               module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import"),
               module.IOSAquaDataTests("test_normal_macos_selection_is_original_bound_without_observer_grants"),
@@ -293,9 +298,10 @@ jobs:
               module.CurrentIOSAquaDataTests("test_file_originals_and_retained_signing_records_cannot_be_substituted"),
               module.ProjectFieldsAquaDataTests("test_complete_project_fields_report_is_bounded_and_fail_closed"),
               module.ProjectFieldsAquaDataTests("test_original_fixture_restoration_has_only_two_ctime_exceptions"),
+              roster_module.InstalledShellCompilerContracts("test_observer_module_roster_matches_production_supported_platforms"),
           ])
           result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
-          if (result.testsRun != 6 or not result.wasSuccessful()
+          if (result.testsRun != 7 or not result.wasSuccessful()
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_OWNER_PINS

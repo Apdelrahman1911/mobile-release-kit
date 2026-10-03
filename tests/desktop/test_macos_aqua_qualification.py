@@ -381,8 +381,12 @@ class AquaDataTests(unittest.TestCase):
                 'module.CurrentIOSAquaDataTests("test_file_originals_and_retained_signing_records_cannot_be_substituted")',
                 'module.ProjectFieldsAquaDataTests("test_complete_project_fields_report_is_bounded_and_fail_closed")',
                 'module.ProjectFieldsAquaDataTests("test_original_fixture_restoration_has_only_two_ctime_exceptions")',
+                'roster_path = pathlib.Path("tests/desktop/test_installed_shell_ci.py").absolute()',
+                'roster_spec = importlib.util.spec_from_file_location("_mrk_macos_observer_roster_preflight", roster_path)',
+                'roster_spec.loader.exec_module(roster_module)',
+                'roster_module.InstalledShellCompilerContracts("test_observer_module_roster_matches_production_supported_platforms")',
                 "unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)",
-                "result.testsRun != 6", "not result.wasSuccessful()",
+                "result.testsRun != 7", "not result.wasSuccessful()",
                 "result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses",
                 "raise SystemExit(1)"):
             self.assertIn(required, step)
