@@ -7,7 +7,7 @@ route are unchanged; the result scope is
 "m2-full-payload-boundary-diagnostic-only".
 
 The source must be separately reviewed and its original execution admitted.
-No run of this five-witness successor is claimed here. A diagnostic exit0 means
+No run of this policy-establishment successor is claimed here. A diagnostic exit0 means
 only the strict bounded observation completed; feasibilityObserved,
 installedProductQualified, tauriQualified, credentialQualified and
 maintenanceAvailable remain false even if the synthetic GUI observation works.
@@ -49,10 +49,28 @@ were unmeasured defaults because it broke before evaluating them, not observed
 identity mismatches. EX-after availability is not process-wait/all-worker
 finality. The marker does not prove its writer's final root fsync returned.
 
-This successor adds only the five bounded progress witnesses below. It does
-not reinterpret any historical result as a successful full-payload launch or
-as proof of a repaired cause. No policy getter, normalization, manual
-finishLaunching or speculative exception workaround is justified by those DATA.
+The five-witness diagnostic on bb8dd0db8a64499cb82ecd61c835f74aa38ece91,
+run37102421101/1, job111144414706, used the same macOS26.6.2 ARM64/SDK26.5/
+clang21.0.0. It observed main admission, sharedApplication returning, and the
+one actual setActivationPolicy(Regular) returning FALSE. Source selected67;
+beforeRun, didFinishLaunching, runReturned, payload-start and payload-quit were
+absent. The observer returned1 with payload-terminated-before-observation.
+Result9218B SHA256:
+ba0081cfce7160b84b78ff6dc73035ae3b297d79dfb0c17dc2c6053891bd416e.
+Workflow success means only the bounded diagnostic completed. No actual policy
+getter value or application wait/exit status was recorded. The selected67 is
+not an observed exit67, and absence does not prove a crash or missing callback.
+
+Both source-generated APPL bundles omit LSUIElement and LSBackgroundOnly.
+Their recorded plist hashes match that literal map: entry767B SHA256
+8ead3dd83f319cfb6057407b993775510c5d1a16c965d8d493ab7aa2c39db3f7;
+payload764B SHA256
+f154ccd6897ee729a3fad0f0ae6ae8d67db25c106495e20f4b3dc7abb91b166c.
+Bundled-app defaults do not establish the actual AppKit state after the same-PID
+entry-to-payload exec. FALSE might reflect a redundant or a failed needed switch;
+the original run cannot distinguish them. This successor checks actual policy
+before deciding whether a switch is needed, retaining every real failed switch.
+It does not reinterpret that historical failure or claim the GUI cause repaired.
 
 ## Fixed route and original fixture
 
@@ -168,6 +186,38 @@ external marker. The existing payload-start/quit bodies and original framework
 receivers, order and single invocation remain unchanged. Only the one passive
 callback witness described below is added to the existing delegate body.
 
+## Payload: establish actual Regular policy
+
+After sharedApplication returns, the public activationPolicy getter is called
+once. Actual Regular needs no setter: no transition and no setter BOOL are
+invented. Actual Accessory or Prohibited permits exactly one call to the existing
+setActivationPolicy(Regular). FALSE is final refusal67: no getter, retry,
+alternate policy or GUI work follows. TRUE permits one getter postcheck and
+continues only when it actually reports Regular. An unrecognized initial enum
+or any failed postcondition also selects67. The selected return is fixed before
+the best-effort policy publication. Unknown/failed native calls remain unknown;
+no exception catch-and-continue or manual finishLaunching is added.
+
+Apple's public contracts (checked2026-10-03):
+- [setActivationPolicy](https://developer.apple.com/documentation/appkit/nsapplication/setactivationpolicy(_:))
+  “Attempts to modify the app’s activation policy”; true if the switch succeeded,
+  otherwise false. Any policy can be set on macOS10.9 and later. The contract does
+  not promise TRUE for an equal-value request or say FALSE means already-Regular.
+- [activationPolicy](https://developer.apple.com/documentation/appkit/nsapplication/activationpolicy())
+  returns “The app’s current activation policy.”
+- [Regular](https://developer.apple.com/documentation/appkit/nsapplication/activationpolicy-swift.enum/regular)
+  is “the default for bundled apps, unless overridden in the Info.plist.”
+- [Accessory](https://developer.apple.com/documentation/appkit/nsapplication/activationpolicy-swift.enum/accessory)
+  corresponds to LSUIElement=1;
+  [Prohibited](https://developer.apple.com/documentation/appkit/nsapplication/activationpolicy-swift.enum/prohibited)
+  corresponds to LSBackgroundOnly=1 and is the default for unbundled executables
+  without Info.plists.
+
+This is an observed-state no-op, not acceptance of a FALSE setter. No bundle flags,
+launch route or entry/observer behavior changes. Policy establishment only
+permits the original delegate/menu/run path: active/window, identity, SH bridge,
+normal Quit, deadlines and all other original observations remain required.
+
 ## Payload: five fixed AppKit progress witnesses
 
 The diagnostic's appKitProgress object has exactly these five nullable slots;
@@ -176,16 +226,15 @@ rows are read only from their corresponding fixed original filenames:
 | Slot | Fixed file | Exact phase |
 | --- | --- | --- |
 | sharedApplication | payload-appkit-shared.json | shared-application-returned |
-| activationPolicy | payload-appkit-policy.json | activation-policy-returned |
+| activationPolicy | payload-appkit-policy.json | activation-policy-evaluated |
 | beforeRun | payload-appkit-before-run.json | setup-complete-before-run |
 | didFinishLaunching | payload-appkit-did-finish.json | did-finish-launching-entered |
 | runReturned | payload-appkit-run-returned.json | run-returned |
 
 The first witness is immediately after the sole original sharedApplication
-expression returns. The second captures the sole original activation setter
-BOOL, selects the original false-return67 before publication, and preserves
-that return regardless of writing. True continues exactly as before; it is not
-a second activation-policy observation. The combined setup/before-run witness
+expression returns. The second captures the policy decision above, including
+only the actual getter/setter values, and preserves its already-selected branch
+regardless of writing. The combined setup/before-run witness
 is immediately after app.mainMenu assignment and before the original run call:
 no original statement separates these boundaries. It does not prove run entered.
 
@@ -197,12 +246,26 @@ or invoked again by instrumentation. The final witness executes only after the
 actual original run returns. Original unexpected-return74 is selected before
 publication and retained, never normalized into ordinary Quit or success.
 
-Each row has only schemaVersion1, exact source, case ls-full-payload, the fixed
-phase, policySwitchAccepted and selectedReturnCode. Policy is boolean only for
-the policy slot and null elsewhere. Selected return is67 iff policy is false,
-74 iff run returned, otherwise null. These are immutable branch DATA, not
-observed original application exit codes. No PID, path, private text, exception
-transcript, success, complete or qualification field is added to these rows.
+The four non-policy rows keep schemaVersion1, exact source, case ls-full-payload,
+the fixed phase, policySwitchAccepted:null and selectedReturnCode (74 iff run
+returned, otherwise null). Only the policy row uses schemaVersion2 and adds
+policyBefore, policySwitchAttempted and policyAfter. Before/after are actual
+signed64 enum captures (Regular0, Accessory1, Prohibited2), never boolean/coerced
+values. Unrecognized values are retained only on a refused branch. No postcheck
+means policyAfter:null, not an invented observation. Its closed cases are:
+
+| Before | Switch attempted | Actual setter BOOL | After | Selected return |
+| --- | --- | --- | --- | --- |
+| Regular | false | null | null | null |
+| Accessory/Prohibited | true | true | Regular | null |
+| Accessory/Prohibited | true | false | null | 67 |
+| Accessory/Prohibited | true | true | not Regular | 67 |
+| unrecognized | false | null | null | 67 |
+
+These are immutable branch DATA, not observed original application exit codes.
+No PID, path, private text, exception transcript, success, complete or
+qualification field is added. Historical schema1 policy rows are not accepted
+as current schema2 no-ops; the original source/result remains unchanged.
 
 A private five-case enum maps only the five fixed names. A consuming five-bit
 latch is set before each first formatting/write attempt, including ambiguous or
@@ -210,14 +273,8 @@ failed writes. Each call formats plain C in768B stack storage through the
 existing already-admitted root and exclusive writer. At most five attempts and
 3840 encoded bytes of new records are admitted; there is no persistent new FD,
 append stream, arbitrary path/event API, fallback sink, readmission or retry.
-Neither format nor writer success affects any original program branch.
-
-Apple's public setActivationPolicy contract says true means the switch
-succeeded, otherwise false. Regular being the default bundled-app policy is not
-an observed getter result and cannot reinterpret a false setter result. Apple's
-finishLaunching documentation says run calls it; no manual extra call is added.
-These public contracts explain the passive witness sites, not the exact hosted
-AppKit implementation or a failure cause in the historical invocation.
+Neither format nor writer success affects the selected policy/lifecycle branch.
+The helper only formats already-captured values; it makes no AppKit calls.
 
 ## Strict parsing and honest unresolved boundary
 
@@ -234,14 +291,16 @@ gate refusal, returned exec and payload-main records are mutually exclusive.
 Payload-start/quit cannot coexist with an entry or main-refusal record. If a
 main-admitted record and payload-start are both present, their original static
 PID/CLOEXEC/executable facts must agree. Each AppKit row additionally has exact
-slot/file/phase correspondence, closed keys, a strict boolean-or-null policy
-and consistent integer-or-null selected return. AppKit rows cannot coexist with
+slot/file/phase correspondence, exact schema version and closed keys. The policy
+row enforces the entire truth table above, strict getter/attempt/BOOL types, and
+consistent integer-or-null selected return. AppKit rows cannot coexist with
 an explicit entry gate/exec refusal or main refusal. An absent earlier marker
 is not a refusal: every partial set, including gaps, can retain later valid DATA.
 No contiguous prefix is required or reconstructed.
 
-Policy false conflicts with beforeRun, didFinishLaunching, runReturned,
-payload-start or payload-quit, because the original branch returns67 first.
+Every validated selected67 policy row conflicts with beforeRun,
+didFinishLaunching, runReturned, payload-start or payload-quit: FALSE setter,
+failed postcondition and unrecognized initial policy all return67 first.
 Run-returned may coexist with earlier callback/start DATA, but it prevents a
 full normal-observation classification. Neither rule invents a missing record,
 new original native status or app exit/signal.
@@ -258,7 +317,7 @@ Alternatively, a full-payload boundary observation requires main-admitted,
 actual observer status0 and the entire unchanged supported_observation predicate:
 real payload start/quit, identity pairs, original shared-bridge observation,
 activation/window/delegate facts, normal Quit and every original observer gate.
-It also requires no contradictory false-policy or unexpected-run-return row.
+It also requires no contradictory refused-policy or unexpected-run-return row.
 The unchanged native supported_observation predicate alone cannot waive this
 additional diagnostic coherence. The top-level diagnostic flags still do not
 become product qualification.
@@ -289,8 +348,8 @@ the original observer call, each through the same original FD/name proof and
 consuming close; their total admitted encoded read bound is32768B. The other
 three fixed names remain the original busy/start/quit records. Even counting
 both final and inflight occupants conservatively,22 names at the existing4096B
-per-file ceiling are at most90112B; the five new writers have the stricter768B
-stack envelope and one-attempt rule. No source, FD, read, output, scratch or
+per-file ceiling are at most90112B; the five writers have the stricter768B
+record envelope and one-attempt rule. No source, FD, read, output, scratch or
 timeout cap is raised.
 
 The added writes and fsyncs change scheduling/timing. Any later observations
@@ -312,10 +371,14 @@ The DATA/inert-FS module retains the same21 method names and six read-only
 SOURCE inputs. Existing root creation, group selection, original consuming-close
 and native JSON/identity tests remain. Existing methods additionally cover all
 five progress schemas, every partial/absent set, source/phase/type/extra-field
-errors, false-policy contradictions, run-returned with earlier start but never
-full success, and unchanged unknown/late/close gates. Source regressions check
+errors, observed-Regular no-op, real switch, FALSE setter, failed postcondition,
+unrecognized policy, and their later-lifecycle contradictions. A FALSE setter
+cannot be reinterpreted through invented after-Regular DATA. Current parsing
+refuses historical policy schema1; run-returned with earlier start never becomes
+full success. Unknown/late/close gates remain. Source regressions check
 11 fixed names, the one-attempt latch,12 original calls and exact whole-payload
-restoration to the accepted8811B source, then the preceding6922B baseline.
+restoration to the accepted8811B source, then the preceding6922B baseline,
+and the initial getter/conditional single setter/TRUE-only getter postcheck.
 No broad baseline is refreshed to absorb unrelated changes. Native C/Objective-C
 files are only read as text; no compiler, LaunchServices, AppKit, fixture owner
 or native process is selected by those tests.

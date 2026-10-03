@@ -25,16 +25,19 @@ enum appkit_progress {
     APPKIT_DID_FINISH = 1U << 3,
     APPKIT_RUN_RETURNED = 1U << 4
 };
+struct appkit_policy {
+    long long before, after;
+    BOOL switch_attempted, switch_accepted;
+    int selected_return;
+};
 static unsigned appkit_attempted;
-static void publish_appkit_progress(enum appkit_progress progress, BOOL policy_accepted) {
-    const char *name, *phase, *policy = "null", *selected = "null";
+static void publish_appkit_progress(enum appkit_progress progress, const struct appkit_policy *policy) {
+    const char *name, *phase, *selected = "null";
     switch (progress) {
     case APPKIT_SHARED_RETURNED:
         name = "payload-appkit-shared.json"; phase = "shared-application-returned"; break;
     case APPKIT_POLICY_RETURNED:
-        name = "payload-appkit-policy.json"; phase = "activation-policy-returned";
-        policy = policy_accepted ? "true" : "false";
-        selected = policy_accepted ? "null" : "67"; break;
+        name = "payload-appkit-policy.json"; phase = "activation-policy-evaluated"; break;
     case APPKIT_BEFORE_RUN:
         name = "payload-appkit-before-run.json"; phase = "setup-complete-before-run"; break;
     case APPKIT_DID_FINISH:
@@ -47,10 +50,27 @@ static void publish_appkit_progress(enum appkit_progress progress, BOOL policy_a
     if (appkit_attempted & bit) return;
     appkit_attempted |= bit;
     char record[768];
-    int n = snprintf(record, sizeof(record),
-        "{\"schemaVersion\":1,\"source\":\"%s\",\"case\":\"ls-full-payload\",\"phase\":\"%s\","
-        "\"policySwitchAccepted\":%s,\"selectedReturnCode\":%s}\n",
-        MRK_SOURCE, phase, policy, selected);
+    int n;
+    if (progress == APPKIT_POLICY_RETURNED) {
+        if (!policy) return;
+        char after[32];
+        int count = policy->switch_attempted && policy->switch_accepted
+            ? snprintf(after, sizeof(after), "%lld", policy->after)
+            : snprintf(after, sizeof(after), "null");
+        if (count < 1 || (size_t)count >= sizeof(after)) return;
+        n = snprintf(record, sizeof(record),
+            "{\"schemaVersion\":2,\"source\":\"%s\",\"case\":\"ls-full-payload\",\"phase\":\"%s\","
+            "\"policyBefore\":%lld,\"policySwitchAttempted\":%s,\"policySwitchAccepted\":%s,"
+            "\"policyAfter\":%s,\"selectedReturnCode\":%s}\n",
+            MRK_SOURCE, phase, policy->before, policy->switch_attempted ? "true" : "false",
+            !policy->switch_attempted ? "null" : policy->switch_accepted ? "true" : "false",
+            after, policy->selected_return == 0 ? "null" : "67");
+    } else {
+        n = snprintf(record, sizeof(record),
+            "{\"schemaVersion\":1,\"source\":\"%s\",\"case\":\"ls-full-payload\",\"phase\":\"%s\","
+            "\"policySwitchAccepted\":null,\"selectedReturnCode\":%s}\n",
+            MRK_SOURCE, phase, selected);
+    }
     if (n > 0 && (size_t)n < sizeof(record))
         (void)mrk_record(root_original, name, record);
     /* Readable DATA is not final fsync/close, process exit or worker finality. */
@@ -97,7 +117,7 @@ static void publish_appkit_progress(enum appkit_progress progress, BOOL policy_a
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
-    publish_appkit_progress(APPKIT_DID_FINISH, NO);
+    publish_appkit_progress(APPKIT_DID_FINISH, NULL);
     self.didFinishLaunching = YES;
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 180)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
@@ -186,20 +206,38 @@ int main(int argc, char **argv) {
         }
         publish_main_outcome(MAIN_ADMITTED);
         NSApplication *app = NSApplication.sharedApplication;
-        publish_appkit_progress(APPKIT_SHARED_RETURNED, NO);
-        const BOOL policy_accepted = [app setActivationPolicy:NSApplicationActivationPolicyRegular];
-        const int selected_policy_return = policy_accepted ? 0 : 67;
-        publish_appkit_progress(APPKIT_POLICY_RETURNED, policy_accepted);
-        if (!policy_accepted) return selected_policy_return;
+        publish_appkit_progress(APPKIT_SHARED_RETURNED, NULL);
+        const NSApplicationActivationPolicy policy_before = [app activationPolicy];
+        const BOOL policy_switch_attempted = policy_before == NSApplicationActivationPolicyAccessory
+            || policy_before == NSApplicationActivationPolicyProhibited;
+        BOOL policy_switch_accepted = NO;
+        long long policy_after = 0; /* Not an observation unless the postcheck runs. */
+        BOOL policy_ready = policy_before == NSApplicationActivationPolicyRegular;
+        if (policy_switch_attempted) {
+            policy_switch_accepted = [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+            /* FALSE is final: no getter, retry, alternate policy or GUI work. */
+            if (policy_switch_accepted) {
+                policy_after = (long long)[app activationPolicy];
+                policy_ready = policy_after == NSApplicationActivationPolicyRegular;
+            }
+        }
+        const int selected_policy_return = policy_ready ? 0 : 67;
+        const struct appkit_policy policy = {
+            .before = (long long)policy_before, .after = policy_after,
+            .switch_attempted = policy_switch_attempted, .switch_accepted = policy_switch_accepted,
+            .selected_return = selected_policy_return
+        };
+        publish_appkit_progress(APPKIT_POLICY_RETURNED, &policy);
+        if (!policy_ready) return selected_policy_return;
         M2Payload *delegate = [M2Payload new]; app.delegate = delegate;
         NSMenu *main = [NSMenu new], *menu = [NSMenu new];
         NSMenuItem *application = [NSMenuItem new]; [main addItem:application];
         NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];
         quit.target = app; [menu addItem:quit]; application.submenu = menu; app.mainMenu = main;
-        publish_appkit_progress(APPKIT_BEFORE_RUN, NO);
+        publish_appkit_progress(APPKIT_BEFORE_RUN, NULL);
         [app run];
         const int selected_run_return = 74;
-        publish_appkit_progress(APPKIT_RUN_RETURNED, NO);
+        publish_appkit_progress(APPKIT_RUN_RETURNED, NULL);
         return selected_run_return; /* Unexpected run-loop return is not normal Quit/finality. */
     }
 }

@@ -15,7 +15,7 @@ class M2EntryDataTests(unittest.TestCase):
     SOURCE = "2cbb3e8f1b8e6b47230fb50f0651b661a4d3735a"
     APPKIT = (
         ("sharedApplication", "payload-appkit-shared.json", "shared-application-returned"),
-        ("activationPolicy", "payload-appkit-policy.json", "activation-policy-returned"),
+        ("activationPolicy", "payload-appkit-policy.json", "activation-policy-evaluated"),
         ("beforeRun", "payload-appkit-before-run.json", "setup-complete-before-run"),
         ("didFinishLaunching", "payload-appkit-did-finish.json", "did-finish-launching-entered"),
         ("runReturned", "payload-appkit-run-returned.json", "run-returned"),
@@ -93,14 +93,20 @@ class M2EntryDataTests(unittest.TestCase):
             value.update(selectedReturnCode=66, entryPidPreserved=False)
         return value
 
-    def progress_value(self, *slots, policy=True):
+    def progress_value(self, *slots, policy=True, before=1, after=0):
         phases = {slot: phase for slot, _, phase in self.APPKIT}
         value = dict.fromkeys(phases)
         for slot in slots:
             value[slot] = {"schemaVersion": 1, "source": self.SOURCE, "case": "ls-full-payload",
-                           "phase": phases[slot], "policySwitchAccepted": policy if slot == "activationPolicy" else None,
-                           "selectedReturnCode": (67 if slot == "activationPolicy" and policy is False
-                                                  else 74 if slot == "runReturned" else None)}
+                           "phase": phases[slot], "policySwitchAccepted": None,
+                           "selectedReturnCode": 74 if slot == "runReturned" else None}
+            if slot == "activationPolicy":
+                attempted = before in (1, 2)
+                ready = policy and after == 0 if attempted else before == 0
+                value[slot].update(schemaVersion=2, policyBefore=before, policySwitchAttempted=attempted,
+                                   policySwitchAccepted=policy if attempted else None,
+                                   policyAfter=after if attempted and policy else None,
+                                   selectedReturnCode=None if ready else 67)
         return value
 
     def test_full_payload_boundary_distinguishes_gate_exec_and_main_without_feasibility(self):
@@ -147,14 +153,16 @@ class M2EntryDataTests(unittest.TestCase):
                     self.assertEqual(result["boundaryOutcome"], "main-admitted-before-appkit" if include_main else "unresolved")
                     self.assertIs(result["expectedBoundaryObserved"], include_main)
                     self.assertEqual(set(result["appKitProgress"]), {slot for slot, _, _ in self.APPKIT})
-        for slots in (("activationPolicy",), ("sharedApplication", "activationPolicy")):
-            progress = self.progress_value(*slots, policy=False)
-            result = self.adapter.boundary_diagnostic(native, 1, None, None, self.main_value(), self.SOURCE,
-                                                      progress=progress)
-            self.assertEqual(result["appKitProgress"], progress)
-            self.assertEqual(result["boundaryOutcome"], "main-admitted-before-appkit")
-            self.assertTrue(result["expectedBoundaryObserved"])
-            self.assertIsNone(native["originalAppExitStatus"])
+        for before, policy, after in ((1, False, 0), (2, False, 0), (1, True, 2), (2, True, -1), (-1, True, 0)):
+            for slots in (("activationPolicy",), ("sharedApplication", "activationPolicy")):
+                progress = self.progress_value(*slots, before=before, policy=policy, after=after)
+                result = self.adapter.boundary_diagnostic(native, 1, None, None, self.main_value(), self.SOURCE,
+                                                          progress=progress)
+                self.assertEqual(result["appKitProgress"], progress)
+                self.assertEqual(progress["activationPolicy"]["selectedReturnCode"], 67)
+                self.assertEqual(result["boundaryOutcome"], "main-admitted-before-appkit")
+                self.assertTrue(result["expectedBoundaryObserved"])
+                self.assertIsNone(native["originalAppExitStatus"])
 
     def test_full_payload_boundary_rejects_conflict_unknown_late_or_close_failure(self):
         native = self.parse(self.early_value())
@@ -202,20 +210,21 @@ class M2EntryDataTests(unittest.TestCase):
                         self.assertRaisesRegex(self.adapter.Refused, "diagnostic-appkit-after-refusal"):
                     self.adapter.boundary_diagnostic(native, 1, gate, failed, main, self.SOURCE,
                                                      progress=self.progress_value(slot))
-        for later in ("beforeRun", "didFinishLaunching", "runReturned"):
-            with self.subTest(later=later), \
-                    self.assertRaisesRegex(self.adapter.Refused, "diagnostic-appkit-policy-conflict"):
-                self.adapter.boundary_diagnostic(
-                    native, 1, None, None, self.main_value(), self.SOURCE,
-                    progress=self.progress_value("activationPolicy", later, policy=False))
-        for later in ("payloadStart", "payloadQuit"):
-            changed = self.early_value()
-            changed[later] = self.value()[later]
-            with self.subTest(later=later), \
-                    self.assertRaisesRegex(self.adapter.Refused, "diagnostic-appkit-policy-conflict"):
-                self.adapter.boundary_diagnostic(
-                    self.parse(changed), 1, None, None, self.main_value(), self.SOURCE,
-                    progress=self.progress_value("activationPolicy", policy=False))
+        for before, policy, after in ((1, False, 0), (1, True, 2), (2, True, -1), (-1, True, 0)):
+            for later in ("beforeRun", "didFinishLaunching", "runReturned"):
+                with self.subTest(later=later, before=before, policy=policy, after=after), \
+                        self.assertRaisesRegex(self.adapter.Refused, "diagnostic-appkit-policy-conflict"):
+                    self.adapter.boundary_diagnostic(
+                        native, 1, None, None, self.main_value(), self.SOURCE,
+                        progress=self.progress_value("activationPolicy", later, before=before, policy=policy, after=after))
+            for later in ("payloadStart", "payloadQuit"):
+                changed = self.early_value()
+                changed[later] = self.value()[later]
+                with self.subTest(later=later, before=before, policy=policy, after=after), \
+                        self.assertRaisesRegex(self.adapter.Refused, "diagnostic-appkit-policy-conflict"):
+                    self.adapter.boundary_diagnostic(
+                        self.parse(changed), 1, None, None, self.main_value(), self.SOURCE,
+                        progress=self.progress_value("activationPolicy", before=before, policy=policy, after=after))
 
     def test_gate_refusal_shape_preserves_original_open_and_consuming_close_outcomes(self):
         changes = (("schemaVersion", True), ("source", "f" * 40), ("case", "direct"),
@@ -471,6 +480,7 @@ class M2EntryDataTests(unittest.TestCase):
                     with self.subTest(slot=slot, policy=policy, missing=key), self.assertRaises(self.adapter.Refused):
                         self.adapter.appkit_progress({**empty, slot: changed}, self.SOURCE)
                 for key, invalid in (("schemaVersion", True), ("schemaVersion", "1"), ("schemaVersion", 0),
+                                     ("schemaVersion", 1 if slot == "activationPolicy" else 2),
                                      ("source", "f" * 40), ("source", None), ("case", "direct"),
                                      ("phase", []), ("phase", "not-reached"), ("success", True)):
                     with self.subTest(slot=slot, policy=policy, key=key, invalid=invalid), \
@@ -492,6 +502,46 @@ class M2EntryDataTests(unittest.TestCase):
                     with self.subTest(slot=slot, policy=policy, invalid_return=invalid), \
                             self.assertRaisesRegex(self.adapter.Refused, "appkit-progress-selected-return"):
                         self.adapter.appkit_progress({**empty, slot: {**row, "selectedReturnCode": invalid}}, self.SOURCE)
+
+        # One truth table protects the real no-op, switch, failed postcondition
+        # and unrecognized-enum cases; it does not simulate native AppKit calls.
+        for before, accepted, after, selected in (
+                (0, True, 0, None), (1, True, 0, None), (2, True, 0, None),
+                (1, False, 0, 67), (2, False, 0, 67), (1, True, 1, 67),
+                (2, True, 2, 67), (1, True, -1, 67), (-1, True, 0, 67),
+                (-(2**63), True, 0, 67), (2**63 - 1, True, 0, 67)):
+            progress = self.progress_value("activationPolicy", before=before, policy=accepted, after=after)
+            row = progress["activationPolicy"]
+            with self.subTest(before=before, accepted=accepted, after=after):
+                self.assertEqual(self.adapter.appkit_progress(progress, self.SOURCE), progress)
+                self.assertEqual(row["selectedReturnCode"], selected)
+                self.assertIs(row["policySwitchAttempted"], before in (1, 2))
+                if before not in (1, 2):
+                    self.assertIsNone(row["policySwitchAccepted"])
+                    self.assertIsNone(row["policyAfter"])
+        switched = self.progress_value("activationPolicy")["activationPolicy"]
+        for key, invalid in (("policyBefore", None), ("policyBefore", True), ("policyBefore", "1"),
+                             ("policyBefore", -(2**63) - 1), ("policyBefore", 2**63),
+                             ("policyBefore", 0), ("policyBefore", -1),
+                             ("policySwitchAttempted", None), ("policySwitchAttempted", 1),
+                             ("policySwitchAttempted", "true"), ("policySwitchAttempted", False),
+                             ("policyAfter", None), ("policyAfter", False), ("policyAfter", "0"),
+                             ("policyAfter", -(2**63) - 1), ("policyAfter", 2**63)):
+            with self.subTest(key=key, invalid=invalid), \
+                    self.assertRaisesRegex(self.adapter.Refused, "appkit-progress-policy"):
+                self.adapter.appkit_progress({**empty, "activationPolicy": {**switched, key: invalid}}, self.SOURCE)
+        noop = self.progress_value("activationPolicy", before=0)["activationPolicy"]
+        failed = self.progress_value("activationPolicy", policy=False)["activationPolicy"]
+        for row in (dict(noop, policySwitchAttempted=True), dict(noop, policySwitchAccepted=False),
+                    dict(noop, policySwitchAccepted=True), dict(noop, policyAfter=0),
+                    dict(noop, selectedReturnCode=67), dict(failed, policyAfter=0),
+                    dict(failed, policyAfter=0, selectedReturnCode=None), dict(failed, selectedReturnCode=None)):
+            with self.subTest(contradictory=row), self.assertRaises(self.adapter.Refused):
+                self.adapter.appkit_progress({**empty, "activationPolicy": row}, self.SOURCE)
+        historical = {"schemaVersion": 1, "source": self.SOURCE, "case": "ls-full-payload",
+                      "phase": "activation-policy-returned", "policySwitchAccepted": False, "selectedReturnCode": 67}
+        with self.assertRaisesRegex(self.adapter.Refused, "record-contract"):
+            self.adapter.appkit_progress({**empty, "activationPolicy": historical}, self.SOURCE)
 
     def test_boundary_correspondence_keeps_full_payload_evidence_separate(self):
         full = self.parse(self.value())
@@ -539,6 +589,20 @@ class M2EntryDataTests(unittest.TestCase):
                                                       progress=self.progress_value(*slots))
             self.assertEqual(result["boundaryOutcome"], "full-payload-observed")
             self.assertTrue(result["expectedBoundaryObserved"])
+        # Both observed no-op and real verified-switch DATA retain all old GUI
+        # predicates; neither supplies a missing real lifecycle observation.
+        for before in (0, 1, 2):
+            progress = self.progress_value("activationPolicy", "beforeRun", "didFinishLaunching", before=before)
+            result = self.adapter.boundary_diagnostic(full, 0, None, None, self.main_value(), self.SOURCE,
+                                                      progress=progress)
+            self.assertTrue(result["expectedBoundaryObserved"])
+            self.assertEqual(result["boundaryOutcome"], "full-payload-observed")
+            for missing in ("windowVisible", "appActive", "didFinishLaunching", "gateIdentity"):
+                incomplete = self.value()
+                incomplete["payloadStart"][missing] = False
+                result = self.adapter.boundary_diagnostic(self.parse(incomplete), 0, None, None, self.main_value(),
+                                                          self.SOURCE, progress=progress)
+                self.assertFalse(result["expectedBoundaryObserved"])
 
     def test_missing_main_and_late_phase_data_never_become_a_premain_diagnosis(self):
         for native, status in ((self.parse(self.value()), 0), (self.parse(self.early_value()), 1)):
@@ -628,7 +692,7 @@ class M2EntryDataTests(unittest.TestCase):
         self.assertIn("if (n > 0 && (size_t)n < sizeof(record))", appkit)
         attempt_order = [appkit.index(part) for part in (
             "default: return;", "unsigned bit = (unsigned)progress;", "if (appkit_attempted & bit) return;",
-            "appkit_attempted |= bit;", "int n = snprintf(", "(void)mrk_record(")]
+            "appkit_attempted |= bit;", "snprintf(", "(void)mrk_record(")]
         self.assertEqual(attempt_order, sorted(attempt_order))
         for _, name, phase in self.APPKIT:
             self.assertEqual(appkit.count('"' + name + '"'), 1)
@@ -636,39 +700,67 @@ class M2EntryDataTests(unittest.TestCase):
         self.assertEqual(source.count("publish_appkit_progress("), 6)  # Definition plus five sites.
         for original in ("NSApplication.sharedApplication", "setActivationPolicy:", "[app run]"):
             self.assertEqual(source.count(original), 1)
+        self.assertEqual(source.count("[app activationPolicy]"), 2)
         self.assertIn("NSApplication *app = NSApplication.sharedApplication;\n"
-                      "        publish_appkit_progress(APPKIT_SHARED_RETURNED, NO);", main)
-        self.assertIn("app.mainMenu = main;\n        publish_appkit_progress(APPKIT_BEFORE_RUN, NO);\n"
+                      "        publish_appkit_progress(APPKIT_SHARED_RETURNED, NULL);", main)
+        self.assertIn("app.mainMenu = main;\n        publish_appkit_progress(APPKIT_BEFORE_RUN, NULL);\n"
                       "        [app run];", main)
-        for parts in (("const BOOL policy_accepted = [app setActivationPolicy:",
-                       "const int selected_policy_return = policy_accepted ? 0 : 67;",
-                       "publish_appkit_progress(APPKIT_POLICY_RETURNED, policy_accepted);",
-                       "if (!policy_accepted) return selected_policy_return;"),
-                      ("[app run];", "const int selected_run_return = 74;",
-                       "publish_appkit_progress(APPKIT_RUN_RETURNED, NO);", "return selected_run_return;")):
+        for parts in (("const NSApplicationActivationPolicy policy_before = [app activationPolicy];",
+                       "const BOOL policy_switch_attempted = policy_before == NSApplicationActivationPolicyAccessory",
+                       "|| policy_before == NSApplicationActivationPolicyProhibited;",
+                       "BOOL policy_ready = policy_before == NSApplicationActivationPolicyRegular;",
+                       "if (policy_switch_attempted) {",
+                       "policy_switch_accepted = [app setActivationPolicy:NSApplicationActivationPolicyRegular];",
+                       "if (policy_switch_accepted) {", "policy_after = (long long)[app activationPolicy];",
+                       "policy_ready = policy_after == NSApplicationActivationPolicyRegular;",
+                       "const int selected_policy_return = policy_ready ? 0 : 67;",
+                       "const struct appkit_policy policy = {",
+                       "publish_appkit_progress(APPKIT_POLICY_RETURNED, &policy);",
+                       "if (!policy_ready) return selected_policy_return;", "M2Payload *delegate ="),
+                       ("[app run];", "const int selected_run_return = 74;",
+                        "publish_appkit_progress(APPKIT_RUN_RETURNED, NULL);", "return selected_run_return;")):
             selected_order = [main.index(part) for part in parts]
             self.assertEqual(selected_order, sorted(selected_order))
         callback_start = source.index("- (void)applicationDidFinishLaunching:")
         callback_end = source.index("- (void)applicationDidBecomeActive:")
         callback = source[callback_start:callback_end]
-        callback_call = "    publish_appkit_progress(APPKIT_DID_FINISH, NO);\n"
+        callback_call = "    publish_appkit_progress(APPKIT_DID_FINISH, NULL);\n"
         self.assertIn("    (void)notification;\n" + callback_call + "    self.didFinishLaunching = YES;", callback)
-        # Undo only the five new call-site splices and private helper/latch.
+        # Undo only the five call-site splices, reviewed policy establishment
+        # and private helper/latch. The old whole-source pins remain unchanged.
         # This must restore the complete accepted source, not a refreshed baseline.
         restored = source[:start] + source[end:]
         policy_capture = (
-            "        const BOOL policy_accepted = [app setActivationPolicy:NSApplicationActivationPolicyRegular];\n"
-            "        const int selected_policy_return = policy_accepted ? 0 : 67;\n"
-            "        publish_appkit_progress(APPKIT_POLICY_RETURNED, policy_accepted);\n"
-            "        if (!policy_accepted) return selected_policy_return;\n")
+            "        const NSApplicationActivationPolicy policy_before = [app activationPolicy];\n"
+            "        const BOOL policy_switch_attempted = policy_before == NSApplicationActivationPolicyAccessory\n"
+            "            || policy_before == NSApplicationActivationPolicyProhibited;\n"
+            "        BOOL policy_switch_accepted = NO;\n"
+            "        long long policy_after = 0; /* Not an observation unless the postcheck runs. */\n"
+            "        BOOL policy_ready = policy_before == NSApplicationActivationPolicyRegular;\n"
+            "        if (policy_switch_attempted) {\n"
+            "            policy_switch_accepted = [app setActivationPolicy:NSApplicationActivationPolicyRegular];\n"
+            "            /* FALSE is final: no getter, retry, alternate policy or GUI work. */\n"
+            "            if (policy_switch_accepted) {\n"
+            "                policy_after = (long long)[app activationPolicy];\n"
+            "                policy_ready = policy_after == NSApplicationActivationPolicyRegular;\n"
+            "            }\n"
+            "        }\n"
+            "        const int selected_policy_return = policy_ready ? 0 : 67;\n"
+            "        const struct appkit_policy policy = {\n"
+            "            .before = (long long)policy_before, .after = policy_after,\n"
+            "            .switch_attempted = policy_switch_attempted, .switch_accepted = policy_switch_accepted,\n"
+            "            .selected_return = selected_policy_return\n"
+            "        };\n"
+            "        publish_appkit_progress(APPKIT_POLICY_RETURNED, &policy);\n"
+            "        if (!policy_ready) return selected_policy_return;\n")
         run_return = (
             "        const int selected_run_return = 74;\n"
-            "        publish_appkit_progress(APPKIT_RUN_RETURNED, NO);\n"
+            "        publish_appkit_progress(APPKIT_RUN_RETURNED, NULL);\n"
             "        return selected_run_return; /* Unexpected run-loop return is not normal Quit/finality. */\n")
         for added, original in (
-                (callback_call, ""), ("        publish_appkit_progress(APPKIT_SHARED_RETURNED, NO);\n", ""),
+                (callback_call, ""), ("        publish_appkit_progress(APPKIT_SHARED_RETURNED, NULL);\n", ""),
                 (policy_capture, "        if (![app setActivationPolicy:NSApplicationActivationPolicyRegular]) return 67;\n"),
-                ("        publish_appkit_progress(APPKIT_BEFORE_RUN, NO);\n", ""),
+                ("        publish_appkit_progress(APPKIT_BEFORE_RUN, NULL);\n", ""),
                 (run_return, "        return 74; /* Unexpected run-loop return is not normal Quit/finality. */\n")):
             self.assertEqual(restored.count(added), 1)
             restored = restored.replace(added, original, 1)

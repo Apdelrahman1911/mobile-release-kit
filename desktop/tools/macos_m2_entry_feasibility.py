@@ -46,7 +46,7 @@ FULL_PAYLOAD_CASE = "ls-full-payload"
 MAIN_FLAGS = ("entryPidPreserved", "gateInheritedWithoutCLOEXEC", "gateMarkedCLOEXEC", "executableIsPayload")
 APPKIT_RECORDS = (
     ("sharedApplication", "payload-appkit-shared.json", "shared-application-returned"),
-    ("activationPolicy", "payload-appkit-policy.json", "activation-policy-returned"),
+    ("activationPolicy", "payload-appkit-policy.json", "activation-policy-evaluated"),
     ("beforeRun", "payload-appkit-before-run.json", "setup-complete-before-run"),
     ("didFinishLaunching", "payload-appkit-did-finish.json", "did-finish-launching-entered"),
     ("runReturned", "payload-appkit-run-returned.json", "run-returned"),
@@ -109,9 +109,9 @@ def document(data):
         raise Refused("invalid-json-data") from error
 
 
-def record(value, source, flags, extra=()):
+def record(value, source, flags, extra=(), *, version=1):
     need(type(value) is dict and set(value) == {"schemaVersion", "source", *flags, *extra}
-         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == version
          and value["source"] == source and all(type(value[k]) is bool for k in flags), "record-contract")
 
 
@@ -212,12 +212,28 @@ def appkit_progress(value, source):
         row = value[slot]
         if row is None:
             continue
-        record(row, source, (), ("case", "phase", "policySwitchAccepted", "selectedReturnCode"))
+        is_policy = slot == "activationPolicy"
+        extra = ("policyBefore", "policySwitchAttempted", "policyAfter") if is_policy else ()
+        record(row, source, (), ("case", "phase", "policySwitchAccepted", "selectedReturnCode", *extra),
+               version=2 if is_policy else 1)
         need(row["case"] == FULL_PAYLOAD_CASE and type(row["phase"]) is str and row["phase"] == phase,
              "appkit-progress-phase")
-        if slot == "activationPolicy":
-            need(type(row["policySwitchAccepted"]) is bool, "appkit-progress-policy")
-            selected = None if row["policySwitchAccepted"] else 67
+        if is_policy:
+            before, after = row["policyBefore"], row["policyAfter"]
+            attempted, accepted = row["policySwitchAttempted"], row["policySwitchAccepted"]
+            need(type(before) is int and -(2**63) <= before < 2**63
+                 and type(attempted) is bool and attempted is (before in (1, 2)), "appkit-progress-policy")
+            if not attempted:
+                need(accepted is None and after is None, "appkit-progress-policy")
+                selected = None if before == 0 else 67
+            else:
+                need(type(accepted) is bool, "appkit-progress-policy")
+                if not accepted:
+                    need(after is None, "appkit-progress-policy")
+                    selected = 67
+                else:
+                    need(type(after) is int and -(2**63) <= after < 2**63, "appkit-progress-policy")
+                    selected = None if after == 0 else 67
         else:
             need(row["policySwitchAccepted"] is None, "appkit-progress-policy")
             selected = 74 if slot == "runReturned" else None
@@ -248,7 +264,7 @@ def boundary_diagnostic(native, original_status, gate, failed, main, source, pro
         need(gate is None and failed is None and (main is None or admitted),
              "diagnostic-appkit-after-refusal")
     policy = progress["activationPolicy"]
-    policy_refused = policy is not None and policy["policySwitchAccepted"] is False
+    policy_refused = policy is not None and policy["selectedReturnCode"] == 67
     if policy_refused:
         need(all(progress[slot] is None for slot in ("beforeRun", "didFinishLaunching", "runReturned"))
              and native["payloadStart"] is None and native["payloadQuit"] is None,
