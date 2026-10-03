@@ -1,0 +1,291 @@
+name: Existing Mac package — two isolated entry diagnostics (not UI qualification)
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-entry-diagnostic
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-macos-entry-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  launchservices:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-entry-diagnostic'
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - name: Check out only reviewed diagnostic source, without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the existing DATA stager Python (not a product runtime build)
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Admit this one fresh hosted job and reserve its exclusive work root
+        id: work
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]] || exit 1
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-entry-diagnostic && "$GITHUB_JOB" == launchservices ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-entry-diagnostic.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && -d "$DEVELOPER_DIR" ]] || exit 1
+          [[ "$(/usr/bin/git -c core.fsmonitor=false rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          root="/Users/runner/mrk-macos-entry-diagnostic-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          /bin/mkdir -m 700 "$root"
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_ENTRY_DIAGNOSTIC_WORK=%s\nMRK_PYTHON=%s\n' "$root" "$MRK_PYTHON" >> "$GITHUB_ENV"
+      - name: Acquire only the fixed prior preview and its public provenance
+        timeout-minutes: 3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Finite ceiling in shell file-size blocks, not archive authority.
+          # Exact50972943B and digest checked before use; no token reaches native jobs.
+          ulimit -S -f 131072
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37143431561/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
+      - name: Verify original archive, complete package roster and fresh destination
+        id: prepare
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_installed_entry_diagnostic.py prepare > "$MRK_ENTRY_DIAGNOSTIC_WORK/prepare-admission.json"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/prepare.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Install that unchanged package once using standard Installer only
+        id: install
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          /usr/bin/sudo -- /usr/sbin/installer -pkg "$MRK_ENTRY_DIAGNOSTIC_WORK/MobileReleaseKit.pkg" -target / -dumplog -verboseR             > "$MRK_ENTRY_DIAGNOSTIC_WORK/installer-output.txt" 2>&1
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/installer-output.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Read back every installed byte, mode, original Installer result and gate
+        id: readback
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_installed_entry_diagnostic.py readback > "$MRK_ENTRY_DIAGNOSTIC_WORK/readback-admission.json"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/readback.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Observe one NSWorkspace original with bounded original-reference cleanup
+        id: observe
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_installed_entry_diagnostic.py observe > "$MRK_ENTRY_DIAGNOSTIC_WORK/observe-admission.json"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/observe.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Preserve only bounded closed diagnostics, never raw local app output
+        if: always() && steps.work.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-entry-launchservices-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/prepare.json
+            ${{ steps.work.outputs.root }}/prepare.status
+            ${{ steps.work.outputs.root }}/prepare-admission.json
+            ${{ steps.work.outputs.root }}/installer-output.status
+            ${{ steps.work.outputs.root }}/readback.json
+            ${{ steps.work.outputs.root }}/readback.status
+            ${{ steps.work.outputs.root }}/readback-admission.json
+            ${{ steps.work.outputs.root }}/observe.json
+            ${{ steps.work.outputs.root }}/observe.status
+            ${{ steps.work.outputs.root }}/observe-admission.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      # No uninstall, root Python, Store workflow, process scan or app retry.
+      # The adapter retires only settled, no-longer-needed compiler originals;
+      # protected installation and unknown app/worker state remain untouched.
+
+  direct_entry:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-entry-diagnostic'
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - name: Check out only reviewed diagnostic source, without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the existing DATA stager Python (not a product runtime build)
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Admit this one fresh hosted job and reserve its exclusive work root
+        id: work
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]] || exit 1
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-entry-diagnostic && "$GITHUB_JOB" == direct_entry ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-entry-diagnostic.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && -d "$DEVELOPER_DIR" ]] || exit 1
+          [[ "$(/usr/bin/git -c core.fsmonitor=false rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          root="/Users/runner/mrk-macos-entry-diagnostic-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          /bin/mkdir -m 700 "$root"
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_ENTRY_DIAGNOSTIC_WORK=%s\nMRK_PYTHON=%s\n' "$root" "$MRK_PYTHON" >> "$GITHUB_ENV"
+      - name: Acquire only the fixed prior preview and its public provenance
+        timeout-minutes: 3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Finite ceiling in shell file-size blocks, not archive authority.
+          # Exact50972943B and digest checked before use; no token reaches native jobs.
+          ulimit -S -f 131072
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37143431561/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
+      - name: Verify original archive, complete package roster and fresh destination
+        id: prepare
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_installed_entry_diagnostic.py prepare > "$MRK_ENTRY_DIAGNOSTIC_WORK/prepare-admission.json"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/prepare.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Install that unchanged package once using standard Installer only
+        id: install
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          /usr/bin/sudo -- /usr/sbin/installer -pkg "$MRK_ENTRY_DIAGNOSTIC_WORK/MobileReleaseKit.pkg" -target / -dumplog -verboseR             > "$MRK_ENTRY_DIAGNOSTIC_WORK/installer-output.txt" 2>&1
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/installer-output.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Read back every installed byte, mode, original Installer result and gate
+        id: readback
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_installed_entry_diagnostic.py readback > "$MRK_ENTRY_DIAGNOSTIC_WORK/readback-admission.json"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/readback.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Probe the fixed direct entry once through the existing original command owner
+        id: observe
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_installed_entry_diagnostic.py observe > "$MRK_ENTRY_DIAGNOSTIC_WORK/observe-admission.json"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_ENTRY_DIAGNOSTIC_WORK/observe.status"
+          saved=$?
+          set -e
+          [[ "$status" == 0 && "$saved" == 0 ]] || exit 1
+      - name: Preserve only bounded closed diagnostics, never raw local app output
+        if: always() && steps.work.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-entry-direct_entry-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/prepare.json
+            ${{ steps.work.outputs.root }}/prepare.status
+            ${{ steps.work.outputs.root }}/prepare-admission.json
+            ${{ steps.work.outputs.root }}/installer-output.status
+            ${{ steps.work.outputs.root }}/readback.json
+            ${{ steps.work.outputs.root }}/readback.status
+            ${{ steps.work.outputs.root }}/readback-admission.json
+            ${{ steps.work.outputs.root }}/observe.json
+            ${{ steps.work.outputs.root }}/observe.status
+            ${{ steps.work.outputs.root }}/observe-admission.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      # No uninstall, root Python, Store workflow, process scan or app retry.
+      # The adapter retires only settled, no-longer-needed compiler originals;
+      # protected installation and unknown app/worker state remain untouched.
