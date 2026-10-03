@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         scope:
-          - vault-helper-shipping-installation-inspection
+          - installation-inspection
     runs-on: macos-26
     timeout-minutes: 75
     env:

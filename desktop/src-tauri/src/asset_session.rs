@@ -5471,6 +5471,9 @@ mod installed_macos_observation {
         document: Weak<Inner>, owner: Weak<OriginalWork>, generation: u32,
         edit: crate::edit_owner::InstalledMacDocumentWitness,
     }
+    pub(crate) struct InstallationWitness {
+        document: Weak<Inner>, edit: crate::edit_owner::InstalledMacDocumentWitness,
+    }
     /// Observer-only references to actual registered originals, not synthetic
     /// receipts or custody owners. Slots are never removed or reused. Keeping
     /// the original work book does not retain its retired private payloads.
@@ -6003,13 +6006,21 @@ mod installed_macos_observation {
         pub(crate) fn installed_macos_project_lost(&self, witness: &ProjectWitness) -> bool {
             self.inner.state.try_lock().is_ok_and(|state| self.macos_project_loss(&state, witness))
         }
-        pub(crate) fn installed_macos_installation_final(&self, quit_id: u32, inspection_id: u32) -> bool {
+        pub(crate) fn installed_macos_installation(&self) -> Option<InstallationWitness> {
+            let state = self.inner.state.try_lock().ok()?;
+            if !live(&state) || state.next_operation != 0 || state.slot.is_some() || state.quit.is_some()
+                || !self.inner.bridge.edits.can_exit()
+                || !self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty()) { return None; }
+            Some(InstallationWitness { document: Arc::downgrade(&self.inner),
+                edit: self.inner.bridge.edits.installed_macos_document()? })
+        }
+        pub(crate) fn installed_macos_installation_final(&self, quit_id: u32, inspection_id: u32, witness: &InstallationWitness) -> bool {
             let Ok(state) = self.inner.state.try_lock() else { return false; };
             let Some(quit) = &state.quit else { return false; };
             let Some(slot) = &state.slot else { return false; };
             // Dedicated no-project journey only. It observes the real ordinary
             // Quit originals without admitting any project/picker witness.
-            if inspection_id.checked_add(1) != Some(quit_id)
+            if !same_document(&self.inner, &witness.document) || inspection_id.checked_add(1) != Some(quit_id)
                 || !quiet(&state) || !state.stopping || !state.quit_accepted
                 || !state.lifetime.original_bound() || state.lost_observed
                 || state.next_operation != quit_id || quit.id != quit_id
@@ -6027,8 +6038,9 @@ mod installed_macos_observation {
                 || !slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
                 || !completed(&self.inner, quit, NativeResponse::Accept, false, true).is_some_and(|response| response.selected.is_none())
                 || !self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty()) { return false; }
-            let Some(edit) = self.inner.bridge.edits.installed_macos_document() else { return false; };
-            self.inner.bridge.edits.installed_macos_document_live(&edit)
+            // Normal Quit has stopped fresh witness admission. Validate the
+            // original retained before either inspection, not a replacement.
+            self.inner.bridge.edits.installed_macos_document_live(&witness.edit)
                 && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
                 && !self.inner.bridge.diagnostics.disabled() && !self.inner.bridge.preflight.disabled()
                 && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !self.inner.bridge.ios_archive.disabled()
@@ -6074,6 +6086,7 @@ mod installed_macos_observation {
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
+    InstallationWitness as InstalledMacInstallationWitness,
     SessionSnapshot as InstalledMacSessionSnapshot, VaultSnapshot as InstalledMacVaultSnapshot,
     ProjectSelectionData as InstalledMacProjectSelectionData, SelectionCustody as InstalledMacSelectionCustody,
     selection_path_bounded as installed_macos_selection_path_bounded, selection_saved_data_checks as installed_macos_selection_saved_data_checks};

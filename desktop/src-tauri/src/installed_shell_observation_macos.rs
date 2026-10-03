@@ -2803,8 +2803,13 @@ impl Observation {
         let vault_snapshot = self.vault.as_ref().and_then(|_| document.installed_macos_vault_snapshot());
         // Dedicated real no-project Quit; never manufacture a picker/project
         // witness to satisfy the existing selected-project finality getter.
-        let installation_finality = (self.case == Case::Installation).then(||
-            document.installed_macos_installation_final(installation_check::QUIT_ID, installation_check::MATCHING_ID));
+        let installation_finality = if self.case == Case::Installation {
+            let Some(r) = self.record() else { return; };
+            let witness = r.installation_record.as_ref().and_then(installation_check::Record::witness);
+            drop(r);
+            Some(witness.as_ref().is_some_and(|witness|
+                document.installed_macos_installation_final(installation_check::QUIT_ID, installation_check::MATCHING_ID, witness)))
+        } else { None };
         let Some(mut r) = self.record() else { return; };
         let finality = installation_finality.unwrap_or_else(|| document.installed_macos_final(
             self.quit_id(),r.project_witness.as_ref(),r.picker_witness.as_ref(),self.case.loses_document()));

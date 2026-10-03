@@ -2,7 +2,7 @@
 //! relay observes two real Document originals, then the normal native Quit.
 //! This module creates no worker, installation path, project or cleanup owner.
 use super::{Case, DocumentBinding, Observation, Step as OuterStep};
-use crate::asset_session::{InstallationOriginalFacts, InstallationReadObservation};
+use crate::asset_session::{InstallationOriginalFacts, InstallationReadObservation, InstalledMacInstallationWitness};
 use crate::installation::{CheckPhase, CheckReason, CheckSettlement, CheckStatus, Matching};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -107,8 +107,12 @@ impl Completed {
 #[derive(Default)]
 pub(super) struct Record {
     active: Option<Active>, cancelled: Option<Completed>, matching: Option<Completed>, normal_quit: bool,
+    // Captured once before the first inspection, retained through normal Quit.
+    // Only immutable original identity: no native handle or project authority.
+    witness: Option<Arc<InstalledMacInstallationWitness>>,
 }
 impl Record {
+    pub(super) fn witness(&self) -> Option<Arc<InstalledMacInstallationWitness>> { self.witness.clone() }
     fn completed(&self) -> bool {
         self.active.is_none() && self.cancelled.as_ref().is_some_and(|row| row.valid(true))
             && self.matching.as_ref().is_some_and(|row| row.valid(false))
@@ -216,13 +220,26 @@ impl Observation {
                 let Some(record) = r.installation_record.as_ref() else { self.fail_with("installation-original-contract"); return; };
                 if r.step != OuterStep::Installation(step) || !no_project(&r) || record.active.is_some()
                     || record.normal_quit || record.matching.is_some()
-                    || if cancelled { record.cancelled.is_some() }
-                        else { !record.cancelled.as_ref().is_some_and(|row| row.valid(true)) } {
+                    || if cancelled { record.cancelled.is_some() || record.witness.is_some() }
+                        else { record.witness.is_none() || !record.cancelled.as_ref().is_some_and(|row| row.valid(true)) } {
                     self.fail_with("installation-original-contract"); return;
                 }
             }
             if !self.timely() { return; }
             // No Observation::Record mutex crosses any Document call.
+            if cancelled {
+                let Some(witness) = document.installed_macos_installation() else {
+                    self.fail_with("installation-original-contract"); return;
+                };
+                let Some(mut r) = self.record() else { return; };
+                if !self.timely() { return; }
+                if r.step != OuterStep::Installation(step) || !no_project(&r) { self.fail_with("installation-original-contract"); return; }
+                let Some(record) = r.installation_record.as_mut() else { self.fail_with("installation-original-contract"); return; };
+                if record.active.is_some() || record.normal_quit || record.cancelled.is_some() || record.matching.is_some()
+                    || record.witness.is_some() { self.fail_with("installation-original-contract"); return; }
+                record.witness = Some(Arc::new(witness));
+            }
+            if !self.timely() { return; }
             let Ok((started, observation)) = document.inspect_installation_observed(cancelled) else {
                 self.fail_with("installation-request-contract"); return;
             };
@@ -231,7 +248,7 @@ impl Observation {
             if !self.timely() { return; }
             if r.step != OuterStep::Installation(step) || !no_project(&r) { self.fail_with("installation-original-contract"); return; }
             let Some(record) = r.installation_record.as_mut() else { self.fail_with("installation-original-contract"); return; };
-            if record.active.is_some() || !cancelled && !record.cancelled.as_ref().is_some_and(|row|
+            if record.active.is_some() || record.witness.is_none() || !cancelled && !record.cancelled.as_ref().is_some_and(|row|
                 row.valid(true) && started.status_revision > row.status.status_revision) {
                 self.fail_with("installation-original-contract"); return;
             }

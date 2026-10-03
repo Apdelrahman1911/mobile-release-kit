@@ -310,6 +310,8 @@ class InstallationObservationDataTests(unittest.TestCase):
     def test_source_uses_start_bound_counts_dedicated_finality_and_existing_relay_only(self):
         source = (ROOT / "desktop/src-tauri/src/installed_shell_observation_macos_installation.rs").read_text()
         parent = (ROOT / "desktop/src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        asset = (ROOT / "desktop/src-tauri/src/asset_session.rs").read_text()
+        edits = (ROOT / "desktop/src-tauri/src/edit_owner.rs").read_text()
         limits = (ROOT / "desktop/src-tauri/src/macos_install_record.rs").read_text()
         self.assertIn("const FILE_LIMIT: usize = 2048;", limits)
         self.assertIn("const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;", limits)
@@ -333,7 +335,53 @@ class InstallationObservationDataTests(unittest.TestCase):
         self.assertNotIn("#[test]", source)
         self.assertNotRegex(source, r"(?:thread::spawn|tokio::spawn|Command::|std::process::|sleep\(|Instant::now\()")
         self.assertIn("drop(r); self.installation_tick(&state.document, step); return;", parent)
-        self.assertIn("document.installed_macos_installation_final(installation_check::QUIT_ID, installation_check::MATCHING_ID)", parent)
+        # Capture the original before either real inspection. Matching and Exit
+        # must consume that identity, never refresh it after normal shutdown.
+        capture = asset.split("fn installed_macos_installation(&self) -> Option<InstallationWitness> {", 1)[1].split(
+            "fn installed_macos_installation_final(", 1)[0]
+        for gate in ("!live(&state)", "state.next_operation != 0", "state.slot.is_some()", "state.quit.is_some()",
+                     "!self.inner.bridge.edits.can_exit()", "roster.generation == 1 && roster.roots.is_empty()",
+                     "document: Arc::downgrade(&self.inner)", "edit: self.inner.bridge.edits.installed_macos_document()?"):
+            self.assertIn(gate, capture)
+        start = source.split("if matches!(step, Step::StartCancelled | Step::StartMatching) {", 1)[1].split("let (id, observation) = {", 1)[0]
+        self.assertIn("if cancelled { record.cancelled.is_some() || record.witness.is_some() }", start)
+        self.assertIn("else { record.witness.is_none() || !record.cancelled.as_ref().is_some_and(|row| row.valid(true)) }", start)
+        self.assertIn("if cancelled {\n                let Some(witness) = document.installed_macos_installation()", start)
+        self.assertEqual(source.count("document.installed_macos_installation()"), 1)
+        self.assertEqual(source.count("record.witness ="), 1)
+        self.assertIn("pub(super) fn witness(&self) -> Option<Arc<InstalledMacInstallationWitness>> { self.witness.clone() }", source)
+        published = start.index("record.witness = Some(Arc::new(witness));")
+        publication = start.split("let Some(witness) = document.installed_macos_installation()", 1)[1].split(
+            "record.witness = Some(Arc::new(witness));", 1)[0]
+        for gate in ("self.record()", "self.timely()", "r.step != OuterStep::Installation(step)", "!no_project(&r)",
+                     "record.active.is_some()", "record.normal_quit", "record.cancelled.is_some()",
+                     "record.matching.is_some()", "record.witness.is_some()"):
+            self.assertIn(gate, publication)
+        self.assertLess(publication.index("self.record()"), publication.index("record.witness.is_some()"))
+        self.assertLess(start.index("document.installed_macos_installation()"), published)
+        self.assertLess(published, start.index("document.inspect_installation_observed(cancelled)"))
+        self.assertIn("record.witness = Some(Arc::new(witness));\n            }\n            if !self.timely()", start)
+        finality = asset.split("fn installed_macos_installation_final(", 1)[1].split("fn installed_macos_final(", 1)[0]
+        self.assertIn("witness: &InstallationWitness", finality)
+        self.assertIn("!same_document(&self.inner, &witness.document)", finality)
+        self.assertIn("self.inner.bridge.edits.installed_macos_document_live(&witness.edit)", finality)
+        self.assertNotIn(".installed_macos_document()", finality)
+        for gate in ("inspection_id.checked_add(1) != Some(quit_id)", "!quiet(&state) || !state.stopping || !state.quit_accepted",
+                     "!state.lifetime.original_bound() || state.lost_observed", "state.next_operation != quit_id || quit.id != quit_id",
+                     "!assets_can_exit_locked(&state) || !state.evidence.revoked", "slot.owner.id != inspection_id",
+                     "!work.settled()", "JoinReceipt::Returned && book.handle.is_none()", "book.not_started()",
+                     "completed(&self.inner, quit, NativeResponse::Accept, false, true)", "!self.inner.bridge.edits.disabled()",
+                     "self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit()"):
+            self.assertIn(gate, finality)
+        fresh = edits.split("fn document(inner: &Arc<Inner>, r: &Registry) -> Option<DocumentWitness> {", 1)[1].split("fn same_document(", 1)[0]
+        self.assertIn("healthy(inner, r) && !r.document_lost && !r.stopping", fresh)
+        exit_route = parent.split("let installation_finality = if self.case == Case::Installation {", 1)[1].split("} else { None };", 1)[0]
+        self.assertLess(exit_route.index("self.record()"), exit_route.index("installation_check::Record::witness"))
+        self.assertLess(exit_route.index("installation_check::Record::witness"), exit_route.index("drop(r);"))
+        self.assertLess(exit_route.index("drop(r);"), exit_route.index("document.installed_macos_installation_final("))
+        self.assertIn("Some(witness.as_ref().is_some_and(|witness|", exit_route)
+        self.assertNotIn(".installed_macos_installation()", exit_route)
+        self.assertIn("document.installed_macos_installation_final(installation_check::QUIT_ID, installation_check::MATCHING_ID, witness)", exit_route)
         self.assertIn("installation_finality.unwrap_or_else(|| document.installed_macos_final(", parent)
         self.assertIn("|| !installation_check::data_checks()", parent)
         self.assertIn("crate::installation::assert_installation_inspection_wire_contract();", parent)
