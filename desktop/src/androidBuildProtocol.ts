@@ -9,10 +9,11 @@ import type { AndroidBuildAbi, AndroidBuildActivity, AndroidBuildArtifact, Andro
   AndroidBuildFinding, AndroidBuildIdentity, AndroidBuildInspection, AndroidBuildLimitation, AndroidBuildOperation,
   AndroidBuildOutcome, AndroidBuildPhase, AndroidBuildReason, AndroidBuildResult, AndroidBuildSavedConfig,
   AndroidBuildSavedPair, AndroidBuildSavedVersion, AndroidBuildSelection, AndroidBuildStage, AndroidBuildStatus,
-  PrepareAndroidBuild, StartAndroidBuild } from './androidBuildTypes.ts';
+  PrepareAndroidBuild, StartAndroidBuild, AndroidSigningSelection } from './androidBuildTypes.ts';
 
 export const ANDROID_BUILD_EVENT = 'android-build-state-changed';
-export const ANDROID_BUILD_CONSENT = 'saved-android-build-inspect-v2';
+export const ANDROID_BUILD_CONSENT = 'saved-android-build-inspect-v3';
+export const ANDROID_BUILD_SIGNED_CONSENT = 'saved-android-local-sign-v1';
 export const ANDROID_BUILD_SCOPE = 'local-post-build-artifact-observation';
 export const ANDROID_BUILD_TOOLCHAIN_PROFILE = 'android-local-linux-gnu-x86_64-v1';
 export const ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE = 'android-registered-macos-arm64-v1';
@@ -29,7 +30,7 @@ export const ANDROID_BUILD_CHECK_IDS: readonly AndroidBuildCheckId[] = Object.fr
   'aab-structure', 'aab-manifest', 'application-id', 'build-number', 'version-name', 'release-flags', 'signature', 'signer', 'core-lifecycle', 'other-core-finding',
 ]);
 export const ANDROID_BUILD_STAGES: readonly AndroidBuildStage[] = Object.freeze([
-  'accepted', 'inputs-bound', 'building', 'capturing', 'inspecting', 'disposing-work',
+  'accepted', 'inputs-bound', 'validating-signing', 'building', 'capturing', 'signing', 'restoring-inputs', 'inspecting', 'disposing-work',
 ]);
 export const ANDROID_BUILD_ABIS: readonly AndroidBuildAbi[] = Object.freeze(['arm64-v8a', 'armeabi', 'armeabi-v7a', 'mips', 'mips64', 'x86', 'x86_64']);
 export const ANDROID_BUILD_LIMITATIONS: readonly AndroidBuildLimitation[] = Object.freeze([
@@ -152,29 +153,47 @@ function artifactValidation(value: unknown): value is AndroidBuildArtifactValida
 export function parseAndroidBuildArtifactValidation(value: unknown): AndroidBuildArtifactValidation | null {
   try { const safe = copyData(value, 256, 16); return artifactValidation(safe) ? safe : null; } catch { return null; }
 }
-function limitations(validation: AndroidBuildArtifactValidation): AndroidBuildLimitation[] {
-  return ANDROID_BUILD_LIMITATIONS.map((item) => item === 'artifact-signer-not-inspected' && validation.mode === 'upload-signature' ?
-    'upload-signature-check-not-store-enrollment' : item);
+function limitations(validation: AndroidBuildArtifactValidation, signed = false): AndroidBuildLimitation[] {
+  return ANDROID_BUILD_LIMITATIONS.map((item) => signed && item === 'toolkit-signing-not-requested' ? 'local-signing-not-store-enrollment' :
+    item === 'artifact-signer-not-inspected' && validation.mode === 'upload-signature' ? 'upload-signature-check-not-store-enrollment' : item);
 }
-
+function signingSelection(value: unknown): value is AndroidSigningSelection {
+  if (!keys(value, ['mode', 'assignments']) || value.mode !== 'local-upload-key' || !Array.isArray(value.assignments) ||
+      value.assignments.length < 1 || value.assignments.length > 2) return false;
+  let revision: number | null = null;
+  const seen = new Set<string>();
+  return value.assignments.every((row: unknown, index) => {
+    if (!keys(row, ['kind', 'recordId', 'recordRevision', 'contextRevision']) || row.kind !== ['android-keystore', 'android-firebase'][index] ||
+        !token(row.recordId) || !integer(row.recordRevision, ANDROID_BUILD_COUNTER_MAX, 1) || !integer(row.contextRevision, ANDROID_BUILD_COUNTER_MAX, 1) ||
+        seen.has(row.recordId) || revision !== null && revision !== row.contextRevision) return false;
+    seen.add(row.recordId); revision = row.contextRevision; return true;
+  });
+}
+export function parseAndroidSigningSelection(value: unknown): AndroidSigningSelection | null {
+  try { const safe = copyData(value, 2048, 48); return signingSelection(safe) ? safe : null; } catch { return null; }
+}
 function prepare(value: unknown): value is PrepareAndroidBuild {
-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation']) && projectId(value.projectId) &&
-    androidBuildCounter(value.draftRevision) && androidBuildCounter(value.baselineGeneration) && content(value.savedConfig) && savedVersion(value.savedVersion) && artifactValidation(value.artifactValidation);
+  const signed = record(value) && Object.hasOwn(value, 'signing');
+  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation', ...(signed ? ['signing'] : [])]) && projectId(value.projectId) &&
+    androidBuildCounter(value.draftRevision) && androidBuildCounter(value.baselineGeneration) && content(value.savedConfig) && savedVersion(value.savedVersion) && artifactValidation(value.artifactValidation) &&
+    (!signed || value.artifactValidation.mode === 'upload-signature' && signingSelection(value.signing));
 }
 function identity(value: unknown): value is AndroidBuildIdentity {
   return record(value) && token(value.operationId) && token(value.ownerGeneration);
 }
 function context(value: unknown): value is AndroidBuildContext {
-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation', 'platform', 'operation']) &&
-    value.platform === 'android' && value.operation === 'android-build-inspect' && prepare({ projectId: value.projectId,
-      draftRevision: value.draftRevision, baselineGeneration: value.baselineGeneration, savedConfig: value.savedConfig, savedVersion: value.savedVersion, artifactValidation: value.artifactValidation });
+  const signed = record(value) && Object.hasOwn(value, 'signing');
+  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'artifactValidation', 'platform', 'operation', ...(signed ? ['signing'] : [])]) &&
+    value.platform === 'android' && value.operation === (signed ? 'android-build-sign' : 'android-build-inspect') && prepare({ projectId: value.projectId,
+      draftRevision: value.draftRevision, baselineGeneration: value.baselineGeneration, savedConfig: value.savedConfig, savedVersion: value.savedVersion,
+      artifactValidation: value.artifactValidation, ...(signed ? { signing: value.signing } : {}) });
 }
 export function copyAndroidBuildRequest(command: AndroidBuildCommand, value: unknown): PrepareAndroidBuild | StartAndroidBuild | AndroidBuildIdentity | Record<string, never> | null {
   try {
-    const safe = copyData(value, ANDROID_BUILD_IPC_LIMIT, 64);
+    const safe = copyData(value, ANDROID_BUILD_IPC_LIMIT, 96);
     if (command === 'prepare_android_build' && prepare(safe)) return safe;
     if (command === 'start_android_build' && keys(safe, ['operationId', 'ownerGeneration', 'consentVersion']) &&
-        identity(safe) && safe.consentVersion === ANDROID_BUILD_CONSENT) return safe as unknown as StartAndroidBuild;
+        identity(safe) && [ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT].includes(safe.consentVersion as string)) return safe as unknown as StartAndroidBuild;
     if (command === 'cancel_android_build' && keys(safe, ['operationId', 'ownerGeneration']) && identity(safe)) return safe;
     if (command === 'android_build_status' && keys(safe, [])) return safe as Record<string, never>;
   } catch { /* No rejected data or exception text is reflected. */ }
@@ -219,9 +238,9 @@ function activity(value: unknown): value is AndroidBuildActivity {
   if (!keys(value, ['stage', 'selection', 'command', 'findings', 'summary']) || !oneOf(value.stage, ANDROID_BUILD_STAGES) ||
       !(value.selection === null || selection(value.selection)) || !commandObservation(value.command)) return false;
   const selected = value.selection, command = value.command;
-  if (['inputs-bound', 'building', 'capturing', 'inspecting'].includes(value.stage) && selected === null) return false;
-  if (['capturing', 'inspecting'].includes(value.stage) && !exitedZero(command)) return false;
-  if (command.outcome !== 'not-dispatched' && (selected === null || !['building', 'capturing', 'inspecting', 'disposing-work'].includes(value.stage))) return false;
+  if (['inputs-bound', 'validating-signing', 'building', 'capturing', 'signing', 'restoring-inputs', 'inspecting'].includes(value.stage) && selected === null) return false;
+  if (['capturing', 'signing', 'restoring-inputs', 'inspecting'].includes(value.stage) && !exitedZero(command)) return false;
+  if (command.outcome !== 'not-dispatched' && (selected === null || !['validating-signing', 'building', 'capturing', 'signing', 'restoring-inputs', 'inspecting', 'disposing-work'].includes(value.stage))) return false;
   const observed = { findings: value.findings, summary: value.summary };
   return inspection(observed) && (!observed.findings.some((row) => !['core-lifecycle', 'other-core-finding'].includes(row.check)) ||
     exitedZero(command) && ['inspecting', 'disposing-work'].includes(value.stage));
@@ -235,7 +254,7 @@ function artifact(value: unknown): value is AndroidBuildArtifact {
   const ordered = ANDROID_BUILD_ABIS.filter((abi) => architectures.includes(abi));
   return ordered.length === architectures.length && ordered.every((abi, index) => architectures[index] === abi);
 }
-function derivedAssurances(rows: AndroidBuildFinding[], validation: AndroidBuildArtifactValidation): AndroidBuildAssurances {
+function derivedAssurances(rows: AndroidBuildFinding[], validation: AndroidBuildArtifactValidation, signed = false): AndroidBuildAssurances {
   const structures = rows.filter((row) => row.check === 'aab-structure').map((row) => row.status);
   const structure = structures.length === 1 && structures[0] === 'PASS' ? 'passed' : structures.some((status) => failures.includes(status)) ? 'failed' : 'not-checked';
   const manifest = rows.filter((row) => manifestChecks.includes(row.check));
@@ -251,7 +270,7 @@ function derivedAssurances(rows: AndroidBuildFinding[], validation: AndroidBuild
     signature === 'passed' && signers.length === 1 && signers[0] === 'PASS' ? 'matches-saved-upload-certificate' :
       signers.some((status) => failures.includes(status)) ? 'failed' : 'not-checked';
   return { structure, nativeManifest, applicationVersion: nativeManifest === 'passed' ? 'native-checked' : 'not-established',
-    signature, signer, toolkitSigning: 'not-requested', storeOperation: 'not-requested', sourceBinding: 'not-established', releaseReadiness: 'not-assessed' };
+    signature, signer, toolkitSigning: signed ? 'local-upload-key-verified' : 'not-requested', storeOperation: 'not-requested', sourceBinding: 'not-established', releaseReadiness: 'not-assessed' };
 }
 function inspectionMode(rows: AndroidBuildFinding[], validation: AndroidBuildArtifactValidation): boolean {
   const signatures = rows.filter((row) => row.check === 'signature').map((row) => row.status);
@@ -282,19 +301,22 @@ function macToolchainSelection(value: unknown): boolean {
 }
 function result(value: unknown): value is AndroidBuildResult {
   if (!record(value)) return false;
-  const mac = value.toolchainProfile === ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE;
+  const mac = value.toolchainProfile === ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE, signed = Object.hasOwn(value, 'signing');
+  if (signed && (!mac || value.signing !== 'local-upload-key')) return false;
   if (!keys(value, ['schemaVersion', 'scope', 'usedConfig', 'usedVersion', 'selection', 'toolchainProfile', 'command', 'findings', 'summary',
-      'artifacts', 'assurances', 'limitations', 'artifactValidation', ...(mac ? ['toolchainSelection'] : [])]) ||
+      'artifacts', 'assurances', 'limitations', 'artifactValidation', ...(mac ? ['toolchainSelection'] : []), ...(signed ? ['signing'] : [])]) ||
       value.schemaVersion !== (mac ? 2 : 1) || value.scope !== ANDROID_BUILD_SCOPE ||
       (mac ? !macToolchainSelection(value.toolchainSelection) : value.toolchainProfile !== ANDROID_BUILD_TOOLCHAIN_PROFILE) ||
       !content(value.usedConfig) || !savedVersion(value.usedVersion) || !artifactValidation(value.artifactValidation) || !selection(value.selection) ||
       !commandObservation(value.command) || !exitedZero(value.command) || !Array.isArray(value.artifacts) || value.artifacts.length !== 1 ||
       !artifact(value.artifacts[0]) || !Array.isArray(value.limitations) || value.limitations.length !== ANDROID_BUILD_LIMITATIONS.length) return false;
   const observedLimitations = value.limitations, observed = { findings: value.findings, summary: value.summary };
-  if (!limitations(value.artifactValidation).every((key, index) => observedLimitations[index] === key) || !inspection(observed) ||
+  if (!limitations(value.artifactValidation, signed).every((key, index) => observedLimitations[index] === key) || !inspection(observed) ||
       !observed.findings.some((row) => row.check === 'aab-structure') || observed.findings.some((row) => row.check === 'core-lifecycle')) return false;
   if (inspectionCommands(observed.findings, value.artifactValidation) === null) return false;
-  const expected = derivedAssurances(observed.findings, value.artifactValidation);
+  const expected = derivedAssurances(observed.findings, value.artifactValidation, signed);
+  if (signed && (value.artifactValidation.mode !== 'upload-signature' || expected.structure !== 'passed' || expected.nativeManifest !== 'passed' ||
+      expected.signature !== 'passed' || expected.signer !== 'matches-saved-upload-certificate' || observed.findings.some((row) => !['PASS', 'NOT_APPLICABLE'].includes(row.status)))) return false;
   return keys(value.assurances, Object.keys(expected)) && sameAndroidBuildData(value.assurances, expected);
 }
 export function parseAndroidBuildResult(value: unknown): AndroidBuildResult | null {
@@ -311,6 +333,8 @@ function operation(value: unknown): value is AndroidBuildOperation {
       !(value.stage === null || oneOf(value.stage, ANDROID_BUILD_STAGES)) || !(value.activity === null || activity(value.activity)) ||
       !(value.disposition === null || disposition(value.disposition)) || !(value.result === null || result(value.result))) return false;
   const op = value as unknown as AndroidBuildOperation;
+  if (op.context.operation !== 'android-build-sign' && [op.stage, op.activity?.stage].some((stage) =>
+    stage === 'validating-signing' || stage === 'signing' || stage === 'restoring-inputs')) return false;
   if (op.activity !== null && (!inspectionMode(op.activity.findings, op.context.artifactValidation) ||
       op.activity.findings.some((row) => !['core-lifecycle', 'other-core-finding'].includes(row.check)) &&
       inspectionCommands(op.activity.findings, op.context.artifactValidation) === null)) return false;
@@ -328,6 +352,7 @@ function operation(value: unknown): value is AndroidBuildOperation {
       op.disposition.artifacts === 'retained-local-result' && op.result !== null &&
       sameAndroidBuildSavedPair(op.context, { savedConfig: op.result.usedConfig, savedVersion: op.result.usedVersion }) &&
       sameAndroidBuildData(op.context.artifactValidation, op.result.artifactValidation) &&
+      (op.context.operation === 'android-build-sign') === (op.result.signing === 'local-upload-key') &&
       sameAndroidBuildData(op.activity.selection, op.result.selection) && sameAndroidBuildData(op.activity.command, op.result.command) &&
       sameAndroidBuildData(op.activity.findings, op.result.findings) && sameAndroidBuildData(op.activity.summary, op.result.summary);
   }
@@ -345,7 +370,7 @@ function operation(value: unknown): value is AndroidBuildOperation {
   if (op.reason === 'command-failed' && (op.outcome !== 'failed' || observed.command.outcome !== 'exited' || observed.command.exitCode === 0)) return false;
   if (op.reason === 'command-incomplete' && (op.outcome !== 'failed' || observed.command.outcome === 'exited')) return false;
   if (artifactReasons.includes(op.reason) && (op.outcome !== 'failed' || observed.selection === null || !exitedZero(observed.command) ||
-      !['capturing', 'inspecting', 'disposing-work'].includes(observed.stage))) return false;
+      !['capturing', 'signing', 'restoring-inputs', 'inspecting', 'disposing-work'].includes(observed.stage))) return false;
   return op.reason !== 'work-retained' || op.outcome === 'failed' && op.disposition.work === 'retained-work';
 }
 export function parseAndroidBuildStatus(value: unknown): AndroidBuildStatus | null {
@@ -421,6 +446,11 @@ export const androidBuildReasonText: Record<AndroidBuildReason, string> = {
   'input-limit': 'The saved input or task-owned processing limit was reached. Reduce the applicable input or use a separately supported profile; no limit is raised automatically.',
   'result-limit': 'The bounded result could not be represented safely. Check original status and cleanup; raw tool output is not a substitute report.',
   'work-retained': 'Original task work is known to remain. Review its disposition; this result offers no automatic rerun, blanket deletion or global daemon stop.',
+  'signing-input-missing': 'Assign the current upload keystore, passwords, alias and required Firebase file in Credentials, then review again.',
+  'signing-input-invalid': 'The selected signing input or saved upload-certificate policy is invalid. Correct the current assignment; no replacement key is generated automatically.',
+  'signing-validation-failed': 'The selected key or final AAB did not satisfy upload-certificate, expiry or signature validation. Nothing was uploaded.',
+  'signing-command-failed': 'The original signing tool could not sign the private AAB copy. Check the selected keystore passwords and alias after cleanup settles.',
+  'build-inputs-unrestored': 'Original build inputs were not restored completely. Inspect Project recovery; do not delete the retained journal or start another build.',
   'cleanup-unknown': 'Original cleanup is unconfirmed and the owner remains retained. Use original Status or Cancel; further execution stays blocked. Do not adopt or delete files from a new session.',
 };
 export const androidBuildFindingText: Record<AndroidBuildCheckId, string> = {
@@ -437,6 +467,7 @@ export const androidBuildLimitationText: Record<AndroidBuildLimitation, string> 
   'artifact-signer-not-inspected': ANDROID_BUILD_SIGNER_MESSAGE,
   'upload-signature-check-not-store-enrollment': 'Upload-signature inspection does not establish Play enrollment or match the separate Play app-signing key.',
   'toolkit-signing-not-requested': 'Toolkit signing was not requested. That does not establish that project code left the file unsigned.',
+  'local-signing-not-store-enrollment': 'The toolkit signed and verified this retained AAB with the selected upload key. This is not Play enrollment, freshness, source provenance or release approval.',
   'store-operation-not-requested': 'No Store operation was requested by the toolkit.',
   'release-readiness-not-assessed': 'Release readiness was not assessed. A completed task is not release approval.',
   'local-output-observation-not-current-file-authority': 'The redacted local output observation is not current-file authority or permission to open, adopt, delete or publish a file.',
@@ -446,6 +477,7 @@ const errors: Record<string, string> = {
   android_build_invalid: 'The Android-build request was not valid closed DATA. Nothing was authorized by this response.',
   android_build_unavailable: 'The separate native Android-build capability is unavailable. No browser or ambient-runtime fallback is used.',
   android_build_busy: 'Another original operation owns the native slot. Keep its Status and Cancel accessible.',
+  android_build_signing_inputs: 'Assign the current upload keystore, store/key passwords, alias and required Firebase file for this saved Android configuration, then review again.',
   android_build_owner: 'The intent identity is foreign, stale or consumed. No Start can be replayed or rearmed.',
   android_build_protocol: 'A usable original Android-build response was not received. Check retained Status; do not repeat Start.',
 };

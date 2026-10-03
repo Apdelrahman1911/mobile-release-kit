@@ -13,6 +13,66 @@ final class NormalAppUITests: XCTestCase {
     private enum Refusal: Error { case condition(String) }
     @MainActor private var launchedApplication: XCUIApplication?
     @MainActor private var normalQuitObserved = false
+    @MainActor private var entryGateObservation: GateObservation?
+
+    // One read-only original of the already admitted permanent gate. An EX
+    // observation is not proof of SH acquisition, process exit status, or all
+    // worker finality. No gate creation, mutation, replacement or relaunch.
+    private final class GateObservation {
+        static let path = "/Library/Application Support/MobileReleaseKit/maintenance-gate-v1"
+        private var fd: Int32?
+        private var entered = false
+        private var original: StatFacts?
+        func openOnce() throws {
+            guard !entered else { throw Refusal.condition("gate observation repeated") }
+            entered = true
+            let opened = Darwin.open(Self.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard opened >= 0 else { throw Refusal.condition("permanent gate is unavailable") }
+            fd = opened // Custody before any fallible observation.
+            var info = stat()
+            guard fstat(opened, &info) == 0 else { throw Refusal.condition("gate original stat failed") }
+            original = StatFacts(info)
+            try check()
+        }
+        private func check() throws {
+            guard let fd, let original else { throw Refusal.condition("gate original missing") }
+            var named = stat(), actual = stat()
+            guard fstat(fd, &actual) == 0, lstat(Self.path, &named) == 0,
+                  StatFacts(actual) == original, StatFacts(named) == original,
+                  actual.st_mode == S_IFREG | 0o444, actual.st_uid == 0, actual.st_gid == 0,
+                  actual.st_nlink == 1, actual.st_flags == 0, actual.st_size == 30,
+                  fcntl(fd, F_GETFD) == FD_CLOEXEC else {
+                throw Refusal.condition("gate original changed or protection refused")
+            }
+            var body = [UInt8](repeating: 0, count: 31)
+            let count = body.withUnsafeMutableBytes { buffer in Darwin.pread(fd, buffer.baseAddress, buffer.count, 0) }
+            guard count == 30, Array(body.prefix(30)) == Array("MRK-MACOS-MAINTENANCE-GATE-v1\n".utf8),
+                  fstat(fd, &actual) == 0, StatFacts(actual) == original else {
+                throw Refusal.condition("gate body changed")
+            }
+        }
+        func probe(busy expected: Bool) throws {
+            try check()
+            guard let fd else { throw Refusal.condition("gate probe original missing") }
+            let returned = flock(fd, LOCK_EX | LOCK_NB), error = errno
+            let busy: Bool
+            if returned == 0 {
+                guard flock(fd, LOCK_UN) == 0 else { throw Refusal.condition("gate probe unlock failed") }
+                busy = false
+            } else {
+                guard returned == -1 && error == EWOULDBLOCK else { throw Refusal.condition("gate probe failed") }
+                busy = true
+            }
+            try check()
+            guard busy == expected else { throw Refusal.condition("gate exclusion does not match original application lifetime") }
+        }
+        func closeOriginal() throws {
+            if let opened = fd {
+                fd = nil // Consume once, including on an unknown close result.
+                guard Darwin.close(opened) == 0 else { throw Refusal.condition("gate observation close unknown") }
+            }
+        }
+    }
 
     @MainActor private func require(_ value: Bool, _ reason: String) throws {
         guard value else { throw Refusal.condition(reason) }
@@ -164,9 +224,11 @@ final class NormalAppUITests: XCTestCase {
 
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
-        try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop"
-                    && (Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mobile-release-kit-desktop",
-                    "the exact ordinary installed application is missing")
+        try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop.entry"
+                    && (Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mrk-macos-entry"
+                    && Bundle(url: url.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app"))?.bundleIdentifier == "dev.mobile-release-kit.desktop"
+                    && (Bundle(url: url.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app"))?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mobile-release-kit-desktop",
+                    "the exact ordinary entry/payload installation is missing")
         // The preceding Installer/readback gate binds the bytes to the normal
         // Cargo binary. A bundle identifier by itself is NOT that proof.
         let app = XCUIApplication(url: url)
@@ -182,6 +244,10 @@ final class NormalAppUITests: XCTestCase {
         ]
         // Register cleanup only AFTER the notRunning precondition. A refused
         // occupied application is never terminated by this test's teardown.
+        let gate = GateObservation()
+        entryGateObservation = gate
+        try gate.openOnce()
+        try gate.probe(busy: false)
         launchedApplication = app
         app.launch() // Exactly once; no activate/relaunch/retry or external PID.
         try require(app.wait(for: .runningForeground, timeout: 5), "ordinary app did not enter the foreground")
@@ -198,6 +264,16 @@ final class NormalAppUITests: XCTestCase {
         let renderer = rendererQuery.element(boundBy: 0)
         // End fixed renderer singleton diagnostic.
         try dashboard(renderer)
+        try gate.probe(busy: true)
+        // Exercise the real same-window native picker without selecting a
+        // project or creating a document/Store operation.
+        try click(renderer.buttons.matching(identifier: "Open project folder"), "native project picker is unavailable")
+        let picker = try nativeSheet(window, title: "Choose a mobile project folder")
+        try gate.probe(busy: true)
+        try click(picker.buttons.matching(identifier: "Cancel"), "native project picker Cancel is unavailable")
+        let pickerDismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: picker)
+        try require(XCTWaiter.wait(for: [pickerDismissed], timeout: 5) == .completed, "native picker Cancel did not settle")
+        try dashboard(renderer)
 
         let first = try quitSheet(app, window)
         try click(first.buttons.matching(identifier: "Cancel"), "normal Quit Cancel is unavailable")
@@ -206,7 +282,7 @@ final class NormalAppUITests: XCTestCase {
         try require(app.state == .runningForeground && window.exists, "Cancel did not preserve the running application")
         try dashboard(renderer)
         // Prove renderer responsiveness after Cancel without selecting a project,
-        // opening a file picker, changing configuration or invoking a Store.
+        // changing configuration or invoking a Store.
         try click(renderer.buttons.matching(identifier: "Project settings"), "post-Cancel navigation is unavailable")
         try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
                     .element(boundBy: 0).waitForExistence(timeout: 5), "post-Cancel settings navigation failed")
@@ -217,6 +293,9 @@ final class NormalAppUITests: XCTestCase {
         try click(second.buttons.matching(identifier: "Quit"), "normal affirmative Quit is unavailable")
         try require(app.wait(for: .notRunning, timeout: 10), "the genuine Quit action did not reach notRunning")
         normalQuitObserved = true
+        try gate.probe(busy: false)
+        try gate.closeOriginal()
+        print("MRK_MACOS_ENTRY_UI=ordinary-entry-payload-picker-quit-and-gate-exclusion-observed;directPayloadPreMain=unqualified;allWorkerFinality=unavailable;maintenance=unavailable")
         // Not final until the original XCTest/xcodebuild result also succeeds.
         print("MRK_MACOS_NORMAL_UI=launch-render-cancel-navigation-quit-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
@@ -979,9 +1058,11 @@ final class NormalAppUITests: XCTestCase {
 
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
-        try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop"
-                    && (Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mobile-release-kit-desktop",
-                    "the exact ordinary installed application is missing")
+        try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop.entry"
+                    && (Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mrk-macos-entry"
+                    && Bundle(url: url.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app"))?.bundleIdentifier == "dev.mobile-release-kit.desktop"
+                    && (Bundle(url: url.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app"))?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mobile-release-kit-desktop",
+                    "the exact ordinary entry/payload installation is missing")
         return (url, account)
     }
 
@@ -1992,6 +2073,8 @@ final class NormalAppUITests: XCTestCase {
 
     override func tearDown() async throws {
         var cleanupFailure: Error?
+        do { try await MainActor.run { try entryGateObservation?.closeOriginal() } }
+        catch { cleanupFailure = error }
         do {
             try await MainActor.run {
                 guard let app = launchedApplication else { return }
@@ -2008,7 +2091,7 @@ final class NormalAppUITests: XCTestCase {
                     throw Refusal.condition("application stopped without completing the normal Quit scenario")
                 }
             }
-        } catch { cleanupFailure = error }
+        } catch { if cleanupFailure == nil { cleanupFailure = error } }
         // Closing the fixture originals is independent of app cleanup success.
         // No fixture deletion or replacement-owner search is performed here.
         do {

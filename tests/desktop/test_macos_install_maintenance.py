@@ -77,9 +77,11 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         helper = (ROOT / "desktop/native/macos-installed-native/build.rs").read_text()
         self.assertIn('#[path = "../../src-tauri/src/macos_install_fixed_paths.rs"]', helper)
         self.assertNotIn('src/macos_install_paths.rs', helper)
-        self.assertIn('installed_paths::APP', helper)
+        self.assertEqual(helper.count('installed_paths::PAYLOAD_APP'), 2)
+        self.assertNotIn('installed_paths::APP', helper)
         stable = (ROOT / "desktop/src-tauri/src/macos_install_fixed_paths.rs").read_text()
         self.assertIn('pub const APP: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app";', stable)
+        self.assertIn('pub const PAYLOAD_APP: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app";', stable)
         self.assertNotIn('OUT_DIR', '\n'.join(line for line in stable.splitlines() if not line.startswith('//!')))
 
     def test_readme_is_static_honest_and_preserves_user_and_unknown_content(self):

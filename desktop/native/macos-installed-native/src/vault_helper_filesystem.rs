@@ -1,4 +1,4 @@
-//! Ten fixed installed code originals shared by app/helper admission, not a
+//! Thirteen fixed installed code originals shared by app/helper admission, not a
 //! caller-selected filesystem walker. No writes, execution or Drop cleanup.
 #![forbid(unsafe_code)]
 use std::{mem::ManuallyDrop,os::fd::{AsFd,BorrowedFd,OwnedFd},path::Path,time::Instant};
@@ -6,12 +6,14 @@ use nix::{fcntl::{self,AtFlags,OFlag},mount::MntFlags,
     sys::{stat::{self,FileStat,Mode,SFlag},statfs},unistd};
 use crate::vault_filesystem::{Expected,Policy,SnapshotBook};
 
-pub const APP_BINARY:&str="/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop";
-pub const HELPER_BINARY:&str="/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/mrk-vault-keychain";
-pub const FIXED_CWD:&str="/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers";
-const APP:usize=7;const HELPER:usize=9;const COUNT:usize=10;
-const NAMES:[&str;COUNT]=["/","Library","Application Support","MobileReleaseKit","Mobile Release Kit.app","Contents","MacOS","mobile-release-kit-desktop","Helpers","mrk-vault-keychain"];
-const PARENT:[Option<usize>;COUNT]=[None,Some(0),Some(1),Some(2),Some(3),Some(4),Some(5),Some(6),Some(5),Some(8)];
+#[path = "../../../src-tauri/src/macos_install_fixed_paths.rs"]
+mod paths;
+pub const APP_BINARY:&str=paths::PAYLOAD_EXECUTABLE;
+pub const HELPER_BINARY:&str=paths::VAULT_HELPER_BINARY;
+pub const FIXED_CWD:&str=paths::PAYLOAD_HELPERS;
+const APP:usize=10;const HELPER:usize=12;const COUNT:usize=13;
+const NAMES:[&str;COUNT]=["/","Library","Application Support","MobileReleaseKit",paths::APP_NAME,"Contents","Helpers",paths::PAYLOAD_NAME,"Contents","MacOS","mobile-release-kit-desktop","Helpers","mrk-vault-keychain"];
+const PARENT:[Option<usize>;COUNT]=[None,Some(0),Some(1),Some(2),Some(3),Some(4),Some(5),Some(6),Some(7),Some(8),Some(9),Some(8),Some(11)];
 #[derive(Clone,Copy,PartialEq,Eq)]
 enum State{Vacant,Opening,Held,NoHandle,Closing,Closed,Unknown}
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]

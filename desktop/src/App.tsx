@@ -384,6 +384,7 @@ export function App() {
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
     releaseVersion: releaseVersion.getSnapshot,
+    assetSession: assetSession.getSnapshot,
     otherOperationReason: () => preflightBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   androidBuildControllerRef.current = androidBuild;
@@ -538,6 +539,7 @@ export function App() {
   // Exact assignment/context changes retire signed consent before a new render;
   // idle retained records remain available to the existing native borrower.
   useEffect(() => assetSession.subscribe(() => iosArchive.syncAssetSession()), [assetSession, iosArchive]);
+  useEffect(() => assetSession.subscribe(() => androidBuild.syncAssetSession()), [assetSession, androidBuild]);
   // Subscribe before bootstrap; a generic asset-only event must recheck the
   // same held selection even when no further image status event will arrive.
   useEffect(() => {
@@ -862,7 +864,8 @@ export function App() {
           androidBuild={<AndroidBuild state={androidBuildState} controller={androidBuild}
             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
-            onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp} />}
+            onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />}
           iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}

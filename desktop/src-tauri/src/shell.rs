@@ -2958,6 +2958,15 @@ pub fn run() -> Result<(), InitializationFailed> {
     // window/document/project picker in a root or incompatible Mac process.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     if mrk_macos_installed_native::real_user().is_err() { return Err(InitializationFailed); }
+    // Only the exact ordinary installed role consumes the C/exec handoff. The
+    // explicitly instrumented Aqua main keeps its original case/environment
+    // route and makes no M2/shared-gate claim. No runtime environment bypass.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "desktop-shell", feature = "custom-protocol",
+        not(test), not(feature = "development-runtime"), not(feature = "macos-installed-observation"),
+        not(feature = "windows-installed-observation"), not(feature = "macos-installed-installer"),
+        not(feature = "macos-installed-installer-fixture"), not(feature = "macos-android-registration-helper"),
+        not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher")))]
+    if mrk_macos_installed_native::installed_entry::admit_once().is_err() { return Err(InitializationFailed); }
     run_builder(builder()).map(|_| ())
 }
 

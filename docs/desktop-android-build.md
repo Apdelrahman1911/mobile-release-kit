@@ -109,11 +109,43 @@ Building runs the project's Gradle scripts and plugins. Use only a project you
 trust: those programs can change files, access same-user resources, start helpers
 and make network requests. A private working directory is **not a sandbox**.
 
-The toolkit does not request signing, read signing credentials, contact a Store,
-or publish a release in this action. Project code may nevertheless sign the
+In the default **Build and inspect** mode, the toolkit does not request signing
+or read signing credentials. No mode contacts a Store or publishes a release.
+Project code may nevertheless sign the
 bundle itself. Without the optional checkbox, its signature and signer are
 explicitly **not inspected**. Offline checks remain a separate build-free action
 and never implicitly start this build.
+
+### Optional local upload-key signing (preparation source, not qualified)
+
+**Sign locally with your upload key** is a separate, default-off choice for the
+separately admitted Apple-silicon Mac tool owner. It does not enable Linux or
+Windows signing or bypass missing runtime, tool, helper or credential gates.
+Real native verification and implementation acceptance remain required.
+
+In **Credentials**, select Android → Candidate / internal testing → Build /
+signing. Use the file picker for your existing `.jks`/`.keystore`, enter its store
+password, key alias and key password, then assess, keep and separately assign it.
+Get these from your key owner or secure backup, not your Google account password.
+If the saved project requires Firebase, pick and assign its matching
+`google-services.json` there too. No manual copying or renaming is needed.
+
+Save the public upload-certificate SHA-256 in Project settings. Local signing
+always verifies that fingerprint and the final signature; it cannot disable
+those checks. A changed assignment, saved configuration or version requires a
+fresh review and the signing-specific confirmation.
+
+The toolkit validates the upload key, builds without placing signing passwords
+in Gradle's environment, checks the captured ZIP, and signs a private copy—not
+the project's original AAB. It restores temporary Firebase inputs before final
+inspection. Passwords remain outside public request/result JSON and argv.
+Project code can still access same-user resources: this is not a sandbox.
+
+Signing success requires all final checks and original cleanup to pass. A failed
+restoration leads to the existing project-recovery flow; an uncertain signer or
+cleanup retains the relevant work and never becomes success merely from a hash.
+A locally signed file is not Play enrollment, source provenance, freshness,
+release approval, an upload or a promotion.
 
 ## Reading a result
 

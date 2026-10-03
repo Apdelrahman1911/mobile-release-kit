@@ -8,6 +8,7 @@ The native owner still supplies the earlier startup-inclusive final deadline.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 import time
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ._desktop_android_build_control import AndroidBuildInput
-from ._desktop_android_build_protocol import AndroidBuildRequest, REASONS, STAGES, require
+from ._desktop_android_build_protocol import AndroidBuildRequest, REASONS, is_signed, stages, require
 from ._desktop_android_build_selection import (
     SavedAndroidSelection, bind_saved_android_validation, bind_saved_android_version, select_saved_android_configuration,
 )
@@ -66,6 +67,7 @@ class AndroidBuildOperation:
         self.invocation: InvocationCustody | None = None
         self.invocation_attempted = False
         self.inputs: BoundAndroidInputs | None = None
+        self.signing = None
         self.files: AndroidBuildFiles | None = None
         self.tools: AndroidValidationTools | None = None
         self.counters: dict[str, int] = {}
@@ -79,6 +81,8 @@ class AndroidBuildOperation:
         self._roles = {"gradle": "new", "bundletool": "new"}
         if request.context["artifactValidation"]["mode"] == "upload-signature":
             self._roles.update(jarsigner="new", keytool="new")
+        if is_signed(request.context):
+            self._roles = {role: "new" for role in ("keytool-input", "gradle", "aab-sign", "bundletool", "jarsigner", "keytool")}
         self._signature_passed = False
         self._command_before: dict[str, int] = {}
         self._returned: dict[str, int] = {}
@@ -91,6 +95,9 @@ class AndroidBuildOperation:
         source.bind_operation(self)
         from ._desktop_android_build_files import AndroidBuildFiles
         self.files = AndroidBuildFiles(self)
+        if is_signed(request.context):
+            from .android_build_signing import SignedAndroidOperation
+            self.signing = SignedAndroidOperation(self)
 
     def owner(self) -> None:
         require(self.pid == os.getpid() and self.thread is threading.current_thread()
@@ -181,6 +188,19 @@ class AndroidBuildOperation:
         config = ReleaseConfig(path=self.root / "release/mobile-release.json", root=self.root, data=data)
         from .android import _bundle_task
         self.inputs = BoundAndroidInputs(config, saved, _bundle_task(selected.module, selected.variant), check_signer)
+        if self.signing is not None:
+            require(self.request.native["profile"] == "macos-arm64" and check_signer)
+            # savedConfig binds the exact original on-disk bytes above. The
+            # asset session holds canonical serde_json UTF-8 draft bytes, not
+            # that file's whitespace/escapes. Compare this SAME admitted parsed
+            # data independently before receiving private material or commands.
+            canonical = json.dumps(data, sort_keys=True, ensure_ascii=False,
+                                   separators=(",", ":"), allow_nan=False).encode("utf-8")
+            captured = self.request.native["signingContext"]
+            if len(canonical) != captured["bytes"] or hashlib.sha256(canonical).hexdigest() != captured["sha256"]:
+                self.fail("stale-intent")
+            expected = ("android-keystore", "android-firebase") if config.section("services").get("androidFirebase") == "required" else ("android-keystore",)
+            require(tuple(row["kind"] for row in self.request.context["signing"]["assignments"]) == expected)
         self.check_inputs()
         return self.inputs
 
@@ -257,7 +277,8 @@ class AndroidBuildOperation:
     def advance(self, stage: str) -> None:
         """Reached fixed stage only; the original engine encodes the frame."""
         self.checkpoint()
-        require(stage in STAGES and (self.stage == "accepted" or STAGES.index(stage) > STAGES.index(self.stage)))
+        selected = stages(self.request.context)
+        require(stage in selected and (self.stage == "accepted" or selected.index(stage) > selected.index(self.stage)))
         self.stage = stage  # A failed progress write cannot erase reached work.
         self.source.progress(stage)
 
@@ -285,14 +306,37 @@ class AndroidBuildOperation:
         require(facts.cleanup_complete and facts.contained and not facts.fatal and facts.profile_calls == 0)
         previous = tuple(self._roles)[:tuple(self._roles).index(role)]
         require(facts.commands == len(previous) and all(self._roles[item] == "returned" for item in previous))
-        if role != "gradle":
-            require(self._returned.get("gradle") == 0 and self._artifact is not None)
+        if role not in {"keytool-input", "gradle"}:
+            require(self._returned.get("gradle") == 0)
+            if role != "aab-sign":
+                require(self._artifact is not None)
+        if self.signing is not None and role != "keytool-input":
+            require(self.signing.input_checked and self._returned.get("keytool-input") == 0)
+        if role == "aab-sign":
+            require(self.signing is not None and self.files is not None
+                    and self.files.signing_candidate is not None and self.files.signing_candidate._native
+                    and self.files.signing_candidate.integrity_checked)
         if role in {"jarsigner", "keytool"}:
             require(self.inputs is not None and self.inputs.check_signer)
         if role == "keytool":
             require(self._signature_passed)
         self._command_before[role] = facts.commands
         self._roles[role], self._pending = "armed", role
+
+    def keystore_command(self) -> tuple[str, ...]:
+        self.checkpoint()
+        require(self.signing is not None and self.tools is not None)
+        argv = self.tools.keystore_input_command()
+        self._arm("keytool-input")
+        return argv
+
+    def aab_sign_command(self, candidate) -> tuple[str, ...]:
+        self.checkpoint()
+        require(self.signing is not None and self.tools is not None and self.files is not None
+                and candidate is self.files.signing_candidate)
+        argv = self.tools.aab_sign_command(candidate)
+        self._arm("aab-sign")
+        return argv
 
     def gradle_command(self) -> tuple[str, ...]:
         require(self.inputs is not None and self.tools is not None and self.files is not None)
@@ -357,7 +401,7 @@ class AndroidBuildOperation:
                 and type(capture) is bool and capture is (role != "gradle")
                 and type(timeout) is int and timeout > 0 and type(output_limit) is int and output_limit > 0)
         self._roles[role] = "attempted"  # Claim once, before run_command can allocate anything.
-        ceiling = {"gradle": 2700, "bundletool": 60, "jarsigner": 120, "keytool": 30}[role]
+        ceiling = {"keytool-input": 30, "gradle": 2700, "aab-sign": 120, "bundletool": 60, "jarsigner": 120, "keytool": 30}[role]
         return min(timeout, ceiling), min(output_limit, 2 * 1024 * 1024)
 
     def returned(self, role: str, code: int) -> None:
@@ -398,15 +442,37 @@ class AndroidBuildOperation:
                                           self.inputs.saved.configuration.variant))
         facts = self.guard.lifetime_ledger.verdict()
         require(facts.cleanup_complete and facts.contained and not facts.fatal
-                and facts.command_dispatched is True and facts.commands == 1 and facts.profile_calls == 0)
+                and facts.command_dispatched is True and facts.commands == (2 if self.signing is not None else 1)
+                and facts.profile_calls == 0)
 
     def capture_after(self) -> OriginalAndroidArtifact:
-        require(self.inputs is not None and self.files is not None and self._artifact is None)
+        require(self.inputs is not None and self.files is not None and self._artifact is None and self.signing is None)
         selected = self.inputs.saved.configuration
         self.capture_ready(selected.module, selected.variant)
         self._artifact = self.files.capture_aab(selected.module, selected.variant)
         self.check_inputs()
         return self._artifact
+
+    def capture_signing_after(self):
+        require(self.inputs is not None and self.files is not None and self._artifact is None and self.signing is not None)
+        selected = self.inputs.saved.configuration
+        self.capture_ready(selected.module, selected.variant)
+        candidate = self.files.capture_signing_aab(selected.module, selected.variant)
+        self.check_inputs()
+        return candidate
+
+    def finalize_signing_capture(self) -> OriginalAndroidArtifact:
+        self.checkpoint()
+        require(self.signing is not None and self.files is not None and self._artifact is None
+                and self._returned.get("aab-sign") == 0 and self._pending is None)
+        self._artifact = self.files.finalize_signing_aab()
+        self.check_inputs()
+        return self._artifact
+
+    def commands_settled(self) -> bool:
+        self.owner()
+        facts = self.guard.lifetime_ledger.verdict()
+        return facts.complete and facts.contained and self._pending is None
 
     def artifact(self, logical_name: str = "android-aab") -> OriginalAndroidArtifact:
         self.checkpoint()
@@ -430,6 +496,8 @@ class AndroidBuildOperation:
         # Independent original closures are all attempted. No failed consuming
         # deletion is retried, and no application/shared cache is selected.
         actions = []
+        if self.signing is not None:
+            actions.append(self.signing.close)
         if self.files is not None:
             if not self.work_finish_attempted:
                 actions.append(self.finish_work)
@@ -448,7 +516,8 @@ class AndroidBuildOperation:
                         self.guard._abort(error)
                     if first is None:
                         first = error
-        self.resources_closed = ((self.files is None or self.files.closed())
+        self.resources_closed = ((self.signing is None or self.signing.closed())
+                                 and (self.files is None or self.files.closed())
                                  and (self.tools is None or self.tools.closed()))
         if first is not None:
             raise first

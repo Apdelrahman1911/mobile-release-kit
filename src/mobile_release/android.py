@@ -339,8 +339,32 @@ def _jar_signature_policy(returncode: int, stdout: str, stderr: str) -> bool:
 
 def _canonicalize_aab_signature(path: Path, *, project_root: Path, execution_source=None,
                                 cancellation: DefaultCancellation | None = None,
-                                build_inputs: BuildInputs | None = None) -> None:
+                                build_inputs: BuildInputs | None = None,
+                                operation: AndroidBuildOperation | None = None) -> None:
     """Re-sign the final copy so JAR stream and central-directory views agree."""
+    if operation is not None:
+        from .android_build_operation import AndroidBuildOperation
+        from ._desktop_android_build_protocol import require
+        require(type(operation) is AndroidBuildOperation and operation.signing is not None
+                and operation.root == project_root and cancellation is operation.guard
+                and execution_source is None and build_inputs is operation.signing.materialization)
+        operation.require(operation.inputs.config, cancellation)
+        candidate = operation.files.signing_candidate
+        require(candidate is not None and candidate.path == path)
+        with candidate.native_signing_input():
+            argv = operation.aab_sign_command(candidate)
+            try:
+                result = run_owned(argv, cwd=project_root, environ=operation.signing.command_environment(),
+                                   capture=True, timeout=120, output_limit=2 * 1024 * 1024,
+                                   cancellation=cancellation)
+                operation.returned("aab-sign", result.returncode)
+            except BaseException as error:
+                operation.command_error("aab-sign", error)
+                raise
+            if result.returncode:
+                operation.fail("signing-command-failed")
+            operation.signing.command_inputs()
+        return
 
     required = (
         "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH",
@@ -645,8 +669,9 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
     if operation is not None:
         from .android_build_operation import AndroidBuildOperation
         from ._desktop_android_build_protocol import require
-        require(type(operation) is AndroidBuildOperation and signed is False
-                and execution_source is None and build_inputs is None)
+        require(type(operation) is AndroidBuildOperation and type(signed) is bool
+                and signed is (operation.signing is not None) and execution_source is None
+                and (build_inputs is operation.signing.materialization if signed else build_inputs is None))
         operation.require(config, cancellation)
         argv = operation.gradle_command()
         try:
@@ -661,7 +686,15 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
         operation.tools.check()
         operation.check_inputs()
         operation.advance("capturing")
-        captured = operation.capture_after()
+        if signed:
+            candidate = operation.capture_signing_after()
+            candidate.validate_integrity()
+            operation.advance("signing")
+            _canonicalize_aab_signature(candidate.path, project_root=config.root, cancellation=cancellation,
+                                        build_inputs=build_inputs, operation=operation)
+            captured = operation.finalize_signing_capture()
+        else:
+            captured = operation.capture_after()
         # Compatibility/diagnostic map only; Desktop consumes the original
         # operation.artifact(), never reopens this returned path as authority.
         return {"android-aab": captured.path}

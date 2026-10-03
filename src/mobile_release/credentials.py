@@ -307,13 +307,18 @@ def credential_values_for_purpose(
 
     allowed: set[str] = set()
     selected = tuple(platforms)
+    from ._desktop_ios_signing_material import CapturedBuildValues
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    if type(values) is CapturedBuildValues and (selected != ("ios",) or purpose != "signing"):
+        raise CredentialError("captured iOS material requires its exact iOS signing purpose")
+    if type(values) is CapturedAndroidBuildValues and (selected != ("android",) or purpose != "signing"):
+        raise CredentialError("captured Android material requires its exact Android signing purpose")
     for item in requirements(config, stage, purpose=purpose, platforms=selected):
         allowed.add(item.name)
         allowed.update(item.alternatives)
     if purpose == "store" and "android" in selected:
         allowed.add("GOOGLE_APPLICATION_CREDENTIALS")
-    from ._desktop_ios_signing_material import CapturedBuildValues
-    if type(values) is CapturedBuildValues:
+    if type(values) in (CapturedBuildValues, CapturedAndroidBuildValues):
         # Captured file bytes are not environment/renderer mapping values.
         # Preserve their original source while applying the SAME core policy.
         return values.select(allowed)
@@ -529,7 +534,8 @@ def _selected_material_bytes(
 ) -> bytes | None:
     """Select an external source once, never return its filename to consumers."""
     from ._desktop_ios_signing_material import CapturedBuildValues
-    if type(values) is CapturedBuildValues:
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    if type(values) in (CapturedBuildValues, CapturedAndroidBuildValues):
         return values.material(base64_name, root=project_root, cancellation=cancellation)
     if values.get(base64_name) and values.get(path_name):
         raise CredentialError("private material has mutually exclusive input sources")
@@ -1314,8 +1320,13 @@ def _validate_android_material(
         execution_source=execution_source, cancellation=cancellation,
     )
     scratch.require(keystore)
-    output = result.stdout + result.stderr
-    if result.returncode or "PrivateKeyEntry" not in output:
+    return android_material_finding(config, result.returncode, result.stdout, result.stderr)
+
+
+def android_material_finding(config: ReleaseConfig, returncode: int, stdout: str, stderr: str) -> Finding:
+    """Shared parsed keytool policy; this pure projection grants no tool custody."""
+    output = stdout + stderr
+    if returncode or "PrivateKeyEntry" not in output:
         return Finding(
             "credential-material.android",
             Status.INVALID,
@@ -2111,6 +2122,13 @@ def materialize_build_inputs(
     if (not selected or len(set(selected)) != len(selected)
             or any(platform not in {"android", "ios"} for platform in selected)):
         raise CredentialError("build material requires an exact platform selection")
+    from ._desktop_ios_signing_material import CapturedBuildValues
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    if type(values) is CapturedBuildValues and selected != ("ios",):
+        raise CredentialError("captured iOS material requires its exact iOS-only child")
+    if type(values) is CapturedAndroidBuildValues and (selected != ("android",) or prepare_ios_signing
+                                                       or signing_lease is not None or build_inputs is None):
+        raise CredentialError("captured Android material requires its original Android-only child")
     if (prepare_ios_signing and "ios" in selected and signing_lease is not None
             and signing_lease.active is not None):
         raise CredentialError("this account lease already has an active signing context")
@@ -2143,9 +2161,10 @@ def materialize_build_inputs(
     scratch = build_inputs.scratch
     _material_guard(scratch, cancellation)
     from ._desktop_ios_signing_material import CapturedBuildValues
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
     # After environment/account/project admission, not before. Captured bytes
     # keep their exact operation binding instead of becoming path/base64 data.
-    values = values.for_invocation(invocation) if type(values) is CapturedBuildValues else dict(values)
+    values = values.for_invocation(invocation) if type(values) in (CapturedBuildValues, CapturedAndroidBuildValues) else dict(values)
     material: dict[str, InputSnapshot] = {}
     for platform, base64_name, path_name, role in (
         ("android", "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64", "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH", "android-keystore"),
@@ -2167,8 +2186,18 @@ def materialize_build_inputs(
             content, platform="android", expected_identity=config.section("android").get("applicationId"),
         ):
             raise CredentialError("Android Firebase client file is missing, malformed, or for another application")
-        module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
-            execution_source=None if signing_lease is None else signing_lease.execution_source()))
+        if type(values) is CapturedAndroidBuildValues:
+            # Same saved module, already admitted under this exact project and
+            # child. No ambient rediscovery/subprocess in the Desktop route.
+            operation = values._original._operation
+            if (operation.invocation is not invocation or operation.inputs.config is not config
+                    or operation.signing.materialization is not build_inputs or signing_lease is not None):
+                raise CredentialError("Android material does not belong to this saved build")
+            operation.check_inputs()
+            module = operation.inputs.saved.configuration.module
+        else:
+            module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
+                execution_source=None if signing_lease is None else signing_lease.execution_source()))
         if not module:
             raise CredentialError("Android Firebase material or application module is unavailable")
         module_relative = module.lstrip(":").replace(":", "/")

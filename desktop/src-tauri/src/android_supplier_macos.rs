@@ -30,13 +30,13 @@ const COMPONENTS: [Component; 6] = [Component::Jdk, Component::SdkPlatform,
     Component::SdkBuildTools, Component::Gradle, Component::Aapt2, Component::Bundletool];
 #[derive(Clone, Copy, Serialize)]
 enum PublishedChecksum { Sha256(&'static str), Sha1(&'static str) }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 enum ArchiveKind {
     Directory { mode: u32 },
     File { mode: u32, bytes: u64, sha256: &'static str },
     Alias { mode: u32, target: &'static str },
 }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 enum ArchiveDisposition {
     Picked { source_index: u32 },
     /// Every byte is retained in the sealed support original, not discarded.
@@ -44,13 +44,13 @@ enum ArchiveDisposition {
     /// Only an explicit directory wrapping the selected distribution/bundle.
     WrapperDirectory,
 }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 struct OfficialMember {
     name: &'static str,
     kind: ArchiveKind,
     disposition: ArchiveDisposition,
 }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 struct OfficialArchive {
     component: Component,
     official_source: &'static str,
@@ -62,11 +62,15 @@ struct OfficialArchive {
     expanded_bytes: u64,
     members: &'static [OfficialMember],
 }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 enum SourceProvenance {
     Vendor { archive: u8, member: u32 },
+    /// A necessary filesystem parent absent from the actual archive headers.
+    /// The complete bidirectional prefix closure below binds this exact archive
+    /// and prefix; neither a fictional member nor an archival mode is supplied.
+    ArchiveParent { archive: u8, prefix: &'static str },
 }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 enum SourceDisposition {
     Payload(u32),
     Alias(u32),
@@ -74,7 +78,7 @@ enum SourceDisposition {
     /// directory closure is derived only from regular files/aliases.
     Directory,
 }
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 struct SourceBinding {
     provenance: SourceProvenance,
     disposition: SourceDisposition,
@@ -523,8 +527,63 @@ fn source_index(reference: &Reference, group: SourceGroup, name: &str) -> Option
     (source.group == group && source.relative == name).then_some(index)
 }
 fn member_under(reference: &Reference, value: &SourceMemberSpec) -> bool {
-    reference.trees.iter().any(|tree| tree.group == value.group && (tree.prefix.is_empty()
-        || value.relative == tree.prefix || value.relative.strip_prefix(tree.prefix).is_some_and(|s| s.starts_with('/'))))
+    source_tree(reference, value).is_some()
+}
+fn source_tree(reference: &Reference, value: &SourceMemberSpec) -> Option<SourceTree> {
+    reference.trees.iter().find(|tree| tree.group == value.group && (tree.prefix.is_empty()
+        || value.relative == tree.prefix || value.relative.strip_prefix(tree.prefix).is_some_and(|s| s.starts_with('/')))).copied()
+}
+fn component_source(reference: &Reference, component: Component, source: &SourceMemberSpec, name: &str) -> bool {
+    let Some(tree) = source_tree(reference, source) else { return false; };
+    match component {
+        Component::Jdk => {
+            let Some(root) = reference.archives.first().and_then(|a| a.members.first())
+                .and_then(|m| m.name.split('/').next()) else { return false; };
+            tree.group == SourceGroup::Jdk && tree.prefix.is_empty()
+                && name.strip_prefix(root).and_then(|s| s.strip_prefix('/')) == Some(source.relative)
+        }
+        Component::Gradle => tree.group == SourceGroup::Gradle && tree.prefix.is_empty()
+            && name.strip_prefix("gradle-").and_then(|s| s.strip_prefix(reference.versions.gradle_version))
+                .and_then(|s| s.strip_prefix('/')) == Some(source.relative),
+        Component::SdkPlatform => tree.group == SourceGroup::Sdk
+            && tree.prefix.strip_prefix("platforms/") == Some(reference.versions.sdk_platform)
+            && name.strip_prefix(reference.versions.sdk_platform) == source.relative.strip_prefix(tree.prefix),
+        Component::SdkBuildTools => tree.group == SourceGroup::Sdk
+            && tree.prefix.strip_prefix("build-tools/") == Some(reference.versions.sdk_build_tools_version)
+            && reference.versions.sdk_build_tools_version == "35.0.0"
+            && name.strip_prefix("android-15") == source.relative.strip_prefix(tree.prefix),
+        Component::Aapt2 | Component::Bundletool => false,
+    }
+}
+fn wrapper_directory(reference: &Reference, archive: &OfficialArchive, member: &OfficialMember) -> bool {
+    if !matches!(member.kind, ArchiveKind::Directory { .. }) { return false; }
+    // Only retained bundle/distribution roots sit outside SourceMembers. All
+    // selected descendants and SDK package roots need their ordinary binding;
+    // sealed support archives never supply picked wrapper directories.
+    match archive.component {
+        Component::Jdk => archive.members.first().and_then(|first| first.name.split('/').next())
+            .is_some_and(|root| member.name == root),
+        Component::Gradle => member.name.strip_prefix("gradle-") == Some(reference.versions.gradle_version),
+        Component::SdkPlatform | Component::SdkBuildTools | Component::Aapt2 | Component::Bundletool => false,
+    }
+}
+fn parent_spelling(left: &str, right: &str) -> bool {
+    for (a, b) in left.split('/').zip(right.split('/')) {
+        if !a.eq_ignore_ascii_case(b) { break; }
+        if a != b { return false; }
+    }
+    true
+}
+fn folded_under(name: &str, prefix: &str) -> bool {
+    name.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        && name.as_bytes().get(prefix.len()) == Some(&b'/')
+}
+fn source_origin(reference: &Reference, index: usize) -> Option<(u8, &'static str)> {
+    match reference.source_bindings.get(index)?.provenance {
+        SourceProvenance::Vendor { archive, member } => Some((archive,
+            reference.archives.get(usize::from(archive))?.members.get(member as usize)?.name)),
+        SourceProvenance::ArchiveParent { archive, prefix } => Some((archive, prefix)),
+    }
 }
 fn same_source_archive(source: &SourceMemberSpec, archive: &OfficialMember) -> bool {
     match (&source.kind, &archive.kind) {
@@ -619,7 +678,7 @@ impl Reference {
         let Some(relative) = pin.path.strip_prefix("sdk/") else { return false; };
         let Some(index) = source_index(self, SourceGroup::Sdk, relative) else { return false; };
         let Some(binding) = self.source_bindings.get(index) else { return false; };
-        let SourceProvenance::Vendor { archive, member } = binding.provenance;
+        let SourceProvenance::Vendor { archive, member } = binding.provenance else { return false; };
         let Some(archive) = self.archives.get(usize::from(archive)) else { return false; };
         let Some(member) = archive.members.get(member as usize) else { return false; };
         sdk_source_matches(archive, member, &self.source_members[index], pin)
@@ -635,7 +694,7 @@ impl Reference {
         let Some(relative) = relative else { return false; };
         let Some(index) = source_index(self, group, relative) else { return false; };
         let Some(binding) = self.source_bindings.get(index) else { return false; };
-        let SourceProvenance::Vendor { archive, member } = binding.provenance;
+        let SourceProvenance::Vendor { archive, member } = binding.provenance else { return false; };
         let Some(archive) = self.archives.get(archive as usize) else { return false; };
         let Some(member) = archive.members.get(member as usize) else { return false; };
         let SourceDisposition::Payload(ordinal) = binding.disposition else { return false; };
@@ -688,7 +747,7 @@ impl Reference {
             || self.versions.sdk_build_tools_version != "35.0.0" { return false; }
         let Some(index) = source_index(self, SourceGroup::Sdk, document.source_properties_relative) else { return false; };
         let Some(binding) = self.source_bindings.get(index) else { return false; };
-        let SourceProvenance::Vendor { archive: origin, member } = binding.provenance;
+        let SourceProvenance::Vendor { archive: origin, member } = binding.provenance else { return false; };
         let Some(member) = archive.members.get(member as usize) else { return false; };
         let SourceDisposition::Payload(ordinal) = binding.disposition else { return false; };
         let Some(properties) = self.payload.get(ordinal as usize) else { return false; };
@@ -721,6 +780,58 @@ impl Reference {
             }
         }
         counts == if required { [1, 1] } else { [0, 0] }
+    }
+    /// Called only after sorted/size/grammar/reciprocal binding preflight.
+    /// All checks borrow static tables: <=16 ancestor searches per source and
+    /// one bounded archive-prefix range per derived directory. No directory
+    /// tree, fabricated archive row, native call or source observation is made.
+    fn source_directory_closure(&self) -> bool {
+        for tree in self.trees {
+            if !tree.prefix.is_empty() {
+                let Some(index) = source_index(self, tree.group, tree.prefix) else { return false; };
+                if !matches!(self.source_members[index].kind, SourceKindSpec::Directory { .. }) { return false; }
+            }
+        }
+        for (index, source) in self.source_members.iter().enumerate() {
+            let Some(tree) = source_tree(self, source) else { return false; };
+            let Some((archive_index, name)) = source_origin(self, index) else { return false; };
+            let Some(archive) = self.archives.get(usize::from(archive_index)) else { return false; };
+            if !component_source(self, archive.component, source, name) { return false; }
+            let mut path = source.relative;
+            while let Some((parent, _)) = path.rsplit_once('/') {
+                // The SDK picker is broad; only the selected package itself
+                // and its descendants belong to the observed member roster.
+                if !tree.prefix.is_empty() && parent.len() < tree.prefix.len() { break; }
+                let Some(parent_index) = source_index(self, source.group, parent) else { return false; };
+                if !matches!(self.source_members[parent_index].kind, SourceKindSpec::Directory { .. }) { return false; }
+                let Some((parent_archive, parent_name)) = source_origin(self, parent_index) else { return false; };
+                let Some(tail) = source.relative.strip_prefix(parent) else { return false; };
+                if parent_archive != archive_index || !tail.starts_with('/')
+                    || name.strip_suffix(tail) != Some(parent_name) { return false; }
+                path = parent;
+            }
+            if let SourceProvenance::ArchiveParent { prefix, .. } = self.source_bindings[index].provenance {
+                // An explicit header (even a differently cased file/alias) can
+                // never be replaced by derived provenance or mode laundering.
+                if archive.members.binary_search_by(|m| archive_order(archive.component, m.name, prefix)).is_ok() {
+                    return false;
+                }
+                let first = archive.members.partition_point(|m| m.name.bytes().map(|b| b.to_ascii_lowercase())
+                    .cmp(prefix.bytes().chain(std::iter::once(b'/')).map(|b| b.to_ascii_lowercase())) == Ordering::Less);
+                let mut required = false;
+                // The entire actual archive prefix, not one convenient child,
+                // must map to this SAME selected source prefix and component.
+                for member in archive.members[first..].iter().take_while(|m| folded_under(m.name, prefix)) {
+                    let Some(tail) = member.name.strip_prefix(prefix).filter(|tail| tail.starts_with('/')) else { return false; };
+                    let ArchiveDisposition::Picked { source_index } = member.disposition else { return false; };
+                    let Some(child) = self.source_members.get(source_index as usize) else { return false; };
+                    if child.group != source.group || child.relative.strip_prefix(source.relative) != Some(tail) { return false; }
+                    required = true;
+                }
+                if !required { return false; }
+            }
+        }
+        true
     }
     fn structural(&self) -> bool {
         if self.working_bytes().is_none()
@@ -757,8 +868,10 @@ impl Reference {
                 SourceKindSpec::File { bytes, sha256, modes: values } =>
                     bytes <= policy::FILE_LIMIT && hex(sha256, 64) && modes(values),
                 SourceKindSpec::Alias { target, canonical, modes: values } =>
-                    source.group == SourceGroup::Jdk && !target.is_empty() && target.len() <= 512
-                        && !target.starts_with('/') && policy::relative(canonical) && modes(values),
+                    source.group == SourceGroup::Jdk && modes(values)
+                        && policy::jdk_source_alias_resolves(source.relative, target, canonical)
+                        && source_index(self, source.group, canonical).is_some_and(|i|
+                            matches!(self.source_members[i].kind, SourceKindSpec::File { .. })),
             };
             if !mode_valid { return false; }
             let binding = &self.source_bindings[index];
@@ -767,10 +880,16 @@ impl Reference {
                     let Some(archive) = self.archives.get(usize::from(archive)) else { return false; };
                     let Some(member) = archive.members.get(member as usize) else { return false; };
                     if !matches!(member.disposition, ArchiveDisposition::Picked { source_index } if source_index as usize == index)
-                        || !same_source_archive(source, member) { return false; }
+                        || !same_source_archive(source, member) || !component_source(self, archive.component, source, member.name) { return false; }
                     if let (ArchiveKind::File { mode, .. }, SourceDisposition::Payload(payload)) = (&member.kind, &binding.disposition) {
                         if mode & 0o111 != 0 && matches!(self.classes.get(*payload as usize), Some(FileClass::Data)) { return false; }
                     }
+                }
+                SourceProvenance::ArchiveParent { archive, prefix } => {
+                    let Some(archive) = self.archives.get(usize::from(archive)) else { return false; };
+                    if !archive_relative(prefix) || !component_source(self, archive.component, source, prefix)
+                        || !matches!(source.kind, SourceKindSpec::Directory { .. })
+                        || !matches!(binding.disposition, SourceDisposition::Directory) { return false; }
                 }
             }
             match binding.disposition {
@@ -797,7 +916,8 @@ impl Reference {
                 || archive.vendor_release.is_empty() || archive.vendor_release.len() > 128
                 || archive.members.is_empty() || archive.members.len() != archive.member_count as usize
                 || archive.members.len() > policy::ENTRY_LIMIT || archive.expanded_bytes > policy::TOTAL_LIMIT
-                || !archive.members.windows(2).all(|w| archive_order(archive.component, w[0].name, w[1].name) == Ordering::Less) {
+                || !archive.members.windows(2).all(|w| archive_order(archive.component, w[0].name, w[1].name) == Ordering::Less
+                    && (archive.component == Component::Bundletool || parent_spelling(w[0].name, w[1].name))) {
                 return false;
             }
             if !match archive.published {
@@ -820,6 +940,14 @@ impl Reference {
                     }
                 };
                 if !archive_mode(archive.component, archive.archive.sha256, mode, expected_kind) { return false; }
+                let mut path = member.name;
+                while let Some((parent, _)) = path.rsplit_once('/') {
+                    if let Ok(index) = archive.members.binary_search_by(|m| archive_order(archive.component, m.name, parent)) {
+                        if archive.members[index].name != parent
+                            || !matches!(archive.members[index].kind, ArchiveKind::Directory { .. }) { return false; }
+                    }
+                    path = parent;
+                }
                 match member.disposition {
                     ArchiveDisposition::Picked { source_index } => {
                         let Some(binding) = self.source_bindings.get(source_index as usize) else { return false; };
@@ -830,11 +958,12 @@ impl Reference {
                         if !matches!((archive.component, asset),
                             (Component::Aapt2, SupportAsset::Aapt2OsxJar) | (Component::Bundletool, SupportAsset::BundletoolJar)) { return false; }
                     }
-                    ArchiveDisposition::WrapperDirectory => if !matches!(member.kind, ArchiveKind::Directory { .. }) { return false; },
+                    ArchiveDisposition::WrapperDirectory => if !wrapper_directory(self, archive, member) { return false; },
                 }
             }
             if bytes != archive.expanded_bytes || files > policy::FILE_COUNT || aliases > policy::ALIAS_COUNT { return false; }
         }
+        if !self.source_directory_closure() { return false; }
         for support in self.support {
             let component = match support.asset { SupportAsset::BundletoolJar => Component::Bundletool, SupportAsset::Aapt2OsxJar => Component::Aapt2 };
             let Some(archive) = self.archives.iter().find(|a| a.component == component) else { return false; };
@@ -1307,7 +1436,8 @@ mod tests {
     }
     /// Deliberately synthetic comparison DATA; never a production supplier and
     /// never executed or installed. The production catalogue remains separate.
-    fn fixture() -> Reference {
+    fn fixture() -> Reference { fixture_with_source_alias(None) }
+    fn fixture_with_source_alias(alias: Option<(&'static str, &'static str)>) -> Reference {
         let support = static_slice(vec![
             SupportOriginalSpec { asset: SupportAsset::BundletoolJar,
                 archive: ArchivePin { bytes: 32_520_401, sha256: BUNDLE_SHA }, modes: &[0o444] },
@@ -1354,6 +1484,10 @@ mod tests {
                 }
             }
         }
+        if let Some((target, canonical)) = alias {
+            sources.push(SourceMemberSpec { group: SourceGroup::Jdk, relative: "Contents/Home/bin/java-link",
+                kind: SourceKindSpec::Alias { target, canonical, modes: &[0o777] } });
+        }
         sources.sort_by(|a,b| source_order(a.group, a.relative, b));
         sources.dedup_by(|a,b| a.group == b.group && a.relative == b.relative);
         let sources = static_slice(sources);
@@ -1376,12 +1510,13 @@ mod tests {
                 SourceKindSpec::Directory { .. } => ArchiveKind::Directory { mode: 0o040755 },
                 SourceKindSpec::File { bytes, sha256, modes } =>
                     ArchiveKind::File { mode: 0o100000 | modes[0], bytes, sha256 },
-                SourceKindSpec::Alias { .. } => unreachable!(),
+                SourceKindSpec::Alias { target, .. } => ArchiveKind::Alias { mode: 0o120777, target },
             };
             members[archive].push(OfficialMember { name: static_text(name), kind,
                 disposition: ArchiveDisposition::Picked { source_index: source_index as u32 } });
             let disposition = match source.kind {
                 SourceKindSpec::Directory { .. } => SourceDisposition::Directory,
+                SourceKindSpec::Alias { .. } => SourceDisposition::Alias(0),
                 _ => SourceDisposition::Payload(payload.iter().position(|p|
                     p.origin == PayloadOrigin::DirectOriginal(OriginalSource::Picked {
                         group: source.group, relative: source.relative })).unwrap() as u32),
@@ -1422,9 +1557,13 @@ mod tests {
                 vendor_release: "test-only", archive: pin, published: PublishedChecksum::Sha256(pin.sha256),
                 member_count: rows.len() as u32, expanded_bytes: expanded, members: static_slice(rows) });
         }
+        let aliases = static_slice(sources.iter().enumerate().filter_map(|(source_index, source)| {
+            let SourceKindSpec::Alias { target, canonical, .. } = source.kind else { return None; };
+            Some(CanonicalAlias { path: static_text(format!("jdk/Test.jdk/{}", source.relative)), target,
+                canonical: static_text(format!("jdk/Test.jdk/{canonical}")), source_index: source_index as u32 })
+        }).collect());
         let mut directories = std::collections::BTreeSet::new();
-        for file in payload {
-            let mut name = file.installed.path;
+        for mut name in payload.iter().map(|p| p.installed.path).chain(aliases.iter().map(|a| a.path)) {
             while let Some((parent, _)) = name.rsplit_once('/') { directories.insert(parent); name = parent; }
         }
         let classes = payload.iter().map(|p| if p.installed.path.ends_with(".jar") {
@@ -1445,7 +1584,7 @@ mod tests {
                 SourceTree { group: SourceGroup::Sdk, prefix: "build-tools/35.0.0" }],
             source_members: sources, source_bindings: static_slice(bindings), support,
             support_members: static_slice(vec![SupportMemberSpec { asset: SupportAsset::Aapt2OsxJar, member: projected }]),
-            payload, classes: static_slice(classes), aliases: &[],
+            payload, classes: static_slice(classes), aliases,
             directories: static_slice(directories.into_iter().collect()) }
     }
     fn observed<T>(r: &Reference, f: impl FnOnce(&SourceObservations<'_>) -> T) -> T {
@@ -1456,11 +1595,16 @@ mod tests {
             };
             FileSpec { path: s.relative.into(), size, sha256: sha.into(), mode }
         }).collect();
-        let members: Vec<_> = r.source_members.iter().zip(&files).map(|(s,file)| SourceMemberData { group: s.group,
+        let aliases: Vec<_> = r.source_members.iter().map(|s| match s.kind {
+            SourceKindSpec::Alias { target, canonical, .. } => Some(Alias {
+                path: s.relative.into(), target: target.into(), canonical: canonical.into() }),
+            _ => None,
+        }).collect();
+        let members: Vec<_> = r.source_members.iter().zip(&files).zip(&aliases).map(|((s,file),alias)| SourceMemberData { group: s.group,
             kind: match s.kind {
                 SourceKindSpec::Directory { modes } => SourceMemberKind::Directory { relative: s.relative, mode: modes[0] },
                 SourceKindSpec::File { .. } => SourceMemberKind::File(file),
-                _ => unreachable!(),
+                SourceKindSpec::Alias { modes, .. } => SourceMemberKind::Alias { data: alias.as_ref().unwrap(), mode: modes[0] },
             }
         }).collect();
         let support: Vec<_> = r.support.iter().map(|s| SupportOriginalData { asset: s.asset, archive: s.archive, mode: s.modes[0] }).collect();
@@ -1468,6 +1612,183 @@ mod tests {
         f(&SourceObservations { members: &members, support: &support, archive_members: &projected,
             optional_sdk_metadata: [None, None] })
     }
+    fn implicit_directory(mut r: Reference, group: SourceGroup, relative: &str) -> Reference {
+        let index = source_index(&r, group, relative).unwrap();
+        let SourceProvenance::Vendor { archive, member } = r.source_bindings[index].provenance else { panic!("fixture directory") };
+        let mut archives = r.archives.to_vec();
+        let original = archives[usize::from(archive)].members[member as usize];
+        assert!(matches!(original.kind, ArchiveKind::Directory { .. }));
+        let rows = archives[usize::from(archive)].members.iter().enumerate()
+            .filter(|(ordinal, _)| *ordinal != member as usize).map(|(_, row)| *row).collect();
+        archives[usize::from(archive)].members = static_slice(rows);
+        archives[usize::from(archive)].member_count -= 1;
+        let mut bindings = r.source_bindings.to_vec();
+        for binding in &mut bindings {
+            if let SourceProvenance::Vendor { archive: other, member: ordinal } = &mut binding.provenance {
+                if *other == archive && *ordinal > member { *ordinal -= 1; }
+            }
+        }
+        bindings[index].provenance = SourceProvenance::ArchiveParent { archive, prefix: original.name };
+        r.archives = static_slice(archives); r.source_bindings = static_slice(bindings); r
+    }
+    fn change_platform_parent(mut r: Reference, change: impl FnOnce(&mut SourceBinding)) -> Reference {
+        let index = source_index(&r, SourceGroup::Sdk, "platforms/android-35").unwrap();
+        let mut bindings = r.source_bindings.to_vec(); change(&mut bindings[index]);
+        r.source_bindings = static_slice(bindings); r
+    }
+    fn extra_wrapper_directory(mut r: Reference, archive_index: usize, name: &'static str) -> Reference {
+        let mut archives = r.archives.to_vec();
+        let archive = &archives[archive_index];
+        let mut members = archive.members.to_vec();
+        assert!(members.iter().all(|member| archive_order(archive.component, member.name, name) != Ordering::Equal));
+        members.push(OfficialMember { name, kind: ArchiveKind::Directory { mode: 0o040755 },
+            disposition: ArchiveDisposition::WrapperDirectory });
+        members.sort_by(|a, b| archive_order(archive.component, a.name, b.name));
+        let mut bindings = r.source_bindings.to_vec();
+        for (member_index, member) in members.iter().enumerate() {
+            if let ArchiveDisposition::Picked { source_index } = member.disposition {
+                assert!(matches!(bindings[source_index as usize].provenance,
+                    SourceProvenance::Vendor { archive, .. } if usize::from(archive) == archive_index));
+                bindings[source_index as usize].provenance = SourceProvenance::Vendor {
+                    archive: u8::try_from(archive_index).unwrap(), member: u32::try_from(member_index).unwrap() };
+            }
+        }
+        archives[archive_index].member_count = u32::try_from(members.len()).unwrap();
+        archives[archive_index].members = static_slice(members);
+        r.archives = static_slice(archives); r.source_bindings = static_slice(bindings); r
+    }
+    pub(super) fn implicit_archive_parents_bind_complete_source_closure_data() {
+        let original = fixture(); let old_digest = reference_digest(&original).unwrap();
+        let mut r = implicit_directory(original, SourceGroup::Sdk, "platforms/android-35");
+        assert_eq!(r.archives[1].member_count, 1);
+        assert!(r.archives[1].members.iter().all(|m| matches!(m.kind, ArchiveKind::File { .. })));
+        assert!(r.structural());
+        // SourceSlots still receives the original directory expectations. The
+        // provenance correction neither removes them nor supplies observations.
+        assert_eq!(r.source_members.as_ptr(), original.source_members.as_ptr());
+        assert_eq!(r.working_bytes(), original.working_bytes());
+        assert_ne!(reference_digest(&r).unwrap(), old_digest);
+        r = implicit_directory(r, SourceGroup::Jdk, "Contents");
+        r = implicit_directory(r, SourceGroup::Gradle, "bin");
+        assert!(r.structural()); // mixed real headers and necessary implicit parents
+        let index = source_index(&r, SourceGroup::Sdk, "platforms/android-35").unwrap();
+        let serialized = serde_json::to_string(&r.source_bindings[index]).unwrap();
+        assert!(serialized.contains("ArchiveParent") && serialized.contains("android-35"));
+        assert!(!serialized.contains("member") && !serialized.contains("mode"));
+        assert!(!available());
+    }
+    pub(super) fn implicit_archive_parent_component_prefix_and_bounds_refuse_data() {
+        let r = implicit_directory(fixture(), SourceGroup::Sdk, "platforms/android-35");
+        for archive in [0, 2, 3, 4, 5, u8::MAX] {
+            assert!(!change_platform_parent(r, |b| b.provenance = SourceProvenance::ArchiveParent {
+                archive, prefix: "android-35" }).structural());
+        }
+        for prefix in ["", "android-3", "android-35x", "ANDROID-35", "android-35/orphan",
+            static_text("x".repeat(513)), static_text(["x"; 17].join("/"))] {
+            let changed = change_platform_parent(r, |b| b.provenance = SourceProvenance::ArchiveParent { archive: 1, prefix });
+            assert!(!changed.structural());
+            assert_ne!(reference_digest(&changed), reference_digest(&r));
+        }
+        let mut too_many = r;
+        too_many.source_members = static_slice(vec![r.source_members[0]; policy::ENTRY_LIMIT + 1]);
+        too_many.source_bindings = static_slice(vec![r.source_bindings[0]; policy::ENTRY_LIMIT + 1]);
+        assert!(too_many.working_bytes().is_none());
+        assert!(!too_many.structural());
+        assert!(r.working_bytes().unwrap() <= APP_BYTES);
+    }
+    pub(super) fn implicit_archive_parent_cannot_replace_headers_payload_or_observations_data() {
+        let explicit = fixture();
+        // Keep the real header: derived provenance may not relabel it.
+        assert!(!change_platform_parent(explicit, |b| b.provenance = SourceProvenance::ArchiveParent {
+            archive: 1, prefix: "android-35" }).source_directory_closure());
+        let r = implicit_directory(explicit, SourceGroup::Sdk, "platforms/android-35");
+        for disposition in [SourceDisposition::Payload(0), SourceDisposition::Alias(0)] {
+            assert!(!change_platform_parent(r, |b| b.disposition = disposition).structural());
+        }
+        let index = source_index(&r, SourceGroup::Sdk, "platforms/android-35").unwrap();
+        let mut changed = r; let mut members = r.source_members.to_vec();
+        members[index].kind = SourceKindSpec::Directory { modes: &[0o2755] };
+        changed.source_members = static_slice(members); assert!(!changed.structural());
+        let mut members = r.source_members.to_vec();
+        members[index].kind = SourceKindSpec::File { bytes: 0, sha256: HASH, modes: &[0o644] };
+        changed.source_members = static_slice(members); assert!(!changed.source_directory_closure());
+        let mut members = r.source_members.to_vec(); members.remove(index);
+        let mut bindings = r.source_bindings.to_vec(); bindings.remove(index);
+        changed.source_members = static_slice(members); changed.source_bindings = static_slice(bindings);
+        assert!(!changed.source_directory_closure()); // selected prefix cannot be omitted
+    }
+    pub(super) fn implicit_archive_parent_inverse_range_and_case_closure_are_complete_data() {
+        let explicit = fixture();
+        assert!(explicit.structural());
+        // The existing complete fixture already has both genuine outer roots.
+        for (index, name) in [(0, "Test.jdk"), (3, "gradle-8.14.5")] {
+            let archive = &explicit.archives[index];
+            let member = archive.members.iter().find(|member| member.name == name).unwrap();
+            assert!(matches!(member.disposition, ArchiveDisposition::WrapperDirectory));
+            assert!(wrapper_directory(&explicit, archive, member));
+        }
+        // Keep every explicit parent and reciprocal Vendor ordinal valid. The
+        // old ArchiveParent-only inverse check misses these hidden directories.
+        for (index, name) in [(0, "Test.jdk/Contents/unmapped-empty"),
+            (3, "gradle-8.14.5/bin/unmapped-empty"), (1, "android-35/unmapped-empty"),
+            (2, "android-15/unmapped-empty"), (4, "unmapped-empty"), (5, "unmapped-empty")] {
+            let changed = extra_wrapper_directory(explicit, index, name);
+            assert_eq!(changed.source_members.as_ptr(), explicit.source_members.as_ptr());
+            assert!(changed.source_directory_closure()); // Isolate the additional wrapper rule.
+            let archive = &changed.archives[index];
+            let member = archive.members.iter().find(|member| member.name == name).unwrap();
+            assert!(!wrapper_directory(&changed, archive, member));
+            assert!(!changed.structural(), "{name}");
+        }
+        let r = implicit_directory(explicit, SourceGroup::Sdk, "platforms/android-35");
+        let mut changed = r; let mut archives = r.archives.to_vec();
+        let mut members = archives[1].members.to_vec();
+        members.push(OfficialMember { name: "android-35/unmapped", kind: ArchiveKind::File { mode: 0o100644, bytes: 1, sha256: HASH },
+            disposition: ArchiveDisposition::Picked { source_index: source_index(&r, SourceGroup::Gradle, "bin/gradle").unwrap() as u32 } });
+        members.sort_by(|a, b| folded(a.name, b.name));
+        archives[1].members = static_slice(members); archives[1].member_count += 1; archives[1].expanded_bytes += 1;
+        changed.archives = static_slice(archives);
+        assert!(!changed.source_directory_closure()); // one correct child is insufficient
+        let mut archives = r.archives.to_vec();
+        let mut members = archives[1].members.to_vec(); members[0].name = "wrong-root/android.jar";
+        archives[1].members = static_slice(members);
+        changed = change_platform_parent(r, |b| b.provenance = SourceProvenance::ArchiveParent {
+            archive: 1, prefix: "wrong-root" });
+        changed.archives = static_slice(archives);
+        assert!(!changed.structural()); // even a coherent remap is not this package's mapping
+        let parent = source_index(&r, SourceGroup::Sdk, "platforms/android-35").unwrap();
+        let mut sources = r.source_members.to_vec(); sources.insert(parent, sources[parent]);
+        let mut bindings = r.source_bindings.to_vec(); bindings.insert(parent, bindings[parent]);
+        changed = r; changed.source_members = static_slice(sources); changed.source_bindings = static_slice(bindings);
+        assert!(!changed.structural()); // no duplicate explicit/derived source row
+        let mut sources = r.source_members.to_vec(); sources[parent].relative = "platforms/Android-35";
+        changed = r; changed.source_members = static_slice(sources);
+        assert!(!changed.structural());
+        assert!(!parent_spelling("android-35/Dir/a", "android-35/dir/b"));
+        assert!(!parent_spelling("android-35/Dir", "android-35/dir/b"));
+        assert!(parent_spelling("android-35/Dir/a", "android-35/Dir/b"));
+        assert!(!folded_under("android-350/file", "android-35"));
+        assert!(folded_under("android-35/file", "android-35"));
+        // A genuine explicit empty directory needs no descendant witness.
+        // This focused closure fixture uses the SAME tree/root binding shape,
+        // without pretending its reduced rows form a six-component reference.
+        let empty_members = static_slice(vec![OfficialMember { name: "android-35", kind: ArchiveKind::Directory { mode: 0o040755 },
+            disposition: ArchiveDisposition::Picked { source_index: 0 } }]);
+        let mut archives = r.archives.to_vec(); archives[1].members = empty_members; archives[1].member_count = 1; archives[1].expanded_bytes = 0;
+        let empty = Reference { archives: static_slice(archives), trees: &[SourceTree { group: SourceGroup::Sdk, prefix: "platforms/android-35" }],
+            source_members: &[SourceMemberSpec { group: SourceGroup::Sdk, relative: "platforms/android-35", kind: SourceKindSpec::Directory { modes: &[0o755] } }],
+            source_bindings: &[SourceBinding { provenance: SourceProvenance::Vendor { archive: 1, member: 0 }, disposition: SourceDisposition::Directory }], ..r };
+        assert!(empty.source_directory_closure());
+        assert!(!change_platform_parent(empty, |b| b.provenance = SourceProvenance::ArchiveParent { archive: 1, prefix: "android-35/missing" }).source_directory_closure());
+    }
+    #[test]
+    fn implicit_archive_parents_bind_complete_source_closure() { implicit_archive_parents_bind_complete_source_closure_data(); }
+    #[test]
+    fn implicit_archive_parent_component_prefix_and_bounds_refuse() { implicit_archive_parent_component_prefix_and_bounds_refuse_data(); }
+    #[test]
+    fn implicit_archive_parent_cannot_replace_headers_payload_or_observations() { implicit_archive_parent_cannot_replace_headers_payload_or_observations_data(); }
+    #[test]
+    fn implicit_archive_parent_inverse_range_and_case_closure_are_complete() { implicit_archive_parent_inverse_range_and_case_closure_are_complete_data(); }
     fn os_files() -> Vec<FileSpec> {
         policy::OS_FILES.iter().map(|p| FileSpec { path: (*p).into(), size: 1, sha256: HASH.into(),
             mode: if p.ends_with(".plist") { 0o644 } else { 0o755 } }).collect()
@@ -1640,6 +1961,31 @@ mod tests {
     pub(super) fn incomplete_reference_mapping_namespace_and_stream_bounds_refuse_data() {
         let r = fixture();
         assert!(r.structural());
+        // Start from a complete reciprocal inert alias reference, not a
+        // missing-binding negative. No real supplier or native link is used.
+        let linked = retained(fixture_with_source_alias(Some(("java", "Contents/Home/bin/java"))));
+        assert!(linked.structural());
+        assert_eq!(linked.aliases.len(), 1);
+        let linked_recipe = Recipe { reference: linked, layout: JdkLayout::Bundle };
+        observed(linked, |observations| {
+            assert!(linked_recipe.observations_match(observations));
+            assert!(linked_recipe.finalize_proposal(&"a".repeat(32), 501, observations, &os_files()).is_ok());
+        });
+        for (target, canonical) in [
+            ("missing", "Contents/Home/bin/missing"),
+            ("..", "Contents/Home"),
+            ("java-link", "Contents/Home/bin/java-link"),
+            ("../../../build-tools/35.0.0/source.properties", "build-tools/35.0.0/source.properties"),
+            ("JAVA", "Contents/Home/bin/JAVA"),
+        ] {
+            let wrong = fixture_with_source_alias(Some((target, canonical)));
+            let index = source_index(&wrong, SourceGroup::Jdk, "Contents/Home/bin/java-link").unwrap();
+            assert!(policy::jdk_source_alias_resolves(wrong.source_members[index].relative, target, canonical));
+            assert!(matches!(wrong.source_bindings[index].disposition, SourceDisposition::Alias(0)));
+            assert_eq!(wrong.aliases[0].source_index as usize, index);
+            assert!(canonical_source(&wrong, SourceGroup::Jdk, canonical, wrong.aliases[0].canonical));
+            assert!(!wrong.structural(), "{canonical}"); // Missing/nonregular/other-group/exact-case canonical.
+        }
         let mut bad = r;
         bad.directories = &r.directories[1..];
         assert!(!bad.structural()); // Closure checked BEFORE validator growth.
@@ -2132,6 +2478,10 @@ mod tests {
 /// Same inert regression bodies for the repository's harness=false runner.
 #[cfg(test)]
 pub(crate) fn assert_macos_supplier_builder_data_contract() {
+    tests::implicit_archive_parents_bind_complete_source_closure_data();
+    tests::implicit_archive_parent_component_prefix_and_bounds_refuse_data();
+    tests::implicit_archive_parent_cannot_replace_headers_payload_or_observations_data();
+    tests::implicit_archive_parent_inverse_range_and_case_closure_are_complete_data();
     tests::canonical_fixture_roundtrips_but_never_enables_production_data();
     tests::complete_observations_and_provider_budget_are_required_data();
     tests::incomplete_reference_mapping_namespace_and_stream_bounds_refuse_data();

@@ -77,6 +77,7 @@ SOURCES = (
     'desktop/src-tauri/src/android_toolchain.rs',
     'desktop/src-tauri/src/asset_commands.rs',
     'desktop/src-tauri/src/asset_session.rs',
+    'desktop/src-tauri/src/asset_session_android_signing.rs',
     'desktop/src-tauri/src/asset_source.rs',
     'desktop/src-tauri/src/bridge.rs',
     'desktop/src-tauri/src/candidate_evidence_protocol.rs',
@@ -227,6 +228,7 @@ SOURCES = (
     'src/mobile_release/_desktop_android_build_files.py',
     'src/mobile_release/_desktop_android_build_protocol.py',
     'src/mobile_release/_desktop_android_build_selection.py',
+    'src/mobile_release/_desktop_android_signing_material.py',
     'src/mobile_release/_desktop_edit_control.py',
     'src/mobile_release/_desktop_edit_engine.py',
     'src/mobile_release/_desktop_edit_protocol.py',
@@ -251,6 +253,7 @@ SOURCES = (
     'src/mobile_release/_store_lane_files.py',
     'src/mobile_release/android.py',
     'src/mobile_release/android_build_operation.py',
+    'src/mobile_release/android_build_signing.py',
     'src/mobile_release/android_build_tools.py',
     'src/mobile_release/android_manifest.py',
     'src/mobile_release/android_upload_validation.py',
@@ -407,7 +410,7 @@ class FiniteJson:
 
     Only an already bounded string token is passed to json.loads. Native DTOs
     require canonical declaration order and one LF. DATA has a larger key/map
-    budget for all290 source names; final/prefix additionally require their
+    budget for all293 source names; final/prefix additionally require their
     producer's sorted compact encoding with no LF. Freeze DATA may be spaced.
     """
     def __init__(self, data: bytes, *, native: bool, large: bool = False):
@@ -419,7 +422,7 @@ class FiniteJson:
         self.limit = (2048 if large else 768) if native else 16000
         self.depth = 12
         self.array = 128 if native else 512
-        self.mapping = 128 if native else 290
+        self.mapping = 128 if native else 293
         self.key_limit = 64 if native else 128
         self.integer_max = 2**32 - 1 if native else 2**64 - 1
 
@@ -1658,7 +1661,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 290, "complete frozen290 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 293, "complete frozen293 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2723,7 +2726,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 290 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 293 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

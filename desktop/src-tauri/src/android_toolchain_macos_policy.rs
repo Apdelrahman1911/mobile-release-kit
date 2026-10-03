@@ -345,22 +345,44 @@ fn validate_provider(value: Provider) -> Option<Provider> {
     Some(value)
 
 }
-// Lexical alias resolution only. Native reads the original link; never follow
-// it during inventory. Targets must be regular members of the same JDK bundle.
-pub(crate) fn alias_target(alias: &Alias) -> Option<String> {
-    if !relative(&alias.path) || !relative(&alias.canonical) || alias.target.is_empty() || alias.target.len() > 512
-        || alias.target.starts_with('/') || !alias.path.starts_with("jdk/") || !alias.canonical.starts_with("jdk/") { return None; }
-    let mut parts: Vec<_> = alias.path.split('/').collect(); parts.pop()?;
-    for part in alias.target.split('/') {
+// ONE lexical resolver for two distinct roots, never a filesystem operation.
+// A <=16-component path has <=15 parent components; a <=512-byte target has
+// <=256 nonempty components. The271 borrowed slots permit transient depth>16
+// without allocating before a supplier structural working-space charge.
+fn alias_resolves(path: &str, target: &str, canonical: &str, floor: usize) -> bool {
+    if !relative(path) || !relative(canonical) || target.is_empty() || target.len() > 512
+        || target.starts_with('/') { return false; }
+    let mut parts = [""; 271]; let mut depth = 0;
+    for part in path.split('/') { parts[depth] = part; depth += 1; }
+    depth -= 1;
+    if depth < floor { return false; }
+    for part in target.split('/') {
         match part {
-            ".." => { parts.pop()?; },
+            ".." if depth > floor => { depth -= 1; },
+            ".." => return false,
             "." => {},
-            _ if component(part) => parts.push(part),
-            _ => return None,
+            _ if component(part) => {
+                if depth == parts.len() { return false; }
+                parts[depth] = part; depth += 1;
+            },
+            _ => return false,
         }
     }
-    let out = parts.join("/");
-    (out == alias.canonical && alias.path.split('/').take(2).eq(out.split('/').take(2))).then_some(out)
+    let mut expected = canonical.split('/');
+    depth > floor && parts[..depth].iter().all(|part| expected.next() == Some(*part)) && expected.next().is_none()
+}
+/// Bundle-relative SOURCE comparison only. The caller proves Jdk group and
+/// SAME picked root; the compiled roster requires a regular canonical member.
+pub(crate) fn jdk_source_alias_resolves(path: &str, target: &str, canonical: &str) -> bool {
+    alias_resolves(path, target, canonical, 0)
+}
+// Installed inventory root is jdk/<bundle>, not a picked bundle-relative path.
+// Native reads the original link without following it. Never leave the bundle,
+// even temporarily before re-entering an otherwise matching final destination.
+pub(crate) fn alias_target(alias: &Alias) -> Option<String> {
+    if !alias.path.starts_with("jdk/") || !alias.canonical.starts_with("jdk/")
+        || !alias.path.split('/').take(2).eq(alias.canonical.split('/').take(2)) { return None; }
+    alias_resolves(&alias.path, &alias.target, &alias.canonical, 2).then(|| alias.canonical.clone())
 }
 pub(crate) fn parse_manifest(raw: &[u8], selected: &MacToolchainSelection) -> Option<Inventory> {
     if !selected.valid() || raw.is_empty() || raw.len() > MANIFEST_LIMIT || digest(raw) != selected.inventory_sha256 { return None; }
@@ -786,9 +808,31 @@ mod tests {
         let alias=Alias {path:"jdk/Test.jdk/Contents/Home/lib/jli/link.dylib".into(),target:"libjli.dylib".into(),
             canonical:"jdk/Test.jdk/Contents/Home/lib/jli/libjli.dylib".into()};
         assert_eq!(alias_target(&alias),Some(alias.canonical.clone()));
-        for target in ["/usr/lib/libjli.dylib","../../../../../../tmp/file","../../../../../Other.jdk/file",""] {
+        for target in ["/usr/lib/libjli.dylib","../../../../../../tmp/file","../../../../../Other.jdk/file","",
+            "../../../../../Test.jdk/Contents/Home/lib/jli/libjli.dylib"] {
             assert!(alias_target(&Alias {target:target.into(),..alias.clone()}).is_none());
         }
+        let source=Alias {path:"Contents/Home/lib/jli/link.dylib".into(),target:alias.target.clone(),
+            canonical:"Contents/Home/lib/jli/libjli.dylib".into()};
+        assert!(alias_target(&source).is_none()); // The installed API stays installed-only.
+        for target in ["libjli.dylib", "./libjli.dylib", "../jli/libjli.dylib"] {
+            assert!(jdk_source_alias_resolves(&source.path,target,&source.canonical));
+            assert_eq!(alias_target(&Alias {target:target.into(),..alias.clone()}),Some(alias.canonical.clone()));
+        }
+        for target in ["", "/usr/lib/libjli.dylib", "../wrong.dylib", "libjli.dylib/", "a//b",
+            "a\\b", "libjli.dylib\n", "\0", "../../../../../Contents/Home/lib/jli/libjli.dylib"] {
+            assert!(!jdk_source_alias_resolves(&source.path,target,&source.canonical),"{target:?}");
+            assert!(alias_target(&Alias {target:target.into(),..alias.clone()}).is_none(),"{target:?}");
+        }
+        assert!(!jdk_source_alias_resolves("../link","file","file"));
+        assert!(!jdk_source_alias_resolves("dir/link","file","dir/../file"));
+        // A legal source name beginning jdk/ is not an installed-root override.
+        assert!(jdk_source_alias_resolves("jdk/inner/link","file","jdk/inner/file"));
+        let deep=format!("{}{}file","d/".repeat(20),"../".repeat(20));
+        assert!(jdk_source_alias_resolves("dir/link",&deep,"dir/file"));
+        assert_eq!(alias_target(&Alias {path:"jdk/Test.jdk/dir/link".into(),target:deep,
+            canonical:"jdk/Test.jdk/dir/file".into()}),Some("jdk/Test.jdk/dir/file".into()));
+        assert!(!jdk_source_alias_resolves("link",&"x".repeat(513),"file"));
         let (mut selected,mut value)=fixture();
         value["aliases"]=json!([{"path":alias.path,"target":alias.target,"canonical":alias.canonical}]);
         assert!(inventory(&mut selected,&value).is_some());

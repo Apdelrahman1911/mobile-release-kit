@@ -281,7 +281,7 @@ impl InstallationSlots {
         self.check(end, stop, publish)?;
         let executable = std::env::current_exe(); let executable_at = Instant::now();
         if executable.as_ref().is_err() { return self.reject(Problem::Native, executable_at, publish); }
-        if executable.as_deref().ok() != Some(Path::new(paths::APP).join("Contents/MacOS/mobile-release-kit-desktop").as_path()) {
+        if executable.as_deref().ok() != Some(Path::new(paths::PAYLOAD_EXECUTABLE)) {
             return self.reject(Problem::WrongLocation, executable_at, publish);
         }
         self.attempt(Problem::PayloadMismatch, publish, |book| book.arm_acl_once(end, stop))?;
@@ -296,6 +296,11 @@ impl InstallationSlots {
         self.require_present(support, "MobileReleaseKit", Problem::Missing, end, stop, publish)?;
         let install = self.open(Some(support), "MobileReleaseKit", true, end, stop, publish)?;
         self.protected(install, 0o755, end, stop, publish)?;
+        self.require_present(install, paths::MAINTENANCE_GATE_NAME, Problem::Incomplete, end, stop, publish)?;
+        {
+            let gate_data = self.read_record(install, paths::MAINTENANCE_GATE_NAME, paths::MAINTENANCE_GATE_BYTES.len(), end, stop, publish)?;
+            if gate_data != paths::MAINTENANCE_GATE_BYTES { return self.reject(Problem::RecordMismatch, Instant::now(), publish); }
+        }
         self.require_present(install, "versions", Problem::Incomplete, end, stop, publish)?;
         let versions = self.open(Some(install), "versions", true, end, stop, publish)?;
         self.protected(versions, 0o755, end, stop, publish)?;
@@ -331,7 +336,7 @@ impl InstallationSlots {
         // app/runtime is incomplete, not an unexplained generic mismatch.
         self.require_present(install, paths::APP_NAME, Problem::Incomplete, end, stop, publish)?;
         self.require_present(release, "runtime", Problem::Incomplete, end, stop, publish)?;
-        self.match_fixed_roster(install, &[paths::APP_NAME, "versions"], Some(&format!(".install-{}", record.instance())), end, stop, publish)?;
+        self.match_fixed_roster(install, &[paths::APP_NAME, "versions", paths::MAINTENANCE_GATE_NAME], Some(&format!(".install-{}", record.instance())), end, stop, publish)?;
         self.match_fixed_roster(versions, &[paths::RELEASE], None, end, stop, publish)?;
         self.match_fixed_roster(release, &["runtime", data::INVENTORY_NAME, data::RECORD_NAME], None, end, stop, publish)?;
         let app = self.open(Some(install), paths::APP_NAME, true, end, stop, publish)?;
@@ -420,7 +425,7 @@ fn installation_roster_uses_fixed_app_name_and_global_inventory_bound() {
     assert!(!runtime::safe_payload_path(paths::APP_NAME));
     assert!(paths::APP_NAME == "Mobile Release Kit.app");
     let paths = ["app/Contents", "app/Contents/Info.plist", "app/Contents/MacOS",
-        "app/Contents/MacOS/mobile-release-kit-desktop", "runtime/python", "runtime/python/bin"];
+        data::APP_BINARY, "runtime/python", "runtime/python/bin"];
     assert_eq!(paths.iter().filter(|path| immediate_child("app", path)).count(), 1);
     assert_eq!(paths.iter().filter(|path| immediate_child("app/Contents", path)).count(), 2);
     assert!(!immediate_child("app", "application/Contents"));

@@ -22,6 +22,7 @@ import sys
 CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
 WORK_PARENT = Path("/Users/runner/work/_temp")
 HELPER = "mrk-android-register"
+ENTRY = "mrk-macos-entry"
 IDENTIFIER = "dev.mobile-release-kit.desktop.android-register"
 WORKSPACE = "desktop/helpers/macos-android-register"
 PROFILE = "desktop/packaging/macos-android-service-signing.profile"
@@ -118,45 +119,6 @@ def build_environment(environment, work):
     return selected
 
 
-def result_guard_tuple(value):
-    """Closed immutable A/C/O diagnostic DATA, not a completion/ownership proof."""
-    def integer(item, low, high):
-        return type(item) is int and low <= item <= high
-
-    def failure(item):
-        if (type(item) is not tuple or len(item) != 5 or not integer(item[0], 0, 2)
-                or not integer(item[1], 0, 12) or not integer(item[2], 0, 4095)
-                or not integer(item[3], 0, 31) or type(item[4]) is not tuple or len(item[4]) > 4):
-            return False
-        if item[0] != 1:
-            return item == (item[0], 0, 0, 0, ())
-        return (item[1] != 0 and (item[2] == 0 or item[1] == 11)
-                and all(type(site) is tuple and len(site) == 2 and integer(site[0], 1, 4)
-                        and integer(site[1], 1, 1000000) for site in item[4]))
-
-    empty = (0, 0, 0, 0, ())
-
-    def anchor(item):
-        return (type(item) is tuple and len(item) == 3 and integer(item[0], 0, 3)
-                and integer(item[1], 0, 8191) and failure(item[2])
-                and (item[0] == 1 or item == (item[0], 0, empty)))
-
-    def waited(item):
-        return (type(item) is tuple and len(item) == 2 and integer(item[0], 0, 2)
-                and integer(item[1], 0, 255) and (item[0] != 0 or item[1] == 0)
-                and (item[0] != 2 or item[1] != 0))
-
-    def custodian(item):
-        return (type(item) is tuple and len(item) == 5 and integer(item[0], 0, 3)
-                and integer(item[1], 0, 16383) and failure(item[2]) and waited(item[3]) and anchor(item[4])
-                and (item[0] == 1 or item == (item[0], 0, empty, (0, 0), (0, 0, empty))))
-
-    return (type(value) is tuple and len(value) == 7 and integer(value[0], 1, 1)
-            and integer(value[1], 0, 65535) and waited(value[2]) and waited(value[3])
-            and all(type(pair) is tuple and len(pair) == 2 and all(integer(item, 0, 16 * 1024 * 1024)
-                    for item in pair) for pair in value[4:6]) and custodian(value[6]))
-
-
 def original_failure(error, owner, checkout, timeout, limit):
     """Bounded original exception DATA; never output, completion or custody proof."""
     need(type(timeout) is int and 0 < timeout < 2 ** 31
@@ -180,13 +142,10 @@ def original_failure(error, owner, checkout, timeout, limit):
                 "owned command produced incomplete output": "incomplete-output",
             }.get(arguments[0], "unclassified")
     # load_owner admitted these exact SOURCE files before the original call.
-    # No basename/normalization aliases or filesystem reads. The sole local
-    # exception below is the exact guard's immutable, closed diagnostic tuple.
+    # No basename/normalization aliases, filesystem reads or frame locals here.
     sources = {str(checkout / "src/mobile_release" / name): "src/mobile_release/" + name
                for name in ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py")}
     frames, visited, foreign = [], 0, 0
-    wait_guard, wait_sites = None, 0
-    result_guard, result_sites = None, 0
     trace = BaseException.__traceback__.__get__(error)
     while trace is not None and visited < 32:
         visited += 1
@@ -201,41 +160,12 @@ def original_failure(error, owner, checkout, timeout, limit):
             if len(frames) == 8:
                 frames.pop(0)
             frames.append({"source": source, "function": function, "line": line})
-            following = trace.tb_next
-            if (error_type == "ProcessError" and classification == "protocol-or-original-ownership"
-                    and source == "src/mobile_release/_command_process.py"
-                    and code.co_qualname == "_Outer._until" and function == "_until"
-                    and following is not None and following.tb_next is None
-                    and following.tb_frame.f_code.co_filename == filename
-                    and following.tb_frame.f_code.co_name == following.tb_frame.f_code.co_qualname == "_require"):
-                wait_sites += 1
-                # Never inspect the engine/predicate or enumerate frame locals.
-                value = trace.tb_frame.f_locals.get("_wait_guard_state")
-                if (type(value) is tuple and len(value) == 9 and type(value[0]) is str
-                        and value[0] in ("STARTING", "PREPARING", "WAIT_READY", "RUNNING")
-                        and all(type(item) is bool for item in value[1:])):
-                    wait_guard = dict(zip(("phase", "wirePresent", "wireEof", "wirePoisoned",
-                                           "terminalPresent", "stdoutEof", "stderrEof",
-                                           "protocolFailed", "outputFailed"), value))
-                    if not value[1]:
-                        wait_guard["wireEof"] = wait_guard["wirePoisoned"] = None
-            if (error_type == "ProcessError" and classification == "incomplete-output"
-                    and source == "src/mobile_release/_command_process.py"
-                    and code.co_name == code.co_qualname == "run_command" and following is None):
-                result_sites += 1
-                # Only this source-owned immutable tuple; never read the engine,
-                # output, arbitrary frame locals, error payload, paths or argv.
-                value = trace.tb_frame.f_locals.get("_result_guard_state")
-                if result_guard_tuple(value):
-                    result_guard = value
         trace = trace.tb_next
     result = {"schemaVersion": 1, "available": True, "ownerErrorType": error_type,
               "classification": classification, "timeoutSeconds": timeout,
               "outputLimitBytes": limit, "captureMode": "bytes", "frames": frames,
               "visitedFrames": visited, "omittedFrames": visited - len(frames),
-              "foreignFrames": foreign, "tracebackTruncated": trace is not None,
-              "waitGuard": wait_guard if wait_sites == 1 and trace is None else None,
-              "resultGuard": result_guard if result_sites == 1 and trace is None else None}
+              "foreignFrames": foreign, "tracebackTruncated": trace is not None}
     need(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")) <= 2048,
          "original-failure-diagnostic-bound")
     return result
@@ -253,6 +183,7 @@ class Operation:
         self.profile_entry = self.source_entry = None
         self.target_name = "android-helper-target" if phase == "prepare" else "android-helper-" + phase
         self.stage, self.sha256 = "owned-directory-admission", None
+        self.entry_sha256 = None
         self.receipt = {"schemaVersion": 1, "phase": phase, "source": environment["GITHUB_SHA"],
                         "workflowSource": environment["GITHUB_WORKFLOW_SHA"],
                         "workflow": environment["GITHUB_WORKFLOW_REF"], "runId": environment["GITHUB_RUN_ID"],
@@ -429,6 +360,36 @@ class Operation:
         self.sha256 = digest(body)
         self.receipt.update(helperSha256=self.sha256, helperBytes=len(body), helperOriginal=signed["identity"],
                             signing="ad-hoc-fixed-identifier-runtime-empty-entitlements-strictly-verified")
+        self.prepare_entry()
+
+    def prepare_entry(self):
+        """One fixed C/libSystem-only compile through this same original owner."""
+        self.stage = "fixed-installed-entry-compiler"
+        paths = ("desktop/native/macos-installed-entry/entry.c", "desktop/native/macos-installed-entry/gate.c",
+                 "desktop/native/macos-installed-entry/gate.h", "desktop/native/macos-installed-entry/fixed_paths.h",
+                 "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs")
+        originals = [(name, self.source_original(name, "entry-source-" + Path(name).name,
+                     256 * 1024 if name == paths[4] else 128 * 1024)) for name in paths]
+        bodies = [self.read(entry) for _name, entry in originals]
+        destination = self.work / self.target_name / ENTRY
+        self.call("entry-build", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "-x", "c", "-std=c11",
+                  "-Wall", "-Wextra", "-Werror", "-O2", "-arch", "arm64", "-mmacosx-version-min=26.0",
+                  "-DMRK_ENTRY_METADATA_ONLY=1", str(self.checkout / paths[0]), str(self.checkout / paths[1]),
+                  str(self.checkout / paths[4]), "-o", str(destination)],
+                  dict(self.native_environment(), DEVELOPER_DIR=self.environment["DEVELOPER_DIR"]),
+                  cwd=self.checkout, timeout=30, limit=65536)
+        need(all(self.read(entry) == body for (_name, entry), body in zip(originals, bodies)), "entry-source-changed")
+        original = self.original(self.target_entry, ENTRY, "entry-compiler-artifact", 1024 * 1024, (0o700, 0o755))
+        body = self.read(original)
+        self.stager.entry_macho(body)
+        self.publish(ENTRY, body, mode=0o755)
+        need(self.read(original) == body, "entry-compiler-original-changed")
+        self.entry_sha256 = digest(body)
+        self.receipt.update(entryBinarySha256BeforeSigning=self.entry_sha256, entryBytes=len(body),
+                            entryOriginal=original["identity"], entryLoaderPolicy="libSystem-only-no-native-initializers",
+                            entrySources=[{"path": name, "bytes": len(body), "sha256": digest(body)}
+                                          for (name, _entry), body in zip(originals, bodies)],
+                            entryExecutionObserved=False, maintenanceQualified=False)
 
     def strict_verify(self, original, body, role, path):
         self.stage = role
@@ -439,7 +400,7 @@ class Operation:
     def verify_staged(self, expected):
         need(type(expected) is str and re.fullmatch(r"[0-9a-f]{64}", expected), "expected-helper-digest")
         self.stage = "staged-helper-original"
-        contents = self.descend(self.work_entry, ("app", "Mobile Release Kit.app", "Contents"))
+        contents = self.descend(self.work_entry, ("app", "Mobile Release Kit.app", "Contents", "Helpers", "MobileReleaseKitPayload.app", "Contents"))
         helpers = self.directory(contents, "Helpers", "staged-helpers")
         original = self.original(helpers, HELPER, "staged-helper", MAX_HELPER, (0o555,))
         body = self.read(original)
@@ -454,7 +415,7 @@ class Operation:
                         "MachServices": {IDENTIFIER: True}} and parsed["MachServices"][IDENTIFIER] is True,
              "source-service-plist")
         need(self.read(plist) == expected_plist, "staged-service-plist")
-        self.strict_verify(original, body, self.phase, self.work / "app/Mobile Release Kit.app/Contents/Helpers" / HELPER)
+        self.strict_verify(original, body, self.phase, self.work / "app/Mobile Release Kit.app" / self.stager.ANDROID_HELPER)
         need(self.read(plist) == self.read(source_plist) == expected_plist, "staged-service-plist-changed")
         self.sha256 = expected
         self.receipt.update(helperSha256=expected, helperBytes=len(body), helperOriginal=original["identity"])
@@ -506,9 +467,10 @@ class Operation:
             self.finish()
         self.receipt["passed"] = ("failure" not in self.receipt and not self.errors
                                   and self.receipt["targetRetired"] and self.receipt["originalClosesKnown"]
-                                  and len(self.calls) == (3 if self.phase == "prepare" else 1)
+                                   and len(self.calls) == (4 if self.phase == "prepare" else 1)
                                   and all(call["returned"] and call["returncode"] == 0 for call in self.calls)
-                                  and self.sha256 is not None)
+                                   and self.sha256 is not None
+                                   and (self.phase != "prepare" or self.entry_sha256 is not None))
         # This receipt remains provisional until its own write/readback/close
         # and the original Python caller's zero exit. No output digest on error.
         self.publish_receipt()
@@ -580,6 +542,7 @@ def main():
         result = operation.execute(os.environ.get("MRK_MACOS_ANDROID_HELPER_SHA256"))
         if sys.argv[1] == "prepare":
             print("sha256=" + result, flush=True)
+            print("entry-sha256=" + operation.entry_sha256, flush=True)
         return 0
     except BaseException:
         # Native/owner messages can contain local paths. Exact bounded command

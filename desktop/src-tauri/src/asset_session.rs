@@ -57,6 +57,9 @@ pub(crate) use vault::KeyringInitializationAdmission;
 #[path = "asset_session_ios_signing.rs"]
 mod ios_signing;
 pub(crate) use ios_signing::{IOSSigningMaterial, MATERIAL_PREFIX as IOS_MATERIAL_PREFIX, MATERIAL_SUFFIX as IOS_MATERIAL_SUFFIX};
+#[path = "asset_session_android_signing.rs"]
+mod android_signing;
+pub(crate) use android_signing::{AndroidSigningMaterial, MATERIAL_PREFIX as ANDROID_MATERIAL_PREFIX, MATERIAL_SUFFIX as ANDROID_MATERIAL_SUFFIX};
 
 // Public listing images share the original document/dialog/source owner but
 // never become credential records or private-vault material.
@@ -2407,14 +2410,19 @@ impl DocumentBinding {
         // path or a diagnostics/offline fixture permit, reaches this owner.
         let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
         let (generation, root) = selected.map_err(|_| crate::android_build_owner::unavailable())?;
-        self.inner.bridge.android_build.prepare(args, generation, root, gate)
+        let material = if args.context().signed() {
+            Some(self.review_android_material(&state, &args.context(), generation, &root)?)
+        } else { None };
+        self.inner.bridge.android_build.prepare_material(args, generation, root, gate, material)
     }
     pub(crate) fn start_android_build(&self, args: crate::android_build_protocol::Start) -> Result<crate::android_build_protocol::Status, BridgeError> {
         let admitted_at = Instant::now(); // Original T before the document lock, lookup, executor or await.
         let mut state = self.lock();
         let project = self.inner.bridge.android_build.prepared_project(&args.operation_id, &args.owner_generation)?;
         let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
-        let admitted = self.inner.bridge.android_build.start(args, admitted_at, selected, self.android_build_gate(&state))?;
+        let material = self.inner.bridge.android_build.prepared_material(&args.operation_id, &args.owner_generation)?
+            .filter(|original| selected.as_ref().is_some_and(|(generation, root)| self.recheck_android_material(&state, original, *generation, root).is_ok()));
+        let admitted = self.inner.bridge.android_build.start_material(args, admitted_at, selected, self.android_build_gate(&state), material)?;
         // Gate/root/generation, one-use consent and the original roster claim
         // share this document mutex. GO is released only after unlocking it.
         drop(state); Ok(admitted.release())

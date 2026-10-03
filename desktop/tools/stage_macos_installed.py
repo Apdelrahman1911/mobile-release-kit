@@ -38,10 +38,17 @@ BUILD_RELEASE_LIMIT = 4096
 HISTORICAL_SUPPLIER_RELEASE = "macos26-arm64-project-draft-01"
 INSTALL_ROOT = Path("/Library/Application Support/MobileReleaseKit")
 APP_NAME = "Mobile Release Kit.app"
-APP_BINARY = "Contents/MacOS/mobile-release-kit-desktop"
-VAULT_HELPER = "Contents/Helpers/mrk-vault-keychain"
-ANDROID_HELPER = "Contents/Helpers/mrk-android-register"
-ANDROID_SERVICE_PLIST = "Contents/Library/LaunchDaemons/dev.mobile-release-kit.desktop.android-register.plist"
+ENTRY_BINARY = "Contents/MacOS/mrk-macos-entry"
+ENTRY_BUNDLE_ID = "dev.mobile-release-kit.desktop.entry"
+PAYLOAD_NAME = "MobileReleaseKitPayload.app"
+PAYLOAD_RELATIVE = "Contents/Helpers/" + PAYLOAD_NAME
+PAYLOAD_CONTENTS = PAYLOAD_RELATIVE + "/Contents/"
+APP_BINARY = PAYLOAD_CONTENTS + "MacOS/mobile-release-kit-desktop"
+PAYLOAD_INFO = PAYLOAD_CONTENTS + "Info.plist"
+VAULT_HELPER = PAYLOAD_CONTENTS + "Helpers/mrk-vault-keychain"
+ANDROID_HELPER_BUNDLE_PROGRAM = "Contents/Helpers/mrk-android-register"
+ANDROID_HELPER = PAYLOAD_RELATIVE + "/" + ANDROID_HELPER_BUNDLE_PROGRAM
+ANDROID_SERVICE_PLIST = PAYLOAD_CONTENTS + "Library/LaunchDaemons/dev.mobile-release-kit.desktop.android-register.plist"
 ANDROID_SERVICE_LABEL = "dev.mobile-release-kit.desktop.android-register"
 ANDROID_SUPPORT_PREFIX = "Contents/Resources/android-support/"
 ANDROID_SUPPORT_MANIFEST = DESKTOP / "macos-installed-inputs/android-support.json"
@@ -55,6 +62,8 @@ ANDROID_SUPPORT_LAYOUT = (
 )
 PACKAGE_ID = "dev.mobile-release-kit.desktop.installed"
 BUNDLE_ID = "dev.mobile-release-kit.desktop"
+MAINTENANCE_GATE_NAME = "maintenance-gate-v1"
+MAINTENANCE_GATE_BYTES = b"MRK-MACOS-MAINTENANCE-GATE-v1\n"
 INSTALLATION_INVENTORY_NAME = "install-inventory.json"
 INSTALLATION_RECORD_NAME = "installation-v1.json"
 INSTALLATION_RECORD_LIMIT = 8192
@@ -807,6 +816,49 @@ def macho(body, *, system_only=False):
     need(offset == 32 + size and minimum == [(1, 26 << 16)], "macho-minimum-macos26")
 
 
+def entry_macho(body):
+    """Closed C-entry loader policy; never execute it or infer a held lock."""
+    macho(body, system_only=True)
+    _magic, _cpu, _subtype, _kind, count, size, flags, _reserved = struct.unpack_from("<8I", body)
+    need(flags & (0x4 | 0x80 | 0x200000) == (0x4 | 0x80 | 0x200000)
+         and not flags & 0x20000, "entry-pie-no-executable-stack")
+    # Exact ordinary clang/linker/code-signing command types. No rpath, dylinker
+    # environment, routines, reexport/weak/lazy library, or unknown load command.
+    allowed = {0x19, 0x2, 0xB, 0xE, 0xC, 0x1B, 0x32, 0x2A, 0x80000028,
+               0x26, 0x29, 0x1D, 0x2E, 0x80000022, 0x80000033, 0x80000034}
+    offset, libraries, dylinkers, mains = 32, [], [], 0
+    for _ in range(count):
+        command, length = struct.unpack_from("<II", body, offset)
+        need(command in allowed, "entry-loader-command")
+        if command in (0xC, 0xE):
+            minimum = 24 if command == 0xC else 12
+            need(length >= minimum, "entry-library-command")
+            start = struct.unpack_from("<I", body, offset + 8)[0]
+            need(minimum <= start < length, "entry-library-offset")
+            raw = body[offset + start:offset + length]
+            need(b"\0" in raw, "entry-library-termination")
+            name, padding = raw.split(b"\0", 1)
+            need(not any(padding), "entry-library-padding")
+            (libraries if command == 0xC else dylinkers).append(name)
+        elif command == 0x19:
+            need(length >= 72, "entry-segment-command")
+            sections = struct.unpack_from("<I", body, offset + 64)[0]
+            need(sections <= 256 and length == 72 + 80 * sections, "entry-segment-sections")
+            for index in range(sections):
+                section = offset + 72 + 80 * index
+                name = body[section:section + 16].split(b"\0", 1)[0]
+                kind = struct.unpack_from("<I", body, section + 64)[0] & 0xFF
+                need(kind not in (0x9, 0xA, 0x15)
+                     and name not in (b"__mod_init_func", b"__mod_term_func", b"__init_offsets"),
+                     "entry-native-initializer")
+        elif command == 0x80000028:
+            need(length == 24, "entry-main-command")
+            mains += 1
+        offset += length
+    need(offset == 32 + size and libraries == [b"/usr/lib/libSystem.B.dylib"]
+         and dylinkers == [b"/usr/lib/dyld"] and mains == 1, "entry-libsystem-only")
+
+
 
 def normal_cargo_artifact(messages, binary, target_dir, body):
     """Bind one ordinary Cargo result to the exact bytes copied into the app.
@@ -889,7 +941,10 @@ def preview_command(args):
                                   original, work / "cargo-target", read(original))
     app = decode(read(work / "app-result.json", 16384))
     need(type(app) is dict and app.get("normalCargoArtifact") == normal
-         and app.get("appBinarySha256BeforeSigning") == normal["binarySha256"], "preview-normal-app-binding")
+         and app.get("appBinarySha256BeforeSigning") == normal["binarySha256"]
+         and sha(app.get("entryBinarySha256BeforeSigning"))
+         and app.get("entryBundleIdentifier") == ENTRY_BUNDLE_ID
+         and app.get("payloadBundleIdentifier") == BUNDLE_ID, "preview-normal-app-binding")
     observed = decode(read(work / "installation-observation.json", INSTALLER_RESULT_BYTES))
     need(type(observed) is dict and observed.get("sourceCommit") == args.expected_source
          and observed.get("installerDeadlineMetAfterFinalCloses") is True
@@ -909,6 +964,9 @@ def preview_command(args):
          and type(metadata["descriptorBytes"]) is int and 0 < metadata["descriptorBytes"] <= INSTALLATION_RECORD_LIMIT
          and metadata["inventoryBytes"] + metadata["descriptorBytes"] == result["installationMetadata"]["writtenBytes"],
          "preview-installation-metadata-readback")
+    need(observed.get("maintenanceGate") == {
+        "state": "protected-permanent-gate-data-correspondence", "bytes": len(MAINTENANCE_GATE_BYTES),
+        "exclusionObserved": False, "workerFinalityEstablished": False}, "preview-maintenance-gate-readback")
     expected = observation_inventory(argparse.Namespace(input=work / "input",
         expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"]))
     need(observed.get("nonrootReadbackFileCount") == len(expected), "preview-readback-roster")
@@ -925,6 +983,10 @@ def preview_command(args):
         "packageSha256": digest(package), "packageSize": len(package), "runtimeManifestSha256": observed["runtimeManifestSha256"],
         "installerInventorySha256": observed["inventorySha256"], "normalBinaryBeforeSigningSha256": normal["binarySha256"],
         "signedAppBinarySha256": expected["app/" + APP_BINARY]["sha256"], "instrumented": False,
+        "signedEntryBinarySha256": expected["app/" + ENTRY_BINARY]["sha256"],
+        "entryBundleIdentifier": ENTRY_BUNDLE_ID, "payloadBundleIdentifier": BUNDLE_ID,
+        "ordinaryEntryRoute": "unexecuted", "directPayloadPreMain": "unqualified",
+        "fullM2Qualified": False, "maintenanceQualified": False,
         "normalBuild": "passed", "packageAudit": "passed", "installationReadback": "passed",
         "automaticWindowOpen": "unexecuted", "normalQuit": "unexecuted", "manualUIAcceptance": "pending",
         "unexecutedReason": "original-normal-app-quit-custody-not-established",
@@ -994,9 +1056,9 @@ def android_support_files(args):
 
 def android_support_input(app):
     manifest_sha, rows = android_support_manifest()
-    expected = {row["resourcePath"]: row for row in rows}
-    expected.update({notice["resourcePath"]: notice for row in rows for notice in row["notices"]})
-    need({name for name in app if name.startswith(ANDROID_SUPPORT_PREFIX)} == set(expected), "android-support-roster")
+    expected = {PAYLOAD_RELATIVE + "/" + row["resourcePath"]: row for row in rows}
+    expected.update({PAYLOAD_RELATIVE + "/" + notice["resourcePath"]: notice for row in rows for notice in row["notices"]})
+    need({name for name in app if name.startswith(PAYLOAD_RELATIVE + "/" + ANDROID_SUPPORT_PREFIX)} == set(expected), "android-support-roster")
     for name, row in expected.items():
         body, mode = app[name]
         need(mode in (0o444, 0o644) and len(body) == row["size"] and digest(body) == row["sha256"],
@@ -1020,13 +1082,22 @@ def source_app_info():
     return info
 
 
+def source_entry_info():
+    info = read(DESKTOP / "macos-installed-inputs/EntryInfo.plist", 16384)
+    parsed = plistlib.loads(info)
+    payload = plistlib.loads(source_app_info())
+    expected = dict(payload, CFBundleExecutable="mrk-macos-entry", CFBundleIdentifier=ENTRY_BUNDLE_ID)
+    need(parsed == expected, "entry-info-binding")
+    return info
+
+
 def android_service_plist():
     body = read(DESKTOP / "macos-installed-inputs" / Path(ANDROID_SERVICE_PLIST).name, 4096)
     try:
         value = plistlib.loads(body)
     except Exception:
         raise Refused("android-service-plist") from None
-    need(value == {"Label": ANDROID_SERVICE_LABEL, "BundleProgram": ANDROID_HELPER,
+    need(value == {"Label": ANDROID_SERVICE_LABEL, "BundleProgram": ANDROID_HELPER_BUNDLE_PROGRAM,
                    "MachServices": {ANDROID_SERVICE_LABEL: True}}
          and value["MachServices"][ANDROID_SERVICE_LABEL] is True, "android-service-plist")
     return body
@@ -1071,19 +1142,26 @@ def app_command(args):
     macho(helper, system_only=True)
     normal = (normal_cargo_artifact(read(cargo_messages, 8 * 1024 * 1024), args.binary, cargo_target, body)
               if cargo_messages is not None else None)
-    info = source_app_info()
-    files = {APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555), "Contents/Info.plist": (info, 0o644),
-             "Contents/PkgInfo": (b"APPL????", 0o644),
-             "Contents/Resources/icon.png": (read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024), 0o644)}
+    entry = read(args.entry_binary, 1024 * 1024)
+    need(sha(args.expected_entry) and digest(entry) == args.expected_entry, "entry-original-compiler-digest")
+    entry_macho(entry)
+    icon = read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024)
+    files = {ENTRY_BINARY: (entry, 0o755), APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555),
+             "Contents/Info.plist": (source_entry_info(), 0o644), PAYLOAD_INFO: (source_app_info(), 0o644),
+             "Contents/PkgInfo": (b"APPL????", 0o644), PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
+             "Contents/Resources/icon.png": (icon, 0o644), PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
     support_sha, support = android_support_files(args)
-    files.update(support)
+    files.update({PAYLOAD_RELATIVE + "/" + name: value for name, value in support.items()})
     android_service = android_service_files(args)
     files.update(android_service)
     # Native codesign is a SEPARATE fixed workflow command after this returned
     # copy. It may modify the app only; the runtime is not nested in the app.
-    # Root/Contents must remain writable to that original codesign writer.
+    # Payload is signed before the outer entry. Root/Contents at both levels
+    # must remain writable to those original codesign writers.
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
     result = {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper),
+              "entryBinarySha256BeforeSigning": digest(entry), "entryBundleIdentifier": ENTRY_BUNDLE_ID,
+              "payloadBundleIdentifier": BUNDLE_ID,
               "androidSupportManifestSha256": support_sha, "qualification": "app-copied-not-signed-or-launched"}
     if normal is not None:
         result["normalCargoArtifact"] = normal
@@ -1108,8 +1186,21 @@ def runtime_tree(root, expected, *, current=False):
 def input_command(args):
     runtime = runtime_tree(args.runtime, args.expected_manifest, current=args.current_runtime)
     app = tree(args.app)
-    need(APP_BINARY in app and VAULT_HELPER in app and "Contents/Info.plist" in app and "Contents/_CodeSignature/CodeResources" in app
-         and app["Contents/Info.plist"][0] == source_app_info(), "signed-app-roster")
+    _support_sha, support_rows = android_support_manifest()
+    support = {PAYLOAD_RELATIVE + "/" + row["resourcePath"] for row in support_rows}
+    support.update(PAYLOAD_RELATIVE + "/" + notice["resourcePath"] for row in support_rows for notice in row["notices"])
+    expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, "Contents/Info.plist", PAYLOAD_INFO,
+                      "Contents/PkgInfo", PAYLOAD_CONTENTS + "PkgInfo", "Contents/Resources/icon.png",
+                      PAYLOAD_CONTENTS + "Resources/icon.png", "Contents/_CodeSignature/CodeResources",
+                      PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
+    if getattr(args, "expected_android_helper", None) is not None:
+        expected_names.update((ANDROID_HELPER, ANDROID_SERVICE_PLIST))
+    need(set(app) == expected_names and app["Contents/Info.plist"][0] == source_entry_info()
+         and app[PAYLOAD_INFO][0] == source_app_info(), "signed-app-roster")
+    need(sha(args.expected_entry) and digest(app[ENTRY_BINARY][0]) == args.expected_entry
+         and sha(args.expected_app_binary) and digest(app[APP_BINARY][0]) == args.expected_app_binary,
+         "final-entry-payload-signature-bytes-changed")
+    entry_macho(app[ENTRY_BINARY][0])
     macho(app[APP_BINARY][0])
     macho(app[VAULT_HELPER][0], system_only=True)
     need(sha(args.expected_vault_helper) and digest(app[VAULT_HELPER][0]) == args.expected_vault_helper,
@@ -1120,7 +1211,7 @@ def input_command(args):
     for prefix, source in (("runtime/", runtime), ("app/", app)):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
-            expected_mode = 0o555 if prefix + name in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3") else 0o444
+            expected_mode = 0o555 if prefix + name in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3") else 0o444
             # codesign may have made its newly created CodeResources 0644. The
             # fresh input copy normalizes modes; it never edits that source.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
@@ -1129,6 +1220,8 @@ def input_command(args):
     need(len(rows) <= MAX_FILES - 3, "installer-inventory-bound")
     inventory = canonical({"schemaVersion": 1, "release": RELEASE, "runtimeManifestSha256": args.expected_manifest, "files": rows}) + b"\n"
     decode(inventory)  # Same independent size/node bound the root installer uses.
+    need(sum(len(data) for data, _mode in files.values()) + len(inventory) + INSTALLATION_RECORD_LIMIT
+         + len(MAINTENANCE_GATE_BYTES) <= MAX_BYTES, "installer-complete-byte-bound")
     files["install-inventory.json"] = (inventory, 0o444)
     write_tree(args.output, files)
     return {"schemaVersion": 1, "inventorySha256": digest(inventory), "runtimeManifestSha256": args.expected_manifest,
@@ -1333,18 +1426,19 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest):
     need(type(inventory) is dict and set(inventory) == {"schemaVersion", "release", "runtimeManifestSha256", "files"}
          and type(inventory["schemaVersion"]) is int and inventory["schemaVersion"] == 1
          and inventory["release"] == RELEASE and inventory["runtimeManifestSha256"] == expected_manifest
-         and type(inventory["files"]) is list and 0 < len(inventory["files"]) <= MAX_FILES, "observation-inventory-shape")
+         and type(inventory["files"]) is list and 0 < len(inventory["files"]) <= MAX_FILES - 3, "observation-inventory-shape")
     rows = {}
     for row in inventory["files"]:
         need(type(row) is dict and set(row) == {"path", "sha256", "size", "executable"}
              and safe_path(row["path"]) and row["path"].startswith(("app/Contents/", "runtime/")) and row["path"] not in rows
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
-             and row["executable"] == (row["path"] in ("app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3")), "observation-inventory-row")
+             and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3")), "observation-inventory-row")
         rows[row["path"]] = row
     need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows), "android-service-input-pair")
     need(list(rows) == sorted(rows) and sum(row["size"] for row in rows.values()) <= MAX_BYTES
-         and {"app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
+         and {"app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "app/" + PAYLOAD_INFO,
+              "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
          and rows["runtime/manifest.json"]["sha256"] == expected_manifest, "observation-inventory-required")
     directories(rows)
     return rows
@@ -1704,7 +1798,7 @@ def bound_original_result(result, expected, source, inventory, manifest):
     reason, runtime, app, state, verified, _exit = expected
     need(type(result) is dict and set(result) == {"schemaVersion", "state", "reason", "release", "runtimePublication", "appPublication",
          "staging", "payloadVerified", "payloadWritersSettled", "originalsSettled", "deadlineMetAfterFinalCloses", "createdAncestors",
-         "cleanup", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "installationMetadata"}, "original-result-closed-shape")
+         "cleanup", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "installationMetadata", "maintenanceGate"}, "original-result-closed-shape")
     need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["release"] == RELEASE
          and result["sourceCommit"] == source and result["inventorySha256"] == inventory and result["runtimeManifestSha256"] == manifest
          and result["state"] == state and result["reason"] == reason and result["runtimePublication"] == runtime and result["appPublication"] == app
@@ -1713,6 +1807,7 @@ def bound_original_result(result, expected, source, inventory, manifest):
     installation_metadata_result(result["installationMetadata"], expected)
     stage = result["staging"]
     need(stage is None or type(stage) is str and re.fullmatch(r"\.install-[0-9a-f]{32}", stage), "original-staging-name")
+    maintenance_gate_result(result["maintenanceGate"], entered=stage is not None)
     need(type(result["createdAncestors"]) is list and len(result["createdAncestors"]) <= 4, "original-created-ancestors")
     for row in result["createdAncestors"]:
         need(type(row) is dict and set(row) == {"name", "state", "parentOriginal", "object"} and type(row["name"]) is str
@@ -1777,8 +1872,8 @@ def installation_record_data(body, inventory_body, source, manifest, root, relea
          and inventory["bytes"] == len(inventory_body) and inventory["sha256"] == digest(inventory_body),
          "installation-record-inventory")
     rows = observation_inventory_bytes(inventory_body, inventory["sha256"], manifest)
-    need(sum(row["size"] for row in rows.values()) + len(inventory_body) + INSTALLATION_RECORD_LIMIT <= MAX_BYTES,
-         "installation-record-total-bound")
+    need(sum(row["size"] for row in rows.values()) + len(inventory_body) + INSTALLATION_RECORD_LIMIT
+         + len(MAINTENANCE_GATE_BYTES) <= MAX_BYTES, "installation-record-total-bound")
     return record
 
 
@@ -1800,7 +1895,39 @@ def installation_metadata_result(value, expected):
              "installation-metadata-not-recorded")
     else:
         need(value["attemptedFiles"] == 2 and value["openedFiles"] == 1 and 0 < value["writtenBytes"] < value["plannedBytes"],
-             "installation-metadata-partial-accounting")
+              "installation-metadata-partial-accounting")
+
+
+def maintenance_gate_result(value, *, entered):
+    need(type(value) is dict and set(value) == {"schemaVersion", "entered", "creation", "fixedBytes", "writtenBytes",
+         "sealed", "filePersisted", "parentPersisted", "writer", "verified", "exclusiveAttempted", "exclusiveAcquired", "participant", "cleanup"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and type(value["fixedBytes"]) is int and value["fixedBytes"] == len(MAINTENANCE_GATE_BYTES)
+         and type(value["writtenBytes"]) is int
+         and all(type(value[key]) is bool for key in ("entered", "sealed", "filePersisted", "parentPersisted", "verified", "exclusiveAttempted", "exclusiveAcquired"))
+         and value["entered"] is entered and value["cleanup"] == "original-closes-only-permanent-gate-retained",
+         "maintenance-gate-result")
+    if not entered:
+        need(value["creation"] == value["writer"] == value["participant"] == "not-attempted"
+             and value["writtenBytes"] == 0 and not any(value[k] for k in ("sealed", "filePersisted", "parentPersisted", "verified", "exclusiveAttempted", "exclusiveAcquired")),
+             "maintenance-gate-unentered")
+        return
+    need(value["verified"] and value["exclusiveAttempted"] and value["exclusiveAcquired"]
+         and value["participant"] == "closed", "maintenance-gate-original-not-settled")
+    if value["creation"] == "created":
+        need(value["writtenBytes"] == len(MAINTENANCE_GATE_BYTES) and value["sealed"]
+             and value["filePersisted"] and value["parentPersisted"] and value["writer"] == "closed", "maintenance-gate-creation-incomplete")
+    else:
+        need(value["creation"] == "existing-not-modified" and value["writtenBytes"] == 0
+             and value["writer"] == "not-attempted" and not value["sealed"] and not value["filePersisted"]
+             and not value["parentPersisted"], "maintenance-gate-reuse-not-observed")
+
+
+def maintenance_gate_readback(root_fd):
+    body, _info = installation_metadata_leaf(root_fd, MAINTENANCE_GATE_NAME, len(MAINTENANCE_GATE_BYTES))
+    need(body == MAINTENANCE_GATE_BYTES, "maintenance-gate-content")
+    return {"state": "protected-permanent-gate-data-correspondence", "bytes": len(body),
+            "exclusionObserved": False, "workerFinalityEstablished": False}
 
 
 @contextlib.contextmanager
@@ -1885,6 +2012,8 @@ def observation_command(args):
     bound_original_result(result, (None, "confirmed", "confirmed", "installed", True, 0),
                           args.expected_source, args.expected_inventory, args.expected_manifest)
     need(result["staging"] is not None, "installed-original-staging-missing")
+    with fixture_directory(INSTALL_ROOT, {APP_NAME, "versions", result["staging"], MAINTENANCE_GATE_NAME}) as fd:
+        gate = maintenance_gate_readback(fd)
     app = tree(INSTALL_ROOT / APP_NAME, installed=True)
     runtime = tree(INSTALL_ROOT / "versions" / RELEASE / "runtime", installed=True)
     actual = {"app/" + name: value for name, value in app.items()}
@@ -1894,7 +2023,7 @@ def observation_command(args):
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "release": RELEASE, "installerDeadlineMetAfterFinalCloses": True,
             "installerReportedOriginalsSettled": True, "nonrootReadbackFileCount": len(actual),
-            "originalInstallerResult": result, "installerResultExport": exported, "installationMetadata": metadata,
+            "originalInstallerResult": result, "installerResultExport": exported, "installationMetadata": metadata, "maintenanceGate": gate,
             "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
             "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
 
@@ -2007,9 +2136,12 @@ def fixture_observation_command(args):
             has_release = name in ("occupied-release", "runtime-publication-collision", "first-publication-second-refusal", "postruntime-persistence-report", "metadata-descriptor-collision")
             runtime_published = row["originalResult"]["runtimePublication"] == "confirmed"
             names = ({stage} if stage is not None else set()) | ({APP_NAME} if app_occupant else set()) | ({"versions"} if has_versions else set())
+            if row["originalResult"]["maintenanceGate"]["entered"]:
+                names.add(MAINTENANCE_GATE_NAME)
             runtime_files = 0
             metadata_observation = None
             with fixture_directory(root, names) as fd:
+                gate = maintenance_gate_readback(fd) if MAINTENANCE_GATE_NAME in names else None
                 if stage is not None:
                     # Metadata only. Never open/chmod the root-owned0700 staging.
                     info = os.stat(stage, dir_fd=fd, follow_symlinks=False)
@@ -2033,7 +2165,8 @@ def fixture_observation_command(args):
                                     metadata_observation = installation_metadata_readback(args, root, row["originalResult"], fixture=True,
                                         occupant=row["occupant"] if name == "metadata-descriptor-collision" else None)
             observations.append({"case": name, "accessibleOccupantChecked": visible_occupant(name) is not None,
-                                 "runtimeReadbackFileCount": runtime_files, "protectedStagingOpened": False, "installationMetadata": metadata_observation})
+                                 "runtimeReadbackFileCount": runtime_files, "protectedStagingOpened": False, "installationMetadata": metadata_observation,
+                                 "maintenanceGate": gate})
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "originalFixtureResult": result, "installerResultExport": exported, "nonrootReadback": observations,
             "applicationLaunched": False, "guiSaveQualified": False, "genuineConcurrentRaceObserved": False,
@@ -2059,6 +2192,8 @@ def main(argv=None):
             command.add_argument("--output", required=True, type=Path)
     app = commands.add_parser("app")
     app.add_argument("--binary", required=True, type=Path)
+    app.add_argument("--entry-binary", required=True, type=Path)
+    app.add_argument("--expected-entry", required=True)
     app.add_argument("--vault-helper", required=True, type=Path)
     app.add_argument("--expected-vault-helper", required=True)
     app.add_argument("--android-helper", type=Path,
@@ -2078,6 +2213,8 @@ def main(argv=None):
     preview.add_argument("--output", required=True, type=Path)
     inputs = commands.add_parser("input")
     inputs.add_argument("--app", required=True, type=Path)
+    inputs.add_argument("--expected-entry", required=True)
+    inputs.add_argument("--expected-app-binary", required=True)
     inputs.add_argument("--expected-vault-helper", required=True)
     inputs.add_argument("--expected-android-helper",
                         help="Required exactly when the signed app contains the Android helper/plist pair")

@@ -49,6 +49,20 @@ def normal_app_steps(workflow):
         "Bind this completed signed app and current-source runtime into fresh Installer DATA"))
 
 
+def entry_macho_fixture(*extra, library=b"/usr/lib/libSystem.B.dylib"):
+    """Inert loader-policy DATA, not a compiled/signed/launched entry."""
+    def named(command, value, prefix):
+        data = value + b"\0"
+        length = (prefix + len(data) + 7) // 8 * 8
+        header = struct.pack("<III", command, length, prefix)
+        return header + bytes(prefix - len(header)) + data + bytes(length - prefix - len(data))
+    commands = (struct.pack("<6I", 0x32, 24, 1, 26 << 16, 26 << 16, 0),
+                named(0xC, library, 24), named(0xE, b"/usr/lib/dyld", 12),
+                struct.pack("<IIQQ", 0x80000028, 24, 0, 0), *extra)
+    return struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, len(commands),
+                       sum(map(len, commands)), 0x200084, 0) + b"".join(commands)
+
+
 @unittest.skipUnless(ANDROID_HELPER is not None, "POSIX inert packaging DATA only")
 class MacAndroidHelperPackagingData(unittest.TestCase):
     """No compiler/codesign/helper/owner execution; every child is a DATA double."""
@@ -87,6 +101,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         plist.parent.mkdir(parents=True)
         plist.write_bytes(TOOL.android_service_plist())
         plist.chmod(0o644)
+        source = Path(__file__).absolute().parents[2]
+        for name in ("desktop/native/macos-installed-entry/entry.c", "desktop/native/macos-installed-entry/gate.c",
+                     "desktop/native/macos-installed-entry/gate.h", "desktop/native/macos-installed-entry/fixed_paths.h",
+                     "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs"):
+            target = checkout / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((source / name).read_bytes()); target.chmod(0o644)
         _, _, _, body = normal_cargo_fixture()
         observations = []
 
@@ -113,6 +134,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                               else b"warning: synthetic helper build diagnostic\n")
                 return CompletedProcess(argv, 101 if failure == "nonzero" else 0,
                                         output.decode() if failure == "malformed" else output, diagnostic)
+            if argv[0] == "/usr/bin/xcrun":
+                self.assertEqual(argv[1:4], ["--sdk", "macosx", "clang"])
+                self.assertIn("-DMRK_ENTRY_METADATA_ONLY=1", argv)
+                self.assertEqual((options["timeout"], options["output_limit"]), (30, 65536))
+                if failure == "entry-owner":
+                    raise RuntimeError("DATA entry original result unavailable")
+                selected = Path(argv[-1])
+                selected.write_bytes(entry_macho_fixture()); selected.chmod(0o700)
+                if failure == "entry-source-changed":
+                    (checkout / "desktop/native/macos-installed-entry/entry.c").write_bytes(b"changed DATA")
+                return CompletedProcess(argv, 0, b"", b"")
             self.assertEqual(argv[0], "/usr/bin/codesign")
             selected = Path(argv[-1])
             if "--sign" in argv:
@@ -209,10 +241,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertEqual(receipt["originalCalls"][0]["stderrSha256"], module.digest(diagnostic))
             self.assertEqual((work / "android-helper-build.jsonl").read_bytes(),
                              self.encoded(self.cargo_rows(checkout, work / "android-helper-target")))
-            self.assertEqual(len(receipt["originalCalls"]), 3)
+            self.assertEqual(len(receipt["originalCalls"]), 4)
+            self.assertEqual(receipt["originalCalls"][-1]["role"], "entry-build")
+            self.assertEqual(operation.entry_sha256, module.digest((work / module.ENTRY).read_bytes()))
+            self.assertEqual(len(receipt["entrySources"]), 6)
+            self.assertFalse(receipt["entryExecutionObserved"] or receipt["maintenanceQualified"])
             self.assertTrue(all(entry["closed"] for entry in operation.entries))
             self.assertFalse(receipt["androidServiceAuthenticated"] or receipt["androidBuildQualified"] or receipt["productReady"])
-            contents = work / "app/Mobile Release Kit.app/Contents"
+            contents = work / "app/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents"
             helpers = contents / "Helpers"; helpers.mkdir(parents=True)
             nested = helpers / module.HELPER
             nested.write_bytes((work / module.HELPER).read_bytes()); nested.chmod(0o555)
@@ -224,11 +260,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(actual.execute(expected), expected)
                 self.assertFalse((work / ("android-helper-" + phase)).exists())
                 self.assertTrue(json.loads((work / ("android-helper-" + phase + ".json")).read_bytes())["passed"])
-            self.assertEqual([item[0][0] for item in observations], ["cargo"] + ["/usr/bin/codesign"] * 4)
+            self.assertEqual([item[0][0] for item in observations], ["cargo"] + ["/usr/bin/codesign"] * 2
+                             + ["/usr/bin/xcrun"] + ["/usr/bin/codesign"] * 2)
 
     def test_alias_original_return_close_and_signature_failures_never_produce_success(self):
         module = ANDROID_HELPER
-        for failure in ("alias", "owner", "malformed", "close", "changed", "nonzero"):
+        for failure in ("alias", "owner", "malformed", "close", "changed", "nonzero", "entry-owner", "entry-source-changed"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 checkout, work, environment, owner, observations = self.fixture(Path(temporary), failure)
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
@@ -247,10 +284,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     operation.execute()
                 receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
                 self.assertFalse(receipt["passed"])
-                uncertain = failure in ("owner", "malformed", "close")
+                uncertain = failure in ("owner", "malformed", "close", "entry-owner")
                 self.assertEqual((work / "android-helper-target").exists(), uncertain)
                 if failure in ("alias", "owner", "malformed", "nonzero"):
                     self.assertEqual(len(observations), 1)
+                if failure.startswith("entry-"):
+                    self.assertEqual(len(observations), 4)
+                    self.assertFalse((work / module.ENTRY).exists())
+                    self.assertEqual(receipt["originalCalls"][-1]["returned"], failure != "entry-owner")
+                    self.assertEqual(receipt["failure"]["stage"], "fixed-installed-entry-compiler")
                 if failure == "nonzero":
                     call = receipt["originalCalls"][0]
                     self.assertEqual((call["returned"], call["returncode"]), (True, 101))
@@ -364,115 +406,6 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         for function, line in (("PRIVATE\nframe", 1), ("x" * 65, 1), ("data_frame", 1000001)):
             self.assertEqual(trace_data(exact, function=function, line=line)["frames"], [])
 
-        # Only the direct, source-bound guard's immutable tuple is diagnostic.
-        # These are inert Python code objects, never a command/native owner.
-        def require_template(condition, error):
-            if not condition:
-                raise error
-
-        def until_template(value, require, error, clear):
-            _wait_guard_state = value
-            if clear:
-                require(True, error)
-                _wait_guard_state = None
-            require(False, error)
-
-        def wait_data(value, *, filename=exact, qualified="_Outer._until", guard="_require", clear=False):
-            guard_code = require_template.__code__.replace(co_filename=filename, co_name=guard, co_qualname=guard)
-            until_code = until_template.__code__.replace(co_filename=filename, co_name="_until", co_qualname=qualified)
-            try:
-                FunctionType(until_code, {})(value, FunctionType(guard_code, {}),
-                    ProcessErrorData("owned command protocol or original ownership is incomplete"), clear)
-            except ProcessErrorData as error:
-                return module.original_failure(error, owner, checkout, 480, 4 * 1024 * 1024)
-            self.fail("inert wait guard was not raised")
-
-        state = ("RUNNING", True, True, False, False, False, True, False, False)
-        missing = wait_data(state)
-        pending = wait_data((*state[:4], True, *state[5:]))
-        self.assertFalse(missing["waitGuard"]["terminalPresent"])
-        self.assertTrue(pending["waitGuard"]["terminalPresent"])
-        self.assertFalse(pending["waitGuard"]["stdoutEof"])
-        self.assertTrue(pending["waitGuard"]["stderrEof"])
-        absent = wait_data(("STARTING", False, False, False, False, False, False, False, False))
-        self.assertIsNone(absent["waitGuard"]["wireEof"])
-        self.assertIsNone(absent["waitGuard"]["wirePoisoned"])
-        for invalid in (None, list(state), state[:-1], (*state, True),
-                        ("PRIVATE", *state[1:]), ("RUNNING", 1, *state[2:]),
-                        ("RUNNING", object(), *state[2:])):
-            diagnostic = wait_data(invalid)
-            self.assertIsNone(diagnostic["waitGuard"])
-            self.assertNotIn("PRIVATE", json.dumps(diagnostic))
-        for options in ({"filename": "/unrelated/_command_process.py"},
-                        {"qualified": "NotOuter._until"}, {"guard": "other_guard"}, {"clear": True}):
-            self.assertIsNone(wait_data(state, **options)["waitGuard"])
-        self.assertLessEqual(len(json.dumps(pending, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
-
-        # A/C/O final-cause tuples are diagnostic DATA, not invented native
-        # waits/finality. Only the direct source-bound incomplete-result guard
-        # may expose this one immutable local; no arbitrary frame traversal.
-        def result_template(value, error, clear, following):
-            _result_guard_state = None if clear else value
-            if following is not None:
-                following(False, error)
-            raise error
-
-        def result_data(value, *, filename=exact, qualified="run_command", clear=False,
-                        following=None, message="owned command produced incomplete output"):
-            code = result_template.__code__.replace(co_filename=filename, co_name="run_command", co_qualname=qualified)
-            try:
-                FunctionType(code, {})(value, ProcessErrorData(message), clear, following)
-            except ProcessErrorData as error:
-                return module.original_failure(error, owner, checkout, 480, 4 * 1024 * 1024)
-            self.fail("inert result guard was not raised")
-
-        empty = (0, 0, 0, 0, ())
-        anchor = (1, 8191, (1, 2, 0, 0, ((1, 1234),)))
-        custodian = (1, 16383, (1, 1, 0, 17, ((1, 2345),)), (1, 2), anchor)
-        result_state = (1, 65535, (1, 2), (1, 0), (0, 0), (0, 0), custodian)
-        captured = result_data(result_state)
-        self.assertEqual(captured["resultGuard"], result_state)
-        self.assertEqual((captured["resultGuard"][6][2][1], captured["resultGuard"][6][4][2][1]), (1, 2))
-        self.assertIsNone(captured["waitGuard"])
-        self.assertEqual(captured["classification"], "incomplete-output")
-        for status in (0, 2, 3):
-            c_missing = (*result_state[:6], (status, 0, empty, (0, 0), (0, 0, empty)))
-            a_missing = (*result_state[:6], (*custodian[:4], (status, 0, empty)))
-            self.assertEqual(result_data(c_missing)["resultGuard"], c_missing)
-            self.assertEqual(result_data(a_missing)["resultGuard"], a_missing)
-        invalid_results = (
-            None, list(result_state), "PRIVATE", result_state[:-1], (True, *result_state[1:]),
-            (1, 65536, *result_state[2:]), (1, 0, (False, 0), *result_state[3:]),
-            (*result_state[:4], (-1, 0), *result_state[5:]),
-            (*result_state[:6], (3, 1, empty, (0, 0), (0, 0, empty))),
-            (*result_state[:6], (1, 0, (1, 1, 13, 0, ()), (1, 0), anchor)),  # errno only on OSError.
-            (*result_state[:6], (1, 0, (1, 11, 4096, 0, ()), (1, 0), anchor)),
-            (*result_state[:6], (*custodian[:4], (1, 0, (1, 2, 0, 0, ((1, 1),) * 5)))),
-            (*result_state[:6], (*custodian[:4], (1, 0, (1, 2, 0, 0, (("PRIVATE", 1),))))),
-            (*result_state[:6], (*custodian[:4], (2, 0, (2, 0, 0, 0, ())))),
-        )
-        for invalid in invalid_results:
-            diagnostic = result_data(invalid)
-            self.assertIsNone(diagnostic["resultGuard"])
-            self.assertNotIn("PRIVATE", json.dumps(diagnostic))
-        for options in ({"filename": "/unrelated/_command_process.py"}, {"qualified": "other.run_command"},
-                        {"clear": True}, {"following": require_template},
-                        {"message": "owned command protocol or original ownership is incomplete"}):
-            self.assertIsNone(result_data(result_state, **options)["resultGuard"])
-
-        maximum_failure = (1, 11, 4095, 31, ((4, 1000000),) * 4)
-        maximum = (1, 65535, (2, 255), (2, 255), (16777216, 16777216), (16777216, 16777216),
-                   (1, 16383, maximum_failure, (2, 255), (1, 8191, maximum_failure)))
-        largest = result_data(maximum)
-        self.assertEqual(largest["resultGuard"], maximum)
-        # Conservative independent maxima, not a claimed reachable receipt.
-        largest.update(ownerErrorType="ProcessOutcomeUnknown", classification="failed-timeout-or-incomplete-output",
-                       timeoutSeconds=2147483647, outputLimitBytes=2147483647, visitedFrames=32,
-                       omittedFrames=32, foreignFrames=32, tracebackTruncated=False,
-                       frames=[{"source": "src/mobile_release/_command_process.py", "function": "x" * 64,
-                                "line": 1000000}] * 8)
-        self.assertLessEqual(len(json.dumps(largest, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
-
         # Even diagnostic inspection failure must re-raise the identical owner
         # exception and leave the uncertain target; this is still a DATA double.
         with tempfile.TemporaryDirectory() as temporary:
@@ -530,6 +463,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertLess(app.index("stage_macos_installed.py app"), app.index("macos_android_helper_package.py verify-before"))
             self.assertLess(app.index("macos_android_helper_package.py verify-before"), app.index("/usr/bin/codesign --force --sign -"))
             self.assertLess(app.index("/usr/bin/codesign --force --sign -"), app.index("macos_android_helper_package.py verify-after"))
+            self.assertIn("MRK_MACOS_ENTRY_SHA256: ${{ steps.android_helper.outputs['entry-sha256'] }}", app)
+            self.assertIn('--entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256"', app)
+            self.assertIn('--expected-entry "$MRK_MACOS_SIGNED_ENTRY_SHA256" --expected-app-binary "$MRK_MACOS_SIGNED_PAYLOAD_SHA256"', inputs)
+            sequence = [app.index(value) for value in (
+                '--timestamp=none "$payload"', 'payload_sha=$(',
+                '--timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"',
+                'macos_android_helper_package.py verify-after', 'entry_sha=$(')]
+            self.assertEqual(sequence, sorted(sequence))
             self.assertNotIn("android-helper-*", workflow)
             if filename == "desktop-macos-aqua.yml":
                 gates = lambda block: [line.strip() for line in block.splitlines() if line.startswith("        if:")]
@@ -574,7 +515,13 @@ def original_result(expected, *, stage=".install-" + "d" * 32):
     return {"schemaVersion": 1, "state": state, "reason": reason, "release": TOOL.RELEASE,
             "runtimePublication": runtime, "appPublication": app, "staging": stage, "payloadVerified": verified,
             "payloadWritersSettled": True, "originalsSettled": True, "deadlineMetAfterFinalCloses": True, "createdAncestors": [],
-            "cleanup": "original-closes-only-no-deletion", "sourceCommit": "a" * 40, "inventorySha256": "b" * 64, "runtimeManifestSha256": "c" * 64, "installationMetadata": metadata}
+            "cleanup": "original-closes-only-no-deletion", "sourceCommit": "a" * 40, "inventorySha256": "b" * 64, "runtimeManifestSha256": "c" * 64, "installationMetadata": metadata,
+            "maintenanceGate": {"schemaVersion": 1, "entered": stage is not None,
+                "creation": "created" if stage else "not-attempted", "fixedBytes": 30, "writtenBytes": 30 if stage else 0,
+                "sealed": stage is not None, "filePersisted": stage is not None, "parentPersisted": stage is not None,
+                "writer": "closed" if stage else "not-attempted", "verified": stage is not None,
+                "exclusiveAttempted": stage is not None, "exclusiveAcquired": stage is not None,
+                "participant": "closed" if stage else "not-attempted", "cleanup": "original-closes-only-permanent-gate-retained"}}
 
 
 def reported_fixture_data():
@@ -922,11 +869,15 @@ class MacInstalledData(unittest.TestCase):
         for reason, expected in (("output-mode", "MRK_MACOS_PACKAGE_REFUSED=output-mode\n" + TOOL.GENERIC_REFUSAL),
                                  ("/private/credential=value", TOOL.GENERIC_REFUSAL)):
             stderr = io.StringIO()
-            with self.subTest(reason=reason), mock.patch.object(TOOL, "app_command", side_effect=TOOL.Refused(reason)), \
+            with self.subTest(reason=reason), mock.patch.object(TOOL, "app_command", side_effect=TOOL.Refused(reason)) as action, \
                     contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
-                TOOL.main(["app", "--binary", "/inert/app", "--vault-helper", "/inert/helper",
+                TOOL.main(["app", "--binary", "/inert/app", "--entry-binary", "/inert/entry",
+                           "--expected-entry", "b" * 64, "--vault-helper", "/inert/helper",
                            "--expected-vault-helper", "a" * 64, "--output", "/inert/output",
                            "--bundletool-archive", "/inert/bundletool", "--aapt2-archive", "/inert/aapt2"])
+            action.assert_called_once()
+            args = action.call_args.args[0]
+            self.assertEqual((args.entry_binary, args.expected_entry), (Path("/inert/entry"), "b" * 64))
             self.assertEqual(stopped.exception.code, 1)
             self.assertEqual(stderr.getvalue(), expected + "\n")
 
@@ -1407,6 +1358,26 @@ class MacInstalledData(unittest.TestCase):
         self.assertIn("actual.uid == 0 && actual.gid == 0", normalized)
         create_file = source.split("fn create_file", 1)[1].split("fn check_name", 1)[0]
         self.assertIn("self.protected(n, false, Some(0o600))?", create_file)
+        install = source.split("fn install(&mut self, source: &str)", 1)[1].split("fn recorded_directory", 1)[0]
+        phases = [install.index(item) for item in ("self.absent(destination, paths::APP_NAME)",
+                  "self.absent(versions, paths::RELEASE)", "self.maintenance_gate(destination)", "getrandom::fill", "self.stage_name =")]
+        self.assertEqual(phases, sorted(phases))
+        gate = source.split("fn maintenance_gate", 1)[1].split("fn gate_record", 1)[0]
+        self.assertIn("Role::GateWriter", gate)
+        self.assertIn("Role::GateParticipant", gate)
+        self.assertIn("fcntl::FlockArg::LockExclusiveNonblock", gate)
+        self.assertNotIn("LockShared", gate)
+        self.assertNotIn("unlink", gate)
+        self.assertNotIn("rename", gate)
+        settlement = source.split("fn settle_originals", 1)[1].split("fn result_record", 1)[0]
+        self.assertIn("if Some(n) != gate { self.close(n); }", settlement)
+        self.assertIn("if others_settled { self.close(n); }", settlement)
+        self.assertIn("std::mem::forget(fd)", settlement)
+        self.assertIn("State::KernelExitRetained", settlement)
+        self.assertIn("self.gate_protected(reader)", settlement)
+        # Exactly two release-metadata files; gate effects have separate fields.
+        self.assertIn('"installationMetadata":self.metadata.snapshot', source)
+        self.assertIn('"maintenanceGate":self.gate_record()', source)
 
     def test_macho_header_data_refuses_an_unreviewed_target_or_minimum(self):
         header = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 1, 24, 0, 0)
@@ -1445,6 +1416,28 @@ class MacInstalledData(unittest.TestCase):
                            ("reason", "deadline"), ("state", "unknown-retained"), ("sourceCommit", "f" * 40), ("schemaVersion", True), ("extra", True)):
             with self.subTest(key=key), self.assertRaises(TOOL.Refused):
                 TOOL.bound_original_result({**result, key: value}, expected, "a" * 40, "b" * 64, "c" * 64)
+        gate = result["maintenanceGate"]
+        for key, value in (("entered", False), ("fixedBytes", True), ("fixedBytes", 29), ("writtenBytes", 29),
+                           ("sealed", False), ("filePersisted", False), ("parentPersisted", False),
+                           ("writer", "owned"), ("verified", False), ("exclusiveAttempted", False),
+                           ("exclusiveAcquired", False), ("participant", "unknown"),
+                           ("participant", "kernel-exit-retained"), ("cleanup", "deleted"), ("extra", True)):
+            with self.subTest(gate=key, value=value), self.assertRaises(TOOL.Refused):
+                TOOL.bound_original_result({**result, "maintenanceGate": {**gate, key: value}}, expected,
+                                           "a" * 40, "b" * 64, "c" * 64)
+        missing = dict(result); del missing["maintenanceGate"]
+        with self.assertRaises(TOOL.Refused):
+            TOOL.bound_original_result(missing, expected, "a" * 40, "b" * 64, "c" * 64)
+        reused = {**gate, "creation": "existing-not-modified", "writtenBytes": 0, "sealed": False,
+                  "filePersisted": False, "parentPersisted": False, "writer": "not-attempted"}
+        TOOL.bound_original_result({**result, "maintenanceGate": reused}, expected, "a" * 40, "b" * 64, "c" * 64)
+        for key, value in (("writtenBytes", 30), ("sealed", True), ("filePersisted", True), ("writer", "closed")):
+            with self.subTest(reuse=key), self.assertRaises(TOOL.Refused):
+                TOOL.maintenance_gate_result({**reused, key: value}, entered=True)
+        unentered = original_result(TOOL.FIXTURE_CASES["occupied-app"], stage=None)["maintenanceGate"]
+        TOOL.maintenance_gate_result(unentered, entered=False)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.maintenance_gate_result({**unentered, "verified": True}, entered=False)
 
     def test_fixture_result_exact_eight_cases_never_promotes_actual_uncertainty(self):
         self.assertEqual(tuple(TOOL.FIXTURE_CASES), ("occupied-app", "occupied-release", "runtime-publication-collision", "staging-file-collision",
@@ -1482,10 +1475,10 @@ class MacInstalledData(unittest.TestCase):
 
 def installation_record_fixture():
     # Closed DATA only, not a root-owned installation or original receipt.
-    names = ["app/" + TOOL.VAULT_HELPER, "app/Contents/Info.plist",
-             "app/" + TOOL.APP_BINARY, "runtime/manifest.json", "runtime/python/bin/python3"]
+    names = ["app/" + TOOL.VAULT_HELPER, "app/Contents/Info.plist", "app/" + TOOL.PAYLOAD_INFO,
+             "app/" + TOOL.ENTRY_BINARY, "app/" + TOOL.APP_BINARY, "runtime/manifest.json", "runtime/python/bin/python3"]
     rows = [{"path": name, "size": 1, "sha256": ("c" if name == "runtime/manifest.json" else "b") * 64,
-             "executable": name in ("app/" + TOOL.VAULT_HELPER, "app/" + TOOL.APP_BINARY, "runtime/python/bin/python3")}
+             "executable": name in ("app/" + TOOL.ENTRY_BINARY, "app/" + TOOL.VAULT_HELPER, "app/" + TOOL.APP_BINARY, "runtime/python/bin/python3")}
             for name in sorted(names)]
     inventory = TOOL.canonical({"schemaVersion": 1, "release": TOOL.RELEASE,
                                 "runtimeManifestSha256": "c" * 64, "files": rows})
@@ -1505,7 +1498,7 @@ class MacInstallationMetadataData(unittest.TestCase):
     def test_optional_android_service_is_exact_nonexecutable_plist_and_bound_helper_pair(self):
         _, _, _, helper = normal_cargo_fixture()
         expected = TOOL.digest(helper)
-        plist = TOOL.plistlib.dumps({"Label": TOOL.ANDROID_SERVICE_LABEL, "BundleProgram": TOOL.ANDROID_HELPER,
+        plist = TOOL.plistlib.dumps({"Label": TOOL.ANDROID_SERVICE_LABEL, "BundleProgram": TOOL.ANDROID_HELPER_BUNDLE_PROGRAM,
                                     "MachServices": {TOOL.ANDROID_SERVICE_LABEL: True}})
         helper_path = Path("/inert/android-helper")
         args = SimpleNamespace(android_helper=helper_path, expected_android_helper=expected)
@@ -1611,6 +1604,28 @@ class MacInstallationMetadataData(unittest.TestCase):
                     with self.subTest(cause=cause), self.assertRaises(TOOL.Refused):
                         TOOL.installation_metadata_leaf(90, TOOL.INSTALLATION_RECORD_NAME, 10)
                 close.assert_called_once_with(91)
+        # The gate reuses the exact protected leaf reader and cannot accept a
+        # convenient empty, replaced, writable or wrong-owner local file.
+        gate = TOOL.MAINTENANCE_GATE_BYTES
+        for problem in ("none", "content", "mode", "owner", "replacement", "missing"):
+            before = log_info(len(gate), st_mode=stat.S_IFREG | (0o644 if problem == "mode" else 0o444),
+                              st_uid=501 if problem == "owner" else 0, st_gid=0, st_flags=0)
+            after = log_info(len(gate), st_mode=before.st_mode, st_uid=before.st_uid, st_gid=0,
+                             st_flags=0, st_ino=before.st_ino + 1) if problem == "replacement" else before
+            with (mock.patch.object(TOOL.os, "stat", side_effect=FileNotFoundError() if problem == "missing" else [before, before]),
+                  mock.patch.object(TOOL.os, "open", return_value=91),
+                  mock.patch.object(TOOL.os, "fstat", side_effect=[before, after]),
+                  mock.patch.object(TOOL.os, "read", side_effect=[b"x" * len(gate) if problem == "content" else gate, b""]),
+                  mock.patch.object(TOOL, "no_xattrs"), mock.patch.object(TOOL, "close_once") as close):
+                if problem == "none":
+                    readback = TOOL.maintenance_gate_readback(90)
+                    self.assertEqual(readback["bytes"], 30)
+                    self.assertFalse(readback["exclusionObserved"] or readback["workerFinalityEstablished"])
+                else:
+                    with self.subTest(gate_problem=problem), self.assertRaises((TOOL.Refused, FileNotFoundError)):
+                        TOOL.maintenance_gate_readback(90)
+                if problem == "missing": close.assert_not_called()
+                else: close.assert_called_once_with(91)
 
     def test_metadata_parent_cleanup_consumes_all_originals_and_gates_result(self):
         names = {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}
@@ -1656,6 +1671,59 @@ class MacInstallationMetadataData(unittest.TestCase):
         self.assertEqual(selected["packageVersion"], TOOL.PACKAGE_VERSION)
         self.assertEqual(selected["release"], TOOL.RELEASE)
         self.assertEqual(TOOL.HISTORICAL_SUPPLIER_RELEASE, "macos26-arm64-project-draft-01")
+        self.assertEqual(TOOL.RELEASE, "macos26-arm64-entry-m2a-01")
+        entry_info = TOOL.plistlib.loads(TOOL.source_entry_info())
+        self.assertEqual(entry_info, dict(info, CFBundleIdentifier=TOOL.ENTRY_BUNDLE_ID, CFBundleExecutable="mrk-macos-entry"))
+        self.assertEqual(TOOL.ANDROID_HELPER_BUNDLE_PROGRAM, "Contents/Helpers/mrk-android-register")
+        self.assertEqual(TOOL.ANDROID_HELPER, TOOL.PAYLOAD_RELATIVE + "/" + TOOL.ANDROID_HELPER_BUNDLE_PROGRAM)
+        for key, value in (("ENTRY_BUNDLE_ID", TOOL.ENTRY_BUNDLE_ID), ("ENTRY_BINARY", TOOL.ENTRY_BINARY),
+                           ("PAYLOAD_NAME", TOOL.PAYLOAD_NAME), ("PAYLOAD_RELATIVE", TOOL.PAYLOAD_RELATIVE),
+                           ("PAYLOAD_EXECUTABLE", str(TOOL.INSTALL_ROOT / TOOL.APP_NAME / TOOL.APP_BINARY)),
+                           ("ENTRY_INVENTORY_PATH", "app/" + TOOL.ENTRY_BINARY),
+                           ("PAYLOAD_INVENTORY_PATH", "app/" + TOOL.APP_BINARY),
+                           ("PAYLOAD_INFO_INVENTORY_PATH", "app/" + TOOL.PAYLOAD_INFO),
+                           ("VAULT_HELPER_INVENTORY_PATH", "app/" + TOOL.VAULT_HELPER),
+                           ("ANDROID_HELPER_INVENTORY_PATH", "app/" + TOOL.ANDROID_HELPER),
+                           ("ANDROID_SERVICE_INVENTORY_PATH", "app/" + TOOL.ANDROID_SERVICE_PLIST),
+                           ("MAINTENANCE_GATE_NAME", TOOL.MAINTENANCE_GATE_NAME)):
+            self.assertIn(f'pub const {key}: &str = "{value}";', paths)
+        fixed = (source / "desktop/native/macos-installed-entry/fixed_paths.h").read_text()
+        for key, value in (("MRK_ENTRY_EXECUTABLE", str(TOOL.INSTALL_ROOT / TOOL.APP_NAME / TOOL.ENTRY_BINARY)),
+                           ("MRK_PAYLOAD_EXECUTABLE", str(TOOL.INSTALL_ROOT / TOOL.APP_NAME / TOOL.APP_BINARY)),
+                           ("MRK_MAINTENANCE_GATE_NAME", TOOL.MAINTENANCE_GATE_NAME)):
+            self.assertIn(f'#define {key} "{value}"', fixed)
+        self.assertEqual(TOOL.MAINTENANCE_GATE_BYTES, b"MRK-MACOS-MAINTENANCE-GATE-v1\n")
+        self.assertIn('pub const MAINTENANCE_GATE_BYTES: &[u8] = b"MRK-MACOS-MAINTENANCE-GATE-v1\\n";', paths)
+        self.assertIn('#define MRK_MAINTENANCE_GATE_BYTES "MRK-MACOS-MAINTENANCE-GATE-v1\\n"', fixed)
+        entry = (source / "desktop/native/macos-installed-entry/entry.c").read_text()
+        main = entry.split("int main(", 1)[1]
+        phases = [main.index(item) for item in ("mrk_entry_root", "mrk_entry_open_gate", "LOCK_SH | LOCK_NB",
+                  "!environment(", "F_SETFD, 0", "mrk_entry_close_ancestors", "execve(")]
+        self.assertEqual(phases, sorted(phases))
+        self.assertEqual(main.count("execve("), 1)
+        self.assertNotIn("getenv(", entry)
+        self.assertNotIn("LOCK_UN", entry)
+        self.assertIn("memchr(value, 0, available)", entry)
+        retained = (source / "desktop/native/macos-installed-entry/gate.c").read_text().split("int mrk_installed_entry_admit", 1)[1]
+        self.assertIn("F_SETFD, FD_CLOEXEC", retained)
+        self.assertNotIn("flock(", retained)
+        self.assertNotIn("close(descriptor", retained)
+        native = (source / "desktop/native/macos-installed-native/build.rs").read_text()
+        self.assertEqual(native.count('format!("{:?}", installed_paths::PAYLOAD_APP)'), 2)
+        shell = (source / "desktop/src-tauri/src/shell.rs").read_text().split("pub fn run()", 1)[1].split("fn builder", 1)[0]
+        self.assertLess(shell.index("installed_entry::admit_once"), shell.index("run_builder(builder())"))
+        for exclusion in ('not(test)', 'not(feature = "development-runtime")', 'not(feature = "macos-installed-observation")',
+                          'not(feature = "macos-installed-installer")', 'not(feature = "macos-installed-installer-fixture")',
+                          'not(feature = "macos-android-registration-helper")', 'not(feature = "ubuntu-runtime-publisher")',
+                          'not(feature = "windows-runtime-publisher")'):
+            self.assertIn(exclusion, shell)
+        ui = (source / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        basic = ui.split("func testLaunchCancelAndQuit()", 1)[1].split("private struct FixtureSpec", 1)[0]
+        self.assertEqual(basic.count("app.launch()"), 1)
+        self.assertIn('try nativeSheet(window, title: "Choose a mobile project folder")', basic)
+        self.assertEqual(basic.count("try gate.probe(busy: true)"), 2)
+        self.assertEqual(basic.count("try gate.probe(busy: false)"), 2)
+        self.assertIn("directPayloadPreMain=unqualified;allWorkerFinality=unavailable;maintenance=unavailable", basic)
         staging = (source / "desktop/tools/stage_macos_installed.py").read_text()
         supplier = ast.parse(staging)
         reused = next(node for node in supplier.body if isinstance(node, ast.FunctionDef) and node.name == "reused_runtime")
@@ -1922,7 +1990,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             historical.assert_called_once()
             current.assert_called_once()
             for current_profile, flags in ((False, []), (True, ["--current-runtime"])):
-                TOOL.main(["input", "--app", "/app", "--runtime", "/runtime", "--expected-manifest", "d" * 64,
+                TOOL.main(["input", "--app", "/app", "--expected-entry", "a" * 64, "--expected-app-binary", "b" * 64, "--runtime", "/runtime", "--expected-manifest", "d" * 64,
                            "--expected-vault-helper", "f" * 64, "--output", "/input", *flags])
                 self.assertIs(inputs.call_args.args[0].current_runtime, current_profile)
                 self.assertEqual(inputs.call_args.args[0].expected_vault_helper, "f" * 64)
@@ -2070,9 +2138,16 @@ class MacCurrentRuntimeData(unittest.TestCase):
         ])
         self.assertEqual(names[81:], ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'])
         sources = ast.literal_eval(TOOL.re.search(r"          source_names = (\(\n.*?\n          \))\n", data, TOOL.re.S).group(1))
-        self.assertEqual(len(sources), 64)
+        self.assertEqual(len(sources), 69)
         self.assertEqual(len(sources), len(set(sources)))
         self.assertEqual(digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
+        self.assertEqual(sources[64:], (
+            "desktop/macos-installed-inputs/build-release.json",
+            "desktop/src-tauri/src/macos_build_release.rs",
+            "desktop/src-tauri/src/macos_install_fixed_paths.rs",
+            "desktop/src-tauri/src/macos_install_paths.rs",
+            "desktop/src-tauri/tauri.conf.json",
+        ))
         for name in names[57:]:
             module, cls, method = name.split(".")
             path = "tests/desktop/" + module + ".py"
@@ -2217,7 +2292,11 @@ class MacAndroidSupportData(unittest.TestCase):
                 mock.patch.object(TOOL, "write_tree") as output:
             source_sha, files = TOOL.android_support_files(fixture)
             self.assertEqual(files, fixture.files)
-            self.assertEqual(TOOL.android_support_input(files), source_sha)
+            # Producer resources are payload-relative; readback sees the assembled app.
+            app_files = {TOOL.PAYLOAD_RELATIVE + "/" + name: value for name, value in files.items()}
+            self.assertEqual(TOOL.android_support_input(app_files), source_sha)
+            with self.assertRaisesRegex(TOOL.Refused, "^android-support-roster$"):
+                TOOL.android_support_input(files)
             result = TOOL.android_support_command(fixture)
             self.assertEqual(result["androidSupportManifestSha256"], source_sha)
             self.assertEqual(result["fileCount"], 10)
@@ -2257,8 +2336,9 @@ class MacAndroidSupportData(unittest.TestCase):
             fixture.values[fixture.manifest_path] = TOOL.canonical(fixture.manifest)
             _, binary, _, body = normal_cargo_fixture()
             helper = Path("/synthetic-mrk-support/helper")
-            fixture.values.update({binary: body, helper: body})
+            fixture.values.update({binary: body, helper: body, Path("/synthetic-mrk-support/entry"): entry_macho_fixture()})
             args = SimpleNamespace(binary=binary, vault_helper=helper, expected_vault_helper=TOOL.digest(body),
+                entry_binary=Path("/synthetic-mrk-support/entry"), expected_entry=TOOL.digest(entry_macho_fixture()),
                 output=Path("/synthetic-mrk-support/app"), bundletool_archive=fixture.bundletool_archive,
                 aapt2_archive=fixture.aapt2_archive)
             original_read = TOOL.read
@@ -2269,13 +2349,19 @@ class MacAndroidSupportData(unittest.TestCase):
             output.assert_not_called()
 
     def test_both_explicit_archive_arguments_are_required_and_never_discovered(self):
-        for command, rest in (("android-support", []), ("app", ["--binary", "/a", "--vault-helper", "/h",
+        for command, rest in (("android-support", []), ("app", ["--binary", "/a",
+                "--entry-binary", "/inert/entry", "--expected-entry", "b" * 64, "--vault-helper", "/h",
                 "--expected-vault-helper", "a" * 64, "--output", "/out"])):
             for absent in ("--bundletool-archive", "--aapt2-archive"):
                 flags = ["--aapt2-archive", "/aapt2"] if absent == "--bundletool-archive" else ["--bundletool-archive", "/bundletool"]
-                with mock.patch.object(TOOL, "read") as reader, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:
+                stderr = io.StringIO()
+                action_name = "app_command" if command == "app" else "android_support_command"
+                with mock.patch.object(TOOL, action_name) as action, mock.patch.object(TOOL, "read") as reader, \
+                        contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
                     TOOL.main([command, *rest, *flags])
                 self.assertEqual(stopped.exception.code, 2)
+                self.assertTrue(stderr.getvalue().endswith("error: the following arguments are required: " + absent + "\n"))
+                action.assert_not_called()
                 reader.assert_not_called()
 
     def test_workflows_download_fixed_originals_without_configuration_or_credentials(self):
@@ -2322,6 +2408,8 @@ class MacNormalPreviewData(unittest.TestCase):
             helper = work / "signed-helper-data"
             helper.write_bytes(body)
             helper.chmod(0o555)
+            entry = work / "entry-data"
+            entry.write_bytes(entry_macho_fixture())
             messages = cargo_lines(item, {"reason": "build-finished", "success": True})
             cargo = work / "cargo.jsonl"
             cargo.write_bytes(messages)
@@ -2329,18 +2417,21 @@ class MacNormalPreviewData(unittest.TestCase):
             for path, data in support.values.items():
                 path.write_bytes(data)
             originals = {path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
-                         for path in (binary, helper, cargo, *support.values)}
+                         for path in (binary, helper, entry, cargo, *support.values)}
             output = work / "Mobile Release Kit.app"
             with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
                 result = TOOL.app_command(SimpleNamespace(binary=binary, output=output,
+                    entry_binary=entry, expected_entry=TOOL.digest(entry_macho_fixture()),
                     normal_cargo_messages=cargo, normal_cargo_target_dir=target,
                     bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
                     vault_helper=helper, expected_vault_helper=TOOL.digest(body)))
-            expected = {TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
-                        "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/Info.plist").read_bytes(), 0o644),
-                        "Contents/PkgInfo": (b"APPL????", 0o644),
-                        "Contents/Resources/icon.png": ((TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes(), 0o644)}
-            expected.update(support.files)
+            icon = (TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes()
+            expected = {TOOL.ENTRY_BINARY: (entry_macho_fixture(), 0o755), TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
+                        "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist").read_bytes(), 0o644),
+                        TOOL.PAYLOAD_INFO: ((TOOL.DESKTOP / "macos-installed-inputs/Info.plist").read_bytes(), 0o644),
+                        "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
+                        "Contents/Resources/icon.png": (icon, 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
+            expected.update({TOOL.PAYLOAD_RELATIVE + "/" + name: value for name, value in support.files.items()})
             self.assertEqual(TOOL.tree(output), expected)
             self.assertEqual(result["vaultHelperSha256"], TOOL.digest(body))
             self.assertEqual(result["normalCargoArtifact"], TOOL.normal_cargo_artifact(messages, binary, target, body))
@@ -2373,13 +2464,17 @@ class MacNormalPreviewData(unittest.TestCase):
         info = TOOL.plistlib.dumps({"CFBundleExecutable": binary.name, "LSMinimumSystemVersion": "26.0",
                                    "CFBundleIdentifier": TOOL.BUNDLE_ID, "CFBundleShortVersionString": TOOL.PACKAGE_VERSION,
                                    "CFBundleVersion": TOOL.PACKAGE_VERSION})
+        entry_info = TOOL.plistlib.dumps(dict(TOOL.plistlib.loads(info), CFBundleIdentifier=TOOL.ENTRY_BUNDLE_ID, CFBundleExecutable="mrk-macos-entry"))
         values = {binary: body, Path("/synthetic-mrk-preview/helper"): body,
+                  Path("/synthetic-mrk-preview/entry"): entry_macho_fixture(),
+                  TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist": entry_info,
                   Path("/synthetic-mrk-preview/cargo.jsonl"): messages,
                   TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
                   TOOL.DESKTOP / "src-tauri/icons/icon.png": b"synthetic-icon"}
         support = android_support_fixture()
         values.update(support.values)
         args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
+            entry_binary=Path("/synthetic-mrk-preview/entry"), expected_entry=TOOL.digest(entry_macho_fixture()),
             normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=target,
             bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
             vault_helper=Path("/synthetic-mrk-preview/helper"), expected_vault_helper=TOOL.digest(body))
@@ -2474,6 +2569,28 @@ class MacNormalPreviewData(unittest.TestCase):
         for command in refused:
             with self.subTest(command=command[:12]), self.assertRaises(TOOL.Refused):
                 TOOL.macho(image(command), system_only=True)
+        TOOL.entry_macho(entry_macho_fixture())
+        # Entry is stricter than the helper: no native Cocoa initialization,
+        # added library, routines, loader environment, or executable stack.
+        segments = []
+        for name, kind in ((b"__mod_init_func", 0), (b"__mod_term_func", 0), (b"__init_offsets", 0),
+                           (b"ordinary", 0x9), (b"ordinary", 0xA), (b"ordinary", 0x15)):
+            segment = bytearray(152)
+            struct.pack_into("<II", segment, 0, 0x19, 152)
+            struct.pack_into("<I", segment, 64, 1)
+            segment[72:88] = name.ljust(16, b"\0")
+            struct.pack_into("<I", segment, 72 + 64, kind)
+            segments.append(bytes(segment))
+        bad_entry = [entry_macho_fixture(library=b"/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation"),
+                     entry_macho_fixture(good), entry_macho_fixture(struct.pack("<II", 0x1A, 8)),
+                     *(entry_macho_fixture(command) for command in refused),
+                     *(entry_macho_fixture(segment) for segment in segments)]
+        for flags in (0, 0x200084 | 0x20000):
+            changed = bytearray(entry_macho_fixture()); struct.pack_into("<I", changed, 24, flags)
+            bad_entry.append(bytes(changed))
+        for body in bad_entry:
+            with self.subTest(entry=TOOL.digest(body)), self.assertRaises(TOOL.Refused):
+                TOOL.entry_macho(body)
 
     def test_changed_signed_helper_fails_before_any_app_write(self):
         target, binary, item, body = normal_cargo_fixture()
@@ -2486,42 +2603,52 @@ class MacNormalPreviewData(unittest.TestCase):
 
     def test_installer_input_requires_the_same_helper_and_rejects_other_executables(self):
         _, _, _, body = normal_cargo_fixture()
-        info = TOOL.plistlib.dumps({"CFBundleExecutable": "mobile-release-kit-desktop", "LSMinimumSystemVersion": "26.0",
-                                   "CFBundleIdentifier": TOOL.BUNDLE_ID, "CFBundleShortVersionString": TOOL.PACKAGE_VERSION,
-                                   "CFBundleVersion": TOOL.PACKAGE_VERSION})
+        entry = entry_macho_fixture()
+        info = TOOL.source_app_info()
+        entry_info = TOOL.source_entry_info()
         args = SimpleNamespace(runtime=Path("/inert/runtime"), expected_manifest="c" * 64,
             current_runtime=True, app=Path("/inert/app"), expected_vault_helper=TOOL.digest(body),
-            output=Path("/inert/output"))
-        app = {TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
-               "Contents/Info.plist": (info, 0o644), "Contents/_CodeSignature/CodeResources": (b"signature-data", 0o644)}
+            expected_entry=TOOL.digest(entry), expected_app_binary=TOOL.digest(body), output=Path("/inert/output"))
+        app = {TOOL.ENTRY_BINARY: (entry, 0o755), TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
+               "Contents/Info.plist": (entry_info, 0o644), TOOL.PAYLOAD_INFO: (info, 0o644),
+               "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
+               "Contents/Resources/icon.png": (b"icon-data", 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (b"icon-data", 0o644),
+               "Contents/_CodeSignature/CodeResources": (b"signature-data", 0o644),
+               TOOL.PAYLOAD_CONTENTS + "_CodeSignature/CodeResources": (b"payload-signature-data", 0o644)}
         support = android_support_fixture()
-        app.update(support.files)
+        app.update({TOOL.PAYLOAD_RELATIVE + "/" + name: value for name, value in support.files.items()})
+        support_name = next(iter(support.files))
+        support_path = TOOL.PAYLOAD_RELATIVE + "/" + support_name
         runtime = {"python/bin/python3": (b"interpreter-data", 0o755)}
+        source = {support.manifest_path: support.values[support.manifest_path],
+                  TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
+                  TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist": entry_info}
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime),
               mock.patch.object(TOOL, "tree", return_value=app) as tree,
               mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path),
-              mock.patch.object(TOOL, "read", side_effect=lambda path, *_: support.values[path] if path == support.manifest_path else info),
+              mock.patch.object(TOOL, "read", side_effect=lambda path, *_: source[path]),
               mock.patch.object(TOOL, "write_tree") as output):
             TOOL.input_command(args)
             files = output.call_args.args[1]
             self.assertEqual(files["app/" + TOOL.VAULT_HELPER], (body, 0o555))
             for path, (data, _) in support.files.items():
-                self.assertEqual(files["app/" + path], (data, 0o444))
+                self.assertEqual(files["app/" + TOOL.PAYLOAD_RELATIVE + "/" + path], (data, 0o444))
             for mutation, reason in (
                 ({name: value for name, value in app.items() if name != TOOL.VAULT_HELPER}, "signed-app-roster"),
                 ({**app, TOOL.VAULT_HELPER: (body + b"changed", 0o555)}, "nested-helper-signature-bytes-changed"),
-                ({**app, "Contents/Helpers/foreign": (body, 0o555)}, "input-executable-scope"),
-                ({name: value for name, value in app.items() if name != next(iter(support.files))}, "android-support-roster"),
-                ({**app, TOOL.ANDROID_SUPPORT_PREFIX + "extra": (b"extra", 0o644)}, "android-support-roster"),
-                ({**app, next(iter(support.files)): (b"changed", 0o644)}, "android-support-resource"),
-                ({**app, next(iter(support.files)): (support.files[next(iter(support.files))][0], 0o755)}, "android-support-resource"),
+                ({**app, TOOL.APP_BINARY: (body + b"changed", 0o755)}, "final-entry-payload-signature-bytes-changed"),
+                ({**app, TOOL.ENTRY_BINARY: (entry + b"changed", 0o755)}, "final-entry-payload-signature-bytes-changed"),
+                ({**app, "Contents/Helpers/foreign": (body, 0o555)}, "signed-app-roster"),
+                ({name: value for name, value in app.items() if name != support_path}, "signed-app-roster"),
+                ({**app, TOOL.PAYLOAD_RELATIVE + "/" + TOOL.ANDROID_SUPPORT_PREFIX + "extra": (b"extra", 0o644)}, "signed-app-roster"),
+                ({**app, support_path: (b"changed", 0o644)}, "android-support-resource"),
+                ({**app, support_path: (support.files[support_name][0], 0o755)}, "android-support-resource"),
+                ({name: value for name, value in app.items() if name != TOOL.PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"}, "signed-app-roster"),
             ):
                 output.reset_mock(); tree.return_value = mutation
                 with self.subTest(reason=reason), self.assertRaisesRegex(TOOL.Refused, reason):
                     TOOL.input_command(args)
                 output.assert_not_called()
-            # Direct input staging must validate the source plist projection too;
-            # callers cannot bypass it by skipping the earlier app-copy command.
             tree.return_value = app
             output.reset_mock()
             with mock.patch.object(TOOL, "PACKAGE_VERSION", "99.0.0"), self.assertRaisesRegex(TOOL.Refused, "app-info-binding"):
@@ -2549,8 +2676,8 @@ class MacNormalPreviewData(unittest.TestCase):
             self.assertLess(build, helper_sign); self.assertLess(helper_sign, digest)
             self.assertLess(digest, stage); self.assertLess(stage, app_sign)
             self.assertIn('RUSTUP_TOOLCHAIN: "1.98.1"', workflow)
-            self.assertEqual(workflow.count("--options runtime"), 2)
-            self.assertEqual(workflow.count("--entitlements desktop/packaging/macos-empty-entitlements.plist"), 2)
+            self.assertEqual(workflow.count("--options runtime"), 3)
+            self.assertEqual(workflow.count("--entitlements desktop/packaging/macos-empty-entitlements.plist"), 3)
             self.assertEqual(workflow.count('--expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256"'), 2)
             # Prohibition text may mention --deep. Inspect only the real shell
             #signing commands, folding their continued arguments without execution.
@@ -2573,7 +2700,9 @@ class MacNormalPreviewData(unittest.TestCase):
             "runtimeManifestSha256": "c" * 64}
         observed = {"sourceCommit": "a" * 40, "installerDeadlineMetAfterFinalCloses": True,
             "installerReportedOriginalsSettled": True, "applicationLaunched": False, "guiSaveQualified": False,
-            "runtimeManifestSha256": "c" * 64, "inventorySha256": "d" * 64, "nonrootReadbackFileCount": 1,
+            "runtimeManifestSha256": "c" * 64, "inventorySha256": "d" * 64, "nonrootReadbackFileCount": 2,
+            "maintenanceGate": {"state": "protected-permanent-gate-data-correspondence", "bytes": 30,
+                                "exclusionObserved": False, "workerFinalityEstablished": False},
              "originalInstallerResult": original_result((None, "confirmed", "confirmed", "installed", True, 0)),
             "installationMetadata": {"state": "recorded-current-data-correspondence", "instance": "d" * 32,
                 "inventoryBytes": 6, "descriptorBytes": 4, "originalFinality": "separate-Installer-status"}}
@@ -2583,13 +2712,15 @@ class MacNormalPreviewData(unittest.TestCase):
             work / "package-final/MobileReleaseKit.pkg": package,
             TOOL.DESKTOP / "packaging/macos-preview.md": b"# Synthetic preview guide\n"}
         documents = {"source-binding.json": binding, "source-inventory.json": {"source": "a" * 40, "tree": "b" * 40},
-            "app-result.json": {"normalCargoArtifact": normal, "appBinarySha256BeforeSigning": TOOL.digest(body)},
+            "app-result.json": {"normalCargoArtifact": normal, "appBinarySha256BeforeSigning": TOOL.digest(body),
+                                "entryBinarySha256BeforeSigning": "f" * 64, "entryBundleIdentifier": TOOL.ENTRY_BUNDLE_ID,
+                                "payloadBundleIdentifier": TOOL.BUNDLE_ID},
             "installation-observation.json": observed,
             "package-audit.json": {"packageSha256": TOOL.digest(package), "packageSize": len(package),
                 "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
                 "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}}
         values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
-        expected = {"app/" + TOOL.APP_BINARY: {"sha256": "e" * 64}}
+        expected = {"app/" + TOOL.APP_BINARY: {"sha256": "e" * 64}, "app/" + TOOL.ENTRY_BINARY: {"sha256": "f" * 64}}
         return work, values, documents, expected
 
     def test_preview_roster_has_no_raw_evidence_and_keeps_open_and_quit_unexecuted(self):
@@ -2609,6 +2740,10 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertEqual(summary["automaticWindowOpen"], "unexecuted")
         self.assertEqual(summary["normalQuit"], "unexecuted")
         self.assertEqual(summary["manualUIAcceptance"], "pending")
+        self.assertFalse(summary["fullM2Qualified"] or summary["maintenanceQualified"])
+        self.assertEqual(summary["ordinaryEntryRoute"], "unexecuted")
+        self.assertEqual(summary["directPayloadPreMain"], "unqualified")
+        self.assertEqual(summary["signedEntryBinarySha256"], "f" * 64)
         self.assertFalse(summary["fullUIQualified"])
         self.assertFalse(summary["distributionQualified"])
         self.assertFalse(summary["productReady"])
@@ -2624,7 +2759,10 @@ class MacNormalPreviewData(unittest.TestCase):
             ("installation-observation.json", "installationMetadata", {"state": "incomplete"}),
             ("installation-observation.json", "installerReportedOriginalsSettled", False),
             ("installation-observation.json", "runtimeManifestSha256", "f" * 64),
-            ("installation-observation.json", "nonrootReadbackFileCount", 2),
+            ("installation-observation.json", "nonrootReadbackFileCount", 1),
+            ("installation-observation.json", "maintenanceGate", None),
+            ("app-result.json", "entryBundleIdentifier", TOOL.BUNDLE_ID),
+            ("app-result.json", "entryBinarySha256BeforeSigning", None),
             ("package-audit.json", "packageSha256", "f" * 64),
         ]
         for name, field, value in failures:

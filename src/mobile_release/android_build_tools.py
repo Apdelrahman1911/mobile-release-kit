@@ -955,6 +955,35 @@ class AndroidValidationTools:
         return (f"{self.binding.root}/{roles['java']}", *_jvm_arguments(work, bundletool=True), "-jar",
                 f"{self.binding.root}/{roles['bundletool']}", "dump", "manifest", f"--bundle={expected}", "--module=base")
 
+    def _signing_inputs(self):
+        self._owner()
+        from .android_build_signing import SignedAndroidOperation
+        signing = self.operation.signing
+        _need(type(signing) is SignedAndroidOperation and signing.operation is self.operation
+              and self.inputs.check_signer and self._signature_claimed and self._signature_ready)
+        work = self._work(self.files.work_path)
+        keystore, _, alias, _ = signing.command_inputs()
+        _need(self.profile is not None and self._mac is not None)
+        return work, keystore, alias
+
+    def keystore_input_command(self) -> tuple[str, ...]:
+        work, keystore, alias = self._signing_inputs()
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/keytool",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)), "-J-Duser.timezone=UTC",
+                "-list", "-v", "-keystore", str(keystore), "-alias", alias,
+                "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD")
+
+    def aab_sign_command(self, candidate) -> tuple[str, ...]:
+        from ._desktop_android_build_files import AndroidSigningCandidate
+        work, keystore, alias = self._signing_inputs()
+        _need(type(candidate) is AndroidSigningCandidate and self.files.signing_candidate is candidate
+              and candidate.files is self.files and candidate._native and candidate.integrity_checked)
+        return (f"{self.binding.root}/{self.profile.java_home}/bin/jarsigner",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-keystore", str(keystore), "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD", str(candidate.native_path()), alias)
+
     def jarsigner_command(self, snapshot_path: Path) -> tuple[str, ...]:
         self._owner()
         _need(self.inputs.check_signer is True and self._signature_claimed and self._signature_ready,

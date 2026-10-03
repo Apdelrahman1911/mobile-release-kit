@@ -88,9 +88,9 @@ impl AndroidServiceIdentitySlots {
     fn fixed_payload(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         use crate::macos_install_record as data;
         self.attempt(|book|book.arm_acl_once(end,stop))?;
-        let contents=self.attempt(|book|book.protected_app_once(end,stop))?;
-        let app=self.original.records[contents].parent.ok_or(AdmissionFailure::Identity)?;
-        let install=self.original.records[app].parent.ok_or(AdmissionFailure::Identity)?;
+        let roles=self.attempt(|book|book.protected_app_once(end,stop))?;
+        let (contents,app,install)=(roles.contents,roles.payload,roles.install);
+        self.attempt(|book|Self::mode(book,roles.entry,0o555,end,stop))?;
         self.attempt(|book|Self::mode(book,app,0o555,end,stop))?;
         self.attempt(|book|Self::mode(book,contents,0o555,end,stop))?;
         self.attempt(|book|Self::mode(book,install,0o755,end,stop))?;
@@ -120,7 +120,7 @@ impl AndroidServiceIdentitySlots {
         // Rebind these exact three retained files to the same source-bound
         // protected record before Security/framework service entry.
         for (path,names,mode) in [
-            ("app/Contents/MacOS/mobile-release-kit-desktop",&["MacOS","mobile-release-kit-desktop"][..],0o555),
+            (data::APP_BINARY,&["MacOS","mobile-release-kit-desktop"][..],0o555),
             (data::ANDROID_HELPER,&["Helpers","mrk-android-register"][..],0o555),
             (data::ANDROID_SERVICE_PLIST,&["Library","LaunchDaemons","dev.mobile-release-kit.desktop.android-register.plist"][..],0o444),
         ] {
@@ -205,6 +205,7 @@ impl AndroidServiceIdentitySlots {
 }
 
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
+struct ProtectedApp { install: usize, entry: usize, payload: usize, contents: usize }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionFailure { Stopped, Deadline, Bounds, Native, Ownership, Inventory, Identity, AlreadyUsed, Unknown }
 type Result<T> = std::result::Result<T, AdmissionFailure>;
@@ -529,19 +530,26 @@ impl Book {
     }
     // Private factoring of the existing installed-app proof, not a Resources
     // capability. FixedSupport uses the SAME retained Contents ancestor.
-    fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
+    fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
         if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         self.records.try_reserve_exact(8256).map_err(native_error)?; self.started = true;
         self.point(end, stop)?; native::real_user().map_err(native_error)?; self.point(end, stop)?;
         // A user-writable drag-copy or checkout app cannot select this runtime.
-        let executable = Path::new(APP).join("Contents/MacOS/mobile-release-kit-desktop");
+        let executable = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
         if std::env::current_exe().map_err(native_error)? != executable { return Err(AdmissionFailure::Ownership); }
-        let app_parent = self.chain(executable.parent().ok_or(AdmissionFailure::Bounds)?, end, stop)?;
+        // Explicit retained role indices, never "payload.parent == install".
+        let install = self.chain(Path::new(crate::macos_install_paths::INSTALL_ROOT), end, stop)?;
+        let entry = self.open(Some(install), crate::macos_install_paths::APP_NAME, true, end, stop)?;
+        let outer_contents = self.open(Some(entry), "Contents", true, end, stop)?;
+        let helpers = self.open(Some(outer_contents), "Helpers", true, end, stop)?;
+        let payload = self.open(Some(helpers), crate::macos_install_paths::PAYLOAD_NAME, true, end, stop)?;
+        let contents = self.open(Some(payload), "Contents", true, end, stop)?;
+        let app_parent = self.open(Some(contents), "MacOS", true, end, stop)?;
         let binary = self.open(Some(app_parent), "mobile-release-kit-desktop", false, end, stop)?;
         let id = self.records[binary].identity.ok_or(AdmissionFailure::Identity)?;
         if id.gid != 0 || id.mode & 0o7777 != 0o555 { return Err(AdmissionFailure::Ownership); }
         native::no_xattrs(self.fd(binary)?.as_fd()).map_err(native_error)?;
-        self.records[app_parent].parent.ok_or(AdmissionFailure::Identity)
+        Ok(ProtectedApp { install, entry, payload, contents })
     }
     fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.protected_app_once(end, stop)?;

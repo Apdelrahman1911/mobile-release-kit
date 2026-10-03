@@ -1,6 +1,6 @@
 //! Closed Android build comparison, transport and redacted projection DATA.
 //!
-//! Version 2 binds the saved upload-signature choice; schemaVersion:1 remains
+//! Version 3 binds optional private local-upload-key signing; schemaVersion:1 remains
 //! the closed envelope/result shape within this explicitly versioned wire.
 //! No owner, launch, file access, tool admission, permit or qualification here.
 //! A parsed core terminal and a settled frame decoder NEVER establish native
@@ -11,8 +11,9 @@ use serde_json::{json, Map, Value};
 use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error::BridgeError,
     protocol::valid_id};
 
-pub(crate) const PROTOCOL: &str = "mrk-android-build/2";
-pub(crate) const CONSENT: &str = "saved-android-build-inspect-v2";
+pub(crate) const PROTOCOL: &str = "mrk-android-build/3";
+pub(crate) const CONSENT: &str = "saved-android-build-inspect-v3";
+pub(crate) const SIGNED_CONSENT: &str = "saved-android-local-sign-v1";
 pub(crate) const EVENT: &str = "android-build-state-changed";
 pub(crate) const SCOPE: &str = "local-post-build-artifact-observation";
 pub(crate) const TOOLCHAIN_PROFILE: &str = "android-local-linux-gnu-x86_64-v1";
@@ -246,18 +247,56 @@ impl ArtifactValidation {
 pub(crate) enum Platform { Android }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Operation { AndroidBuildInspect }
+pub(crate) enum Operation { AndroidBuildInspect, AndroidBuildSign }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SigningMode { LocalUploadKey }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SigningAssignment {
+    pub(crate) kind: String, pub(crate) record_id: String,
+    pub(crate) record_revision: u32, pub(crate) context_revision: u32,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SigningSelection { pub(crate) mode: SigningMode, pub(crate) assignments: Vec<SigningAssignment> }
+impl SigningSelection {
+    fn valid(&self) -> bool {
+        (1..=2).contains(&self.assignments.len()) && self.assignments.iter().enumerate().all(|(index, row)|
+            row.kind == ["android-keystore", "android-firebase"][index] && token(&row.record_id)
+            && (1..u32::MAX).contains(&row.record_revision) && (1..u32::MAX).contains(&row.context_revision)
+            && row.context_revision == self.assignments[0].context_revision)
+            && (self.assignments.len() < 2 || self.assignments[0].record_id != self.assignments[1].record_id)
+    }
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        self.assignments.iter().try_fold(self.assignments.capacity().checked_mul(std::mem::size_of::<SigningAssignment>())?,
+            |bytes, row| bytes.checked_add(row.kind.capacity())?.checked_add(row.record_id.capacity()))
+    }
+}
+// Missing is allowed for closed optional extensions; explicit null is not.
+fn present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
+where D: de::Deserializer<'de>, T: Deserialize<'de> { T::deserialize(decoder).map(Some) }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Context {
     pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
     pub(crate) saved_config: Content, pub(crate) saved_version: SavedVersion, pub(crate) artifact_validation: ArtifactValidation,
     pub(crate) platform: Platform, pub(crate) operation: Operation,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) signing: Option<SigningSelection>,
 }
 impl Context {
+    pub(crate) fn signed(&self) -> bool { self.operation == Operation::AndroidBuildSign }
+    pub(crate) fn frame_limit(&self) -> usize { if self.signed() { 10 } else { MAX_FRAMES } }
+    fn stage_valid(&self, stage: Stage) -> bool {
+        self.signed() || !matches!(stage, Stage::ValidatingSigning | Stage::Signing | Stage::RestoringInputs)
+    }
+    fn maximum_commands(&self) -> u32 { if self.signed() { 6 } else { self.artifact_validation.maximum_commands() } }
     fn valid(&self) -> bool {
         valid_id(&self.project_id) && self.draft_revision < u32::MAX && self.baseline_generation < u32::MAX
             && self.saved_config.valid(CONFIG_LIMIT) && self.saved_version.valid() && self.artifact_validation.valid()
+            && self.signed() == self.signing.is_some() && self.signing.as_ref().is_none_or(|s|
+                s.valid() && self.artifact_validation.mode == ValidationMode::UploadSignature)
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -265,12 +304,15 @@ impl Context {
 pub(crate) struct Prepare {
     pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
     pub(crate) saved_config: Content, pub(crate) saved_version: SavedVersion, pub(crate) artifact_validation: ArtifactValidation,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) signing: Option<SigningSelection>,
 }
 impl Prepare {
     pub(crate) fn context(&self) -> Context {
         Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
             baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
-            saved_version: self.saved_version.clone(), artifact_validation: self.artifact_validation.clone(), platform: Platform::Android, operation: Operation::AndroidBuildInspect }
+            saved_version: self.saved_version.clone(), artifact_validation: self.artifact_validation.clone(), platform: Platform::Android,
+            operation: if self.signing.is_some() { Operation::AndroidBuildSign } else { Operation::AndroidBuildInspect }, signing: self.signing.clone() }
     }
 }
 #[derive(Debug, Deserialize)]
@@ -282,9 +324,9 @@ pub(crate) struct Start {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
-    if !structure(value) || !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion", "artifactValidation"]) {
-        return Err(invalid());
-    }
+    let mut fields = vec!["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion", "artifactValidation"];
+    if value.get("signing").is_some() { fields.push("signing"); }
+    if !structure(value) || !keys(value, &fields) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); }
     bounded(value, IPC_LIMIT - 1).map_err(|_| invalid())?;
@@ -293,8 +335,13 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !structure(value) || !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || input.consent_version != CONSENT { return Err(invalid()); }
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(), CONSENT | SIGNED_CONSENT) { return Err(invalid()); }
     Ok(input)
+}
+impl Start {
+    pub(crate) fn consent_matches(&self, context: &Context) -> bool {
+        self.consent_version == if context.signed() { SIGNED_CONSENT } else { CONSENT }
+    }
 }
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !structure(value) || !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
@@ -407,15 +454,27 @@ impl ToolchainBinding {
 /// enter this encoder. No savedVersion.source is used as a native path.
 pub(crate) fn request(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding) -> Result<Vec<u8>, BridgeError> {
-    if !token(operation) || !token(generation) || !context.valid() || !toolchain.matches_profile(profile) { return Err(invalid()); }
+    request_selected(operation, generation, context, profile, project, cwd, toolchain, None)
+}
+pub(crate) fn request_signed(operation: &str, generation: &str, context: &Context, profile: Profile,
+    project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding, signing: &Content) -> Result<Vec<u8>, BridgeError> {
+    request_selected(operation, generation, context, profile, project, cwd, toolchain, Some(signing))
+}
+fn request_selected(operation: &str, generation: &str, context: &Context, profile: Profile,
+    project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding, signing: Option<&Content>) -> Result<Vec<u8>, BridgeError> {
+    if !token(operation) || !token(generation) || !context.valid() || !toolchain.matches_profile(profile)
+        || context.signed() != signing.is_some() || signing.is_some_and(|s| profile != Profile::MacArm64 || !s.valid(CONFIG_LIMIT)) {
+        return Err(invalid());
+    }
     // Existing native identity projection is DATA; no offline permit is reused.
     let observed = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
     let identity = RootIdentity { device: observed.device, inode: observed.inode, mode: observed.mode,
         uid: observed.uid, gid: observed.gid };
     if !identity.valid() { return Err(invalid()); }
-    let value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
+    let mut value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
         "native":{"profile":profile,"projectRoot":native_path(&project.path).ok_or_else(invalid)?,
             "rootIdentity":identity,"cwd":native_path(cwd).ok_or_else(invalid)?,"toolchain":toolchain}});
+    if let Some(signing) = signing { value["native"]["signingContext"] = json!(signing); }
     if !structure(&value) { return Err(invalid()); }
     let mut bytes = bounded(&value, REQUEST_LIMIT - 1).map_err(|_| invalid())?;
     bytes.push(b'\n');
@@ -434,10 +493,11 @@ pub(crate) enum Reason {
     SavedVersionSensitive, SavedVersionUnsafe, SavedVersionTooLarge, PlatformDisabled, ModuleRequired,
     ToolchainUnavailable, ToolchainMismatch, ProjectAdmissionRefused, CommandFailed, CommandIncomplete,
     ArtifactMissing, ArtifactAmbiguous, ArtifactUnsafe, ArtifactChanged, InputLimit, ResultLimit, WorkRetained, CleanupUnknown,
+    SigningInputMissing, SigningInputInvalid, SigningValidationFailed, SigningCommandFailed, BuildInputsUnrestored,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Stage { Accepted, InputsBound, Building, Capturing, Inspecting, DisposingWork }
+pub(crate) enum Stage { Accepted, InputsBound, ValidatingSigning, Building, Capturing, Signing, RestoringInputs, Inspecting, DisposingWork }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CommandOutcome { NotDispatched, Exited, Unknown }
@@ -560,12 +620,12 @@ impl Activity {
         if !self.command.valid() || self.selection.as_ref().is_some_and(|s| !s.valid()) || !inspection(&self.findings, &self.summary) {
             return false;
         }
-        if matches!(self.stage, Stage::InputsBound | Stage::Building | Stage::Capturing | Stage::Inspecting) && self.selection.is_none() {
+        if matches!(self.stage, Stage::InputsBound | Stage::ValidatingSigning | Stage::Building | Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting) && self.selection.is_none() {
             return false;
         }
-        if matches!(self.stage, Stage::Capturing | Stage::Inspecting) && !self.command.zero() { return false; }
+        if matches!(self.stage, Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting) && !self.command.zero() { return false; }
         if self.command.outcome != CommandOutcome::NotDispatched && (self.selection.is_none()
-            || !matches!(self.stage, Stage::Building | Stage::Capturing | Stage::Inspecting | Stage::DisposingWork)) { return false; }
+            || !matches!(self.stage, Stage::ValidatingSigning | Stage::Building | Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting | Stage::DisposingWork)) { return false; }
         if self.findings.iter().any(|r| !matches!(r.check, CheckId::CoreLifecycle | CheckId::OtherCoreFinding))
             && (!self.command.zero() || !matches!(self.stage, Stage::Inspecting | Stage::DisposingWork)) { return false; }
         true
@@ -609,7 +669,7 @@ pub(crate) struct Assurances {
     structure: InspectionAssurance, native_manifest: InspectionAssurance, application_version: String,
     signature: String, signer: String, toolkit_signing: String, store_operation: String, source_binding: String, release_readiness: String,
 }
-fn assurances(findings: &[Finding], validation: &ArtifactValidation) -> Assurances {
+fn assurances(findings: &[Finding], validation: &ArtifactValidation, signed: bool) -> Assurances {
     let structure_rows: Vec<_> = findings.iter().filter(|r| r.check == CheckId::AabStructure).collect();
     let structure = if structure_rows.len() == 1 && structure_rows[0].status == CoreStatus::Pass { InspectionAssurance::Passed }
         else if structure_rows.iter().any(|r| r.status.failure()) { InspectionAssurance::Failed } else { InspectionAssurance::NotChecked };
@@ -630,7 +690,7 @@ fn assurances(findings: &[Finding], validation: &ArtifactValidation) -> Assuranc
         else if signers.iter().any(|s| s.failure()) { "failed" } else { "not-checked" };
     Assurances { structure, native_manifest: native,
         application_version: if native == InspectionAssurance::Passed { "native-checked" } else { "not-established" }.into(),
-        signature: signature.into(), signer: signer.into(), toolkit_signing: "not-requested".into(), store_operation: "not-requested".into(),
+        signature: signature.into(), signer: signer.into(), toolkit_signing: if signed { "local-upload-key-verified" } else { "not-requested" }.into(), store_operation: "not-requested".into(),
         source_binding: "not-established".into(), release_readiness: "not-assessed".into() }
 }
 fn inspection_mode(findings: &[Finding], validation: &ArtifactValidation) -> bool {
@@ -664,7 +724,7 @@ fn inspection_commands(findings: &[Finding], validation: &ArtifactValidation) ->
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Limitation {
     SavedInputsNotAtomic, ProjectCodeEffectsPossible, NotNetworkIsolated, PostRunBytesMayBeIncrementalReusedOrStale,
-    SourceBindingNotEstablished, ArtifactSignerNotInspected, UploadSignatureCheckNotStoreEnrollment, ToolkitSigningNotRequested, StoreOperationNotRequested,
+    SourceBindingNotEstablished, ArtifactSignerNotInspected, UploadSignatureCheckNotStoreEnrollment, ToolkitSigningNotRequested, LocalSigningNotStoreEnrollment, StoreOperationNotRequested,
     ReleaseReadinessNotAssessed, LocalOutputObservationNotCurrentFileAuthority, CoreTerminalRequiresOriginalNativeFinality,
 }
 const LIMITATIONS: [Limitation; 11] = [Limitation::SavedInputsNotAtomic, Limitation::ProjectCodeEffectsPossible,
@@ -672,9 +732,10 @@ const LIMITATIONS: [Limitation; 11] = [Limitation::SavedInputsNotAtomic, Limitat
     Limitation::ArtifactSignerNotInspected, Limitation::ToolkitSigningNotRequested, Limitation::StoreOperationNotRequested,
     Limitation::ReleaseReadinessNotAssessed, Limitation::LocalOutputObservationNotCurrentFileAuthority,
     Limitation::CoreTerminalRequiresOriginalNativeFinality];
-fn limitations(validation: &ArtifactValidation) -> [Limitation; 11] {
+fn limitations(validation: &ArtifactValidation, signed: bool) -> [Limitation; 11] {
     let mut result = LIMITATIONS;
     if validation.mode == ValidationMode::UploadSignature { result[5] = Limitation::UploadSignatureCheckNotStoreEnrollment; }
+    if signed { result[6] = Limitation::LocalSigningNotStoreEnrollment; }
     result
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -682,6 +743,8 @@ fn limitations(validation: &ArtifactValidation) -> [Limitation; 11] {
 pub(crate) struct ResultData {
     schema_version: u32, scope: String, used_config: Content, used_version: SavedVersion, artifact_validation: ArtifactValidation, selection: Selection,
     toolchain_profile: String,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    signing: Option<SigningMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     toolchain_selection: Option<MacToolchainSelection>,
     command: CommandData, findings: Vec<Finding>, summary: Summary,
@@ -700,23 +763,29 @@ impl ResultData {
         }
     }
     fn valid(&self) -> bool {
-        self.toolchain_valid() && self.scope == SCOPE && self.used_config.valid(CONFIG_LIMIT) && self.used_version.valid()
+        self.toolchain_valid() && (self.signing.is_none() || self.toolchain_profile == MAC_TOOLCHAIN_PROFILE
+            && self.artifact_validation.mode == ValidationMode::UploadSignature
+            && self.assurances.structure == InspectionAssurance::Passed && self.assurances.native_manifest == InspectionAssurance::Passed
+            && self.assurances.signature == "passed" && self.assurances.signer == "matches-saved-upload-certificate"
+            && self.findings.iter().all(|row| matches!(row.status, CoreStatus::Pass | CoreStatus::NotApplicable))) && self.scope == SCOPE && self.used_config.valid(CONFIG_LIMIT) && self.used_version.valid()
             && self.artifact_validation.valid() && inspection_commands(&self.findings, &self.artifact_validation).is_some()
             && self.selection.valid() && self.command.zero()
             && inspection(&self.findings, &self.summary) && self.findings.iter().any(|r| r.check == CheckId::AabStructure)
             && self.findings.iter().all(|r| r.check != CheckId::CoreLifecycle) && self.artifacts.len() == MAX_ARTIFACTS
-            && self.artifacts.iter().all(Artifact::valid) && self.assurances == assurances(&self.findings, &self.artifact_validation)
-            && self.limitations.as_slice() == limitations(&self.artifact_validation)
+            && self.artifacts.iter().all(Artifact::valid) && self.assurances == assurances(&self.findings, &self.artifact_validation, self.signing.is_some())
+            && self.limitations.as_slice() == limitations(&self.artifact_validation, self.signing.is_some())
     }
     fn matches(&self, context: &Context, activity: &Activity) -> bool {
         self.used_config == context.saved_config && self.used_version == context.saved_version && self.artifact_validation == context.artifact_validation
+            && self.signing.is_some() == context.signed()
             && activity.selection.as_ref() == Some(&self.selection) && self.command == activity.command
             && self.findings == activity.findings && self.summary == activity.summary
     }
 }
 fn result_shape(value: &Value) -> bool {
-    let common = ["schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile", "command",
+    let mut common = vec!["schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile", "command",
         "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation"];
+    if value.get("signing").is_some() { common.push("signing"); }
     let shape = if value.get("toolchainProfile").and_then(Value::as_str) == Some(MAC_TOOLCHAIN_PROFILE) {
         let mut selected = common.to_vec(); selected.push("toolchainSelection");
         keys(value, &selected) && value.get("toolchainSelection").is_some_and(|s| keys(s,
@@ -756,13 +825,21 @@ pub(crate) struct Lifetime {
     pub(crate) input_closed: bool, pub(crate) handlers_restored: bool, pub(crate) invocation_closed: bool,
     pub(crate) artifacts_closed: bool, pub(crate) tools_closed: bool, pub(crate) namespace_closed: bool,
     pub(crate) stop_observed: CoreStop,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) build_inputs_closed: Option<bool>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) material_retired: Option<bool>,
 }
 impl Lifetime {
-    fn valid(&self) -> bool { self.commands <= 4 && self.profile_calls == 0 }
+    fn valid(&self) -> bool {
+        self.commands <= (if self.build_inputs_closed.is_some() { 6 } else { 4 }) && self.profile_calls == 0
+            && self.build_inputs_closed.is_some() == self.material_retired.is_some()
+    }
     pub(crate) fn settled(&self) -> bool {
         self.valid() && self.complete && !self.fatal && self.contained && self.command_dispatched.is_some()
             && self.input_closed && self.handlers_restored && self.invocation_closed && self.artifacts_closed
             && self.tools_closed && self.namespace_closed
+            && self.build_inputs_closed.is_none_or(|closed| closed) && self.material_retired.is_none_or(|closed| closed)
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -791,12 +868,14 @@ fn retained_inputs(project_id: &String, content: &Content, version: &SavedVersio
 }
 impl Prepare {
     pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
-        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)
+        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)?
+            .checked_add(self.signing.as_ref().map_or(Some(0), SigningSelection::retained_heap_bytes)?)
     }
 }
 impl Context {
     pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
-        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)
+        retained_inputs(&self.project_id, &self.saved_config, &self.saved_version, &self.artifact_validation)?
+            .checked_add(self.signing.as_ref().map_or(Some(0), SigningSelection::retained_heap_bytes)?)
     }
 }
 impl MacToolchainSelection {
@@ -858,7 +937,7 @@ fn failure_facts(outcome: Outcome, reason: Reason, activity: &Activity, disposit
         return false;
     }
     if artifact_reason(reason) && (outcome != Outcome::Failed || activity.selection.is_none() || !activity.command.zero()
-        || !matches!(activity.stage, Stage::Capturing | Stage::Inspecting | Stage::DisposingWork)) { return false; }
+        || !matches!(activity.stage, Stage::Capturing | Stage::Signing | Stage::RestoringInputs | Stage::Inspecting | Stage::DisposingWork)) { return false; }
     if reason == Reason::WorkRetained && (outcome != Outcome::Failed || disposition.work != WorkDisposition::RetainedWork) { return false; }
     disposition.work != WorkDisposition::RetainedWork || matches!(outcome, Outcome::Failed | Outcome::Unknown)
 }
@@ -872,11 +951,16 @@ impl Terminal {
         }
         let life = &self.lifetime;
         let validation = &context.artifact_validation;
-        if life.commands > validation.maximum_commands() || !inspection_mode(&self.activity.findings, validation)
-            || !self.activity.command.zero() && life.commands > 1
-            || life.commands > 1 && !matches!(self.activity.stage, Stage::Inspecting | Stage::DisposingWork) { return false; }
+        let signed = context.signed();
+        let offset = if signed { 2 } else { 0 };
+        if !context.stage_valid(self.activity.stage) || life.build_inputs_closed.is_some() != signed
+            || life.material_retired.is_some() != signed || life.commands > context.maximum_commands()
+            || !inspection_mode(&self.activity.findings, validation)
+            || !self.activity.command.zero() && life.commands > (if signed { 2 } else { 1 })
+            || life.commands > (if signed { 3 } else { 1 }) && !matches!(self.activity.stage, Stage::Inspecting | Stage::DisposingWork)
+            || signed && life.commands == 3 && !matches!(self.activity.stage, Stage::Signing | Stage::RestoringInputs | Stage::Inspecting | Stage::DisposingWork) { return false; }
         if self.activity.findings.iter().any(|r| !matches!(r.check, CheckId::CoreLifecycle | CheckId::OtherCoreFinding))
-            && inspection_commands(&self.activity.findings, validation) != Some(life.commands) { return false; }
+            && inspection_commands(&self.activity.findings, validation).map(|count| count + offset) != Some(life.commands) { return false; }
         match self.activity.command.outcome {
             CommandOutcome::NotDispatched if life.command_dispatched != Some(false) || life.commands > 1 => return false,
             CommandOutcome::Exited if life.command_dispatched != Some(true) || life.commands < 1 => return false,
@@ -886,7 +970,7 @@ impl Terminal {
             return self.settled() && life.stop_observed == CoreStop::None && self.reason == Reason::None
                 && self.activity.stage == Stage::DisposingWork && self.disposition.complete()
                 && self.result.as_ref().is_some_and(|r| r.valid() && r.matches(context, &self.activity)
-                    && inspection_commands(&r.findings, validation) == Some(life.commands));
+                    && inspection_commands(&r.findings, validation).map(|count| count + offset) == Some(life.commands));
         }
         if self.result.is_some() || self.reason == Reason::None || self.disposition.artifacts == ArtifactDisposition::RetainedLocalResult {
             return false;
@@ -907,10 +991,12 @@ impl Terminal {
     }
 }
 fn terminal_shape(value: &Value) -> bool {
+    let mut life_fields = vec!["complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved",
+        "inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed"];
+    if value.get("context").and_then(|v| v.get("signing")).is_some() { life_fields.extend(["buildInputsClosed", "materialRetired"]); }
     keys(value, &["schemaVersion", "context", "outcome", "reason", "activity", "disposition", "result", "lifetime"])
         && value.get("activity").is_some_and(activity_shape)
-        && value.get("lifetime").is_some_and(|v| keys(v, &["complete", "fatal", "contained", "commandDispatched", "commands",
-            "profileCalls", "stopObserved", "inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed"]))
+        && value.get("lifetime").is_some_and(|v| keys(v, &life_fields))
         && value.get("result").is_some_and(|v| v.is_null() || result_shape(v))
 }
 pub(crate) fn terminal(value: &Value, context: &Context) -> Result<Terminal, BridgeError> {
@@ -963,7 +1049,7 @@ impl FrameDecoder {
         result
     }
     fn push_original(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
-        if self.failed || self.terminal || self.frames >= MAX_FRAMES || self.bytes > RESPONSE_LIMIT { return Err(protocol_error()); }
+        if self.failed || self.terminal || self.frames >= self.context.frame_limit() || self.bytes > RESPONSE_LIMIT { return Err(protocol_error()); }
         let value = strict_data(bytes, RESPONSE_LIMIT, true)?;
         let envelope = Envelope::deserialize(&value).map_err(|_| protocol_error())?;
         if envelope.protocol != PROTOCOL || envelope.operation_id != self.operation || envelope.owner_generation != self.generation
@@ -974,9 +1060,9 @@ impl FrameDecoder {
                 if accepted.schema_version != 1 || accepted.context != self.context || !accepted.context.valid() { return Err(protocol_error()); }
                 Frame::Accepted
             },
-            "progress" if (1..=5).contains(&self.frames) => {
+            "progress" if (1..=if self.context.signed() { 8 } else { 5 }).contains(&self.frames) => {
                 let progress = Progress::deserialize(&envelope.payload).map_err(|_| protocol_error())?;
-                if progress.schema_version != 1 || progress.stage <= self.stage { return Err(protocol_error()); }
+                if progress.schema_version != 1 || progress.stage <= self.stage || !self.context.stage_valid(progress.stage) { return Err(protocol_error()); }
                 Frame::Progress(progress.stage)
             },
             "terminal" if self.frames >= 1 => {
@@ -999,7 +1085,7 @@ impl FrameDecoder {
     pub(crate) fn finish(&mut self) -> Result<(), BridgeError> {
         if !self.settled() { self.failed = true; Err(protocol_error()) } else { Ok(()) }
     }
-    pub(crate) fn settled(&self) -> bool { !self.failed && self.terminal && (2..=MAX_FRAMES).contains(&self.frames) }
+    pub(crate) fn settled(&self) -> bool { !self.failed && self.terminal && (2..=self.context.frame_limit()).contains(&self.frames) }
     pub(crate) fn frames(&self) -> usize { self.frames }
     pub(crate) fn bytes(&self) -> usize { self.bytes }
 }
@@ -1020,7 +1106,9 @@ pub(crate) struct Projection {
 }
 impl Projection {
     fn valid(&self) -> bool {
-        if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid() { return false; }
+        if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
+            || self.stage.is_some_and(|stage| !self.context.stage_valid(stage))
+            || self.activity.as_ref().is_some_and(|a| !self.context.stage_valid(a.stage)) { return false; }
         if self.activity.as_ref().is_some_and(|activity| !inspection_mode(&activity.findings, &self.context.artifact_validation)
             || activity.findings.iter().any(|r| !matches!(r.check, CheckId::CoreLifecycle | CheckId::OtherCoreFinding))
                 && inspection_commands(&activity.findings, &self.context.artifact_validation).is_none()) { return false; }
@@ -1109,6 +1197,13 @@ pub(crate) mod tests {
     pub(crate) fn upload_context() -> Context {
         let mut value = prepare_value();
         value["artifactValidation"] = json!({"mode":"upload-signature","uploadCertificateSha256":"Aa".repeat(32)});
+        prepare(&value).unwrap().context()
+    }
+    pub(crate) fn signed_context() -> Context {
+        let mut value = prepare_value();
+        value["artifactValidation"] = json!({"mode":"upload-signature","uploadCertificateSha256":"Aa".repeat(32)});
+        value["signing"] = json!({"mode":"local-upload-key","assignments":[
+            {"kind":"android-keystore","recordId":"e".repeat(32),"recordRevision":1,"contextRevision":2}]});
         prepare(&value).unwrap().context()
     }
     fn selection() -> Value {
@@ -1357,8 +1452,8 @@ pub(crate) mod tests {
 
     #[test]
     fn fixed_domain_and_limits_do_not_admit_offline_or_extra_artifacts() {
-        assert_eq!(PROTOCOL, "mrk-android-build/2");
-        assert_eq!(CONSENT, "saved-android-build-inspect-v2");
+        assert_eq!(PROTOCOL, "mrk-android-build/3");
+        assert_eq!(CONSENT, "saved-android-build-inspect-v3");
         assert_eq!(EVENT, "android-build-state-changed");
         assert_eq!((IPC_LIMIT, REQUEST_LIMIT, RESPONSE_LIMIT, STATUS_LIMIT), (8192, 32768, 65536, 65536));
         assert_eq!((MAX_FRAMES, MAX_FINDINGS, MAX_ARTIFACTS), (8, 128, 1));
@@ -1836,6 +1931,102 @@ pub(crate) mod tests {
         let mut bad = unavailable.clone(); bad["qualified"] = json!(true); assert!(status(&bad).is_err());
         let mut bad = unavailable; bad["availability"] = json!("qualified"); assert!(status(&bad).is_err());
         let mut bad = good; bad["operation"]["result"]["usedVersion"]["build"] = json!(43); assert!(status(&bad).is_err());
+    }
+
+    fn signed_complete() -> Value {
+        let mut value = upload_complete(); value["context"] = json!(signed_context());
+        value["result"]["schemaVersion"] = json!(2);
+        value["result"]["toolchainProfile"] = json!(MAC_TOOLCHAIN_PROFILE);
+        value["result"]["toolchainSelection"] = json!({"instance":"c".repeat(32),"ownerUid":501,"catalogGeneration":1,
+            "recordSha256":"d".repeat(64),"inventorySha256":"e".repeat(64),"osProviderSha256":"f".repeat(64)});
+        value["result"]["signing"] = json!("local-upload-key");
+        value["result"]["assurances"]["toolkitSigning"] = json!("local-upload-key-verified");
+        value["result"]["limitations"][6] = json!("local-signing-not-store-enrollment");
+        value["lifetime"]["commands"] = json!(6);
+        value["lifetime"]["buildInputsClosed"] = json!(true);
+        value["lifetime"]["materialRetired"] = json!(true);
+        value
+    }
+
+    #[test]
+    fn explicit_signing_requires_closed_assignments_and_the_matching_consent_domain() {
+        let context = signed_context(); assert!(context.signed());
+        assert_eq!(context.frame_limit(), 10); assert_eq!(context.maximum_commands(), 6);
+        for (consent, signed) in [(CONSENT, false), (SIGNED_CONSENT, true)] {
+            let start = start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent})).unwrap();
+            assert_eq!(start.consent_matches(&context), signed);
+            assert_eq!(start.consent_matches(&self::context()), !signed);
+        }
+        for old in ["saved-android-build-inspect-v1", "saved-android-build-inspect-v2"] {
+            assert!(start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":old})).is_err());
+        }
+        let mut unsigned = prepare_value(); unsigned["signing"] = Value::Null;
+        assert!(prepare(&unsigned).is_err());
+        for bad in [json!({"mode":"local-upload-key","assignments":[]}),
+            json!({"mode":"local-upload-key","assignments":[{"kind":"apple-p12","recordId":"e".repeat(32),"recordRevision":1,"contextRevision":2}]}),
+            json!({"mode":"local-upload-key","assignments":[{"kind":"android-keystore","recordId":"e".repeat(32),"recordRevision":0,"contextRevision":2}]}),
+            json!({"mode":"local-upload-key","assignments":context.signing.as_ref().unwrap().assignments,"password":"PRIVATE"})] {
+            let mut value = json!(context); value["signing"] = bad;
+            assert!(Context::deserialize(&value).map_or(true, |v| !v.valid()));
+        }
+        let mut wrong = context.clone(); wrong.operation = Operation::AndroidBuildInspect; assert!(!wrong.valid());
+        wrong = context; wrong.artifact_validation = self::context().artifact_validation; assert!(!wrong.valid());
+    }
+
+    #[test]
+    fn signed_completion_requires_all_six_commands_material_closes_and_final_passes() {
+        let context = signed_context(); let good = signed_complete();
+        assert!(terminal(&good, &context).unwrap().settled());
+        for field in ["buildInputsClosed", "materialRetired"] {
+            let mut bad = good.clone(); bad["lifetime"][field] = json!(false);
+            assert!(terminal(&bad, &context).is_err());
+            bad["lifetime"].as_object_mut().unwrap().remove(field); assert!(terminal(&bad, &context).is_err());
+        }
+        for count in [0, 4, 5, 7] { let mut bad = good.clone(); bad["lifetime"]["commands"] = json!(count); assert!(terminal(&bad, &context).is_err()); }
+        let mut fail = good.clone(); fail["result"]["findings"][3]["status"] = json!("FAIL");
+        fail["result"]["summary"]["counts"]["PASS"] = json!(3); fail["result"]["summary"]["counts"]["FAIL"] = json!(1);
+        fail["result"]["assurances"]["signer"] = json!("failed"); assert!(result(&fail["result"]).is_err());
+        let mut basic = good.clone(); basic["result"]["signing"] = Value::Null; assert!(result(&basic["result"]).is_err());
+        let mut early = good; early["result"] = Value::Null; early["outcome"] = json!("failed"); early["reason"] = json!("signing-validation-failed");
+        early["activity"]["stage"] = json!("validating-signing"); early["activity"]["command"] = json!({"outcome":"unknown","exitCode":null});
+        early["lifetime"]["commands"] = json!(1); early["disposition"]["artifacts"] = json!("not-created");
+        set_rows(&mut early, &[], "not-checked", "not-checked");
+        assert!(terminal(&early, &context).is_ok()); early["outcome"] = json!("refused"); assert!(terminal(&early, &context).is_err());
+    }
+
+    #[test]
+    fn original_signed_decoder_allows_eight_progress_stages_and_only_the_selected_mac_result() {
+        let context = signed_context(); let complete = signed_complete();
+        let selected = MacToolchainSelection::deserialize(&complete["result"]["toolchainSelection"]).unwrap();
+        let mut decoder = FrameDecoder::new_macos(&"a".repeat(32), &"b".repeat(32), &context, &selected).unwrap();
+        decoder.push(&frame(0, "accepted", json!({"schemaVersion":1,"context":context}))).unwrap();
+        for (index, stage) in [Stage::InputsBound, Stage::ValidatingSigning, Stage::Building, Stage::Capturing,
+            Stage::Signing, Stage::RestoringInputs, Stage::Inspecting, Stage::DisposingWork].into_iter().enumerate() {
+            decoder.push(&frame(index as u32 + 1, "progress", json!({"schemaVersion":1,"stage":stage}))).unwrap();
+        }
+        decoder.push(&frame(9, "terminal", complete)).unwrap(); decoder.finish().unwrap();
+        assert!(decoder.push(&frame(10, "progress", json!({"schemaVersion":1,"stage":"disposing-work"}))).is_err());
+        let mut ordinary = self::decoder(); ordinary.push(&accepted()).unwrap();
+        assert!(ordinary.push(&frame(1, "progress", json!({"schemaVersion":1,"stage":"validating-signing"}))).is_err());
+    }
+    #[test]
+    fn native_signing_request_binds_bounded_canonical_bytes_separately_from_raw_saved_config() {
+        let context = signed_context(); let complete = signed_complete();
+        let selected = MacToolchainSelection::deserialize(&complete["result"]["toolchainSelection"]).unwrap();
+        let binding = ToolchainBinding::new_macos_data(&selected.root_data(),
+            RootIdentity { device: "1".into(), inode: "2".into(), mode: 0o040555, uid: 0, gid: 0 }, &selected).unwrap();
+        let project = crate::asset_source::RegisteredRoot { path: "/inert/project".into(),
+            identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+        let canonical = Content { bytes: 17, sha256: "a".repeat(64) }; assert_ne!(context.saved_config, canonical);
+        let encoded = request_signed(&"a".repeat(32), &"b".repeat(32), &context, Profile::MacArm64,
+            &project, &project.path, &binding, &canonical).unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(value["native"]["signingContext"], json!(canonical));
+        assert_eq!(value["context"]["savedConfig"], json!(context.saved_config));
+        for bad in [Content { bytes: 0, sha256: "a".repeat(64) }, Content { bytes: CONFIG_LIMIT + 1, sha256: "a".repeat(64) }] {
+            assert!(request_signed(&"a".repeat(32), &"b".repeat(32), &context, Profile::MacArm64, &project, &project.path, &binding, &bad).is_err());
+        }
+        assert!(request(&"a".repeat(32), &"b".repeat(32), &context, Profile::MacArm64, &project, &project.path, &binding).is_err());
     }
 }
 

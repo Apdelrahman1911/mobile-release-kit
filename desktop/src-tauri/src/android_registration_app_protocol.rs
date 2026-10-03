@@ -223,12 +223,19 @@ fn comparison(value: &Value, name: &str) -> Result<String, BridgeError> {
 pub(crate) fn status_request(raw: &[u8]) -> Result<(), BridgeError> {
     request(raw, &["schemaVersion"]).map(|_| ())
 }
+// Tool inspection, protected copying and service setup share saved-input
+// comparison data, but never signing assignments or a signed-build intent.
+fn unsigned_registration_context(value: &Value) -> Result<Prepare, BridgeError> {
+    let input = build::prepare(value).map_err(|_| invalid())?;
+    if input.signing.is_some() { return Err(invalid()); }
+    Ok(input)
+}
 impl Inspect {
     pub(crate) fn parse(raw: &[u8]) -> Result<Self, BridgeError> {
         let value = request(raw, &["schemaVersion", "registrationGeneration", "sourceGeneration", "context"])?;
         Ok(Self { registration_generation: counter(&value, "registrationGeneration", false)?,
             source_generation: counter(&value, "sourceGeneration", true)?,
-            context: build::prepare(&value["context"]).map_err(|_| invalid())? })
+            context: unsigned_registration_context(&value["context"]).map_err(|_| invalid())? })
     }
 }
 impl Register {
@@ -240,7 +247,7 @@ impl Register {
         }
         Ok(Self { registration_generation: counter(&value, "registrationGeneration", true)?,
             source_generation: counter(&value, "sourceGeneration", true)?, review_id: comparison(&value, "reviewId")?,
-            context: build::prepare(&value["context"]).map_err(|_| invalid())? })
+            context: unsigned_registration_context(&value["context"]).map_err(|_| invalid())? })
     }
 }
 impl Cancel {
@@ -260,7 +267,7 @@ impl ServiceRequest {
             (value["consentVersion"].as_str() != Some(SERVICE_CONSENT)
                 || value["registrationAcknowledged"].as_bool() != Some(true)) { return Err(service_invalid()); }
         Ok(Self { setup_generation: counter(&value, "setupGeneration", false).map_err(|_| service_invalid())?,
-            context: build::prepare(&value["context"]).map_err(|_| service_invalid())?, action })
+            context: unsigned_registration_context(&value["context"]).map_err(|_| service_invalid())?, action })
     }
     pub(crate) fn check(raw: &[u8]) -> Result<Self, BridgeError> { Self::parse_action(raw, ServiceAction::Check) }
     pub(crate) fn request_registration(raw: &[u8]) -> Result<Self, BridgeError> { Self::parse_action(raw, ServiceAction::RequestRegistration) }
@@ -331,7 +338,8 @@ impl ServiceStatus {
     }
 }
 fn context_valid(value: &Prepare) -> bool {
-    serde_json::to_value(value).ok().is_some_and(|data| build::prepare(&data).is_ok_and(|copy| copy == *value))
+    serde_json::to_value(value).ok().is_some_and(|data|
+        unsigned_registration_context(&data).is_ok_and(|copy| copy == *value))
 }
 fn version(value: &str) -> bool {
     !value.is_empty() && value.len() <= 64
@@ -473,6 +481,52 @@ mod tests {
         assert!(status_request(br#"{"schemaVersion":1,"schemaVersion":1}"#).is_err());
         assert!(status_request(br#"{"schemaVersion":1.0}"#).is_err());
         assert!(status_request(br#"{}"#).is_err());
+    }
+    #[test]
+    fn source_copy_and_service_setup_do_not_admit_signed_build_contexts() {
+        fn admission<T>(result: Result<T, BridgeError>, allowed: bool, code: &str, label: &str) {
+            match result {
+                Ok(_) => assert!(allowed, "signed context admitted: {label}"),
+                Err(error) => {
+                    assert!(!allowed, "unsigned context refused: {label}");
+                    assert_eq!(error.code, code, "wrong pre-admission error: {label}");
+                }
+            }
+        }
+        let build = crate::android_build_protocol::tests::signed_context();
+        let mut signature = context_data();
+        signature["artifactValidation"] = serde_json::json!(build.artifact_validation);
+        let mut signed = signature.clone();
+        signed["signing"] = serde_json::json!(build.signing.unwrap());
+        // The ordinary build owner still supports a valid local signing request.
+        let prepare = crate::android_build_protocol::prepare(&signed).unwrap();
+        assert!(prepare.context().signed());
+        assert!(!context_valid(&prepare));
+        let mut null_signing = signature.clone();
+        null_signing["signing"] = Value::Null;
+        for (label, context, allowed) in [("structure", context_data(), true),
+            ("signature inspection", signature, true), ("local signing", signed, false),
+            ("explicit null signing", null_signing, false)] {
+            let inspect = serde_json::json!({"schemaVersion":1,"registrationGeneration":0,
+                "sourceGeneration":3,"context":context.clone()});
+            let register = serde_json::json!({"schemaVersion":1,"registrationGeneration":1,"sourceGeneration":3,
+                "reviewId":"a".repeat(32),"context":context.clone(),"consentVersion":CONSENT,"licenseAcknowledged":true});
+            let service = serde_json::json!({"schemaVersion":1,"setupGeneration":0,"context":context.clone()});
+            let service_registration = serde_json::json!({"schemaVersion":1,"setupGeneration":0,"context":context.clone(),
+                "consentVersion":SERVICE_CONSENT,"registrationAcknowledged":true});
+            admission(Inspect::parse(&serde_json::to_vec(&inspect).unwrap()), allowed,
+                "android_registration_invalid", label);
+            admission(Register::parse(&serde_json::to_vec(&register).unwrap()), allowed,
+                "android_registration_invalid", label);
+            let service_bytes = serde_json::to_vec(&service).unwrap();
+            admission(ServiceRequest::check(&service_bytes), allowed, "android_service_invalid", label);
+            admission(ServiceRequest::open_approval_settings(&service_bytes), allowed, "android_service_invalid", label);
+            admission(ServiceRequest::request_registration(&serde_json::to_vec(&service_registration).unwrap()),
+                allowed, "android_service_invalid", label);
+            if let Ok(prepare) = crate::android_build_protocol::prepare(&context) {
+                assert_eq!(context_valid(&prepare), allowed, "request/status domain drift: {label}");
+            }
+        }
     }
     #[test]
     fn register_requires_current_review_comparisons_fixed_consent_and_explicit_true() {

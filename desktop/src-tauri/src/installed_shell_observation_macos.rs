@@ -3554,7 +3554,7 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     // only this immutable compiled tuple derives the fixed fixture namespace.
     if source.len() != 40 || !source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !decimal(run) || !decimal(attempt) { return None; }
-    let expected = Path::new(crate::macos_install_paths::APP).join("Contents/MacOS/mobile-release-kit-desktop");
+    let expected = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
     let suffix = if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }

@@ -4,7 +4,8 @@
 // finality, qualification or authority to Start. No bridge/controller is used.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ANDROID_BUILD_ABIS, ANDROID_BUILD_CHECK_IDS, ANDROID_BUILD_CONSENT, ANDROID_BUILD_CONSENT_MS,
+import { copyAndroidToolRegistrationRequest, copyAndroidToolServiceRequest } from '../src/androidToolRegistration.ts';
+import { ANDROID_BUILD_ABIS, ANDROID_BUILD_CHECK_IDS, ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT, ANDROID_BUILD_CONSENT_MS,
   ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_COUNTER_MAX, ANDROID_BUILD_EVENT, ANDROID_BUILD_IPC_LIMIT,
   ANDROID_BUILD_LIMITATIONS, ANDROID_BUILD_MAX_AAB_BYTES, ANDROID_BUILD_MAX_FINDINGS, ANDROID_BUILD_SCOPE,
   ANDROID_BUILD_SIGNER_MESSAGE, ANDROID_BUILD_STAGES, ANDROID_BUILD_STATUS_LIMIT, ANDROID_BUILD_TOOLCHAIN_PROFILE,
@@ -255,7 +256,7 @@ test('native Status exposes only stage while interim, withholds observations and
   assert.equal(parseAndroidBuildStatus(status(null, 0, 'qualified-by-diagnostics')), null);
   for (const intentUsable of [true, false]) assert.ok(parseAndroidBuildStatus(status(operation({ intentUsable }))));
   for (const phase of ['starting', 'running', 'stopping']) {
-    const stages = phase === 'starting' ? [null] : [null, ...ANDROID_BUILD_STAGES];
+    const stages = phase === 'starting' ? [null] : [null, ...ANDROID_BUILD_STAGES.filter((stage) => !['validating-signing', 'signing', 'restoring-inputs'].includes(stage))];
     for (const stage of stages) assert.ok(parseAndroidBuildStatus(status(operation({ phase, stage, intentUsable: false }))));
     for (const key of ['activity', 'disposition', 'result']) {
       const bad = operation({ phase, intentUsable: false }); bad[key] = completed()[key]; assert.equal(parseAndroidBuildStatus(status(bad)), null, `${phase}.${key}`);
@@ -432,10 +433,11 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
       ['missing', 'invalid', 'changed', 'sensitive', 'unsafe', 'too-large'].map((reason) => `saved-${kind}-${reason}`)),
     'platform-disabled', 'module-required', 'toolchain-unavailable', 'toolchain-mismatch', 'project-admission-refused',
     'command-failed', 'command-incomplete', 'artifact-missing', 'artifact-ambiguous', 'artifact-unsafe', 'artifact-changed',
-    'input-limit', 'result-limit', 'work-retained', 'cleanup-unknown'];
+    'input-limit', 'result-limit', 'work-retained', 'cleanup-unknown', 'signing-input-missing', 'signing-input-invalid',
+    'signing-validation-failed', 'signing-command-failed', 'build-inputs-unrestored'];
   assert.deepEqual(Object.keys(androidBuildReasonText).sort(), reasons.sort());
   assert.deepEqual(Object.keys(androidBuildFindingText).sort(), [...ANDROID_BUILD_CHECK_IDS].sort());
-  assert.deepEqual(Object.keys(androidBuildLimitationText).sort(), [...ANDROID_BUILD_LIMITATIONS, 'upload-signature-check-not-store-enrollment'].sort());
+  assert.deepEqual(Object.keys(androidBuildLimitationText).sort(), [...ANDROID_BUILD_LIMITATIONS, 'upload-signature-check-not-store-enrollment', 'local-signing-not-store-enrollment'].sort());
   assert.match(androidBuildReasonText['command-failed'], /Possible causes/); assert.match(androidBuildReasonText['command-incomplete'], /no exit code/);
   assert.match(androidBuildReasonText['cleanup-unknown'], /further execution stays blocked/); assert.match(androidBuildReasonText.none, /not release approval/);
   assert.equal(ANDROID_BUILD_SIGNER_MESSAGE, 'Toolkit signing was not requested; artifact signer was not inspected. Project code may have signed this file.');
@@ -449,8 +451,8 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
 });
 
 
-test('v2 inspection choice is required, default-off-shaped and preserves exact saved comparison text', () => {
-  assert.equal(ANDROID_BUILD_CONSENT, 'saved-android-build-inspect-v2');
+test('v3 inspection choice is required, default-off-shaped and preserves exact saved comparison text', () => {
+  assert.equal(ANDROID_BUILD_CONSENT, 'saved-android-build-inspect-v3');
   for (const fingerprint of ['Ab'.repeat(32), Array(32).fill('Ab').join(':')]) {
     const choice = { mode: 'upload-signature', uploadCertificateSha256: fingerprint };
     assert.deepEqual(clone(parseAndroidBuildArtifactValidation(choice)), choice);
@@ -464,6 +466,7 @@ test('v2 inspection choice is required, default-off-shaped and preserves exact s
   const missing = request(); delete missing.artifactValidation;
   assert.equal(encodeAndroidBuildRequest('prepare_android_build', missing), null);
   assert.equal(encodeAndroidBuildRequest('start_android_build', { operationId: OP, ownerGeneration: OWNER, consentVersion: 'saved-android-build-inspect-v1' }), null);
+  assert.equal(encodeAndroidBuildRequest('start_android_build', { operationId: OP, ownerGeneration: OWNER, consentVersion: 'saved-android-build-inspect-v2' }), null);
 });
 
 function uploadReport(signature = 'PASS', signer = 'PASS') {
@@ -538,4 +541,60 @@ test('Mac results have a closed selected-tool extension while Linux stays exact'
   assert.equal(encodeAndroidBuildRequest('prepare_android_build', { ...request(), toolchainSelection: selected }), null);
   assert.equal(encodeAndroidBuildRequest('start_android_build', { operationId: OP, ownerGeneration: OWNER,
     consentVersion: ANDROID_BUILD_CONSENT, toolchainSelection: selected }), null);
+});
+
+const signedRequest = () => ({ ...request(), artifactValidation: { mode: 'upload-signature', uploadCertificateSha256: 'Ab'.repeat(32) },
+  signing: { mode: 'local-upload-key', assignments: [{ kind: 'android-keystore', recordId: OTHER, recordRevision: 1, contextRevision: 2 }] } });
+
+test('explicit local signing has closed current-assignment DATA and separate consent, never renderer material', () => {
+  const input = signedRequest();
+  assert.deepEqual(decode(encodeAndroidBuildRequest('prepare_android_build', input)), input);
+  assert.equal(ANDROID_BUILD_SIGNED_CONSENT, 'saved-android-local-sign-v1');
+  assert.ok(encodeAndroidBuildRequest('start_android_build', { operationId: OP, ownerGeneration: OWNER, consentVersion: ANDROID_BUILD_SIGNED_CONSENT }));
+  const two = signedRequest(); two.signing.assignments.push({ kind: 'android-firebase', recordId: OWNER, recordRevision: 3, contextRevision: 2 });
+  assert.ok(encodeAndroidBuildRequest('prepare_android_build', two));
+  for (const mutate of [x => { x.signing = null; }, x => { x.signing = { mode: 'local-upload-key', assignments: [] }; },
+    x => { x.artifactValidation = request().artifactValidation; }, x => { x.signing.assignments[0].kind = 'apple-p12'; },
+    x => { x.signing.assignments[0].recordRevision = 0; }, x => { x.signing.assignments[0].contextRevision = -1; },
+    x => { x.signing.assignments[0].path = '/private/key'; }, x => { x.signing.password = 'PRIVATE'; },
+    x => { x.signingContext = CONFIG; }]) {
+    const bad = signedRequest(); mutate(bad); assert.equal(encodeAndroidBuildRequest('prepare_android_build', bad), null);
+  }
+  for (const mutate of [x => x.signing.assignments.reverse(), x => { x.signing.assignments[1].recordId = OTHER; },
+    x => { x.signing.assignments[1].contextRevision++; }]) {
+    const bad = clone(two); mutate(bad); assert.equal(encodeAndroidBuildRequest('prepare_android_build', bad), null);
+  }
+  // Native borrower/Start owns matching the separate consent to original loan;
+  // these renderer tests establish only a closed DATA projection.
+  assert.equal(copyAndroidToolServiceRequest('check_android_tool_service', { schemaVersion: 1, setupGeneration: 0, context: input }), null);
+  assert.equal(copyAndroidToolRegistrationRequest('inspect_android_tool_sources', { schemaVersion: 1,
+    context: input, sourceGeneration: 1, registrationGeneration: 0 }), null);
+});
+
+test('signed results require Mac selection and every final verification, not signature-only completion', () => {
+  const signed = { ...uploadReport(), schemaVersion: 2, toolchainProfile: 'android-registered-macos-arm64-v1', signing: 'local-upload-key',
+    toolchainSelection: { instance: OTHER, ownerUid: 501, catalogGeneration: 1, recordSha256: 'a'.repeat(64), inventorySha256: 'b'.repeat(64), osProviderSha256: 'c'.repeat(64) } };
+  signed.assurances.toolkitSigning = 'local-upload-key-verified';
+  signed.limitations = signed.limitations.map(item => item === 'toolkit-signing-not-requested' ? 'local-signing-not-store-enrollment' : item);
+  assert.ok(parseAndroidBuildResult(signed));
+  const done = completed(signed); done.context = { ...signedRequest(), platform: 'android', operation: 'android-build-sign' };
+  assert.ok(parseAndroidBuildStatus(status(done)));
+  const inspectionOnly = clone(done); delete inspectionOnly.context.signing; inspectionOnly.context.operation = 'android-build-inspect';
+  assert.equal(parseAndroidBuildStatus(status(inspectionOnly)), null);
+  for (const mutate of [x => { x.schemaVersion = 1; x.toolchainProfile = ANDROID_BUILD_TOOLCHAIN_PROFILE; delete x.toolchainSelection; },
+    x => { x.signing = null; }, x => { x.assurances.toolkitSigning = 'not-requested'; },
+    x => { x.limitations = uploadReport().limitations; }, x => { x.findings[3].status = 'FAIL'; x.summary.counts.PASS--; x.summary.counts.FAIL++; x.assurances.signer = 'failed'; },
+    x => { x.findings[2].status = 'FAIL'; x.summary.counts.PASS--; x.summary.counts.FAIL++; x.assurances.signature = 'failed'; }]) {
+    const bad = clone(signed); mutate(bad); assert.equal(parseAndroidBuildResult(bad), null);
+  }
+});
+
+test('signing progress cannot be donated to unsigned status or rearmed as consent', () => {
+  for (const stage of ['validating-signing', 'signing', 'restoring-inputs']) {
+    const pending = operation({ context: { ...signedRequest(), platform: 'android', operation: 'android-build-sign' },
+      phase: 'running', intentUsable: false, stage });
+    assert.ok(parseAndroidBuildStatus(status(pending)));
+    assert.equal(parseAndroidBuildStatus(status({ ...pending, context: context() })), null);
+    assert.equal(parseAndroidBuildStatus(status({ ...pending, phase: 'awaiting-consent', intentUsable: true })), null);
+  }
 });

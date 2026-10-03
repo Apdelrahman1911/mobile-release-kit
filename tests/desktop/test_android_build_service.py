@@ -164,6 +164,8 @@ class _InertRun:
                                work_end=4000.0, fd=None, identity=None, acquired=True, active=True,
                                request_returned=True, close_claimed=False, closed=False, stop_reason="none",
                                first_failure=None, custody_unknown=False, buffer=bytearray(), _engine=None)
+        source.signed = source.material_pending = source.material_receiving = False
+        source.material = None
         guard._saved_command_source = source
         case.patched(guard, "check", return_value=None)
         case.patched(source, "poll", return_value=None)
@@ -175,6 +177,7 @@ class _InertRun:
                            resources_closed=False, work_finish_attempted=False, cleanup_errors=[], _pending=None,
                            _roles={"gradle": "new", "bundletool": "new"}, _command_before={}, _returned={},
                            zip_metadata=None, stage="accepted", _signature_passed=False)
+        op.signing = None
         if signature:
             op._roles.update(jarsigner="new", keytool="new")
         source.operation = op
@@ -224,7 +227,7 @@ class _InertRun:
 
         case.patched(op, "returned", side_effect=returned)
         self.run = run = object.__new__(service.AndroidBuildRun)
-        run.__dict__.update(request=self.request, guard=guard, source=source, operation=op, primary=None,
+        run.__dict__.update(request=self.request, guard=guard, source=source, operation=op, primary=None, primary_signing_phase=None,
                             report=None, _candidate=None, _run_claimed=False, _close_claimed=False)
         self.custody_call = case.patched(service, "invocation_custody", side_effect=self.custody)
         self.build_call = case.patched(service, "run_android_build", side_effect=self.build)

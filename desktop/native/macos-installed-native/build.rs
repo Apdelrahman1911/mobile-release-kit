@@ -77,7 +77,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/vault_helper_auth.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain_fixture.m");
     let mut build = cc::Build::new();
-    let app_path = format!("{:?}", installed_paths::APP);
+    let app_path = format!("{:?}", installed_paths::PAYLOAD_APP);
     build.define("MRK_ANDROID_APP_PATH", Some(app_path.as_str()));
     if let Some((app, helper)) = android_requirements() {
         let app = format!("{app:?}"); let helper = format!("{helper:?}");
@@ -89,7 +89,7 @@ fn main() {
     }
     if helper {
         build.define("MRK_WRAPPING_VAULT_HELPER", Some("1"));
-        let app = format!("{:?}", installed_paths::APP);
+        let app = format!("{:?}", installed_paths::PAYLOAD_APP);
         build.define("MRK_VAULT_APP_PATH", Some(app.as_str()));
         build.file("src/vault_helper_auth.m");
         println!("cargo:rustc-cfg=mrk_wrapping_vault_helper_native");
@@ -105,6 +105,12 @@ fn main() {
     if qualification {
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION", Some("1"));
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION_DEBUG", Some("1"));
+    }
+    if !helper && !android_helper && !observation {
+        println!("cargo:rerun-if-changed=../macos-installed-entry/gate.c");
+        println!("cargo:rerun-if-changed=../macos-installed-entry/gate.h");
+        println!("cargo:rerun-if-changed=../macos-installed-entry/fixed_paths.h");
+        build.file("../macos-installed-entry/gate.c");
     }
     build.file("src/native.m").file("src/android_registration.m").file("src/android_service_management.m").file("src/wrapping_keychain.m").file("src/vault_filesystem.m").file("src/vault_helper_control.m").flag("-fno-objc-arc").flag("-fblocks")
         .flag("-mmacosx-version-min=26.0").warnings(true).compile("mrk_macos_installed_native");

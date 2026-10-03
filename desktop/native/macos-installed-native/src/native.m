@@ -1,6 +1,8 @@
+#ifndef MRK_ENTRY_METADATA_ONLY
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #include <Block.h>
+#endif
 #include <sys/acl.h>
 #include <sys/stat.h>
 #include <sys/attr.h>
@@ -40,6 +42,7 @@ int mrk_user(uint32_t *uid) {
 // One ordinary-user request at a fixed URL. The framework owns Finder; this
 // function creates no application worker or completion callback. A returned zero
 // means only that the void AppKit request returned, not that Finder was visible.
+#ifndef MRK_ENTRY_METADATA_ONLY
 int mrk_reveal_installation(void) {
     uint32_t uid = 0;
     int admitted = mrk_user(&uid); if (admitted) return admitted;
@@ -56,6 +59,7 @@ int mrk_reveal_installation(void) {
         return EIO; // The request might already have reached Finder.
     }
 }
+#endif
 
 // Closed first-party diagnostic ABI, shared with Rust and the fixed probe.
 // 1 allocation; 2 snapshot; 3/4/5 owner/group/mode completeness; 6 presence;
@@ -123,6 +127,7 @@ int mrk_no_xattrs(int fd) {
     ssize_t count = flistxattr(fd, NULL, 0, 0);
     return count < 0 ? (errno ? errno : EIO) : count == 0 ? 0 : EPERM;
 }
+#ifndef MRK_ENTRY_METADATA_ONLY
 // Public bulk attributes are four-byte packed, NOT a padded C struct.
 // The same pure decoder is exercised by the native crate's cfg(test) FFI.
 #define MRK_DIRECTORY_ATTRS (ATTR_CMN_NAME | ATTR_CMN_OBJTYPE | ATTR_CMN_FILEID | ATTR_CMN_RETURNED_ATTRS)
@@ -2354,3 +2359,5 @@ void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, c
     atomic_flag_clear(&mrk_prompt_active);
 }
 #endif
+
+#endif /* !MRK_ENTRY_METADATA_ONLY: no Cocoa in the ordinary C entry. */

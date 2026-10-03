@@ -72,7 +72,7 @@ mod tests {
         assert_eq!(value.package_version, crate::macos_install_paths::PACKAGE_VERSION);
         assert_eq!(value.release, crate::macos_install_paths::RELEASE);
         assert_eq!(value.package_version, "0.1.0");
-        assert_eq!(value.release, "macos26-arm64-project-draft-01"); // No v2 release was selected.
+        assert_eq!(value.release, "macos26-arm64-entry-m2a-01"); // Engineering entry only, not a v2 publisher release.
         assert!(value.declarations().contains("pub const RELEASE: &str ="));
     }
 

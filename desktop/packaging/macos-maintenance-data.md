@@ -13,15 +13,18 @@ release from the single fixed source `macos-installed-inputs/build-release.json`
 Cargo emits their constants for every app-crate target and checks the Cargo/Tauri
 version projections. Staging checks the signed app/package against the same DATA;
 the existing Info.plist and Distribution versions remain checked projections.
-The native helper uses only the unchanged stable app path, not app-generated
+The native helper uses the central fixed executing-payload path, not app-generated
 build output. Invalid/missing source DATA refuses; no runtime environment or
 destination record can choose the release. The historical supplier description
 keeps its original release label independently of current build selection.
 
-This source still deliberately selects engineering-v1 `0.1.0` /
-`macos26-arm64-project-draft-01`. Unifying selection does not create a new v2
-release, authenticate signing policy, authorize a predecessor or settle an
-invocation. A future producer must select a genuine unique new build identity
+This source selects engineering `0.1.0` / `macos26-arm64-entry-m2a-01` for the
+ordinary entry/payload layout. That release, historical
+`macos26-arm64-project-draft-01` and engineering version `0.1.0` remain excluded
+from v2 producer DATA. Entry participation does not create a v2 release,
+authenticate signing policy, authorize a predecessor or settle an invocation.
+The permanent root gate is never deleted/replaced; M2 worker/direct-pre-main
+closure and M3/M4 maintenance remain unavailable. A future producer must select a genuine unique new build identity
 before signing and inventory generation, then publish its completed package
 digest in detached schema2 DATA only after complete package audit.
 

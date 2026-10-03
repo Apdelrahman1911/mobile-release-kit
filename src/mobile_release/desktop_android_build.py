@@ -3,7 +3,8 @@
 Only the original operation can supply inputs, tools and captured bytes. The
 service emits bounded observation DATA after its actual cleanup. Native runtime,
 process/transport and document finality still have to settle before UI success.
-No toolkit signing, credential loading, Store call or release publication occurs.
+Optional upload-key signing borrows the same original input/operation owners.
+No Store call or release publication occurs.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import time
 from ._desktop_android_build_control import AndroidBuildInput
 from ._desktop_android_build_files import AndroidFileError
 from ._desktop_android_build_protocol import (
-    AndroidBuildRequest, PROFILES, ProtocolError, REASONS, project_activity,
+    AndroidBuildRequest, PROFILES, ProtocolError, REASONS, is_signed, project_activity,
     project_artifact, project_result, require, validate_terminal,
 )
 from ._desktop_android_build_selection import AndroidSelectionRefused
@@ -24,12 +25,13 @@ from .android_build_operation import AndroidBuildError, AndroidBuildOperation
 from .android_build_tools import AndroidToolError
 from .build_inputs import BuildInputError, invocation_custody
 from .cancellation import DefaultCancellation
+from .errors import CredentialError, ValidationError
 from .owned_process import ProcessError, fatal_lifetime_error
 from .provenance import (
     AndroidAbiObservation, ArtifactObservation, android_abis_from_zip_metadata,
     artifact_records_from_observations,
 )
-from .reporting import Report
+from .reporting import Report, Status
 
 
 class AndroidBuildRun:
@@ -41,6 +43,7 @@ class AndroidBuildRun:
                 and threading.current_thread() is threading.main_thread())
         self.request, self.guard, self.source = request, guard, source
         self.primary: BaseException | None = None
+        self.primary_signing_phase: str | None = None
         self.report: Report | None = None
         self._candidate: dict | None = None
         self._run_claimed = self._close_claimed = False
@@ -52,6 +55,7 @@ class AndroidBuildRun:
     def remember(self, error: BaseException) -> None:
         if self.primary is None:
             self.primary = error
+            self.primary_signing_phase = (None if self.operation.signing is None else self.operation.signing.phase)
         self.source.failure_observed()
         self.guard.lifetime_ledger._remember(error)
         if fatal_lifetime_error(error, "Android build original custody did not settle") is not None:
@@ -76,11 +80,14 @@ class AndroidBuildRun:
                         bound = operation.bind_inputs()
                         operation.advance("inputs-bound")
                         operation.prepare()
-                        operation.advance("building")
-                        # Shared core owns the task invocation and capture.
-                        # Its diagnostic returned Path map is deliberately unused.
-                        run_android_build(bound.config, signed=False, cancellation=self.guard,
-                                          operation=operation)
+                        if operation.signing is None:
+                            operation.advance("building")
+                            # Shared core owns invocation/capture. Its diagnostic
+                            # returned Path map is deliberately unused.
+                            run_android_build(bound.config, signed=False, cancellation=self.guard,
+                                              operation=operation)
+                        else:
+                            self._signed_body(bound)
                         operation.advance("inspecting")
                         artifact = operation.artifact()
                         findings = validate_aab(
@@ -91,6 +98,9 @@ class AndroidBuildRun:
                             tools=operation.tools,
                         )
                         self.report = Report("android-build-inspect", findings=findings)
+                        if operation.signing is not None and any(
+                                item.status not in {Status.PASS, Status.NOT_APPLICABLE} for item in findings):
+                            operation.fail("signing-validation-failed")
                         operation.check_inputs()
                         operation.tools.check()
                         abi = (AndroidAbiObservation((), False) if operation.zip_metadata is None
@@ -118,6 +128,7 @@ class AndroidBuildRun:
                                 validation=self.request.context["artifactValidation"],
                                 toolchain_profile=self.request.native["toolchain"]["profile"],
                                 toolchain_selection=self.request.native["toolchain"].get("selection"),
+                                signed=operation.signing is not None,
                             )
                         except (ProtocolError, ValueError, TypeError, RecursionError) as error:
                             # Bounded DATA projection is not a successful build
@@ -142,6 +153,48 @@ class AndroidBuildRun:
                 self.remember(error)
                 raise
 
+    def _signed_body(self, bound) -> None:
+        from .credentials import materialize_build_inputs
+        operation, guard = self.operation, self.guard
+        signing = operation.signing
+        require(signing is not None and operation.invocation.signing_lease is None)
+        # Saved config and protected tools have already been admitted. No Apple
+        # account lease or second input reader is acquired for Android.
+        self.source.receive_material(operation)
+        signing.bind_values()
+        signing.phase = "materializing"
+        try:
+            with operation.invocation.materialization(signing_lease=None) as child:
+                try:
+                    with materialize_build_inputs(bound.config, values=signing.values, platforms=("android",),
+                            signing_lease=None, cancellation=guard, build_inputs=child) as materialized:
+                        try:
+                            signing.bind_materialized(materialized)
+                            operation.advance("validating-signing")
+                            signing.validate_input()
+                            signing.phase = "building"
+                            operation.advance("building")
+                            run_android_build(bound.config, signed=True, cancellation=guard,
+                                              build_inputs=child, operation=operation)
+                            operation.advance("restoring-inputs")
+                        except BaseException as error:
+                            self.remember(error)  # F before even the materialized view retires.
+                            raise
+                except BaseException as error:
+                    # Includes materializer entry errors, before BuildInputs
+                    # performs potentially blocking restoration/scratch close.
+                    self.remember(error)
+                    raise
+                finally:
+                    signing.phase = "restoring-inputs"
+        except BaseException as error:
+            self.remember(error)
+            raise
+        if not signing.inputs_closed():
+            operation.fail("build-inputs-unrestored")
+        signing.close()
+        signing.phase = "inspecting"
+
     def close(self) -> None:
         if self._close_claimed:
             return
@@ -153,7 +206,10 @@ class AndroidBuildRun:
         if isinstance(error, (AndroidSelectionRefused, AndroidBuildError, AndroidToolError, AndroidFileError)):
             reason = error.reason
         elif isinstance(error, BuildInputError):
-            reason = "project-admission-refused"
+            reason = ("build-inputs-unrestored" if self.operation.signing is not None
+                      and self.primary_signing_phase == "restoring-inputs" else "project-admission-refused")
+        elif self.operation.signing is not None and isinstance(error, (CredentialError, ValidationError)):
+            reason = "signing-input-invalid"
         elif isinstance(error, ProcessError):
             reason = ("command-incomplete" if command["outcome"] != "exited" else
                       "command-failed" if command["exitCode"] != 0 else "toolchain-unavailable")
@@ -178,7 +234,8 @@ class AndroidBuildRun:
         operation = self.operation
         operation.owner()
         verdict = self.guard.lifetime_ledger.verdict()
-        maximum_commands = 4 if self.request.context["artifactValidation"]["mode"] == "upload-signature" else 2
+        signed = is_signed(self.request.context)
+        maximum_commands = 6 if signed else 4 if self.request.context["artifactValidation"]["mode"] == "upload-signature" else 2
         if verdict.profile_calls != 0 or verdict.commands > maximum_commands:
             self.guard._abort(ProtocolError("Unexpected Android build lifetime domain"))
             verdict = self.guard.lifetime_ledger.verdict()
@@ -198,6 +255,9 @@ class AndroidBuildRun:
             "namespaceClosed": files is None or files.namespace is None or files.namespace.closed(),
             "stopObserved": self.source.stop_reason,
         }
+        if signed:
+            lifetime.update(buildInputsClosed=operation.signing.closed(),
+                            materialRetired=self.source.material_closed())
         command, disposition = operation.command_outcome(), operation.disposition()
         try:
             activity = project_activity(self.report, stage=operation.stage,
@@ -209,6 +269,7 @@ class AndroidBuildRun:
         settled = (verdict.cleanup_complete and verdict.contained and verdict.command_dispatched is not None
                    and all(lifetime[key] for key in ("inputClosed", "handlersRestored", "invocationClosed",
                                                     "artifactsClosed", "toolsClosed", "namespaceClosed"))
+                   and (not signed or lifetime["buildInputsClosed"] and lifetime["materialRetired"])
                    and "unknown" not in disposition.values())
         result = None
         if not settled:

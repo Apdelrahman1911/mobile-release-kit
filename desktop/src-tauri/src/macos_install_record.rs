@@ -11,8 +11,11 @@ pub const INVENTORY_LIMIT: usize = 1024 * 1024;
 pub const RECORD_LIMIT: usize = 8192;
 pub const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;
 pub const FILE_LIMIT: usize = 2048;
-pub const ANDROID_HELPER: &str = "app/Contents/Helpers/mrk-android-register";
-pub const ANDROID_SERVICE_PLIST: &str = "app/Contents/Library/LaunchDaemons/dev.mobile-release-kit.desktop.android-register.plist";
+pub const ENTRY_BINARY: &str = paths::ENTRY_INVENTORY_PATH;
+pub const APP_BINARY: &str = paths::PAYLOAD_INVENTORY_PATH;
+pub const VAULT_HELPER: &str = paths::VAULT_HELPER_INVENTORY_PATH;
+pub const ANDROID_HELPER: &str = paths::ANDROID_HELPER_INVENTORY_PATH;
+pub const ANDROID_SERVICE_PLIST: &str = paths::ANDROID_SERVICE_INVENTORY_PATH;
 type Result<T> = std::result::Result<T, &'static str>;
 fn check(ok: bool, reason: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(reason) } }
 fn hex(value: &str, bytes: usize) -> bool {
@@ -59,7 +62,7 @@ impl Inventory {
         let inventory: Self = serde_json::from_value(strict_json(bytes).map_err(|_| "inventory-json")?)
             .map_err(|_| "inventory-shape")?;
         check(inventory.schema_version == 1 && inventory.release == paths::RELEASE
-            && !inventory.files.is_empty() && inventory.files.len() <= FILE_LIMIT
+            && !inventory.files.is_empty() && inventory.files.len() <= FILE_LIMIT - 3
             && hex(runtime_manifest, 64) && inventory.runtime_manifest_sha256 == runtime_manifest, "inventory-binding")?;
         Ok(inventory)
     }
@@ -73,7 +76,7 @@ impl Inventory {
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == matches!(item.path.as_str(),
-                "app/Contents/MacOS/mobile-release-kit-desktop" | "app/Contents/Helpers/mrk-vault-keychain" | ANDROID_HELPER | "runtime/python/bin/python3"),
+                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | "runtime/python/bin/python3"),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -81,8 +84,9 @@ impl Inventory {
             let mut path = item.path.as_str();
             while let Some((parent, _)) = path.rsplit_once('/') { directories.insert(parent.to_owned()); path = parent; }
         }
-        check(directories.len() <= FILE_LIMIT && files.contains_key("app/Contents/MacOS/mobile-release-kit-desktop")
-            && files.contains_key("app/Contents/Info.plist") && files.contains_key("app/Contents/Helpers/mrk-vault-keychain")
+        check(directories.len() <= FILE_LIMIT && files.contains_key(ENTRY_BINARY) && files.contains_key(APP_BINARY)
+            && files.contains_key("app/Contents/Info.plist") && files.contains_key(paths::PAYLOAD_INFO_INVENTORY_PATH)
+            && files.contains_key(VAULT_HELPER)
             && files.contains_key("runtime/python/bin/python3")
             && files.get("runtime/manifest.json").is_some_and(|f| f.sha256 == self.runtime_manifest_sha256), "inventory-required")?;
         // Optional only as a complete fixed pair. Absent keeps the existing
@@ -153,6 +157,7 @@ impl Record {
         let parsed = Inventory::parse(inventory, expected.runtime_manifest)?;
         let indexed = parsed.index()?;
         check(indexed.payload_bytes.checked_add(inventory.len() as u64).and_then(|n| n.checked_add(RECORD_LIMIT as u64))
+            .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
             .is_some_and(|n| n <= PAYLOAD_LIMIT), "installation-record-total-bound")?;
         Ok(record)
     }
@@ -202,10 +207,12 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn inventory() -> Vec<u8> {
-        let rows = ["app/Contents/Helpers/mrk-vault-keychain", "app/Contents/Info.plist",
-            "app/Contents/MacOS/mobile-release-kit-desktop", "runtime/manifest.json", "runtime/python/bin/python3"]
+        let mut paths = [ENTRY_BINARY, APP_BINARY, VAULT_HELPER, "app/Contents/Info.plist",
+            paths::PAYLOAD_INFO_INVENTORY_PATH, "runtime/manifest.json", "runtime/python/bin/python3"];
+        paths.sort();
+        let rows = paths
             .into_iter().map(|path| json!({"path":path,"sha256": if path == "runtime/manifest.json" { "c".repeat(64) } else { "b".repeat(64) },
-                "size":1,"executable":matches!(path,"app/Contents/Helpers/mrk-vault-keychain"|"app/Contents/MacOS/mobile-release-kit-desktop"|"runtime/python/bin/python3")}))
+                "size":1,"executable":matches!(path,ENTRY_BINARY|APP_BINARY|VAULT_HELPER|"runtime/python/bin/python3")}))
             .collect::<Vec<_>>();
         serde_json::to_vec(&json!({"schemaVersion":1,"release":paths::RELEASE,"runtimeManifestSha256":"c".repeat(64),"files":rows})).unwrap()
     }
@@ -238,7 +245,7 @@ mod tests {
     fn full_inventory_and_stable_directory_identity_data() {
         let source="a".repeat(40);let manifest="c".repeat(64);let input=inventory();let expected=expected(&source,&manifest);
         let bytes=Record::encode(&"d".repeat(32),&input,&expected).unwrap();
-        let parsed=Inventory::parse(&input,&manifest).unwrap();assert_eq!(parsed.index().unwrap().files.len(),5);
+        let parsed=Inventory::parse(&input,&manifest).unwrap();assert_eq!(parsed.index().unwrap().files.len(),7);
         for field in ["mtime","ctime","size","links"] {
             let mut changed:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             changed["installRoot"][field]=json!(1);
@@ -275,7 +282,7 @@ mod tests {
     fn android_service_inventory_pair_and_executable_scope_data() {
         let manifest="c".repeat(64);
         let original:serde_json::Value=serde_json::from_slice(&inventory()).unwrap();
-        // The original five-file unavailable package remains a valid DATA
+        // The fixed seven-file unavailable package remains a valid DATA
         // inventory; it cannot acquire service authority by this parse.
         assert!(Inventory::parse(&inventory(),&manifest).unwrap().index().is_ok());
         for (helper,plist,helper_executable,plist_executable,accepted) in [

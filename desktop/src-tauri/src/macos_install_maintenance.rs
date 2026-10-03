@@ -13,6 +13,7 @@ pub const PREDECESSOR_LIMIT: usize = 8;
 const PROFILE: &str = "fixed-macos26-arm64-maintenance-v2";
 // These are the published engineering-v1 identities, not the next release.
 const LEGACY_RELEASE: &str = "macos26-arm64-project-draft-01";
+const ENTRY_ENGINEERING_RELEASE: &str = "macos26-arm64-entry-m2a-01";
 const LEGACY_VERSION: &str = "0.1.0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,7 +56,8 @@ impl ReleaseData {
     fn validate(&self) -> Result<()> {
         require(self.profile == PROFILE && self.package_identifier == paths::PACKAGE_ID
             && self.bundle_identifier == paths::BUNDLE_ID, DataError::Binding)?;
-        require(self.release != LEGACY_RELEASE && self.package_version != LEGACY_VERSION, DataError::Legacy)?;
+        require(self.release != LEGACY_RELEASE && self.release != ENTRY_ENGINEERING_RELEASE
+            && self.package_version != LEGACY_VERSION, DataError::Legacy)?;
         require(version(&self.package_version).is_some() && self.release.len() <= 128
             && self.release.starts_with("macos26-arm64-") && self.release.len() > "macos26-arm64-".len()
             && self.release.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
@@ -263,7 +265,7 @@ mod tests {
     #[test]
     fn release_data_is_closed_bounded_and_not_legacy() {
         assert_eq!(parsed().predecessor_data().len(), 1);
-        for mutate in ["extra", "missing", "legacy-schema", "nested-extra", "legacy-release", "legacy-version", "foreign-profile"] {
+        for mutate in ["extra", "missing", "legacy-schema", "nested-extra", "legacy-release", "entry-engineering-release", "legacy-version", "foreign-profile"] {
             let mut value = plan();
             match mutate {
                 "extra" => value["installed"] = json!(true),
@@ -271,6 +273,7 @@ mod tests {
                 "legacy-schema" => value["schemaVersion"] = json!(1),
                 "nested-extra" => value["current"]["authenticated"] = json!(true),
                 "legacy-release" => value["current"]["release"] = json!(LEGACY_RELEASE),
+                "entry-engineering-release" => value["current"]["release"] = json!(ENTRY_ENGINEERING_RELEASE),
                 "legacy-version" => value["current"]["packageVersion"] = json!(LEGACY_VERSION),
                 _ => value["current"]["profile"] = json!("fixed-windows"),
             }

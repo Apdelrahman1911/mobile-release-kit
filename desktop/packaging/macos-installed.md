@@ -179,7 +179,48 @@ The changed transport/created-directory path still needs its own native evidence
 The installed app is
 `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`.
 The runtime is
-`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-project-draft-01/runtime`.
+`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-entry-m2a-01/runtime`.
+The historical supplier archive keeps its original label; it does not select the
+current installed release.
+
+### M2-A ordinary entry (engineering integration, not available maintenance)
+
+The outer app is the small C/libSystem-only `mrk-macos-entry`, bundle identifier
+`dev.mobile-release-kit.desktop.entry`. Its fixed nested
+`Contents/Helpers/MobileReleaseKitPayload.app` contains the ordinary Rust/Tauri
+product, existing helpers/resources and the unchanged identifier
+`dev.mobile-release-kit.desktop`. The product's app-data/vault namespace therefore
+does not move. Helper authentication compares the actual executing payload to its
+static payload signature, never the entry signature. Android's `BundleProgram`
+remains payload-relative `Contents/Helpers/mrk-android-register`.
+
+The existing fresh-only Installer provisions or strictly admits the permanent
+`maintenance-gate-v1` at the installation root: exact30B
+`MRK-MACOS-MAINTENANCE-GATE-v1\n`, root:wheel0444, one regular link, empty
+ACL/xattrs and protected local APFS ancestry. It never repairs, replaces or
+unlinks that gate. Gate writes/seal/file+parent persistence and original closes
+are accounted separately from the existing two release-metadata files. Installer
+holds nonblocking EX through publication and final protected checks, closing its
+participant last; another unknown original close retains that participant for
+kernel process exit and never produces installed/settled success.
+
+The ordinary entry takes SH before loading the product, constructs the fixed
+clean eight-key account environment, then execs the fixed payload in the same
+process. Rust admits that one handoff before the builder, sets the same inherited
+FD CLOEXEC and never unlocks it on Quit/cancel/Drop. Only kernel process exit
+releases it. Build and post-signing inspection reject non-libSystem entry loads,
+loader overrides and native initializers. Helpers → payload → entry are explicitly
+signed inside-out, with final entry/payload/helper digest bindings; no deep repair.
+
+The extended original normal UI scenario must genuinely follow its exact-URL
+launch handle across exec, show the real Tauri window and native picker, Cancel
+and normally Quit, with gate EX probes before/during/after. Neither an EX probe
+nor XCTest `notRunning` authenticates SH custody or proves all-worker finality.
+Observed Aqua deliberately still invokes its nested instrumented payload directly
+and supplies **no ordinary-entry or M2 gate evidence**. Direct payload pre-main,
+independent Python/tool/helper/service lifetimes, forced-parent/unknown closure and
+M3/M4 maintenance remain unqualified. Source or DATA success is not native
+acceptance; Developer-ID/notarization and Desktop readiness are not claimed.
 
 This deliberately uses a protected Library location, not an `Applications`
 ancestor that might permit group replacement. It is an engineering installation,

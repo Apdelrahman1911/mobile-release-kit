@@ -8,7 +8,7 @@ fn main() { std::process::exit(installer::run()); }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod installer {
-    use std::{collections::{BTreeMap, BTreeSet}, os::fd::{AsFd, OwnedFd}, path::Path, time::{Duration, Instant}};
+    use std::{collections::{BTreeMap, BTreeSet}, os::fd::{AsFd, AsRawFd, OwnedFd}, path::Path, time::{Duration, Instant}};
     use nix::{errno::Errno, fcntl::{self, AtFlags, OFlag}, mount::MntFlags,
         sys::{stat::{self, FileStat, Mode, SFlag}, statfs}, unistd};
     use sha2::{Digest, Sha256};
@@ -17,9 +17,9 @@ mod installer {
     use mrk_macos_installed_native as native;
     type Result<T> = std::result::Result<T, &'static str>;
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum State { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown }
+    enum State { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown, KernelExitRetained }
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Role { Reader, PayloadWriter, MetadataWriter, ReceiptWriter }
+    enum Role { Reader, PayloadWriter, MetadataWriter, ReceiptWriter, GateWriter, GateParticipant }
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Identity { dev: i64, ino: u64, mode: u32, uid: u32, gid: u32, links: u64, size: i64,
         mtime: i64, mtime_ns: i64, ctime: i64, ctime_ns: i64 }
@@ -34,11 +34,23 @@ mod installer {
     // A mkdir effect gets its own record BEFORE the call, including effects
     // that returned successfully but whose subsequent open/verification failed.
     struct Creation { parent: usize, name: String, state: &'static str, identity: Option<Identity> }
+    // Separate fixed30B effect. InstallationMetadata remains exactly two files.
+    // These are original returned-effect observations, not authority from JSON.
+    struct MaintenanceGate {
+        entered: bool, creation: &'static str, written: u64, sealed: bool, persisted: bool, parent_persisted: bool,
+        parent: Option<usize>, writer: Option<usize>, participant: Option<usize>, verified: bool,
+        lock_attempted: bool, exclusive_acquired: bool,
+    }
+    impl MaintenanceGate {
+        fn new() -> Self { Self { entered:false,creation:"not-attempted",written:0,sealed:false,persisted:false,
+            parent_persisted:false,parent:None,writer:None,participant:None,verified:false,lock_attempted:false,exclusive_acquired:false } }
+    }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
         metadata: installation_record::Progress,
+        gate: MaintenanceGate,
         #[cfg(feature = "macos-installed-installer-fixture")]
         fixture: Option<fixture::Context>,
     }
@@ -301,6 +313,7 @@ mod installer {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
+                gate:MaintenanceGate::new(),
                 #[cfg(feature = "macos-installed-installer-fixture")]
                 fixture: None }
         }
@@ -323,6 +336,7 @@ mod installer {
                 Ok(fd) => {
                     self.originals[n].fd = Some(fd); self.originals[n].state = State::Owned;
                     if self.originals[n].role == Role::MetadataWriter { self.metadata.opened()?; }
+                    if self.originals[n].role == Role::GateWriter { self.gate.creation = "created"; }
                     Ok(n)
                 }
                 Err(_error) => {
@@ -334,7 +348,11 @@ mod installer {
             }
         }
         fn open(&mut self, parent: Option<usize>, name: &str, directory: bool) -> Result<usize> {
-            let n = self.reserve(parent, name, Role::Reader)?;
+            self.open_role(parent, name, directory, Role::Reader)
+        }
+        fn open_role(&mut self, parent: Option<usize>, name: &str, directory: bool, role: Role) -> Result<usize> {
+            let n = self.reserve(parent, name, role)?;
+            if role == Role::GateParticipant { self.gate.participant = Some(n); }
             let before = self.named(parent, name).map_err(|_| "named-refused")?;
             check(before.st_mode & SFlag::S_IFMT.bits() == if directory { SFlag::S_IFDIR.bits() } else { SFlag::S_IFREG.bits() }
                 && (directory || before.st_nlink == 1), "input-type")?;
@@ -348,6 +366,7 @@ mod installer {
             check(component(name), "file-component")?;
             let n = self.reserve(Some(parent), name, role)?;
             if role == Role::MetadataWriter { self.metadata.attempted()?; }
+            if role == Role::GateWriter { self.gate.writer = Some(n); self.gate.creation = "attempting"; }
             self.originals[n].state = State::Acquiring;
             let flags = OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
             let opened = fcntl::openat(self.fd(parent)?, name, flags, Mode::from_bits_truncate(0o600));
@@ -388,6 +407,8 @@ mod installer {
             #[cfg(feature = "macos-installed-installer-fixture")]
             self.fixture_persist_return(point, actual.is_ok(), actual.as_ref().err().and_then(std::io::Error::raw_os_error));
             actual.map_err(|_| "persistence-refused")?; // Actual native error wins.
+            if file && self.originals[n].role == Role::GateWriter { self.gate.persisted = true; }
+            if !file && self.gate.parent == Some(n) && self.gate.writer.is_some() { self.gate.parent_persisted = true; }
             self.clock()?; // The SAME original synchronous call may return late.
             #[cfg(feature = "macos-installed-installer-fixture")]
             if self.fixture_report_persistence_failure(point) { return Err("fixture-reported-persistence-failure"); }
@@ -462,6 +483,10 @@ mod installer {
                 let count = unistd::write(self.fd(n)?, bytes).map_err(|_| "write-refused")?;
                 check(count != 0 && count <= bytes.len(), "write-zero-or-bound")?;
                 if self.originals[n].role == Role::MetadataWriter { self.metadata.wrote(count)?; }
+                if self.originals[n].role == Role::GateWriter {
+                    self.gate.written = self.gate.written.checked_add(count as u64).ok_or("gate-write-bound")?;
+                    check(self.gate.written <= paths::MAINTENANCE_GATE_BYTES.len() as u64, "gate-write-bound")?;
+                }
                 bytes = &bytes[count..];
             }
             Ok(())
@@ -470,6 +495,7 @@ mod installer {
             self.check_name(n, false)?;
             unistd::fchown(self.fd(n)?, Some(unistd::Uid::from_raw(0)), Some(unistd::Gid::from_raw(0))).map_err(|_| "file-owner")?;
             stat::fchmod(self.fd(n)?, Mode::from_bits_truncate(if executable { 0o555 } else { 0o444 })).map_err(|_| "file-mode")?;
+            if self.originals[n].role == Role::GateWriter { self.gate.sealed = true; }
             self.protected(n, false, Some(if executable { 0o555 } else { 0o444 }))?;
             native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_| "file-attributes")?;
             self.persist(n, true)?; self.forward_close(n, "file-close-unknown")
@@ -493,6 +519,7 @@ mod installer {
                 "runtimePublication":self.runtime_publication,"appPublication":self.app_publication,
                 "payloadVerified":self.payload_verified,"payloadWritersSettled":self.payload_writers_settled(),
                 "installationMetadata":self.metadata.snapshot(self.metadata_writers_settled()),
+                "maintenanceGate":self.gate_record(),
                 "originalSettlement":"pending-final-closes","stage":self.original_summary(self.stage),
                 "runtime":self.original_summary(self.runtime),"app":self.original_summary(self.app),"createdAncestors":self.creation_summary(),
                 "inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")})).map_err(|_| "receipt-shape")?;
@@ -632,12 +659,68 @@ mod installer {
             let support = self.open(Some(library), "Application Support", true)?; self.protected_as(support, true, None, AclRole::SystemSupport)?;
             Ok(support)
         }
+        fn gate_protected(&self, reader: usize) -> Result<()> {
+            self.protected(reader, false, Some(0o444))?;
+            let s = stat::fstat(self.fd(reader)?).map_err(|_| "gate-stat")?;
+            check(s.st_flags == 0 && s.st_size == paths::MAINTENANCE_GATE_BYTES.len() as i64, "gate-shape")?;
+            native::no_xattrs(self.fd(reader)?.as_fd()).map_err(|_| "gate-attributes")?;
+            self.check_name(reader, true)
+        }
+        fn maintenance_gate(&mut self, destination: usize) -> Result<()> {
+            self.clock()?; check(!self.gate.entered, "gate-already-entered")?; self.gate.entered = true;
+            self.gate.parent = Some(destination);
+            match self.named(Some(destination), paths::MAINTENANCE_GATE_NAME) {
+                Err(Errno::ENOENT) => {
+                    let writer = self.create_file(destination, paths::MAINTENANCE_GATE_NAME, Role::GateWriter)?;
+                    self.write_all(writer, paths::MAINTENANCE_GATE_BYTES)?;
+                    self.seal_file(writer, false)?;
+                    self.persist(destination, false)?;
+                },
+                Ok(_) => self.gate.creation = "existing-not-modified",
+                Err(_) => return Err("gate-name-refused"),
+            }
+            // Existing occupants are never chmod'ed, truncated, repaired or
+            // replaced. A lost original create is never retried as admission.
+            let reader = self.open_role(Some(destination), paths::MAINTENANCE_GATE_NAME, false, Role::GateParticipant)?;
+            if let Some(writer) = self.gate.writer {
+                check(self.identity(writer)?.same_object(self.identity(reader)?), "gate-created-correspondence")?;
+            }
+            self.gate_protected(reader)?;
+            let (_, body) = self.read(reader, paths::MAINTENANCE_GATE_BYTES.len() as u64, true)?;
+            check(body == paths::MAINTENANCE_GATE_BYTES, "gate-content")?;
+            self.gate.verified = true; self.clock()?;
+            self.gate.lock_attempted = true;
+            #[allow(deprecated)] // Borrow the original; Flock's Drop must not unlock it early.
+            let locked = fcntl::flock(self.fd(reader)?.as_raw_fd(), fcntl::FlockArg::LockExclusiveNonblock);
+            locked.map_err(|_| "gate-busy-or-refused")?;
+            self.gate.exclusive_acquired = true;
+            self.clock()?; self.gate_protected(reader)
+        }
+        fn gate_record(&self) -> serde_json::Value {
+            let state = |index: Option<usize>| -> &'static str {
+                match index.and_then(|i| self.originals.get(i)).map(|r| r.state) {
+                    None => "not-attempted", Some(State::Reserved) => "reserved", Some(State::Acquiring) => "acquiring",
+                    Some(State::Owned) => "owned", Some(State::NoHandle) => "no-handle", Some(State::Closing) => "closing",
+                    Some(State::Closed) => "closed", Some(State::Unknown) => "unknown",
+                    Some(State::KernelExitRetained) => "kernel-exit-retained",
+                }
+            };
+            serde_json::json!({"schemaVersion":1,"entered":self.gate.entered,"creation":self.gate.creation,
+                "fixedBytes":paths::MAINTENANCE_GATE_BYTES.len(),"writtenBytes":self.gate.written,
+                "sealed":self.gate.sealed,"filePersisted":self.gate.persisted,"writer":state(self.gate.writer),
+                "parentPersisted":self.gate.parent_persisted,
+                "verified":self.gate.verified,"exclusiveAttempted":self.gate.lock_attempted,
+                "exclusiveAcquired":self.gate.exclusive_acquired,"participant":state(self.gate.participant),
+                "cleanup":"original-closes-only-permanent-gate-retained"})
+        }
         fn install(&mut self, source: &str) -> Result<()> {
             let (input, inventory, inventory_bytes) = self.input(source)?;
             let indexed = inventory.index()?;
             check(indexed.payload_bytes.checked_add(inventory_bytes.len() as u64)
                 .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64))
+                .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
                 .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT), "inventory-bound")?;
+            check(indexed.files.len().checked_add(3).is_some_and(|n| n <= installation_record::FILE_LIMIT), "installed-file-bound")?;
             let files = indexed.files; let directories = indexed.directories;
             let support = self.support_root()?;
             #[cfg(not(feature = "macos-installed-installer-fixture"))]
@@ -649,6 +732,7 @@ mod installer {
             #[cfg(feature = "macos-installed-installer-fixture")]
             self.fixture_before_release_absence(versions)?;
             self.absent(versions, paths::RELEASE)?;
+            self.maintenance_gate(destination)?;
             let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "stage-identity")?;
             check(nonce.iter().any(|byte| *byte != 0), "stage-identity")?;
             let name = format!(".install-{}", nonce.iter().map(|b| format!("{b:02x}")).collect::<String>());
@@ -739,10 +823,32 @@ mod installer {
         fn settle_originals(&mut self) -> bool {
             // Actual original closes continue even after an error/expiry. No
             // rollback, repair, overwrite, retry or deletion anywhere.
-            for n in (0..self.originals.len()).rev() { self.close(n); }
+            // The permanent participant is last. Its EX continues to exclude
+            // ordinary entry until every other original capability is retired.
+            let gate = self.gate.participant;
+            for n in (0..self.originals.len()).rev() { if Some(n) != gate { self.close(n); } }
+            if let Some(n) = gate {
+                let others_settled = !self.unknown && self.originals.iter().enumerate()
+                    .filter(|(index, _)| *index != n)
+                    .all(|(_, r)| r.fd.is_none() && matches!(r.state, State::Closed | State::NoHandle));
+                if others_settled { self.close(n); }
+                else if let Some(fd) = self.originals[n].fd.take() {
+                    // Do not release EX after an unknown earlier close. No new
+                    // wrapper/Drop owner may retire it; only kernel process exit.
+                    std::mem::forget(fd);
+                    self.originals[n].state = State::KernelExitRetained;
+                    self.unknown = true;
+                }
+            }
             self.originals_settled()
         }
-        fn finish(&mut self, result: Result<()>) -> FinalResult {
+        fn finish(&mut self, mut result: Result<()>) -> FinalResult {
+            if result.is_ok() {
+                result = match self.gate.participant {
+                    Some(reader) if self.gate.verified && self.gate.exclusive_acquired => self.gate_protected(reader),
+                    _ => Err("gate-finality-missing"),
+                };
+            }
             let settled = self.settle_originals();
             // Sample AFTER every final close; an earlier Ok is not timely finality.
             final_result(result, settled, self.unknown, self.runtime_publication, self.app_publication, self.end, Instant::now())
@@ -752,6 +858,7 @@ mod installer {
                 "runtimePublication":self.runtime_publication,"appPublication":self.app_publication,"staging":self.stage_name,
                 "payloadVerified":self.payload_verified,"payloadWritersSettled":self.payload_writers_settled(),
                 "installationMetadata":self.metadata.snapshot(self.metadata_writers_settled()),"originalsSettled":self.originals_settled(),
+                "maintenanceGate":self.gate_record(),
                 "deadlineMetAfterFinalCloses":result.deadline_met,"createdAncestors":self.creation_summary(),"cleanup":"original-closes-only-no-deletion",
                 "sourceCommit":option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),"inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256"),
                 "runtimeManifestSha256":option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")})

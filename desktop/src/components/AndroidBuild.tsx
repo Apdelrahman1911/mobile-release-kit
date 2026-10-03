@@ -1,6 +1,6 @@
 import { useId } from 'react';
 import type { AndroidBuildController, AndroidBuildState } from '../androidBuild.ts';
-import { androidToolchainCatalogHelp, androidBuildCancelHelp, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildOwnerReason, androidBuildSignatureHelp } from '../androidBuild.ts';
+import { androidToolchainCatalogHelp, androidBuildCancelHelp, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildOwnerReason, androidBuildSignatureHelp, androidBuildLocalSigningHelp } from '../androidBuild.ts';
 import { ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_SIGNER_MESSAGE, androidBuildAvailabilityText, androidBuildFindingText, androidBuildLimitationText, androidBuildReasonText } from '../androidBuildProtocol.ts';
 import type { AndroidBuildCoreStatus, AndroidBuildPhase, AndroidBuildStage } from '../androidBuildTypes.ts';
 import type { HelpContent } from '../types.ts';
@@ -17,7 +17,7 @@ import type { AndroidToolRegistrationProblem, AndroidToolRegistrationStatus, And
 const phases: Record<AndroidBuildPhase, string> = { 'awaiting-consent': 'Awaiting your approval', starting: 'Starting build',
   running: 'Build running', stopping: 'Stopping · waiting for cleanup', terminal: 'Build request finished', unknown: 'Cleanup needs attention' };
 const stages: Record<AndroidBuildStage, string> = { accepted: 'Request accepted', 'inputs-bound': 'Saved inputs bound', building: 'Building',
-  capturing: 'Capturing post-run AAB', inspecting: 'Inspecting captured bytes', 'disposing-work': 'Disposing task-owned work' };
+  'validating-signing': 'Checking the upload key', capturing: 'Capturing post-run AAB', signing: 'Signing the private AAB copy', 'restoring-inputs': 'Restoring original build inputs', inspecting: 'Inspecting captured bytes', 'disposing-work': 'Disposing task-owned work' };
 const negative = (status: AndroidBuildCoreStatus) => ['FAIL', 'MISSING', 'BLOCKED', 'INVALID'].includes(status);
 
 // Shared by Releases and Artifacts. No arbitrary result prop, file opener or
@@ -31,6 +31,7 @@ export function AndroidBuildResultView({ state, operationProjectName = null }: {
     <div className="inline-heading"><h3>Local AAB observation · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / retained context' : 'This build only'}</Badge></div>
     <p><strong>Complete is not PASS, a fresh build or release approval.</strong> Native completion permits this bounded observation to be shown. It does not establish that these are current source outputs or current-file authority.</p>
     <p>Saved version {result.usedVersion.name} · build {result.usedVersion.build} · module <code>{result.selection.module}</code> · variant <code>{result.selection.variant}</code> · application ID <code>{result.selection.applicationId}</code>.</p>
+    {result.signing === 'local-upload-key' && <p><strong>Signed locally and verified with the selected upload key.</strong> No Store upload or release approval occurred.</p>}
     <p>Known Gradle exit: {result.command.exitCode}. Structure: {result.assurances.structure}; native manifest: {result.assurances.nativeManifest}; application version: {result.assurances.applicationVersion}.</p>
     {result.artifactValidation.mode === 'upload-signature' ? <>
       <p><strong>Signature integrity:</strong> {result.assurances.signature}. <strong>Saved upload certificate:</strong> {result.assurances.signer === 'matches-saved-upload-certificate' ? 'matches saved upload certificate' : result.assurances.signer}.</p>
@@ -50,9 +51,10 @@ export function AndroidBuildResultView({ state, operationProjectName = null }: {
 }
 
 export function AndroidBuild({ state, controller, projectName, operationProjectName, compact = false, onShow, onRefresh, onReadVersion,
-  refreshReason = null, versionReason = null, onHelp }: {
+  refreshReason = null, versionReason = null, onHelp, onCredentials, onSettings, onRecovery }: {
   state: AndroidBuildState; controller: AndroidBuildController; projectName: string | null; operationProjectName: string | null;
   compact?: boolean; onShow?: () => void; onRefresh?: () => void; onReadVersion?: () => void;
+  onCredentials?: () => void; onSettings?: () => void; onRecovery?: () => void;
   refreshReason?: string | null; versionReason?: string | null; onHelp?: (help: HelpContent) => void;
 }) {
   const label = useId(), op = state.status?.operation, consent = state.consent, project = state.project;
@@ -104,7 +106,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     <AndroidToolchainCatalog state={state} controller={controller} onHelp={onHelp} />
     <h3 id={label}>Review the current saved inputs</h3>
     <p><strong>Selected source project:</strong> {projectName ?? 'No project selected'}. {onHelp && <HelpButton content={androidBuildInputHelp} onHelp={onHelp} />}</p>
-    <div className="notice notice-warning"><Icon name="shield" /><p>Only build a project you trust. Gradle and project code can run other programs, modify files, read account files, access the network and sign outputs. The toolkit does not request signing, credential loading or Store operations; that does not constrain arbitrary project code. This is not network isolation or a sandbox. Cancel stops further owned work and waits for original cleanup; it does not undo prior effects.</p></div>
+    <div className="notice notice-warning"><Icon name="shield" /><p>Only build a project you trust. Gradle and project code can run other programs, modify files, read account files, access the network and sign outputs. The toolkit signs only when you explicitly select local signing below and never requests Store operations here; that does not constrain arbitrary project code. This is not network isolation or a sandbox. Cancel stops further owned work and waits for original cleanup; it does not undo prior effects.</p></div>
     {project?.dirtyDraft && <p className="review-caution"><strong>Unsaved draft changes are NOT used.</strong> Selection below comes from the current completed saved snapshot, not the editor’s possibly older baseline. Your draft is neither saved nor discarded.</p>}
     {selected && <p>Saved module: <code>{selected.module}</code> · variant (saved or core default): <code>{selected.variant}</code> · application ID: <code>{selected.applicationId}</code>.</p>}
     {project?.savedConfig && <p>Saved configuration: {project.savedConfig.bytes} bytes · SHA-256 <code>{project.savedConfig.sha256}</code>.</p>}
@@ -116,12 +118,27 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       {onReadVersion && <button type="button" className="button secondary small" disabled={!project || !!versionReason || project.versionPending} onClick={() => { controller.versionIntent(); onReadVersion(); }}>Read saved version</button>}
     </div>
     {refreshReason && <p className="save-note">Configuration refresh: {refreshReason}</p>}{versionReason && <p className="save-note">Version read: {versionReason}</p>}
-    <label className="offline-ack"><input type="checkbox" checked={state.verifyUploadSignature}
-      disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}
+    <fieldset className="session-review" disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}>
+      <legend>Local signing</legend>
+      <label className="offline-ack"><input type="checkbox" checked={state.buildMode === 'signed'}
+        onChange={(event) => controller.setBuildMode(event.target.checked ? 'signed' : 'unsigned')} />
+        <span>Sign locally with my upload key</span></label>
+      <p className="save-note">Optional and off by default. Signs a private copy, never the project’s AAB. Requires current keystore assignments and the separately admitted Apple-silicon Mac owner; no Store upload occurs. {onHelp && <HelpButton content={androidBuildLocalSigningHelp} onHelp={onHelp} />}</p>
+      {state.buildMode === 'signed' && <>
+        {state.signing.issue ? <p className="review-caution">{state.signing.issue}</p> : <p>Current inputs are assigned. Passwords, private-key use and certificate policy will be checked during the owned run; file-format assessment alone is not signing verification.</p>}
+        <div className="button-row">
+          {onCredentials && <button type="button" className="button secondary small" onClick={onCredentials}>Select signing files in Credentials</button>}
+          {onSettings && <button type="button" className="button secondary small" onClick={onSettings}>Edit saved upload certificate</button>}
+        </div>
+        <p className="save-note">Obtain the existing keystore, alias and both passwords from your key owner or secure backup—not your Google login. Never replace a production key simply to pass validation. The original selected files are not copied into source control.</p>
+      </>}
+    </fieldset>
+    <label className="offline-ack"><input type="checkbox" checked={state.buildMode === 'signed' || state.verifyUploadSignature}
+      disabled={state.buildMode === 'signed' || state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}
       onChange={(event) => controller.setVerifyUploadSignature(event.target.checked)} />
       <span>Also verify upload signature</span></label>
-    <p className="save-note">Optional and off by default. Inspects the same captured AAB; it does not sign or upload. Use the upload certificate, not Play’s app-signing certificate. {onHelp && <HelpButton content={androidBuildSignatureHelp} onHelp={onHelp} />}</p>
-    {state.verifyUploadSignature && <p>Saved upload-certificate SHA-256: {project?.uploadCertificateSha256 ? <code>{project.uploadCertificateSha256}</code> : 'not available in the completed saved configuration; save the field and refresh first'}.</p>}
+    <p className="save-note">Optional for ordinary builds; mandatory for local signing. This inspection checkbox only verifies the captured AAB and does not itself sign or upload. Use the upload certificate, not Play’s app-signing certificate. {onHelp && <HelpButton content={androidBuildSignatureHelp} onHelp={onHelp} />}</p>
+    {(state.buildMode === 'signed' || state.verifyUploadSignature) && <p>Saved upload-certificate SHA-256: {project?.uploadCertificateSha256 ? <code>{project.uploadCertificateSha256}</code> : 'not available in the completed saved configuration; save the field and refresh first'}.</p>}
     <p className="save-note">{state.status ? androidBuildAvailabilityText[state.status.availability] : 'The separate native Android-build capability has not been observed. Passive checks do not enable it.'}</p>
     {!consent && <><button type="button" className="button" disabled={prepareReason !== null} onClick={() => void controller.prepare()}>Review saved inputs</button>{prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && <div className="session-review" role="group" aria-label="Confirm this saved Android-build intent">
@@ -129,12 +146,13 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       <p>Build project: <strong>{consent.binding.context.projectId}</strong>. Module <code>{consent.binding.selection.module}</code>, variant <code>{consent.binding.selection.variant}</code>, application ID <code>{consent.binding.selection.applicationId}</code>.</p>
       <p>Version <strong>{consent.binding.context.savedVersion.name}</strong>, build <strong>{consent.binding.context.savedVersion.build}</strong>, selected source <code>{consent.binding.context.savedVersion.source}</code>.</p>
       <p>Saved configuration SHA-256: <code>{consent.binding.context.savedConfig.sha256}</code>. Saved version SHA-256: <code>{consent.binding.context.savedVersion.sha256}</code>.</p>
+      <p>Signing: {consent.binding.context.operation === 'android-build-sign' ? 'Use my selected upload key to sign the private AAB copy; require final verification. No Store upload.' : 'Not requested; project code may still sign its output.'}</p>
       <p>Inspection: {consent.binding.context.artifactValidation.mode === 'upload-signature' ? <>structure, application version and upload signature; saved upload-certificate SHA-256 <code>{consent.binding.context.artifactValidation.uploadCertificateSha256}</code></> : 'structure and application version only; signer not inspected'}.</p>
       {consent.binding.toolchainSelection && <p>Protected Mac tool copy: <code>{consent.binding.toolchainSelection.instance}</code> · catalog generation {consent.binding.toolchainSelection.catalogGeneration}. Changing the tool copy retires this review; full native admission is still required at Build.</p>}
       <p>This review expires no later than five minutes after original preparation. Status refresh never renews it. Save, refresh, new version observation, selection change or leaving this unstarted review retires consent.</p>
       <label className="offline-ack"><input type="checkbox" checked={consent.acknowledged} onChange={(event) => controller.setAcknowledged(consent.operationId, consent.ownerGeneration, event.target.checked)} />
-        <span>I trust this project and authorize one build of these saved Android inputs with the inspection choice above. I understand project-code effects, that my unsaved draft is not used, and that post-run bytes may be reused/stale. {consent.binding.context.artifactValidation.mode === 'upload-signature' ? 'Verify the captured upload signature against this saved certificate; do not sign or upload. ' : 'The signer is not inspected. '}Completion is not release approval.</span></label>
-      <div className="button-row"><button type="button" className="button" disabled={startReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>Build Android app</button></div>
+        <span>I trust this project and authorize one build of these saved Android inputs with the inspection choice above. I understand project-code effects, that my unsaved draft is not used, and that post-run bytes may be reused/stale. {consent.binding.context.operation === 'android-build-sign' ? 'I authorize signing the private final copy using these exact assigned inputs and verifying this saved upload certificate. Do not upload. ' : consent.binding.context.artifactValidation.mode === 'upload-signature' ? 'Verify the captured upload signature against this saved certificate; do not sign or upload. ' : 'The signer is not inspected. '}Completion is not release approval.</span></label>
+      <div className="button-row"><button type="button" className="button" disabled={startReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>{consent.binding.context.operation === 'android-build-sign' ? 'Build, sign and validate' : 'Build Android app'}</button></div>
       {startReason && <p className="review-caution">{startReason}</p>}
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new Android-build outcome was confirmed" />}
@@ -144,6 +162,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a progress percentage or native completion.</p>}
       {op.outcome && <p><strong>Outcome:</strong> {op.outcome}</p>}<p>{androidBuildReasonText[op.reason]}</p>
       {op.activity && <p>Build command: {op.activity.command.outcome === 'exited' ? `known exit ${op.activity.command.exitCode}` : op.activity.command.outcome === 'not-dispatched' ? 'not dispatched' : 'no usable exit outcome'}.</p>}
+      {op.context.operation === 'android-build-sign' && op.reason !== 'none' && onRecovery && <button type="button" className="button secondary small" onClick={onRecovery}>Inspect Project recovery</button>}
       {op.disposition && <p>Task work: {op.disposition.work}. Local artifacts: {op.disposition.artifacts}. Disposition is not permission for blanket deletion or a rerun.</p>}
       {op.activity && op.outcome !== 'complete' && <ol className="offline-findings">{op.activity.findings.map((finding) => <li key={finding.ordinal}><Badge tone={negative(finding.status) ? 'warning' : 'neutral'}>{finding.status}</Badge><span>{finding.check === 'signer' && op.context.artifactValidation.mode === 'structure-and-version' ? ANDROID_BUILD_SIGNER_MESSAGE : androidBuildFindingText[finding.check]}</span></li>)}</ol>}
       {state.historical && <p className="review-caution">Retained original-operation data is not permission for the current editor or selected project.</p>}

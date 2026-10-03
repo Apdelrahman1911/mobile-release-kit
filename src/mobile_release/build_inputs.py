@@ -700,6 +700,11 @@ class FiniteScratch:
             operation = source.require_operation()
             _need(operation.signing is not None, "unsigned iOS cannot acquire signing scratch")
             operation.signing.bind_scratch(self)
+        android = getattr(guard, "_android_build_source", None)
+        if android is not None and layout in {"signing-validation", "build"}:
+            operation = android.require_operation()
+            _need(operation.signing is not None and layout == "build", "Android scratch requires its signing child")
+            operation.signing.bind_scratch(self)
         if lane_evidence is not None:
             from ._store_lane_evidence import StoreLaneCallEvidence
 
@@ -728,6 +733,9 @@ class FiniteScratch:
         source = getattr(self.cancellation, "_ios_archive_source", None)
         if source is not None and self.layout in {"signing-validation", "build"}:
             source.require_operation().signing.scratch_checkpoint(self)
+        android = getattr(self.cancellation, "_android_build_source", None)
+        if android is not None and self.layout == "build":
+            android.require_operation().signing.scratch_checkpoint(self)
         self.parent.check()
         _need(self.slot.number is not None and self.identity is not None
               and _directory(os.fstat(self.slot.number)) == self.identity
@@ -1807,13 +1815,19 @@ class InvocationCustody:
               "one materializer requires continuous project admission")
         child = BuildInputs(self, self.project_owner)
         self.child = child
-        source = getattr(self.cancellation, "_ios_archive_source", None)
-        if source is not None:
-            operation = source.require_operation()
-            _need(operation.signing is not None and operation.invocation is self,
-                  "unsigned iOS cannot borrow signing materialization")
-            operation.signing.bind_materialization(child)
         try:
+            source = getattr(self.cancellation, "_ios_archive_source", None)
+            if source is not None:
+                operation = source.require_operation()
+                _need(operation.signing is not None and operation.invocation is self,
+                      "unsigned iOS cannot borrow signing materialization")
+                operation.signing.bind_materialization(child)
+            android = getattr(self.cancellation, "_android_build_source", None)
+            if android is not None:
+                operation = android.require_operation()
+                _need(operation.signing is not None and operation.invocation is self and signing_lease is None,
+                      "unsigned Android cannot borrow signing materialization")
+                operation.signing.bind_materialization(child)
             with _scope(child, self.cancellation, False):
                 yield child
         finally:
@@ -1922,7 +1936,16 @@ class InvocationCustody:
               and self.cancellation._android_build_source is operation.source
               and operation.source.require_operation() is operation,
               "Android root requires its original invocation")
-        return self._unsigned_build_root(operation.guard)
+        if operation.signing is None:
+            return self._unsigned_build_root(operation.guard)
+        self.require(root=self.root, cancellation=operation.guard, signing_lease=None)
+        _need(self.mode == "build" and self.project_owner is self._original_project
+              and self.project_owner is not None
+              and (self.child is None or self.child is operation.signing.materialization),
+              "signed Android root requires its original project and child")
+        value = os.fstat(self.project_owner.fd)
+        return self.project_owner.fd, {"device": str(value.st_dev), "inode": str(value.st_ino),
+            "mode": value.st_mode, "uid": value.st_uid, "gid": value.st_gid}
 
     def _android_build_cleanup_root(self, operation) -> tuple[int, dict[str, Any]]:
         """Check the same still-held project during original resource cleanup.
@@ -1941,6 +1964,7 @@ class InvocationCustody:
               "Android cleanup root requires its claimed original namespace")
         operation.cleanup_checkpoint()
         _need(self.mode == "build" and self.signing_lease is None and self.child is None
+              and (operation.signing is None or operation.signing.inputs_closed())
               and self.active and self.reserved and _ENV_OWNER is self and not _ENV_TAINTED
               and self.project_owner is not None and self.project_owner is self._original_project
               and not self.project_owner.claimed,
@@ -1960,7 +1984,8 @@ class InvocationCustody:
         _need(type(operation) is AndroidBuildOperation and operation.invocation is self
               and operation.guard is self.cancellation and operation.source.operation is operation,
               "Android closure requires its original invocation")
-        return self._unsigned_build_closed(operation.guard)
+        return (self._unsigned_build_closed(operation.guard)
+                and (operation.signing is None or operation.signing.closed()))
 
     def _ios_archive_root(self, operation) -> tuple[int, dict[str, Any]]:
         from .ios_archive_operation import IOSArchiveOperation
@@ -2223,6 +2248,12 @@ class BuildInputs:
         if source is not None and source.signed:
             operation = source.require_operation()
             _need(operation.signing.materialization is self, "materialization is not the original iOS input owner")
+            operation.cleanup_checkpoint() if self.claimed else operation._tick()
+        android = getattr(self.cancellation, "_android_build_source", None)
+        if android is not None:
+            operation = android.require_operation()
+            _need(operation.signing is not None and operation.signing.materialization is self,
+                  "materialization is not the original Android input owner")
             operation.cleanup_checkpoint() if self.claimed else operation._tick()
         self.project.check()
         meta = self.project.meta.number

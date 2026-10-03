@@ -673,6 +673,9 @@ impl SourceSlots {
         self.point(end, stop)?;
         if self.aliases.len() >= policy::ALIAS_COUNT { return Err(AdmissionFailure::Bounds); }
         let SourceKindSpec::Alias { target, canonical, modes } = expected.kind else { return Err(AdmissionFailure::Inventory); };
+        if expected.group != SourceGroup::Jdk || !policy::jdk_source_alias_resolves(expected.relative, target, canonical) {
+            return Err(AdmissionFailure::Inventory);
+        }
         let before = stat::fstatat(self.fd(parent)?, name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
         let identity = Identity::of(&before); let mode = u32::from(identity.mode & 0o7777);
         if before.st_mode & SFlag::S_IFMT.bits() != SFlag::S_IFLNK.bits() || identity.ino != inode || identity.links != 1
@@ -680,7 +683,6 @@ impl SourceSlots {
             || identity.uid != 0 && Some(identity.uid) != self.account { return Err(AdmissionFailure::Ownership); }
         let data = Alias { path: text_owned(expected.relative, 512)?, target: text_owned(target, 512)?,
             canonical: text_owned(canonical, 512)? };
-        if policy::alias_target(&data).as_deref() != Some(canonical) { return Err(AdmissionFailure::Inventory); }
         self.point(end, stop)?;
         let actual = fcntl::readlinkat(self.fd(parent)?, name).map_err(native_error)?;
         if actual.to_str() != Some(target) { return Err(AdmissionFailure::Inventory); }

@@ -358,6 +358,33 @@ fn recovery_core_terminal_is_provisional_and_never_mints_a_review_before_origina
 #[test]
 fn signed_and_recovery_clocks_share_only_original_first_failure_cleanup_not_work_or_material() {
     let start = Instant::now();
+    let android = Context::AndroidBuild(android_wire::tests::signed_context());
+    assert!(android.requires_private_material()); assert!(!android.signed_ios());
+    let clocks = Clocks::for_context(&android, start);
+    assert_eq!((clocks.signed, clocks.recovery), (false, false));
+    assert_eq!((clocks.work, clocks.finality), (start + Duration::from_secs(3000), start + Duration::from_secs(3010)));
+    let first = start + Duration::from_secs(2);
+    assert_eq!(clocks.cleanup_end(Some(first)), first + Duration::from_secs(10));
+    assert_eq!(clocks.settlement(Some(first)), first + Duration::from_secs(10));
+    assert_eq!(android.frame_limit(), 10);
+    // Exercise the same protocol-count predicate used by both consuming/native
+    // preconditions and observe_final. These DATA flags certify no actual join.
+    for (context, limit) in [
+        (android, 10), (context(SavedCommandDomain::AndroidBuild), 8),
+        (context(SavedCommandDomain::OfflinePreflight), 2), (context(SavedCommandDomain::ProjectRecovery), 2),
+        (context(SavedCommandDomain::IOSArchive), ios_wire::MAX_FRAMES),
+        (Context::IOSArchive(ios_wire::tests::signed_context()), ios_wire::SIGNED_MAX_FRAMES),
+        (Context::IOSArchive(ios_wire::tests::recovery_context()), ios_wire::RECOVERY_MAX_FRAMES),
+    ] {
+        for frames in [0, 1, 2, 8, 9, 10, 11, limit, limit + 1] {
+            let end = ReadEnd { frames, eof: false, closed: false, failed: false, decoder_settled: true };
+            assert_eq!(end.protocol_settled_for(&context), (2..=limit).contains(&frames));
+        }
+        let mut end = ReadEnd { frames: limit, eof: false, closed: false, failed: true, decoder_settled: true };
+        assert!(!end.protocol_settled_for(&context));
+        end.failed = false; end.decoder_settled = false;
+        assert!(!end.protocol_settled_for(&context));
+    }
     for (context, work, cleanup, hard, signed, recovery) in [
         (ios_wire::tests::signed_context(), 5400, 5520, 5530, true, false),
         (ios_wire::tests::recovery_context(), 120, 240, 250, false, true),

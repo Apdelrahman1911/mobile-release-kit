@@ -130,6 +130,7 @@ def inert_operation(*, signature=False, document=None):
     # Actual operation type, deliberately fabricated fields: constructor/owner
     # predicates only. There is no input descriptor, invocation or native owner.
     operation = object.__new__(AndroidBuildOperation)
+    operation.signing = None
     operation.pid, operation.thread = os.getpid(), threading.current_thread()
     operation.guard = Guard()
     operation.source = types.SimpleNamespace(operation=operation, guard=operation.guard, active=True,
@@ -1238,6 +1239,39 @@ class MacToolAdmissionDataTests(unittest.TestCase):
         chosen["root_gradle_properties"] = f"org.gradle.java.home={tools.binding.root}/jdk\n".encode("ascii")
         with self.assertRaises(subject.AndroidToolError):
             subject._selection_data(chosen, tools.profile, root_module=False)
+
+    def test_signed_roles_use_protected_jdk_bounded_jvm_and_private_only_password_environment(self):
+        from mobile_release.android_build_signing import SignedAndroidOperation
+        from mobile_release._desktop_android_build_files import AndroidSigningCandidate
+        tools = mac_inert_tools(); operation = tools.operation
+        signing = object.__new__(SignedAndroidOperation); signing.operation, signing.guard = operation, operation.guard
+        operation.signing = signing
+        candidate = object.__new__(AndroidSigningCandidate)
+        candidate.files, candidate._native, candidate.integrity_checked = operation.files, True, True
+        candidate.native_path = Mock(return_value=WORK / "signing/app-release.aab")
+        operation.files.signing_candidate = candidate
+        home = f"{tools.binding.root}/{tools.profile.java_home}"
+        with patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+             patch.object(tools, "_work", return_value=WORK), \
+             patch.object(signing, "command_inputs", return_value=(WORK / "private-key", "inert-store-secret", "upload-key", "inert-key-secret")), \
+             patch.dict(os.environ, {"MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "ambient-secret", "JAVA_TOOL_OPTIONS": "ambient-jvm"}):
+            keytool = tools.keystore_input_command(); signer = tools.aab_sign_command(candidate)
+            self.assertEqual(keytool[0], f"{home}/bin/keytool"); self.assertEqual(signer[0], f"{home}/bin/jarsigner")
+            for argv in (keytool, signer):
+                self.assertIn("-J-Xmx1024m", argv); self.assertIn("-J-XX:MaxMetaspaceSize=512m", argv)
+                self.assertIn(f"-J-Djava.io.tmpdir={WORK}", argv)
+                self.assertIn("-storepass:env", argv); self.assertIn("-keypass:env", argv)
+                self.assertFalse(any("secret" in value or "ambient" in value for value in argv))
+            self.assertEqual(signer[-2:], (str(WORK / "signing/app-release.aab"), "upload-key"))
+            environment = operation.command_environment(); private_environment = signing.command_environment()
+            self.assertEqual(environment["MOBILE_RELEASE_REQUIRE_SIGNING"], "false")
+            self.assertNotIn("MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", environment)
+            self.assertNotIn("MOBILE_RELEASE_ANDROID_KEY_PASSWORD", environment)
+            self.assertEqual(private_environment["MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"], "inert-store-secret")
+            self.assertEqual(private_environment["MOBILE_RELEASE_ANDROID_KEY_PASSWORD"], "inert-key-secret")
+            self.assertNotIn("JAVA_TOOL_OPTIONS", private_environment)
+            candidate._native = False
+            with self.assertRaises(subject.AndroidToolError): tools.aab_sign_command(candidate)
 
     def test_mac_identity_flags_do_not_change_linux_tuple_or_accept_named_drift(self):
         original = observed(mode=stat.S_IFREG | 0o444)

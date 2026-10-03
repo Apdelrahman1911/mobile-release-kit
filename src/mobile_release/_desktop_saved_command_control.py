@@ -156,7 +156,7 @@ class _SavedCommandInput:
         # lends its role set or budget to a caller-supplied command descriptor.
         role = operation._pending
         if self.domain is SavedCommandDomain.AndroidBuild:
-            maxima = {"gradle": 2700, "bundletool": 60, "jarsigner": 120, "keytool": 30}
+            maxima = {"keytool-input": 30, "gradle": 2700, "aab-sign": 120, "bundletool": 60, "jarsigner": 120, "keytool": 30}
             self._require(role in maxima and capture is (role != "gradle"))
         elif self.domain is SavedCommandDomain.IOSArchive:
             maxima = {"xcode-version": 30, "ios-sdk": 30, "prepare": 600, "archive": 3600}
@@ -189,7 +189,7 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        material_phase = self.domain is SavedCommandDomain.IOSArchive and self.material_pending
+        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive) and self.material_pending
         active = self.active and not material_phase
         if active and self.buffer:
             self.stop()
@@ -235,12 +235,12 @@ class _SavedCommandInput:
             if position >= 0:
                 raw = bytes(self.buffer[:position + 1])
                 del self.buffer[:position + 1]
-                if self.domain is SavedCommandDomain.IOSArchive:
+                if self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
                     request = _protocol(self.domain).parse_request(raw)
                     self._request_material(request)
                 self.active = True  # Signed pending input remains inert until account/project admission.
                 self.guard.check()
-                if self.domain is not SavedCommandDomain.IOSArchive:
+                if self.domain not in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
                     request = _protocol(self.domain).parse_request(raw)
                 self.request_returned = True
                 return request

@@ -1013,6 +1013,7 @@ mod tests {
     fn loan_payload(kind: Kind, reference: StoredRef) -> Arc<Payload> {
         // Inert envelope/role DATA, never a usable certificate/profile/provider.
         let file = match kind {
+            Kind::AndroidKeystore => Some(vec![0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0]),
             Kind::AppleP12 => Some(vec![0x30,0x18,0x02,0x01,0x03,0x30,0x13,0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x07,0x01,
                 0xa0,0x06,0x04,0x04,b'D',b'A',b'T',b'A']),
             Kind::AppleProfile => Some(vec![0x30,0x2b,0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x07,0x02,0xa0,0x1e,
@@ -1022,6 +1023,7 @@ mod tests {
             _ => panic!("unsupported synthetic loan kind"),
         };
         let fields = match kind {
+            Kind::AndroidKeystore => json!({"storePassword":"synthetic-store-password","keyAlias":"synthetic-alias","keyPassword":"synthetic-key-password"}),
             Kind::AppleP12 => json!({"password":"synthetic-password"}),
             Kind::GoogleWif => json!({"provider":"p".repeat(4096),"serviceAccount":null}),
             Kind::ProjectReadToken => json!({"token":"synthetic-dependency-token"}),
@@ -1037,7 +1039,7 @@ mod tests {
     fn loan_slot(state: &mut DocumentState, kind: Kind, record: u8) -> (Slot, Assignment) {
         let session = state.vault.as_mut().unwrap();
         let mut row = descriptor_data(record, 1);
-        let presence = match kind { Kind::AppleP12 | Kind::ProjectReadToken => vec![true], Kind::GoogleWif => vec![true, false], _ => vec![] };
+        let presence = match kind { Kind::AndroidKeystore => vec![true, true, true], Kind::AppleP12 | Kind::ProjectReadToken => vec![true], Kind::GoogleWif => vec![true, false], _ => vec![] };
         row.authenticated.descriptor = format::Descriptor::new(kind, None, presence, kind.file().is_some()).unwrap();
         let reference = row.reference(session.identity.unwrap()); let key = row.key();
         session.rows.push(row);
@@ -1178,6 +1180,30 @@ mod tests {
         drop(retired); drop(slot); drop(state);
         assert!(observed.upgrade().is_some()); // Existing signer, not a vault-row refund.
         assert_eq!(borrowed.parts().unwrap()[1].1, b"synthetic-password");
+        drop(borrowed); assert!(observed.upgrade().is_none());
+    }
+    #[test]
+    fn android_vault_loan_retains_same_file_and_three_scalars_after_lock_invalidates_new_borrows() {
+        let mut state = loan_state();
+        Arc::get_mut(state.context.as_mut().unwrap()).unwrap().platform = Platform::Android;
+        let key = publish_loan_data(&mut state, Kind::AndroidKeystore, 3);
+        let native = state.context.as_ref().unwrap().clone();
+        let mut context = crate::android_build_protocol::tests::signed_context();
+        context.project_id = native.project_id.clone();
+        context.signing.as_mut().unwrap().assignments = state.assignments.iter().map(|assignment|
+            crate::android_build_protocol::SigningAssignment { kind: assignment.kind.name().into(), record_id: assignment.record_id.0.clone(),
+                record_revision: assignment.record_revision, context_revision: assignment.context_revision }).collect();
+        let borrowed = super::super::android_signing::borrow_material(&state, &context, 7, &native.project).unwrap();
+        assert!(borrowed.current(&state, 7, &native.project));
+        assert_eq!(borrowed.parts().unwrap().iter().map(|part| part.0).collect::<Vec<_>>(),
+            ["android-keystore", "store-password", "key-alias", "key-password"]);
+        let observed = Arc::downgrade(assigned_payload(&state, &key, Kind::AndroidKeystore, &native).unwrap());
+        invalidate_all(&mut state); request_release(&mut state, Instant::now());
+        assert!(!borrowed.current(&state, 7, &native.project));
+        assert!(super::super::android_signing::borrow_material(&state, &context, 7, &native.project).is_err());
+        let mut slot = state.slot.take().unwrap(); let retired = take_retirement(&mut state, &mut slot);
+        drop(retired); drop(slot); drop(state);
+        assert!(observed.upgrade().is_some()); assert_eq!(borrowed.parts().unwrap()[3].1, b"synthetic-key-password");
         drop(borrowed); assert!(observed.upgrade().is_none());
     }
     #[test]

@@ -93,7 +93,10 @@ class SavedCommandBindingTests(unittest.TestCase):
             control.SavedCommandDomain.OfflinePreflight, control.SavedCommandDomain.AndroidBuild,
             control.SavedCommandDomain.ProjectRecovery, control.SavedCommandDomain.IOSArchive})
         self.assertIs(PreflightInput.poll, AndroidBuildInput.poll)
-        self.assertIs(PreflightInput.close, AndroidBuildInput.close)
+        self.assertIs(PreflightInput.close, control._SavedCommandInput.close)
+        self.assertIsNot(AndroidBuildInput.close, control._SavedCommandInput.close)
+        # Android wraps the same original input close before private retirement.
+        # Both domains' actual close/return-loss/no-retry behavior is tested below.
         self.assertIs(PreflightEngine.run, AndroidEngine.run)
         self.assertIs(PreflightEngine.cleanup, AndroidEngine.cleanup)
         self.assertIs(PreflightEngine.close_output, AndroidEngine.close_output)

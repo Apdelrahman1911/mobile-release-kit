@@ -167,7 +167,7 @@ function array(value: unknown, maximum: number): unknown[] | null {
 function context(value: unknown): PrepareAndroidBuild | null {
   // Reuse the existing bounded saved-config/version/signature contract exactly.
   const safe = copyAndroidBuildRequest('prepare_android_build', value);
-  return safe === null ? null : safe as PrepareAndroidBuild;
+  return safe === null || Object.hasOwn(safe, 'signing') ? null : safe as PrepareAndroidBuild;
 }
 function sourceData(value: unknown, review: boolean): AndroidToolRegistrationSource[] | null {
   const rows = array(value, 3);

@@ -2,8 +2,9 @@
 
 **This is a limited, normal application preview, not the completed Desktop product.**
 It is not an observer/test executable. The package uses the ordinary
-`src/main.rs → shell::run()` application entrypoint with bundled UI assets,
-Mobile Release Kit core and Python runtime. You do not need to install Python,
+C entry → ordinary Rust `src/main.rs → shell::run()` route with bundled UI assets,
+Mobile Release Kit core and Python runtime. The nested payload keeps the existing
+product identity and app-data namespace; you still open the outer named app. You do not need to install Python,
 Rust, Node.js or the CLI to try the application.
 
 ## Before installing
@@ -42,14 +43,18 @@ No Applications shortcut, drag-install or relocation support is claimed.
 The package-export receipt is intentionally a **build/Installer/readback
 snapshot**: its automatic-open and normal-Quit fields remain unexecuted at that
 stage. The same hosted job subsequently runs one external XCTest scenario
-against the exact ordinary app, without instrumentation: launch/render, Cancel
-the genuine Quit sheet, navigate safely, then genuinely Quit. Look for the
+against the exact ordinary app, without instrumentation: launch through the
+entry, render, open/Cancel the real project picker, Cancel the genuine Quit sheet,
+navigate safely, then genuinely Quit. One permanent-gate observation checks
+exclusion while the app/picker is live and availability after observed Quit. Look for the
 separate exact-source `normal-ui/result.json` engineering evidence; only an
 actual successful test/count receipt establishes that narrow UI observation.
 A missing, failed or skipped check is not a pass.
 
-This check does not prove POSIX exit status or every worker's finality, Finder/
-Installer interaction, Gatekeeper or full feature journeys. Physical/manual
+This check does not prove POSIX exit status or every worker's finality, direct
+payload pre-main exclusion, Finder/Installer interaction, Gatekeeper or full
+feature journeys. The root maintenance gate is permanent; never remove or replace
+it as troubleshooting. Update/uninstall remains unavailable. Physical/manual
 observations of this exact package and the checklist below remain separate.
 
 ## What this source currently exposes on macOS

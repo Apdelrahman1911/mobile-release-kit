@@ -136,7 +136,7 @@ impl FixedSupportSlots {
         self.original.arm_acl_once(end, stop)?;
         // Exactly the runtime's existing protected installed-app proof. The
         // returned index is its SAME retained Contents edge, not Resources DATA.
-        let contents = self.original.protected_app_once(end, stop)?;
+        let contents = self.original.protected_app_once(end, stop)?.contents;
         let resources = self.original.open(Some(contents), "Resources", true, end, stop)?;
         let support = self.original.open(Some(resources), "android-support", true, end, stop)?;
         for index in [resources, support] {

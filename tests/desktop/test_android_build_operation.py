@@ -31,7 +31,7 @@ def directory(inode):
 def original(*, signature=False):
     binding = {"device": "1", "inode": "50", "mode": stat.S_IFDIR | 0o700, "uid": 123, "gid": 123}
     request = parse_request(json.dumps({
-        "protocol": "mrk-android-build/2", "operationId": "a" * 32, "ownerGeneration": "b" * 32,
+        "protocol": "mrk-android-build/3", "operationId": "a" * 32, "ownerGeneration": "b" * 32,
         "context": {"projectId": "inert", "draftRevision": 1, "baselineGeneration": 1,
                     "savedConfig": {"bytes": 1, "sha256": "c" * 64}, "platform": "android",
                     "operation": "android-build-inspect", "savedVersion": {

@@ -10,9 +10,9 @@ import { ReleaseVersionController } from '../src/releaseVersion.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
-import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_EVENT, ANDROID_BUILD_LIMITATIONS,
+import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_SIGNED_CONSENT, ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_EVENT, ANDROID_BUILD_LIMITATIONS,
   ANDROID_BUILD_SCOPE, ANDROID_BUILD_TOOLCHAIN_PROFILE } from '../src/androidBuildProtocol.ts';
-import { ANDROID_TOOL_SERVICE_CONSENT } from '../src/androidToolRegistration.ts';
+import { ANDROID_TOOL_SERVICE_CONSENT, ANDROID_TOOL_REGISTRATION_CONSENT, parseAndroidToolRegistrationStatus } from '../src/androidToolRegistration.ts';
 import { parseAndroidToolchainCatalogStatus } from '../src/androidToolchainCatalogProtocol.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
@@ -41,7 +41,7 @@ function observation(project, patch = {}) {
   return { schemaVersion: 2, source: project.snapshot.config.data.version.source, version: { name: '1.2.3', build: 42 },
     savedConfig: clone(project.savedConfigContent), savedVersion: clone(VERSION), observationScope: 'single-request-non-atomic', assurance: clone(assurance), ...patch };
 }
-const context = (request) => ({ ...clone(request), platform: 'android', operation: 'android-build-inspect' });
+const context = (request) => ({ ...clone(request), platform: 'android', operation: request.signing ? 'android-build-sign' : 'android-build-inspect' });
 const operation = (input, patch = {}) => ({ operationId: OP, ownerGeneration: OWNER, context: context(input), phase: 'awaiting-consent',
   intentUsable: true, outcome: null, reason: 'none', stage: null, activity: null, disposition: null, result: null, ...patch });
 const status = (revision = 0, op = null, availability = 'available') => ({ schemaVersion: 1, statusRevision: revision, availability, operation: op });
@@ -65,6 +65,23 @@ function completed(op, selection = { module: ':app', variant: 'release', applica
 const TOOL_A = { instance: '1'.repeat(32), ownerUid: 501, catalogGeneration: 1,
   recordSha256: '2'.repeat(64), inventorySha256: '3'.repeat(64), osProviderSha256: '4'.repeat(64) };
 const TOOL_B = { ...TOOL_A, instance: '5'.repeat(32), recordSha256: '6'.repeat(64) };
+function signingAssets() {
+  const scope = { platform: 'android', stage: 'candidate', purpose: 'signing' };
+  return { mode: 'native', scope, contextCurrent: true, busy: null, updatingContext: false, observing: false, observationFailed: false,
+    blocked: false, error: null, previewDeadline: null, entryGeneration: 1, selectionKind: null, cancelledOperationId: null,
+    originPending: false, intent: null, reviewReady: false, status: { schemaVersion: 3, statusRevision: 1, mode: 'session', persistence: null,
+      capability: { available: true, reason: 'none' }, modes: { session: { available: true, reason: 'none' }, encrypted: { available: false, reason: 'unsupported-platform' } },
+      context: { ...scope, projectId: 'p1', revision: 2 }, operation: null,
+      records: [{ recordId: OTHER, revision: 1, kind: 'android-keystore', availability: 'assigned', storage: 'session', label: null, payloadState: 'assessed' }],
+      assignments: [{ kind: 'android-keystore', recordId: OTHER, recordRevision: 1, contextRevision: 2, availability: 'available' }] } };
+}
+async function savedSigningPolicy(h) {
+  await h.ready;
+  h.dispatch({ type: 'snapshot-start', projectId: 'p1', requestId: 2 });
+  h.dispatch({ type: 'snapshot-done', projectId: 'p1', requestId: 2,
+    snapshot: snapshot({ uploadCertificateSha256: 'Ab'.repeat(32) }), observedAt: 2 });
+  await h.readVersion();
+}
 const toolEntry = (selection, verified) => ({ instance: selection.instance, occupants: 1,
   status: verified ? 'verified-this-session' : 'recovery-required',
   versions: { jdkVendor: 'Example', jdkVersion: '17.0.12', gradleVersion: '8.10', agpVersion: '8.7',
@@ -84,11 +101,12 @@ function readyCatalog(patch = {}) {
   assert.ok(parseAndroidToolchainCatalogStatus(value), 'Synthetic catalog must satisfy the current closed row/session contract');
   return value;
 }
-function harness(t, { initial = status(), initialCatalog = catalogStatus(), initialService = null, sourceSelections = [], listenGate = null, completeVersion = true } = {}) {
+function harness(t, { initial = status(), initialCatalog = catalogStatus(), initialService = null, initialRegistration = null, initialAssets = null, sourceSelections = [], listenGate = null, completeVersion = true } = {}) {
   let state = workspace(), registry = clone(initial), catalogRegistry = clone(initialCatalog), clock = 10, other = null, versionOverride;
   const calls = [], reads = [], subscriptions = [], versionCalls = [], order = [], catalogCalls = [], catalogSubscriptions = [];
-  const serviceCalls = [], serviceSubscriptions = [];
-  let serviceRegistry = clone(initialService);
+  const serviceCalls = [], serviceSubscriptions = [], registrationCalls = [], registrationSubscriptions = [];
+  let serviceRegistry = clone(initialService), registrationRegistry = clone(initialRegistration);
+  let assets = clone(initialAssets);
   const selected = () => state.selectedId ? state.projects[state.selectedId] : null;
   const version = new ReleaseVersionController(selected);
   version.setConnection({ mode: 'native', observeReleaseVersion: (projectId) => {
@@ -113,8 +131,8 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), init
     startAndroidBuild: (input) => { const call = { kind: 'start', input: clone(input), ...deferred() }; calls.push(call); return call.promise; },
     cancelAndroidBuild: (operationId, ownerGeneration) => { const call = { kind: 'cancel', input: { operationId, ownerGeneration }, ...deferred() }; calls.push(call); return call.promise; },
   };
-  if (initialService !== null) {
-    const serviceRequest = (kind, input) => { const call = { kind, input: clone(input), ...deferred() }; serviceCalls.push(call); return call.promise; };
+  const serviceRequest = (kind, input) => { const call = { kind, input: clone(input), ...deferred() }; serviceCalls.push(call); return call.promise; };
+  if (initialService !== null || initialRegistration !== null) {
     Object.assign(api, {
       androidToolSourcesStatus: async () => ({ schemaVersion: 1, statusRevision: sourceSelections.length ? 1 : 0,
         sourceGeneration: sourceSelections.length ? 1 : 0, projectId: sourceSelections.length ? 'p1' : null,
@@ -124,6 +142,10 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), init
       chooseAndroidToolSource: (input) => serviceRequest('unexpected-picker', input),
       cancelAndroidToolSource: (input) => serviceRequest('unexpected-picker-cancel', input),
       subscribeAndroidToolSources: async () => () => {},
+    });
+  }
+  if (initialService !== null) {
+    Object.assign(api, {
       androidToolServiceStatus: async () => clone(serviceRegistry),
       checkAndroidToolService: (input) => serviceRequest('check', input),
       requestAndroidToolServiceRegistration: (input) => serviceRequest('request-registration', input),
@@ -134,8 +156,21 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), init
       },
     });
   }
+  if (initialRegistration !== null) {
+    const registrationRequest = (kind, input) => { const call = { kind, input: clone(input), ...deferred() }; registrationCalls.push(call); return call.promise; };
+    Object.assign(api, {
+      androidToolRegistrationStatus: async () => clone(registrationRegistry),
+      inspectAndroidToolSources: (input) => registrationRequest('inspect', input),
+      registerAndroidToolSources: (input) => registrationRequest('register', input),
+      cancelAndroidToolRegistration: (input) => registrationRequest('cancel', input),
+      subscribeAndroidToolRegistration: async (callback) => {
+        const row = { callback, closed: false }; registrationSubscriptions.push(row); return () => { row.closed = true; };
+      },
+    });
+  }
   const controller = new AndroidBuildController({ selectedProject: selected,
     releaseVersion: () => versionOverride === undefined ? version.getSnapshot() : versionOverride,
+    assetSession: () => assets,
     otherOperationReason: () => typeof other === 'function' ? other() : other, now: () => clock });
   // Same synchronous lifetime wiring required in App; not a late React effect.
   const unsubscribeVersion = version.subscribe(controller.syncReleaseVersion);
@@ -148,7 +183,12 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), init
   const ready = connected.then(async () => { if (completeVersion) await readVersion(); });
   t.after(() => { unsubscribeVersion(); controller.dispose(); version.dispose(); });
   return { api, controller, version, calls, reads, subscriptions, versionCalls, order, ready, readVersion, catalogCalls, catalogSubscriptions,
-    serviceCalls, serviceSubscriptions,
+    serviceCalls, serviceSubscriptions, registrationCalls, registrationSubscriptions,
+    replyRegistration(call, value) {
+      assert.ok(parseAndroidToolRegistrationStatus(value), 'Synthetic registration must satisfy the closed status contract');
+      registrationRegistry = clone(value); call.resolve(clone(value));
+    },
+    setAssets(value) { assets = clone(value); controller.syncAssetSession(); },
     emitService(value) { serviceRegistry = clone(value); serviceSubscriptions.at(-1)?.callback(clone(value)); },
     replyService(call, value) { serviceRegistry = clone(value); call.resolve(clone(value)); },
     emitCatalog(value) { catalogRegistry = clone(value); catalogSubscriptions.at(-1)?.callback(clone(value)); },
@@ -429,7 +469,9 @@ test('component shares native-terminal-only output with Artifacts and provides r
   for (const help of [androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp]) {
     for (const key of ['label', 'what', 'why', 'where', 'format', 'failure', 'requiredWhen']) assert.ok(help[key].length > 12, `${help.label}.${key}`);
   }
-  assert.match(androidBuildInputHelp.what, /observe-v2/); assert.match(androidBuildOutputHelp.failure, /Complete may contain FAIL/);
+  assert.match(androidBuildInputHelp.what, /observe-v2/);
+  assert.match(androidBuildOutputHelp.failure, /Ordinary inspection completion may contain FAIL/);
+  assert.match(androidBuildOutputHelp.failure, /local signing requires all final checks to pass/);
   assert.match(androidBuildCancelHelp.failure, /Unknown cleanup is sticky/);
 });
 
@@ -677,4 +719,108 @@ test('foreign service action and terminal regression cannot replace the retained
   g.emitService({ ...active, statusRevision: finished.statusRevision + 1 });
   assert.equal(g.state.integrityFailed, true); assert.equal(g.state.toolService.phase, 'complete');
   assert.equal(g.serviceCalls.length, 1); // A regressed event cannot create a new Cancel target.
+});
+
+test('signing stays default-off, requires current assets and forces final signature validation with separate one-use consent', async (t) => {
+  const h = harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }), initialAssets: signingAssets() });
+  await savedSigningPolicy(h);
+  assert.equal(h.state.buildMode, 'unsigned'); assert.equal(h.state.verifyUploadSignature, false);
+  h.controller.setBuildMode('signed'); h.controller.setVerifyUploadSignature(false);
+  assert.equal(h.controller.prepareReason(), null);
+  const op = await reviewed(h);
+  assert.equal(op.context.operation, 'android-build-sign');
+  assert.equal(op.context.artifactValidation.mode, 'upload-signature');
+  assert.deepEqual(op.context.signing.assignments, [{ kind: 'android-keystore', recordId: OTHER, recordRevision: 1, contextRevision: 2 }]);
+  const { call, done } = start(h, op);
+  assert.equal(call.input.consentVersion, ANDROID_BUILD_SIGNED_CONSENT);
+  h.controller.setBuildMode('unsigned'); assert.equal(h.state.buildMode, 'signed');
+  await h.controller.start(op.operationId, op.ownerGeneration);
+  assert.equal(h.calls.filter(row => row.kind === 'start').length, 1);
+  h.reply(call, status(2, terminal(op))); await done;
+  assert.equal(h.state.consent, null);
+});
+
+test('current signing assignment changes retire consent synchronously rather than donating a different record to Start', async (t) => {
+  const h = harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }), initialAssets: signingAssets() });
+  await savedSigningPolicy(h); h.controller.setBuildMode('signed'); const op = await reviewed(h);
+  h.controller.setAcknowledged(op.operationId, op.ownerGeneration, true);
+  const changed = signingAssets(); changed.status.records[0].revision++; changed.status.assignments[0].recordRevision++;
+  h.setAssets(changed);
+  assert.equal(h.state.consent, null);
+  await h.controller.start(op.operationId, op.ownerGeneration); await flush();
+  assert.equal(h.calls.filter(row => row.kind === 'start').length, 0);
+  const cancel = h.calls.find(row => row.kind === 'cancel'); assert.ok(cancel);
+  h.reply(cancel, status(2, terminal(op, 'cancelled', 'context-changed'))); await flush();
+  for (const mutate of [x => { x.contextCurrent = false; }, x => { x.status.assignments[0].availability = 'unavailable'; },
+    x => { x.status.context.projectId = 'other'; }, x => { x.status.mode = 'encrypted'; x.status.persistence = { state: 'locked', keyAccess: 'locked', reason: 'none' }; }]) {
+    const blocked = signingAssets(); mutate(blocked); h.setAssets(blocked);
+    assert.ok(h.state.signing.issue); assert.equal(h.state.signing.selection, null);
+  }
+});
+
+test('signed-mode service preparation remains unsigned and material-free even before credentials or fingerprint exist', async (t) => {
+  const h = harness(t, { initialService: serviceIdle() }); await h.ready;
+  h.controller.setBuildMode('signed'); assert.ok(h.controller.prepareReason());
+  assert.equal(h.controller.serviceActionReason(), null);
+  const checking = h.controller.checkAndroidToolService(), call = h.serviceCalls[0];
+  assert.equal(call.kind, 'check'); assert.equal(call.input.context.signing, undefined);
+  assert.deepEqual(call.input.context.artifactValidation, { mode: 'structure-and-version', uploadCertificateSha256: null });
+  h.replyService(call, serviceComplete(servicePending(call))); await checking;
+  assert.equal(h.calls.length, 0);
+});
+
+
+test('source setup uses its unsigned context through inspection and explicit copy consent, independently of signed build prerequisites', async (t) => {
+  for (const mode of ['unsigned', 'unsigned-upload-signature', 'signed']) {
+    const h = harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }),
+      initialRegistration: { schemaVersion: 1, statusRevision: 0, registrationGeneration: 0,
+        availability: 'available', prerequisite: 'ready', phase: 'idle', reason: 'not-inspected',
+        operation: null, review: null, report: null },
+      sourceSelections: ['jdk', 'sdk', 'gradle'].map(role => ({ role, displayName: 'Example-' + role })) });
+    if (mode === 'unsigned-upload-signature') await savedSigningPolicy(h); else await h.ready;
+    h.controller.setBuildMode(mode === 'signed' ? 'signed' : 'unsigned');
+    h.controller.setVerifyUploadSignature(mode === 'unsigned-upload-signature');
+    if (mode === 'signed') {
+      assert.equal(h.project.snapshot.config.data.android.uploadCertificateSha256, undefined);
+      assert.equal(h.state.signing.selection, null); assert.ok(h.controller.prepareReason());
+      await h.controller.prepare(); assert.equal(h.calls.length, 0);
+    }
+    assert.equal(h.controller.inspectToolSourcesReason(), null, mode);
+    const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
+    assert.equal(inspect?.kind, 'inspect', mode + ': inspection must actually reach the adapter');
+    assert.equal(Object.hasOwn(inspect.input.context, 'signing'), false);
+    assert.deepEqual(inspect.input.context.artifactValidation, mode === 'unsigned-upload-signature'
+      ? { mode: 'upload-signature', uploadCertificateSha256: 'Ab'.repeat(32) }
+      : { mode: 'structure-and-version', uploadCertificateSha256: null });
+    const op = { operationId: OP, registrationGeneration: 1, sourceGeneration: 1,
+      kind: 'inspection', context: clone(inspect.input.context) };
+    const review = { schemaVersion: 1, statusRevision: 1, registrationGeneration: 1,
+      availability: 'available', prerequisite: 'ready', phase: 'review', reason: 'none', operation: op,
+      review: { reviewId: OTHER, sourceGeneration: 1, context: clone(inspect.input.context),
+        consentVersion: ANDROID_TOOL_REGISTRATION_CONSENT, licenseAcknowledgmentRequired: true,
+        sources: ['jdk', 'sdk', 'gradle'].map(role => ({ role, version: '17.0.1', logicalBytes: 1,
+          files: 1, entries: 1, aliases: 0, complete: true, compatibility: 'compatible' })) }, report: null };
+    h.replyRegistration(inspect, review); await inspecting;
+    assert.equal(h.state.registrationConsent?.acknowledged, false, mode + ': finalized review must remain usable');
+    assert.ok(h.controller.registerToolSourcesReason());
+    await h.controller.registerToolSources(OP, 1, OTHER); assert.equal(h.registrationCalls.length, 1);
+    h.controller.setRegistrationAcknowledged(OP, 1, OTHER, true);
+    assert.equal(h.controller.registerToolSourcesReason(), null);
+    const registering = h.controller.registerToolSources(OP, 1, OTHER), copy = h.registrationCalls[1];
+    assert.equal(copy?.kind, 'register'); assert.deepEqual(copy.input.context, inspect.input.context);
+    assert.equal(copy.input.consentVersion, ANDROID_TOOL_REGISTRATION_CONSENT);
+    assert.equal(copy.input.licenseAcknowledged, true); assert.equal(copy.input.reviewId, OTHER);
+    assert.equal(h.state.registrationConsent, null);
+    // Settle the fake adapter with a refusal, not a fictitious protected copy.
+    h.replyRegistration(copy, { ...review, statusRevision: 2, registrationGeneration: 2,
+      phase: 'refused', reason: 'registration-refused', review: null,
+      operation: { ...op, operationId: OWNER, registrationGeneration: 2, kind: 'registration' } });
+    await registering;
+    assert.equal(h.state.integrityFailed, false); assert.equal(h.state.registrationPending, null);
+    assert.equal(h.state.toolRegistration.phase, 'refused'); assert.equal(h.state.registrationConsent, null);
+    if (mode === 'signed') { assert.ok(h.controller.prepareReason()); await h.controller.prepare(); }
+    assert.equal(h.calls.length, 0); assert.equal(h.serviceCalls.length, 0);
+    h.controller.dispose();
+    assert.ok(h.registrationSubscriptions.every(row => row.closed));
+  }
 });
