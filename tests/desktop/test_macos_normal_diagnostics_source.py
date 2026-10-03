@@ -22,7 +22,8 @@ METHOD = "testSyntheticProjectBuildToolDiagnostics"
 SCOPE = "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"
 SOURCE_METHODS = ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
  'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result']
-ORIGINAL_SWIFT_SHA256 = "376817b2c3617e8324bff0dbdc9929f63ed5ed395286e6d919f23de291c0f631"
+# Baseline includes the independently reviewed M2-A entry/payload, gate and picker integration.
+ORIGINAL_SWIFT_SHA256 = "9657c21883ba8494679929fa2d6b36eaeba70b04a0fef4c814f196ef0afad2d1"
 DIAGNOSTICS_INSERTION_SHA256 = "7b5aeb18210ac3862362e59602adb024040b7232dee12a64e98a534ffc42b44a"
 DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; observations are non-atomic.\n'
 DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
@@ -34,7 +35,8 @@ RENDERER_QUERY_ORIGINAL = '        let renderer = try unique(window.webViews, "o
 RENDERER_QUERY_DIAGNOSTICS_SHA256 = 'dea59830e6aef376217856dc9779acffb9634aa5fd2d260847db0b876cb7a0c4'
 ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
 ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
-BLOCK_PINS = {'normal_ui_result': 'cad0ea48888071634eac7834632e4057e71ae482f93814974c8d5c6501629657',
+# The normal result also binds M2-A entry identity without claiming full M2/maintenance readiness.
+BLOCK_PINS = {'normal_ui_result': 'e1ed6c1e52188096063c173524857fc829dbf61cdab5e2aab57767de839af6c9',
  'normal_project_ui_test': '161d12ffaada989d866466ec297dd17ed64de10ac6b84bc9cc1973e76d7d07fb',
  'normal_project_ui_result': '20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d',
  'normal_persistence_ui_test': '01bded1ba9c28bff4d9ce7a224665cc8e2a1bcb1327a2f097da4bde50fec390e',
