@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""One fixed hosted LS/payload-absent startup diagnostic, not M2 feasibility.
+"""One fixed hosted full-payload boundary diagnostic, not M2 qualification.
 
 Imports are DATA-only. Native main reuses the reviewed Aqua owner loader and
 the existing original command owner. NSWorkspace app exit status remains unknown.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -41,7 +42,10 @@ REQUIRED_PAYLOAD = PAYLOAD_FLAGS - {flag for pair in PAYLOAD_IDENTITY_PAIRS for 
 OBSERVER_FLAGS = frozenset("launchRequested launchReferenceReturned launchErrorReported referencePIDMatchesPayload referenceBundleIsEntry referenceBundleIsPayload referenceExecutableIsEntry referenceExecutableIsPayload exclusiveBlockedWhilePayloadAlive normalQuitRequestSent terminationObserved exclusiveAvailableAfterTermination rootCloseReturned timely observationComplete workDeadlineFailed".split())
 COUNTS = frozenset(("completionCount", "completionBodyDoneCount", "completionHandoffCount"))
 FAILURES = frozenset("none launch-completion payload-record payload-terminated-before-observation original-reference-or-shared-bridge observation-deadline quit-record normal-quit-or-last-holder native-exception cleanup-native-exception root-close final-deadline".split())
-DIAGNOSTIC_RECORDS = ("entry-gate-refused.json", "entry-failed-exec.json")
+FULL_PAYLOAD_CASE = "ls-full-payload"
+MAIN_FLAGS = ("entryPidPreserved", "gateInheritedWithoutCLOEXEC", "gateMarkedCLOEXEC", "executableIsPayload")
+DIAGNOSTIC_RECORDS = ("entry-gate-refused.json", "entry-failed-exec.json", "payload-main.json")
+FIXED_RECORDS = (*DIAGNOSTIC_RECORDS, "entry-busy.json", "payload-start.json", "payload-quit.json")
 
 
 class Refused(Exception):
@@ -146,7 +150,7 @@ def gate_refusal(value, source):
     fields = ("case", "phase", "selectedReturnCode", "originalRootDescriptor",
               "gateOpenDescriptor", "gateOpenErrno", "gateMatchAccepted", "rejectedGateCloseReturned")
     record(value, source, (), fields)
-    need(value["case"] == "ls-payload-absent" and value["phase"] == "entry-gate-admission"
+    need(value["case"] == FULL_PAYLOAD_CASE and value["phase"] == "entry-gate-admission"
          and type(value["selectedReturnCode"]) is int and value["selectedReturnCode"] == 66
          and type(value["originalRootDescriptor"]) is int and 0 <= value["originalRootDescriptor"] < 2**31
          and type(value["gateOpenDescriptor"]) is int and -1 <= value["gateOpenDescriptor"] < 2**31,
@@ -162,33 +166,72 @@ def gate_refusal(value, source):
     return value
 
 
-def startup_diagnostic(native, original_status, gate, failed, source):
-    """Keep expected diagnostic observation separate from full feasibility."""
+def returned_exec(value, source):
+    """The immediately latched errno is DATA, not an observed app exit."""
+    record(value, source, ("execReturnedENOENT", "originalGateStillHeld"), ("case", "phase", "execErrno"))
+    need(value["case"] == FULL_PAYLOAD_CASE and value["phase"] == "entry-exec-returned"
+         and type(value["execErrno"]) is int and 0 < value["execErrno"] < 2**31
+         and value["execReturnedENOENT"] is (value["execErrno"] == errno.ENOENT), "returned-exec-shape")
+    return value
+
+
+def payload_main(value, source):
+    """One already-admitted-root main outcome; no missing-witness inference."""
+    record(value, source, (), ("case", "phase", "selectedReturnCode", "gateMatchAccepted", *MAIN_FLAGS))
+    need(value["case"] == FULL_PAYLOAD_CASE and type(value["phase"]) is str
+         and value["phase"] in ("main-gate-refused", "main-handoff-refused", "main-admitted-before-appkit"),
+         "payload-main-phase")
+    if value["phase"] == "main-gate-refused":
+        need(type(value["selectedReturnCode"]) is int and value["selectedReturnCode"] == 65
+             and value["gateMatchAccepted"] is False and all(value[k] is None for k in MAIN_FLAGS),
+             "payload-main-gate-shape")
+    else:
+        need(value["gateMatchAccepted"] is True and all(type(value[k]) is bool for k in MAIN_FLAGS),
+             "payload-main-handoff-shape")
+        accepted = all(value[k] for k in MAIN_FLAGS[:3])
+        need((value["phase"] == "main-handoff-refused"
+              and type(value["selectedReturnCode"]) is int and value["selectedReturnCode"] == 66 and not accepted)
+             or (value["phase"] == "main-admitted-before-appkit"
+                 and value["selectedReturnCode"] is None and accepted), "payload-main-original-predicate")
+    return value
+
+
+def boundary_diagnostic(native, original_status, gate, failed, main, source):
+    """Known phase DATA can survive an incomplete diagnostic; no pre-main guess."""
     need(type(original_status) is int and 0 <= original_status <= 255, "diagnostic-owner-status")
     if gate is not None:
         gate_refusal(gate, source)
     if failed is not None:
-        record(failed, source, ("execReturnedENOENT", "originalGateStillHeld"))
-    need(gate is None or failed is None, "diagnostic-conflicting-outcomes")
-    outcome = "unresolved"
-    branch_accepted = False
+        returned_exec(failed, source)
+    if main is not None:
+        payload_main(main, source)
+    need(sum(value is not None for value in (gate, failed, main)) <= 1, "diagnostic-conflicting-outcomes")
+    admitted = main is not None and main["phase"] == "main-admitted-before-appkit"
+    if gate is not None or failed is not None or (main is not None and not admitted):
+        need(native["payloadStart"] is None and native["payloadQuit"] is None, "diagnostic-impossible-phase-records")
+    if admitted and native["payloadStart"] is not None:
+        need(all(main[k] is native["payloadStart"][k] for k in MAIN_FLAGS), "diagnostic-main-start-facts")
+    outcome, branch_accepted = "unresolved", False
     if gate is not None:
-        outcome = "entry-gate-refused"
-        branch_accepted = gate["rejectedGateCloseReturned"] is not False
-    elif failed is not None and failed["execReturnedENOENT"] and failed["originalGateStillHeld"]:
-        outcome, branch_accepted = "entry-reached-exec-enoent", True
+        outcome, branch_accepted = "entry-gate-refused", gate["rejectedGateCloseReturned"] is not False
+    elif failed is not None:
+        outcome, branch_accepted = "entry-exec-returned", failed["originalGateStillHeld"]
+    elif main is not None:
+        outcome, branch_accepted = main["phase"], True
     true_flags = ("launchRequested", "launchReferenceReturned", "terminationObserved",
                   "exclusiveAvailableAfterTermination", "rootCloseReturned", "timely")
     false_flags = ("launchErrorReported", "workDeadlineFailed", "normalQuitRequestSent",
                    "observationComplete", "referencePIDMatchesPayload", "exclusiveBlockedWhilePayloadAlive",
                    *(flag for pair in REFERENCE_IDENTITY_PAIRS for flag in pair))
-    observed = (branch_accepted and original_status == 1
-                and native["firstFailure"] == "payload-terminated-before-observation"
-                and all(native[k] for k in true_flags) and not any(native[k] for k in false_flags)
-                and all(native[k] == 1 for k in COUNTS)
-                and native["payloadStart"] is None and native["payloadQuit"] is None)
-    return {"case": "ls-payload-absent", "entryOutcome": outcome,
-            "entryGateRefusal": gate, "failedExec": failed, "expectedControlObserved": observed}
+    early = (original_status == 1 and native["firstFailure"] == "payload-terminated-before-observation"
+             and all(native[k] for k in true_flags) and not any(native[k] for k in false_flags)
+             and all(native[k] == 1 for k in COUNTS)
+             and native["payloadStart"] is None and native["payloadQuit"] is None)
+    complete = admitted and original_status == 0 and supported_observation(native)
+    if complete:
+        outcome = "full-payload-observed"
+    return {"case": FULL_PAYLOAD_CASE, "boundaryOutcome": outcome, "entryGateRefusal": gate,
+            "failedExec": failed, "payloadMain": main, "expectedBoundaryObserved": branch_accepted and (early or complete)}
 
 
 def require_absent(path, reason):
@@ -325,7 +368,7 @@ def tree(root):
 
 def main():
     root = Path(__file__).absolute().parents[2]
-    report = {"schemaVersion": 1, "scope": "m2-entry-startup-diagnostic-only", "feasibilityObserved": False,
+    report = {"schemaVersion": 1, "scope": "m2-full-payload-boundary-diagnostic-only", "feasibilityObserved": False,
               "installedProductQualified": False, "tauriQualified": False, "credentialQualified": False,
               "maintenanceAvailable": False, "diagnosticComplete": False, "diagnostic": None,
               "commands": [], "native": None,
@@ -457,30 +500,35 @@ def main():
         report["entryPreMainClosure"] = {"onlyLinkedImage": "/usr/lib/libSystem.B.dylib", "dylinker": "/usr/lib/dyld",
                                          "noRpath": True, "noModInitFunc": True, "inspectedOriginalCommands": True}
         appkit = ["-fobjc-arc", "-fblocks", "-framework", "AppKit", "-framework", "Foundation"]
+        payload = bundle("Mobile Release Kit.app", "payload", payload_id)
+        payload_exe = payload / "Contents/MacOS/payload"
+        zero("compile-payload", compiler + common + appkit + [str(root / NATIVE / "payload.m"), "-o", str(payload_exe)], 60)
+        zero("sign-payload", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", "--options", "runtime", str(payload)])
+        zero("verify-payload-signature", ["/usr/bin/codesign", "--verify", "--strict", str(payload)])
         observer = work / "build/observe"
         zero("compile-observer", compiler + common + appkit + [str(root / NATIVE / "observe.m"), "-o", str(observer)], 60)
-        bundle_pins = {"entry": tree(entry), "observer": read_file(observer, 8 * 1024 * 1024)[1]}
+        bundle_pins = {"entry": tree(entry), "payload": tree(payload), "observer": read_file(observer, 8 * 1024 * 1024)[1]}
         report["bundleFiles"] = {label: {k: {"bytes": v["bytes"], "sha256": v["sha256"]} for k, v in entries.items()}
                                   for label, entries in bundle_pins.items() if label != "observer"}
-        # This fresh namespace has exactly one entry invocation: the LS call.
-        # Do not create the payload or consume diagnostic names in direct cases.
-        for name in ("Mobile Release Kit.app", *DIAGNOSTIC_RECORDS, "entry-busy.json",
-                     "payload-start.json", "payload-quit.json"):
-            require_absent(work / name, "startup-diagnostic-name-occupied")
+        # Fresh full payload, one entry invocation through LS, no direct controls.
+        # No previous publication or incomplete staging file may seed this call.
+        for name in FIXED_RECORDS:
+            require_absent(work / name, "boundary-diagnostic-name-occupied")
+            require_absent(work / ("." + name + ".inflight"), "boundary-diagnostic-staging-occupied")
         observed = call("one-launchservices-observation", [str(observer)], 60)
         # AppKit may emit OS diagnostics. Preserve their bound/hash above, not
         # raw text or invented evidence; only the strict stdout contract counts.
         report["native"] = native_data(observed.stdout, sha)
-        need(tree(entry) == bundle_pins["entry"]
+        need(tree(entry) == bundle_pins["entry"] and tree(payload) == bundle_pins["payload"]
              and read_file(observer, 8 * 1024 * 1024)[1] == bundle_pins["observer"], "native-inputs-changed")
-        require_absent(work / "Mobile Release Kit.app", "startup-diagnostic-payload-appeared")
         gate = read_diagnostic(work / "entry-gate-refused.json", uid, gid)
         failed = read_diagnostic(work / "entry-failed-exec.json", uid, gid)
-        report["diagnostic"] = startup_diagnostic(report["native"], observed.returncode, gate, failed, sha)
+        main_record = read_diagnostic(work / "payload-main.json", uid, gid)
+        report["diagnostic"] = boundary_diagnostic(report["native"], observed.returncode, gate, failed, main_record, sha)
         check_sources()
         report["sourcePrePostMatched"] = snapshot(root, pins) == before
-        diagnostic_complete = report["diagnostic"]["expectedControlObserved"] and report["sourcePrePostMatched"]
-        report["stage"] = "startup-diagnostic-observed"
+        diagnostic_complete = report["diagnostic"]["expectedBoundaryObserved"] and report["sourcePrePostMatched"]
+        report["stage"] = "full-payload-boundary-observed"
     except BaseException as error:
         report["error"] = str(error) if type(error) is Refused else "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "adapter-or-owner-error"
         report["originalCallReturned"] = last_returned
@@ -522,7 +570,7 @@ def main():
         except BaseException:
             return 1
     else:
-        print(json.dumps({"schemaVersion": 1, "scope": "m2-entry-startup-diagnostic-only",
+        print(json.dumps({"schemaVersion": 1, "scope": "m2-full-payload-boundary-diagnostic-only",
                           "diagnosticComplete": False, "feasibilityObserved": False, "stage": report["stage"],
                           "error": report["error"], "fixtureAdmission": report.get("fixtureAdmission")}, sort_keys=True))
     return 0 if diagnostic_complete else 1

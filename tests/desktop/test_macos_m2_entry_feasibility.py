@@ -64,61 +64,80 @@ class M2EntryDataTests(unittest.TestCase):
         return value
 
     def gate_value(self):
-        return {"schemaVersion": 1, "source": self.SOURCE, "case": "ls-payload-absent",
+        return {"schemaVersion": 1, "source": self.SOURCE, "case": "ls-full-payload",
                 "phase": "entry-gate-admission", "selectedReturnCode": 66,
                 "originalRootDescriptor": 0, "gateOpenDescriptor": 1,
                 "gateOpenErrno": None, "gateMatchAccepted": False,
                 "rejectedGateCloseReturned": True}
 
     def failed_value(self):
-        return {"schemaVersion": 1, "source": self.SOURCE,
+        return {"schemaVersion": 1, "source": self.SOURCE, "case": "ls-full-payload",
+                "phase": "entry-exec-returned", "execErrno": self.adapter.errno.ENOENT,
                 "execReturnedENOENT": True, "originalGateStillHeld": True}
 
-    def test_startup_diagnostic_distinguishes_gate_and_failed_exec_without_feasibility(self):
+    def main_value(self, phase="main-admitted-before-appkit"):
+        value = {"schemaVersion": 1, "source": self.SOURCE, "case": "ls-full-payload",
+                 "phase": phase, "selectedReturnCode": None, "gateMatchAccepted": True,
+                 **dict.fromkeys(self.adapter.MAIN_FLAGS, True)}
+        if phase == "main-gate-refused":
+            value.update(selectedReturnCode=65, gateMatchAccepted=False,
+                         **dict.fromkeys(self.adapter.MAIN_FLAGS, None))
+        elif phase == "main-handoff-refused":
+            value.update(selectedReturnCode=66, entryPidPreserved=False)
+        return value
+
+    def test_full_payload_boundary_distinguishes_gate_exec_and_main_without_feasibility(self):
         native = self.parse(self.early_value())
         for gate in (self.gate_value(),
                      dict(self.gate_value(), originalRootDescriptor=3, gateOpenDescriptor=4),
                      dict(self.gate_value(), gateOpenDescriptor=-1, gateOpenErrno=24,
                           gateMatchAccepted=None, rejectedGateCloseReturned=None)):
             with self.subTest(gate=gate):
-                value = self.adapter.startup_diagnostic(native, 1, gate, None, self.SOURCE)
-                self.assertEqual(value["entryOutcome"], "entry-gate-refused")
+                value = self.adapter.boundary_diagnostic(native, 1, gate, None, None, self.SOURCE)
+                self.assertEqual(value["boundaryOutcome"], "entry-gate-refused")
                 self.assertEqual(value["entryGateRefusal"], gate)
                 self.assertIsNone(value["failedExec"])
-                self.assertTrue(value["expectedControlObserved"])
-        failed = self.failed_value()
-        value = self.adapter.startup_diagnostic(native, 1, None, failed, self.SOURCE)
-        self.assertEqual(value["entryOutcome"], "entry-reached-exec-enoent")
-        self.assertEqual(value["failedExec"], failed)
-        self.assertTrue(value["expectedControlObserved"])
+                self.assertIsNone(value["payloadMain"])
+                self.assertTrue(value["expectedBoundaryObserved"])
+        for code in (1, self.adapter.errno.ENOENT, 13, 86, 2**31 - 1):
+            failed = dict(self.failed_value(), execErrno=code, execReturnedENOENT=code == self.adapter.errno.ENOENT)
+            value = self.adapter.boundary_diagnostic(native, 1, None, failed, None, self.SOURCE)
+            self.assertEqual(value["boundaryOutcome"], "entry-exec-returned")
+            self.assertEqual(value["failedExec"], failed)
+            self.assertTrue(value["expectedBoundaryObserved"])
+        for phase in ("main-gate-refused", "main-handoff-refused", "main-admitted-before-appkit"):
+            main = self.main_value(phase)
+            value = self.adapter.boundary_diagnostic(native, 1, None, None, main, self.SOURCE)
+            self.assertEqual(value["boundaryOutcome"], phase)
+            self.assertEqual(value["payloadMain"], main)
+            self.assertTrue(value["expectedBoundaryObserved"])
         self.assertFalse(self.adapter.supported_observation(native))
         self.assertIsNone(native["originalAppExitStatus"])
         self.assertEqual(native["allWorkerFinality"], "not-established-by-NSRunningApplication")
         self.assertEqual(native["firstFailure"], "payload-terminated-before-observation")
 
-    def test_startup_diagnostic_rejects_conflict_and_cannot_complete_unknown_late_or_close_failure(self):
+    def test_full_payload_boundary_rejects_conflict_unknown_late_or_close_failure(self):
         native = self.parse(self.early_value())
-        value = self.adapter.startup_diagnostic(native, 1, None, None, self.SOURCE)
-        self.assertEqual(value["entryOutcome"], "unresolved")
-        self.assertFalse(value["expectedControlObserved"])
-        with self.assertRaisesRegex(self.adapter.Refused, "diagnostic-conflicting-outcomes"):
-            self.adapter.startup_diagnostic(native, 1, self.gate_value(), self.failed_value(), self.SOURCE)
-        gate = dict(self.gate_value(), rejectedGateCloseReturned=False)
-        value = self.adapter.startup_diagnostic(native, 1, gate, None, self.SOURCE)
-        self.assertEqual(value["entryOutcome"], "entry-gate-refused")
-        self.assertFalse(value["expectedControlObserved"])
-        for flag in ("execReturnedENOENT", "originalGateStillHeld"):
-            failed = self.failed_value()
-            failed[flag] = False
-            value = self.adapter.startup_diagnostic(native, 1, None, failed, self.SOURCE)
-            self.assertEqual(value["entryOutcome"], "unresolved")
-            self.assertFalse(value["expectedControlObserved"])
+        value = self.adapter.boundary_diagnostic(native, 1, None, None, None, self.SOURCE)
+        self.assertEqual(value["boundaryOutcome"], "unresolved")
+        self.assertFalse(value["expectedBoundaryObserved"])
+        for gate, failed, main in ((self.gate_value(), self.failed_value(), None),
+                                   (self.gate_value(), None, self.main_value()),
+                                   (None, self.failed_value(), self.main_value()),
+                                   (self.gate_value(), self.failed_value(), self.main_value())):
+            with self.assertRaisesRegex(self.adapter.Refused, "diagnostic-conflicting-outcomes"):
+                self.adapter.boundary_diagnostic(native, 1, gate, failed, main, self.SOURCE)
+        for gate, failed in ((dict(self.gate_value(), rejectedGateCloseReturned=False), None),
+                             (None, dict(self.failed_value(), originalGateStillHeld=False))):
+            value = self.adapter.boundary_diagnostic(native, 1, gate, failed, None, self.SOURCE)
+            self.assertFalse(value["expectedBoundaryObserved"])
+            self.assertNotEqual(value["boundaryOutcome"], "unresolved")
         for status in (0, 64, 255):
-            self.assertFalse(self.adapter.startup_diagnostic(
-                native, status, self.gate_value(), None, self.SOURCE)["expectedControlObserved"])
+            self.assertFalse(self.adapter.boundary_diagnostic(
+                native, status, self.gate_value(), None, None, self.SOURCE)["expectedBoundaryObserved"])
         for status in (True, -1, 256, "1"):
             with self.assertRaisesRegex(self.adapter.Refused, "diagnostic-owner-status"):
-                self.adapter.startup_diagnostic(native, status, self.gate_value(), None, self.SOURCE)
+                self.adapter.boundary_diagnostic(native, status, self.gate_value(), None, None, self.SOURCE)
         changes = (("timely", False), ("workDeadlineFailed", True), ("rootCloseReturned", False),
                    ("terminationObserved", False), ("exclusiveAvailableAfterTermination", False),
                    ("launchRequested", False), ("launchReferenceReturned", False),
@@ -126,15 +145,14 @@ class M2EntryDataTests(unittest.TestCase):
                    ("referencePIDMatchesPayload", True), ("exclusiveBlockedWhilePayloadAlive", True),
                    ("referenceExecutableIsEntry", True), ("observationComplete", True),
                    ("firstFailure", "root-close"), ("completionCount", 2),
-                   ("completionBodyDoneCount", 0), ("completionHandoffCount", 2),
-                   ("payloadStart", self.value()["payloadStart"]), ("payloadQuit", self.value()["payloadQuit"]))
+                   ("completionBodyDoneCount", 0), ("completionHandoffCount", 2))
         for key, changed in changes:
             value = self.early_value()
             value[key] = changed
             with self.subTest(key=key):
-                result = self.adapter.startup_diagnostic(
-                    self.parse(value), 1, self.gate_value(), None, self.SOURCE)
-                self.assertFalse(result["expectedControlObserved"])
+                result = self.adapter.boundary_diagnostic(
+                    self.parse(value), 1, self.gate_value(), None, None, self.SOURCE)
+                self.assertFalse(result["expectedBoundaryObserved"])
 
     def test_gate_refusal_shape_preserves_original_open_and_consuming_close_outcomes(self):
         changes = (("schemaVersion", True), ("source", "f" * 40), ("case", "direct"),
@@ -230,15 +248,152 @@ class M2EntryDataTests(unittest.TestCase):
         main = source[source.index("def main():"):]
         launch = 'observed = call("one-launchservices-observation", [str(observer)], 60)'
         self.assertEqual(main.count(launch), 1)
-        self.assertLess(main.index('for name in ("Mobile Release Kit.app", *DIAGNOSTIC_RECORDS'), main.index(launch))
-        self.assertNotIn('bundle("Mobile Release Kit.app"', main)
+        self.assertLess(main.index('for name in FIXED_RECORDS:'), main.index(launch))
+        self.assertIn('require_absent(work / ("." + name + ".inflight"),', main)
+        self.assertEqual(main.count('bundle("Mobile Release Kit.app"'), 1)
+        for role in ("compile-payload", "sign-payload", "verify-payload-signature"):
+            self.assertEqual(main.count('zero("' + role + '"'), 1)
+            self.assertLess(main.index('zero("' + role + '"'), main.index(launch))
+        self.assertIn('"payload": tree(payload)', main)
+        self.assertIn('tree(payload) == bundle_pins["payload"]', main)
         self.assertNotIn('call("exclusive-refusal"', main)
         self.assertNotIn('call("real-failed-exec"', main)
         self.assertNotIn('report["feasibilityObserved"] =', main)
-        self.assertIn('"feasibilityObserved": False', main)
+        for field in ("feasibilityObserved", "installedProductQualified", "tauriQualified",
+                      "credentialQualified", "maintenanceAvailable"):
+            self.assertIn('"' + field + '": False', main)
+        self.assertIn('"scope": "m2-full-payload-boundary-diagnostic-only"', main)
         self.assertIn('report["diagnosticComplete"] = diagnostic_complete', main)
         self.assertIn('return 0 if diagnostic_complete else 1', main)
         self.assertIn('result = owner.run_owned(argv, environ=environment, cwd=work, timeout=timeout,', main)
+        self.assertIn('native.get("observationComplete") and native.get("terminationObserved")', main)
+        self.assertNotIn('native.get("diagnosticComplete")', main)
+
+
+    def test_returned_exec_errno_is_strict_and_not_an_exit_receipt(self):
+        self.assertEqual(self.adapter.returned_exec(self.failed_value(), self.SOURCE), self.failed_value())
+        changes = (("schemaVersion", True), ("source", "f" * 40), ("case", "ls-payload-absent"),
+                   ("phase", "payload-main"), ("execErrno", True), ("execErrno", 0), ("execErrno", -1),
+                   ("execErrno", 2**31), ("execErrno", "2"), ("execErrno", None),
+                   ("execReturnedENOENT", False), ("execReturnedENOENT", 1),
+                   ("originalGateStillHeld", 1), ("extra", 0))
+        for key, changed in changes:
+            with self.subTest(key=key, changed=changed), self.assertRaises(self.adapter.Refused):
+                self.adapter.returned_exec(dict(self.failed_value(), **{key: changed}), self.SOURCE)
+        for key in self.failed_value():
+            value = self.failed_value()
+            del value[key]
+            with self.subTest(missing=key), self.assertRaises(self.adapter.Refused):
+                self.adapter.returned_exec(value, self.SOURCE)
+        failed = dict(self.failed_value(), originalGateStillHeld=False)
+        self.assertEqual(self.adapter.returned_exec(failed, self.SOURCE), failed)
+
+    def test_payload_main_union_requires_exact_original_predicate_facts(self):
+        for phase in ("main-gate-refused", "main-handoff-refused", "main-admitted-before-appkit"):
+            value = self.main_value(phase)
+            self.assertEqual(self.adapter.payload_main(value, self.SOURCE), value)
+            for key in value:
+                changed = dict(value)
+                del changed[key]
+                with self.subTest(phase=phase, missing=key), self.assertRaises(self.adapter.Refused):
+                    self.adapter.payload_main(changed, self.SOURCE)
+            for key, bad in (("schemaVersion", True), ("source", "f" * 40), ("case", "ls-payload-absent"),
+                             ("phase", "pre-main"), ("phase", []), ("extra", False),
+                             ("selectedReturnCode", True), ("selectedReturnCode", 64)):
+                with self.subTest(phase=phase, key=key), self.assertRaises(self.adapter.Refused):
+                    self.adapter.payload_main(dict(value, **{key: bad}), self.SOURCE)
+        gate = self.main_value("main-gate-refused")
+        for key in ("gateMatchAccepted", *self.adapter.MAIN_FLAGS):
+            with self.subTest(key=key), self.assertRaises(self.adapter.Refused):
+                self.adapter.payload_main(dict(gate, **{key: True}), self.SOURCE)
+        for phase in ("main-handoff-refused", "main-admitted-before-appkit"):
+            value = self.main_value(phase)
+            for key in self.adapter.MAIN_FLAGS:
+                for bad in (None, 1, "true"):
+                    with self.subTest(phase=phase, key=key, bad=bad), self.assertRaises(self.adapter.Refused):
+                        self.adapter.payload_main(dict(value, **{key: bad}), self.SOURCE)
+            with self.assertRaises(self.adapter.Refused):
+                self.adapter.payload_main(dict(value, gateMatchAccepted=False), self.SOURCE)
+        with self.assertRaises(self.adapter.Refused):
+            self.adapter.payload_main(dict(self.main_value("main-handoff-refused"), entryPidPreserved=True), self.SOURCE)
+        for key in self.adapter.MAIN_FLAGS[:3]:
+            with self.subTest(key=key), self.assertRaises(self.adapter.Refused):
+                self.adapter.payload_main(dict(self.main_value(), **{key: False}), self.SOURCE)
+        # The original main predicate does not select66 on the executable flag.
+        value = dict(self.main_value(), executableIsPayload=False)
+        self.assertEqual(self.adapter.payload_main(value, self.SOURCE), value)
+
+    def test_boundary_correspondence_keeps_full_payload_evidence_separate(self):
+        full = self.parse(self.value())
+        main = self.main_value()
+        value = self.adapter.boundary_diagnostic(full, 0, None, None, main, self.SOURCE)
+        self.assertEqual(value["boundaryOutcome"], "full-payload-observed")
+        self.assertTrue(value["expectedBoundaryObserved"])
+        self.assertIsNone(full["originalAppExitStatus"])
+        for gate, failed, main in ((self.gate_value(), None, None), (None, self.failed_value(), None),
+                                   (None, None, self.main_value("main-gate-refused")),
+                                   (None, None, self.main_value("main-handoff-refused"))):
+            with self.assertRaisesRegex(self.adapter.Refused, "diagnostic-impossible-phase-records"):
+                self.adapter.boundary_diagnostic(full, 0, gate, failed, main, self.SOURCE)
+        for key in self.adapter.MAIN_FLAGS:
+            changed = self.value()
+            changed["payloadStart"][key] = False
+            with self.subTest(key=key), self.assertRaisesRegex(self.adapter.Refused, "diagnostic-main-start-facts"):
+                self.adapter.boundary_diagnostic(self.parse(changed), 0, None, None, self.main_value(), self.SOURCE)
+        for status in (1, 64, 255):
+            value = self.adapter.boundary_diagnostic(full, status, None, None, self.main_value(), self.SOURCE)
+            self.assertFalse(value["expectedBoundaryObserved"])
+
+    def test_missing_main_and_late_phase_data_never_become_a_premain_diagnosis(self):
+        for native, status in ((self.parse(self.value()), 0), (self.parse(self.early_value()), 1)):
+            value = self.adapter.boundary_diagnostic(native, status, None, None, None, self.SOURCE)
+            self.assertEqual(value["boundaryOutcome"], "unresolved")
+            self.assertFalse(value["expectedBoundaryObserved"])
+        for key, changed in (("timely", False), ("workDeadlineFailed", True), ("rootCloseReturned", False),
+                             ("terminationObserved", False), ("exclusiveAvailableAfterTermination", False),
+                             ("completionCount", 2), ("completionBodyDoneCount", 0)):
+            native = self.early_value()
+            native[key] = changed
+            result = self.adapter.boundary_diagnostic(self.parse(native), 1, None, None, self.main_value(), self.SOURCE)
+            self.assertEqual(result["boundaryOutcome"], "main-admitted-before-appkit")
+            self.assertFalse(result["expectedBoundaryObserved"])
+        path = Path("/private/tmp/mrk-m2-inert-root/payload-main.json")
+        with patch.object(Path, "lstat", side_effect=FileNotFoundError), \
+                patch.object(self.adapter, "read_file") as reader:
+            self.assertIsNone(self.adapter.read_diagnostic(path, 501, 20))
+            reader.assert_not_called()
+
+    def test_payload_main_sink_preserves_original_pool_guards_and_refusals(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "desktop/native/macos-m2-entry/payload.m").read_text()
+        helper = source[source.index("static void publish_main_outcome("):source.index("int main(int argc, char **argv)")]
+        main = source[source.index("int main(int argc, char **argv)"):]
+        for forbidden in ("mrk_root(", "mrk_open_gate(", "mrk_gate_matches(", "mrk_exclusive_probe(",
+                          "flock(", "fcntl(", "open(", "openat(", "NSApplication", "@autoreleasepool"):
+            self.assertNotIn(forbidden, helper)
+        self.assertEqual(helper.count("mrk_record("), 1)
+        self.assertIn('(void)mrk_record(root_original, "payload-main.json", record);', helper)
+        self.assertEqual(main.count("mrk_root("), 1)
+        self.assertEqual(main.count("mrk_gate_matches("), 1)
+        self.assertEqual(main.count("publish_main_outcome("), 3)
+        order = [main.index(part) for part in (
+            "@autoreleasepool {", "if (argc != 3 || !mrk_account()", "root_original = mrk_root();",
+            "if (root_original < 0) return 65;", "int gate_matched = mrk_gate_matches(",
+            "publish_main_outcome(MAIN_GATE_REFUSED);", "entry_pid_preserved = getpid() == original_pid;",
+            "inherited_without_cloexec = fcntl(", "marked_cloexec = !fcntl(",
+            "executable_is_payload = !_NSGetExecutablePath(", "if (!entry_pid_preserved ||",
+            "publish_main_outcome(MAIN_HANDOFF_REFUSED);", "publish_main_outcome(MAIN_ADMITTED);",
+            "NSApplication *app = NSApplication.sharedApplication;")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("publish_main_outcome(MAIN_GATE_REFUSED);\n            return 65;", main)
+        self.assertIn("publish_main_outcome(MAIN_HANDOFF_REFUSED);\n            return 66;", main)
+        for forbidden in ("constructor", "dup(", "dup2(", "F_DUPFD", "finishLaunching]"):
+            self.assertNotIn(forbidden, source)
+        entry = (root / "desktop/native/macos-m2-entry/entry.c").read_text()
+        returned = entry[entry.index("    execve("):]
+        self.assertLess(returned.index("int exec_error = errno;"), returned.index("root = mrk_root();"))
+        self.assertIn('"execErrno\\":%d,', returned)
+        self.assertIn("_exit(exec_error == ENOENT && held && written && root_closed ? 76 : 71);", returned)
 
     @contextmanager
     def created_root(self, gid=0):

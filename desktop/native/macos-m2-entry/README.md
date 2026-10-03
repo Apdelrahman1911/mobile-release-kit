@@ -1,203 +1,223 @@
-# Synthetic fixed-entry startup diagnostic — not M2 feasibility
+# Synthetic full-payload boundary diagnostic — not M2 qualification
 
-This is one narrow, credential-free LaunchServices startup diagnostic. It does
-not implement production M2, installation maintenance or a successful GUI flow.
-The current source deliberately leaves the payload absent, preserving the same
-entry guards and original LaunchServices observer. A completed diagnostic can
-expose a rejected original gate descriptor or show that this LS invocation
-reached the real ENOENT exec; it cannot establish full-payload startup.
+This is one credential-free LaunchServices diagnostic using the real synthetic
+AppKit payload. It does not implement production M2, Tauri, installation
+maintenance or a qualified shipping GUI flow. The existing workflow bytes and
+route are unchanged; the result scope is
+"m2-full-payload-boundary-diagnostic-only".
 
-## Exact scope and original fixture
+The source must be separately reviewed and its original execution admitted.
+No full-payload run of this successor is claimed here. A diagnostic exit0 means
+only the strict bounded observation completed; feasibilityObserved,
+installedProductQualified, tauriQualified, credentialQualified and
+maintenanceAvailable remain false even if the synthetic GUI observation works.
 
-Only the reviewed `desktop-macos-m2-entry.yml` push route is admitted: this
-repository's `verify/desktop-macos-m2-entry` branch, exact detached source,
-GitHub-hosted macOS26 ARM64 and original unprivileged `runner` account. No manual
-command, application, diagnostic mode or directory selector is provided. Root
-must separately admit actual source and execution before publishing that route.
+## Evidence that motivates this successor
 
-The adapter creates one fresh, private, run-bound `/private/tmp/mrk-macos-m2-entry-*`
-namespace. `Launch Mobile Release Kit.app` and the deliberately absent
-`Mobile Release Kit.app` are synthetic fixture names, not the installed product.
-Compile-time constants fix source, paths, bundle IDs, UID/GID and the gate's
-original device/inode. The test gate is runner-owned0444; this is not a claim
-of production root-owned path authentication.
+The earlier b9319bbc13b467b03ba9338668dda54224bb0737 run37088152428/1 completed
+its original direct entry controls and full synthetic payload construction,
+then observed termination before an accepted payload-start record. Its real
+application exit/signal, returned exec errno and early payload main phase were
+not captured. Unmeasured identity flags on that path were not observed identity
+mismatches. Neither a low-descriptor correction nor a missing finishLaunching
+call is an established cause.
 
-Darwin assigns new directories and files their parent's group, which need not
-be the runner's primary group. Before creating children or running a tool, the
-adapter exclusively creates its private0700 root, opens that original without
-following links, and checks named/FD identity, owner and mode. Only on that
-just-created original may it select the runner's primary group using
-`fchown(fd, -1, gid)`; it rechecks identity/ownership/mode and closes each original
-once. This is initial creation, never permission repair or adoption. Collision,
-failed selection/proof or close error refuses. The empty single-link0444 gate
-must independently match the account before the first tool call. Bounded root/
-gate stat facts are diagnostic DATA, not ownership/finality receipts.
+The fresh payload-absent diagnostic on
+a399458782f4a27dfe41f08a8a1351b7837689b1, run37093573976/1, completed with
+entry-reached-exec-enoent, execReturnedENOENT:true and originalGateStillHeld:true,
+and no gate-refusal record. Result7338B SHA256:
+e33b484609cc49d4322847f793800f00ef90db9da0e4a7966086faddcc428928.
+That invocation reached its actual execve with the original shared gate held.
+Its observer status1/early termination was the intended missing-payload
+control result, not a new full-payload failure diagnosis.
 
-The entry's `otool` checks still require only system libSystem/dyld and reject
-extra linked images, RPATH, dynamic-loader environment commands, routine commands
-and initializer sections. Signing and strict verification remain unchanged.
-The same reviewed Aqua loader and original `run_owned` controller bound each
-compiler, codesign, inspection and observer call. Clean tool environment, exact
-source/gate pre/post checks, one-shot closes and original command statuses remain.
+This successor restores only the real synthetic payload construction and adds
+bounded phase DATA. It does not reinterpret either historical result as a
+successful full-payload launch or as proof of a repaired cause.
 
-## Why this is a diagnostic successor
+## Fixed route and original fixture
 
-The original994188a run37084951661/1 returned65 at entry root admission, before
-any lock observation. Its artifact had no root stat fields; the particular
-historical stat predicate is unobserved. Darwin parent-group inheritance caused
-a confirmed fixture preparation assumption to be corrected, without relabelling
-that historical failure.
+Only the reviewed desktop-macos-m2-entry.yml push route is admitted: the
+verify/desktop-macos-m2-entry branch, exact detached source, GitHub-hosted
+macOS26 ARM64 and original unprivileged runner account. No command, mode,
+application, directory or diagnostic-case selector is added.
 
-On sourceb9319bbc13b467b03ba9338668dda54224bb0737, run37088152428/1, root/group
-preparation and all13 pre-observer commands passed. Owned-direct EX refusal75
-and real failed exec76 passed, followed by signed AppKit-payload construction.
-One LS call returned one original NSRunningApplication but it was observed
-terminated before an accepted payload-start. Observer1 reported
-`payload-terminated-before-observation`; no normal Quit was requested, termination
-and EX-after were observed, and deadlines held. App exit/signal, early C predicate,
-exec errno and AppKit phase were not captured. The identity booleans on that path
-were not evaluated, rather than observed mismatches. Its source-confirmation
-workflow step was skipped; adapter source pre/post equality is separate evidence.
+The adapter exclusively creates one private source/run/attempt-bound namespace
+under /private/tmp. The fixed entry and payload bundle names are synthetic,
+not installed-product paths. Compile-time constants bind source, paths, bundle
+IDs, original UID/GID and the newly created gate's device/inode. The runner-owned
+0444 gate is not a production root-owned path authentication claim.
 
-Those direct cases already occupied `entry-busy.json` and
-`entry-failed-exec.json`. They were not GUI evidence. The entry also rejected a
-gate FD below3, but the helper consumed a rejecting allocated FD before returning
--1. No actual LS descriptor number was observed; FD0/1/2 is a possible class,
-not a diagnosed historical cause. This successor avoids another contaminated
-marker and adds only that missing failure-path scalar observation.
+Existing original root preparation is unchanged: admit the private parent,
+create0700 exclusively, bind its named/FD identity and owner, select its initial
+group on that original if necessary, recheck, and consume each descriptor once.
+This is initial creation, never permission repair or collision reuse. Failed
+admission, group selection, identity or close refuses.
 
-## One fresh LS/payload-absent control
+The exact native call roster is twelve:
 
-There are no preceding direct invocations and no payload creation. After entry
-compile/sign/verification/inspection and unchanged observer compilation, the
-adapter requires payload and all record names absent before exactly one LS call.
-This is nine bounded native commands, not a product/Cargo build or matrix. The
-fresh namespace and source/gate/header binding identify the single synthetic
-invocation that may publish each exclusive record; no old marker is reused.
+1. compiler-version
+2. sdk-version
+3. compile-entry
+4. sign-entry
+5. verify-entry-signature
+6. entry-linked-images
+7. entry-load-commands
+8. compile-payload
+9. sign-payload
+10. verify-payload-signature
+11. compile-observer
+12. one-launchservices-observation
 
-The entry still checks argc/account, admitted root, original gate and SH before
-one fixed exec. Its capture-capable gate helper performs exactly the original
-open, one matching predicate and, on rejection, one consuming close. It copies
-only scalar outcomes in memory: allocatedFD before close, errno only from a
-failed open, match result and rejected-close result. Existing callers use the
-same wrapper without capture. There are no extra diagnostic opens, repeated
-predicates, descriptor normalization or successful-phase writes.
+There is one entry invocation through the original NSWorkspace observer.
+No direct EX/ENOENT controls precede it, and no launch retry follows it. Payload
+compile/sign/strict-verify uses the earlier full-payload construction commands,
+not a new compiler or framework configuration. Both bundles and observer are
+pinned before and after the one call. Every fixed record and its exclusive
+inflight staging name must be absent before launch.
 
-Only after the original `gate < 0` verdict has irrevocably selected return66 may
-the entry attempt `entry-gate-refused.json`, using its already admitted retained
-root. No writer outcome changes66 or allows continued execution. Earliest
-argc/account/root refusals remain unchanged, with no new sink or root readmission.
-SH refusal75/67, flags68, formatting69, root-close70 and real returned-exec76/71
-remain unchanged. The original SH is never closed/unlocked early. The existing
-root reopen following successful pre-exec close and returned exec is not a new
-reopen after a refused admission.
+Existing clean command environment, isolated owner loader, source/gate
+pre/post checks, bounded capture and actual original command returns remain.
+Entry inspection still requires only libSystem/dyld, with no RPATH, initializer,
+routine or dynamic-loader environment command. That entry-specific fact says
+nothing about system AppKit/Objective-C initialization in the full payload.
 
-The gate record has a closed fixed source/case/phase, selectedReturnCode66 and
-original numeric open/match/close facts. Open failure uses descriptor-1, positive
-errno and null unevaluated match/close; allocated rejection has null errno,
-matchfalse and an actual close boolean. False close is retained as an error and
-cannot complete the diagnostic. No argv/environment/private strings or OS log
-transcripts are exported. `selectedReturnCode` is not an observed app exit status;
-a readable record also does not establish the writer's final fsync return.
+## Entry: failures only, no success-path instrumentation
 
-If entry instead passes these original gates, its one real exec encounters the
-absent payload. The unchanged failed-exec record can report ENOENT and SH still
-held through an independent EX probe. No pre-exec marker substitutes for the
-actual returned exec. The unchanged source retains SH until kernel process exit.
+Entry keeps its original argc/account/root/gate guards and exactly one gate
+open and matching predicate. Gate-refusal DATA is published only after the
+original branch selected66, through the already-admitted root. The selected
+return stays66 regardless of diagnostic write success. The record's case is
+now fixed to "ls-full-payload"; it is never an observed process exit66.
 
-## Observer and report: expected failure is not feasibility
+On the successful entry path the original SH, CLOEXEC transition, argument
+formatting, root close and one fixed execve remain unchanged. No diagnostic
+open, normalization, duplicated descriptor, extra lock or pre-exec marker is
+inserted there.
 
-`observe.m` is unchanged. It still makes exactly one NSWorkspace launch with a
-new instance requested, substitution/prompts disabled and the original configured
-environment. Only its original returned app object is available for normal
-termination; there is no PID lookup, second reference, force termination or retry.
-Concurrent callback body counts and main-queue handoff remain separate facts.
+If the real execve returns, its errno is latched immediately, before root
+readmission or any diagnostic helper. The existing failure record now includes:
 
-Original work and final deadlines stay30s and45s, within the unchanged60s owner
-bound. Work admission is irreversible and checked after setup/before launch,
-after the event pump, after record IO and after final native observations. Late
-completion may identify the original for cleanup but never renew work.
+- case "ls-full-payload" and phase "entry-exec-returned";
+- execErrno as the actual latched positive integer;
+- execReturnedENOENT, consistent with that errno;
+- originalGateStillHeld from the original identity/CLOEXEC/independent EX probe.
 
-The expected observer result is still **1**, with firstFailure exactly early
-termination, one callback/body/handoff, no NSError, no accepted payload records,
-no normal-Quit request, terminated/EX-after/root-close/timely true, and no work
-deadline failure. PID/bundle/executable comparison flags remain unmeasuredfalse
-on this early path. The adapter preserves this original result, not a fictitious
-normal-Quit success.
+Its original selected exit76-or71 logic is unchanged. It still keeps the
+original SH open until kernel process exit; there is no early gate close or
+unlock. A returned-exec record proves that call returned with that errno, not
+an app exit/signal, a loader explanation or all-worker finality. In particular,
+a non-ENOENT errno is retained, not replaced with a guessed failure cause.
 
-After that original owner call returns, the adapter checks entry/observer/source/
-gate originals and payload absence, then reads only the two fixed possible
-records. The existing bounded nofollow reader proves stable original FD/name,
-regular0400, account UID/GID, single link and a4096-byte ceiling. Only initial
-lstat ENOENT means missing; disappearance or proof failure after seeing a name
-is an error, not absence. Both records present are contradictory and refuse.
+## Payload: one already-admitted-root main outcome
 
-The nested diagnostic reports one of:
+The original payload order is preserved: enter its autorelease pool; validate
+argc/account/canonical inherited arguments; open and admit the original root;
+evaluate the original gate predicate once; obtain original PID/CLOEXEC and
+executable facts; select the existing refusal or continue to NSApplication.
+No constructor or C-main wrapper is added. Root admission is not moved earlier
+than the pool, and no failed admission is retried for a diagnostic sink.
 
-- `entry-gate-refused`: valid actual gate-admission outcome; a false consuming
-  close remains incomplete, never a passing cleanup.
-- `entry-reached-exec-enoent`: fresh failed-exec record with both ENOENT and
-  original-SH-held true, with no gate-refusal record.
-- `unresolved`: missing/noncorresponding branch evidence; never a completed
-  diagnostic merely because the LS object terminated.
+One bounded best-effort payload-main.json can be published through that
+already-admitted root. Its closed outcome union is:
 
-`expectedControlObserved` describes the bounded branch/observer facts. The
-separate top-level `diagnosticComplete` additionally requires source/postcondition
-checks and no cleanup error. A zero adapter status means only this explicitly
-named diagnostic completed. `feasibilityObserved`, `installedProductQualified`,
-`tauriQualified`, `credentialQualified` and `maintenanceAvailable` always remain
-false. Incomplete/contradictory/late/close/source failures keep completionfalse
-and return nonzero while retaining available bounded facts.
+- main-gate-refused: the original gate predicate rejected, selectedReturnCode65,
+  gateMatchAccepted:false, and later handoff fields null.
+- main-handoff-refused: the original PID/CLOEXEC predicate rejected,
+  selectedReturnCode66, gateMatchAccepted:true and original measured booleans.
+- main-admitted-before-appkit: the original C predicates accepted,
+  selectedReturnCode null, immediately before the first explicit
+  NSApplication.sharedApplication call.
 
-`originalAppExitStatus` staysnull and `allWorkerFinality` remains
-`not-established-by-NSRunningApplication`. Termination, callback counts and JSON
-records are not app exit, OS-thread-join, all-worker-finality or ownership receipts.
-A positive ENOENT control does not qualify successful exec, AppKit or Tauri. A
-new gate observation does not retroactively prove b9319bb failed for that reason.
-Any actual correction or further discriminant requires its own reviewed source.
+The phase name means that explicit call boundary. It does NOT mean AppKit,
+dyld or the Objective-C runtime has not already performed pre-main or pool
+initialization. The existing autorelease pool is deliberately still first.
 
-## Preservation, cleanup and verification
+Recorded handoff fields are entryPidPreserved, gateInheritedWithoutCLOEXEC,
+gateMarkedCLOEXEC and executableIsPayload. The original main refusal predicate
+uses only the first three. A false executable flag therefore remains truthful
+DATA, not a newly invented refusal66. These fields do not add a SH-lock probe;
+the original later payload/observer checks retain their separate meaning.
 
-Existing cleanup conditions are unchanged. Full native `observationComplete`
-remainsfalse for this diagnostic, so diagnostic completion alone authorizes no
-new removal. Synthetic bundles, app-tmp, gate/records, build/tmp and unknown state
-remain for disposable hosted-job retirement. There is no large Cargo build/cache.
-Every original compiler/controller call still joins; no shared cache, other task
-process or unknown application state is removed. App temporary data remains
-separate from controller tmp. The report says what was actually retained.
+The helper uses plain bounded C formatting and the existing exclusive writer.
+It does not open/readmit a root, repeat a gate predicate, call a framework,
+change CLOEXEC or inspect/convert a lock. Refusal65/66 is irrevocable before the
+publication and unchanged even if writing fails. Successful main flow also
+does not depend on publication success. No alternate sink or second attempt
+is allowed. Earlier argc/account/argument/root failures remain without a safe
+external marker. Existing AppKit delegate, payload-start and payload-quit
+bodies are unchanged, including the original run/activation/normal-Quit flow.
 
-Only bounded normalized JSON is uploaded. OS stderr is bounded and hashed, not
-exported as a transcript or used as an application receipt. Public-source compiler
-error excerpts remain bounded when relevant. No project, signing input, Keychain,
-Store mutation, installation, production release or availability gate is involved.
+## Strict parsing and honest unresolved boundary
 
-The existing small local DATA/inert-FS module now covers diagnostic shape,
-contradiction, missing/late/close failure, fixed readers and source ordering.
-Mocks do not provide native FD/LaunchServices evidence. The original observer
-parser/deadline contracts stay covered; real execution belongs to the reviewed
-hosted Mac route after local source/control acceptance. This source contains no
-fresh native result and does not claim the diagnostic has run successfully.
+Each record is private bounded DATA, not a self-authenticating process receipt.
+Existing readers require nofollow regular single-link0400 files, admitted
+account UID/GID, bounded bytes, stable original FD/name full9 and a consuming
+close. Only initial ENOENT is absence; an occupant, read failure, disappearing
+original, malformed/duplicate/nonfinite/extra JSON field or changed source
+refuses. A readable marker does not prove its writer's last fsync/close.
 
-## Apple contracts and remaining scope
+The new parser requires exact source/case/phase, strict integers rather than
+booleans, consistent errno/ENOENT, and exact main-predicate facts/nulls. Entry
+gate refusal, returned exec and payload-main records are mutually exclusive.
+Payload-start/quit cannot coexist with an entry or main-refusal record. If a
+main-admitted record and payload-start are both present, their original static
+PID/CLOEXEC/executable facts must agree.
 
-Apple documents additional LS arguments as an empty default and inserts the app
-path first. Its OpenConfiguration has no documented standard-input/output/error
-setter. Do not invent one or redirect/normalize descriptors to hide an original
-allocation. Successful `execve(2)` preserves PID/real IDs/non-CLOEXEC descriptors
-but does not promise sibling-bundle LS identity rebinding. AppKit `run` invokes
-`finishLaunching`; absence of another explicit call is not a proven startup bug.
-Strict codesign verification is not a C/exec/dyld/AppKit lifetime receipt.
+A strict early-termination diagnostic requires the actual observer status1,
+the existing early-termination firstFailure, one callback/body/handoff, original
+launch/reference/termination/EX-after/root-close/timely facts, no work-deadline
+failure, NSError, normal-Quit request, claimed payload identity, complete
+observation or payload start/quit record. The selected branch record must
+additionally be eligible: gate rejected-close cannot be false, and returned
+exec must retain its original SH-held observation.
 
-The continuation investigation retains exact document pins; documentation is
-not a native implementation trace. Relevant public Apple documentation includes
-[NSWorkspace openApplication](https://developer.apple.com/documentation/appkit/nsworkspace/openapplication(at:configuration:completionhandler:)),
-[arguments](https://developer.apple.com/documentation/appkit/nsworkspace/openconfiguration/arguments),
-[execve](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/execve.2.html),
-[finishLaunching](https://developer.apple.com/documentation/appkit/nsapplication/finishlaunching()),
-[mkdir](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mkdir.2.html)
-and [open](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/open.2.html).
+Alternatively, a full-payload boundary observation requires main-admitted,
+actual observer status0 and the entire unchanged supported_observation predicate:
+real payload start/quit, identity pairs, original shared-bridge observation,
+activation/window/delegate facts, normal Quit and every original observer gate.
+The top-level diagnostic flags still do not become product qualification.
 
-Production retained-entry layout, native participant/child ownership, ten runtime
-constructor joins, vault helper,3/8-FD transfers, provider re-entry/capacity,
-update/remove, full-payload identity/activation/normal Quit and distribution remain
-separate obligations. Desktop remains NOT READY.
+Known phase DATA can be retained in an incomplete result. A marker alone does
+not complete the diagnostic. Absent markers remain "unresolved", even if other
+payload evidence exists. In particular, missing main DATA does not establish a
+pre-main crash, exec success, a low-FD problem or an AppKit bug. It can include
+entry/exec/loader/runtime/early-main/writer failures that this safe sink cannot
+separate. No repeated run or speculative workaround is authorized by absence.
+
+## Original bounds and unknown custody
+
+The existing observer is byte-identical: one launch,30-second work window,
+45-second final window and60-second original command-owner timeout. Late work
+does not get a new deadline. Only normal terminate on the one returned
+NSRunningApplication is allowed. No PID lookup/process scan, forceQuit, broad
+OS/crash-log collection, alternate command owner or TCC change is introduced.
+
+Original app exit remains null and all-worker finality stays
+not-established-by-NSRunningApplication. A phase result never authorizes
+deletion. Cleanup predicates remain unchanged: only proven completed compiler/
+controller outputs and their own temp area may be removed after the original
+complete observation. Application images, app-tmp, gate and diagnostic records
+remain for disposable hosted-job retirement. Unknown app/resource state is
+retained, never converted into success by a diagnostic marker.
+
+## Focused local regressions and remaining work
+
+The DATA/inert-FS module contains21 source/parser methods. Existing root
+creation, group selection, original consuming-close and native JSON/identity
+tests remain. New cases cover exact returned errno, all main union branches,
+missing/extra/type/range/refusal inconsistencies, inter-record conflicts,
+main/start correspondence, unknown/late/missing markers and source order.
+Native C/Objective-C files are only read as text in those tests; no compiler,
+LaunchServices, AppKit, fixture owner or native process is selected.
+
+Authoring/static SOURCE checks are not a test result. The old local16 selection
+is not silently reused as a21-method grant: Root must separately adopt the
+minimal exact input/selection derivative and run it through its original
+bounded control. Distinct implementation review and one expressly authorized
+native run remain before any new full-payload observation may be claimed.
+
+Production path/root authority, actual Tauri constructor/runtime behavior,
+full inherited-FD lifetime joins, credential/vault/signing flows, maintenance
+updates/removal and distribution remain outside this synthetic diagnostic.
+Desktop/product readiness is not established by this work.

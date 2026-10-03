@@ -18,7 +18,7 @@ int main(int argc, char **argv) {
             ? snprintf(open_error, sizeof(open_error), "%d", gate_outcome.open_errno)
             : snprintf(open_error, sizeof(open_error), "null");
         int n = e > 0 && (size_t)e < sizeof(open_error) ? snprintf(record, sizeof(record),
-            "{\"schemaVersion\":1,\"source\":\"%s\",\"case\":\"ls-payload-absent\","
+            "{\"schemaVersion\":1,\"source\":\"%s\",\"case\":\"ls-full-payload\","
             "\"phase\":\"entry-gate-admission\",\"selectedReturnCode\":66,"
             "\"originalRootDescriptor\":%d,\"gateOpenDescriptor\":%d,\"gateOpenErrno\":%s,"
             "\"gateMatchAccepted\":%s,\"rejectedGateCloseReturned\":%s}\n",
@@ -54,8 +54,9 @@ int main(int argc, char **argv) {
         && mrk_exclusive_probe(root) == 0;
     char record[512];
     int n = snprintf(record, sizeof(record),
-        "{\"schemaVersion\":1,\"source\":\"%s\",\"execReturnedENOENT\":%s,\"originalGateStillHeld\":%s}\n",
-        MRK_SOURCE, exec_error == ENOENT ? "true" : "false", held ? "true" : "false");
+        "{\"schemaVersion\":1,\"source\":\"%s\",\"case\":\"ls-full-payload\",\"phase\":\"entry-exec-returned\","
+        "\"execErrno\":%d,\"execReturnedENOENT\":%s,\"originalGateStillHeld\":%s}\n",
+        MRK_SOURCE, exec_error, exec_error == ENOENT ? "true" : "false", held ? "true" : "false");
     int written = n > 0 && (size_t)n < sizeof(record) && root >= 0
         && mrk_record(root, "entry-failed-exec.json", record);
     int root_closed = root >= 0 && mrk_close(&root);
