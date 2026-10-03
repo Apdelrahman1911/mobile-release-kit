@@ -7,7 +7,7 @@ route are unchanged; the result scope is
 "m2-full-payload-boundary-diagnostic-only".
 
 The source must be separately reviewed and its original execution admitted.
-No full-payload run of this successor is claimed here. A diagnostic exit0 means
+No run of this five-witness successor is claimed here. A diagnostic exit0 means
 only the strict bounded observation completed; feasibilityObserved,
 installedProductQualified, tauriQualified, credentialQualified and
 maintenanceAvailable remain false even if the synthetic GUI observation works.
@@ -31,9 +31,28 @@ That invocation reached its actual execve with the original shared gate held.
 Its observer status1/early termination was the intended missing-payload
 control result, not a new full-payload failure diagnosis.
 
-This successor restores only the real synthetic payload construction and adds
-bounded phase DATA. It does not reinterpret either historical result as a
-successful full-payload launch or as proof of a repaired cause.
+The restored full-payload baseline on
+3d1eaac7a108cd860f41dc75437c85d9a4f69426, run37098213216/1,
+job111132378605, completed the first11 compiler/sign/inspection calls with0.
+Its one-launchservices-observation returned1. Actual payload-main DATA was
+main-admitted-before-appkit with accepted gate/PID/CLOEXEC/executable facts;
+entry gate-refusal and returned-exec records were absent. The original observer
+reported one callback/body/handoff, no NSError, and
+payload-terminated-before-observation. Payload-start/quit were null and normal
+Quit was not requested. Result8721B SHA256:
+cc339185b39cb02e8239447b2a5df9a5e798a97732e38ce33c63d6085fd40b01.
+
+That run used macOS26.6.2 ARM64, SDK26.5 and Apple clang21.0.0. Its main marker
+narrows the explicit C boundary but does not establish a subsequent AppKit
+return, exception, crash or original exit code. The observer's identity flags
+were unmeasured defaults because it broke before evaluating them, not observed
+identity mismatches. EX-after availability is not process-wait/all-worker
+finality. The marker does not prove its writer's final root fsync returned.
+
+This successor adds only the five bounded progress witnesses below. It does
+not reinterpret any historical result as a successful full-payload launch or
+as proof of a repaired cause. No policy getter, normalization, manual
+finishLaunching or speculative exception workaround is justified by those DATA.
 
 ## Fixed route and original fixture
 
@@ -73,8 +92,8 @@ There is one entry invocation through the original NSWorkspace observer.
 No direct EX/ENOENT controls precede it, and no launch retry follows it. Payload
 compile/sign/strict-verify uses the earlier full-payload construction commands,
 not a new compiler or framework configuration. Both bundles and observer are
-pinned before and after the one call. Every fixed record and its exclusive
-inflight staging name must be absent before launch.
+pinned before and after the one call. All11 fixed final record names and their
+11 exclusive inflight staging names must be absent before launch.
 
 Existing clean command environment, isolated owner loader, source/gate
 pre/post checks, bounded capture and actual original command returns remain.
@@ -145,8 +164,60 @@ change CLOEXEC or inspect/convert a lock. Refusal65/66 is irrevocable before the
 publication and unchanged even if writing fails. Successful main flow also
 does not depend on publication success. No alternate sink or second attempt
 is allowed. Earlier argc/account/argument/root failures remain without a safe
-external marker. Existing AppKit delegate, payload-start and payload-quit
-bodies are unchanged, including the original run/activation/normal-Quit flow.
+external marker. The existing payload-start/quit bodies and original framework
+receivers, order and single invocation remain unchanged. Only the one passive
+callback witness described below is added to the existing delegate body.
+
+## Payload: five fixed AppKit progress witnesses
+
+The diagnostic's appKitProgress object has exactly these five nullable slots;
+rows are read only from their corresponding fixed original filenames:
+
+| Slot | Fixed file | Exact phase |
+| --- | --- | --- |
+| sharedApplication | payload-appkit-shared.json | shared-application-returned |
+| activationPolicy | payload-appkit-policy.json | activation-policy-returned |
+| beforeRun | payload-appkit-before-run.json | setup-complete-before-run |
+| didFinishLaunching | payload-appkit-did-finish.json | did-finish-launching-entered |
+| runReturned | payload-appkit-run-returned.json | run-returned |
+
+The first witness is immediately after the sole original sharedApplication
+expression returns. The second captures the sole original activation setter
+BOOL, selects the original false-return67 before publication, and preserves
+that return regardless of writing. True continues exactly as before; it is not
+a second activation-policy observation. The combined setup/before-run witness
+is immediately after app.mainMenu assignment and before the original run call:
+no original statement separates these boundaries. It does not prove run entered.
+
+The callback witness is one passive C call after the existing notification void
+cast. A repeated callback still executes its original body; only the diagnostic
+helper consumes a one-attempt latch. No callback early check, window creation,
+activation request, timer, readyPublished check or publishObservation is moved
+or invoked again by instrumentation. The final witness executes only after the
+actual original run returns. Original unexpected-return74 is selected before
+publication and retained, never normalized into ordinary Quit or success.
+
+Each row has only schemaVersion1, exact source, case ls-full-payload, the fixed
+phase, policySwitchAccepted and selectedReturnCode. Policy is boolean only for
+the policy slot and null elsewhere. Selected return is67 iff policy is false,
+74 iff run returned, otherwise null. These are immutable branch DATA, not
+observed original application exit codes. No PID, path, private text, exception
+transcript, success, complete or qualification field is added to these rows.
+
+A private five-case enum maps only the five fixed names. A consuming five-bit
+latch is set before each first formatting/write attempt, including ambiguous or
+failed writes. Each call formats plain C in768B stack storage through the
+existing already-admitted root and exclusive writer. At most five attempts and
+3840 encoded bytes of new records are admitted; there is no persistent new FD,
+append stream, arbitrary path/event API, fallback sink, readmission or retry.
+Neither format nor writer success affects any original program branch.
+
+Apple's public setActivationPolicy contract says true means the switch
+succeeded, otherwise false. Regular being the default bundled-app policy is not
+an observed getter result and cannot reinterpret a false setter result. Apple's
+finishLaunching documentation says run calls it; no manual extra call is added.
+These public contracts explain the passive witness sites, not the exact hosted
+AppKit implementation or a failure cause in the historical invocation.
 
 ## Strict parsing and honest unresolved boundary
 
@@ -162,7 +233,18 @@ booleans, consistent errno/ENOENT, and exact main-predicate facts/nulls. Entry
 gate refusal, returned exec and payload-main records are mutually exclusive.
 Payload-start/quit cannot coexist with an entry or main-refusal record. If a
 main-admitted record and payload-start are both present, their original static
-PID/CLOEXEC/executable facts must agree.
+PID/CLOEXEC/executable facts must agree. Each AppKit row additionally has exact
+slot/file/phase correspondence, closed keys, a strict boolean-or-null policy
+and consistent integer-or-null selected return. AppKit rows cannot coexist with
+an explicit entry gate/exec refusal or main refusal. An absent earlier marker
+is not a refusal: every partial set, including gaps, can retain later valid DATA.
+No contiguous prefix is required or reconstructed.
+
+Policy false conflicts with beforeRun, didFinishLaunching, runReturned,
+payload-start or payload-quit, because the original branch returns67 first.
+Run-returned may coexist with earlier callback/start DATA, but it prevents a
+full normal-observation classification. Neither rule invents a missing record,
+new original native status or app exit/signal.
 
 A strict early-termination diagnostic requires the actual observer status1,
 the existing early-termination firstFailure, one callback/body/handoff, original
@@ -176,14 +258,22 @@ Alternatively, a full-payload boundary observation requires main-admitted,
 actual observer status0 and the entire unchanged supported_observation predicate:
 real payload start/quit, identity pairs, original shared-bridge observation,
 activation/window/delegate facts, normal Quit and every original observer gate.
-The top-level diagnostic flags still do not become product qualification.
+It also requires no contradictory false-policy or unexpected-run-return row.
+The unchanged native supported_observation predicate alone cannot waive this
+additional diagnostic coherence. The top-level diagnostic flags still do not
+become product qualification.
 
 Known phase DATA can be retained in an incomplete result. A marker alone does
 not complete the diagnostic. Absent markers remain "unresolved", even if other
 payload evidence exists. In particular, missing main DATA does not establish a
 pre-main crash, exec success, a low-FD problem or an AppKit bug. It can include
 entry/exec/loader/runtime/early-main/writer failures that this safe sink cannot
-separate. No repeated run or speculative workaround is authorized by absence.
+separate. Every absent AppKit slot independently stays null/unresolved, not
+not-reached, a crash, successful execution or a failed policy switch. The old
+entry/main diagnostic may still establish its own original phase while any or
+all AppKit slots are unresolved; diagnosticComplete is not an AppKit-progress
+completion flag. A new marker cannot upgrade an old incomplete result. No
+repeated run or speculative workaround is authorized by absence.
 
 ## Original bounds and unknown custody
 
@@ -192,6 +282,21 @@ The existing observer is byte-identical: one launch,30-second work window,
 does not get a new deadline. Only normal terminate on the one returned
 NSRunningApplication is allowed. No PID lookup/process scan, forceQuit, broad
 OS/crash-log collection, alternate command owner or TCC change is introduced.
+
+The original4096B file reader,65536B command capture and262144B report limits
+are unchanged. Exactly eight diagnostic filenames are read sequentially after
+the original observer call, each through the same original FD/name proof and
+consuming close; their total admitted encoded read bound is32768B. The other
+three fixed names remain the original busy/start/quit records. Even counting
+both final and inflight occupants conservatively,22 names at the existing4096B
+per-file ceiling are at most90112B; the five new writers have the stricter768B
+stack envelope and one-attempt rule. No source, FD, read, output, scratch or
+timeout cap is raised.
+
+The added writes and fsyncs change scheduling/timing. Any later observations
+would describe this instrumented synthetic invocation, not unmodified AppKit,
+LaunchServices or production M2. If the closed set is still unresolved, retain
+that limitation; no automatic new collection or hosted rerun follows.
 
 Original app exit remains null and all-worker finality stays
 not-established-by-NSRunningApplication. A phase result never authorizes
@@ -203,19 +308,22 @@ retained, never converted into success by a diagnostic marker.
 
 ## Focused local regressions and remaining work
 
-The DATA/inert-FS module contains21 source/parser methods. Existing root
-creation, group selection, original consuming-close and native JSON/identity
-tests remain. New cases cover exact returned errno, all main union branches,
-missing/extra/type/range/refusal inconsistencies, inter-record conflicts,
-main/start correspondence, unknown/late/missing markers and source order.
-Native C/Objective-C files are only read as text in those tests; no compiler,
-LaunchServices, AppKit, fixture owner or native process is selected.
+The DATA/inert-FS module retains the same21 method names and six read-only
+SOURCE inputs. Existing root creation, group selection, original consuming-close
+and native JSON/identity tests remain. Existing methods additionally cover all
+five progress schemas, every partial/absent set, source/phase/type/extra-field
+errors, false-policy contradictions, run-returned with earlier start but never
+full success, and unchanged unknown/late/close gates. Source regressions check
+11 fixed names, the one-attempt latch,12 original calls and exact whole-payload
+restoration to the accepted8811B source, then the preceding6922B baseline.
+No broad baseline is refreshed to absorb unrelated changes. Native C/Objective-C
+files are only read as text; no compiler, LaunchServices, AppKit, fixture owner
+or native process is selected by those tests.
 
-Authoring/static SOURCE checks are not a test result. The old local16 selection
-is not silently reused as a21-method grant: Root must separately adopt the
-minimal exact input/selection derivative and run it through its original
-bounded control. Distinct implementation review and one expressly authorized
-native run remain before any new full-payload observation may be claimed.
+Authoring/static SOURCE checks are not a test result. Root must separately
+adopt the changed exact input hashes for the same21-method bounded local
+control. Distinct implementation review and one expressly authorized, batched
+five-witness native run remain before any new observation may be claimed.
 
 Production path/root authority, actual Tauri constructor/runtime behavior,
 full inherited-FD lifetime joins, credential/vault/signing flows, maintenance

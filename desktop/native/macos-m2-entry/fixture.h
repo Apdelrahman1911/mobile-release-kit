@@ -88,7 +88,7 @@ static inline int mrk_decimal(const char *text, int minimum, int *value) {
     if (count < 1 || (size_t)count >= sizeof(canonical) || strcmp(canonical, text)) return 0;
     *value = (int)number; return 1;
 }
-/* Six fixed public diagnostic records; exclusive publication, no repair. */
+/* Eleven fixed public diagnostic records; exclusive publication, no repair. */
 static inline int mrk_record(int root, const char *name, const char *body) {
     size_t size = strlen(body), offset = 0;
     char staging[80];

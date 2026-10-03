@@ -44,7 +44,15 @@ COUNTS = frozenset(("completionCount", "completionBodyDoneCount", "completionHan
 FAILURES = frozenset("none launch-completion payload-record payload-terminated-before-observation original-reference-or-shared-bridge observation-deadline quit-record normal-quit-or-last-holder native-exception cleanup-native-exception root-close final-deadline".split())
 FULL_PAYLOAD_CASE = "ls-full-payload"
 MAIN_FLAGS = ("entryPidPreserved", "gateInheritedWithoutCLOEXEC", "gateMarkedCLOEXEC", "executableIsPayload")
-DIAGNOSTIC_RECORDS = ("entry-gate-refused.json", "entry-failed-exec.json", "payload-main.json")
+APPKIT_RECORDS = (
+    ("sharedApplication", "payload-appkit-shared.json", "shared-application-returned"),
+    ("activationPolicy", "payload-appkit-policy.json", "activation-policy-returned"),
+    ("beforeRun", "payload-appkit-before-run.json", "setup-complete-before-run"),
+    ("didFinishLaunching", "payload-appkit-did-finish.json", "did-finish-launching-entered"),
+    ("runReturned", "payload-appkit-run-returned.json", "run-returned"),
+)
+DIAGNOSTIC_RECORDS = ("entry-gate-refused.json", "entry-failed-exec.json", "payload-main.json",
+                      *(name for _, name, _ in APPKIT_RECORDS))
 FIXED_RECORDS = (*DIAGNOSTIC_RECORDS, "entry-busy.json", "payload-start.json", "payload-quit.json")
 
 
@@ -196,7 +204,30 @@ def payload_main(value, source):
     return value
 
 
-def boundary_diagnostic(native, original_status, gate, failed, main, source):
+def appkit_progress(value, source):
+    """Five nullable fixed-site records, not an event log or a completion claim."""
+    need(type(value) is dict and set(value) == {slot for slot, _, _ in APPKIT_RECORDS},
+         "appkit-progress-slots")
+    for slot, _name, phase in APPKIT_RECORDS:
+        row = value[slot]
+        if row is None:
+            continue
+        record(row, source, (), ("case", "phase", "policySwitchAccepted", "selectedReturnCode"))
+        need(row["case"] == FULL_PAYLOAD_CASE and type(row["phase"]) is str and row["phase"] == phase,
+             "appkit-progress-phase")
+        if slot == "activationPolicy":
+            need(type(row["policySwitchAccepted"]) is bool, "appkit-progress-policy")
+            selected = None if row["policySwitchAccepted"] else 67
+        else:
+            need(row["policySwitchAccepted"] is None, "appkit-progress-policy")
+            selected = 74 if slot == "runReturned" else None
+        need((selected is None and row["selectedReturnCode"] is None)
+             or (type(row["selectedReturnCode"]) is int and row["selectedReturnCode"] == selected),
+             "appkit-progress-selected-return")
+    return value
+
+
+def boundary_diagnostic(native, original_status, gate, failed, main, source, progress=None):
     """Known phase DATA can survive an incomplete diagnostic; no pre-main guess."""
     need(type(original_status) is int and 0 <= original_status <= 255, "diagnostic-owner-status")
     if gate is not None:
@@ -211,6 +242,17 @@ def boundary_diagnostic(native, original_status, gate, failed, main, source):
         need(native["payloadStart"] is None and native["payloadQuit"] is None, "diagnostic-impossible-phase-records")
     if admitted and native["payloadStart"] is not None:
         need(all(main[k] is native["payloadStart"][k] for k in MAIN_FLAGS), "diagnostic-main-start-facts")
+    progress = appkit_progress({slot: None for slot, _, _ in APPKIT_RECORDS}
+                               if progress is None else progress, source)
+    if any(row is not None for row in progress.values()):
+        need(gate is None and failed is None and (main is None or admitted),
+             "diagnostic-appkit-after-refusal")
+    policy = progress["activationPolicy"]
+    policy_refused = policy is not None and policy["policySwitchAccepted"] is False
+    if policy_refused:
+        need(all(progress[slot] is None for slot in ("beforeRun", "didFinishLaunching", "runReturned"))
+             and native["payloadStart"] is None and native["payloadQuit"] is None,
+             "diagnostic-appkit-policy-conflict")
     outcome, branch_accepted = "unresolved", False
     if gate is not None:
         outcome, branch_accepted = "entry-gate-refused", gate["rejectedGateCloseReturned"] is not False
@@ -228,10 +270,12 @@ def boundary_diagnostic(native, original_status, gate, failed, main, source):
              and all(native[k] == 1 for k in COUNTS)
              and native["payloadStart"] is None and native["payloadQuit"] is None)
     complete = admitted and original_status == 0 and supported_observation(native)
+    complete = complete and not policy_refused and progress["runReturned"] is None
     if complete:
         outcome = "full-payload-observed"
     return {"case": FULL_PAYLOAD_CASE, "boundaryOutcome": outcome, "entryGateRefusal": gate,
-            "failedExec": failed, "payloadMain": main, "expectedBoundaryObserved": branch_accepted and (early or complete)}
+            "failedExec": failed, "payloadMain": main, "appKitProgress": progress,
+            "expectedBoundaryObserved": branch_accepted and (early or complete)}
 
 
 def require_absent(path, reason):
@@ -524,7 +568,9 @@ def main():
         gate = read_diagnostic(work / "entry-gate-refused.json", uid, gid)
         failed = read_diagnostic(work / "entry-failed-exec.json", uid, gid)
         main_record = read_diagnostic(work / "payload-main.json", uid, gid)
-        report["diagnostic"] = boundary_diagnostic(report["native"], observed.returncode, gate, failed, main_record, sha)
+        progress = {slot: read_diagnostic(work / name, uid, gid) for slot, name, _ in APPKIT_RECORDS}
+        report["diagnostic"] = boundary_diagnostic(report["native"], observed.returncode, gate, failed, main_record, sha,
+                                                   progress=progress)
         check_sources()
         report["sourcePrePostMatched"] = snapshot(root, pins) == before
         diagnostic_complete = report["diagnostic"]["expectedBoundaryObserved"] and report["sourcePrePostMatched"]

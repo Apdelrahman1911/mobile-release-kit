@@ -16,6 +16,46 @@ static BOOL publish(NSString *name, NSDictionary *value) {
     return body && mrk_record(root_original, name.UTF8String, body.UTF8String);
 }
 
+/* Five fixed progress witnesses, once per site through the admitted root.
+   The latch is consumed before formatting/writing, including failed attempts. */
+enum appkit_progress {
+    APPKIT_SHARED_RETURNED = 1U << 0,
+    APPKIT_POLICY_RETURNED = 1U << 1,
+    APPKIT_BEFORE_RUN = 1U << 2,
+    APPKIT_DID_FINISH = 1U << 3,
+    APPKIT_RUN_RETURNED = 1U << 4
+};
+static unsigned appkit_attempted;
+static void publish_appkit_progress(enum appkit_progress progress, BOOL policy_accepted) {
+    const char *name, *phase, *policy = "null", *selected = "null";
+    switch (progress) {
+    case APPKIT_SHARED_RETURNED:
+        name = "payload-appkit-shared.json"; phase = "shared-application-returned"; break;
+    case APPKIT_POLICY_RETURNED:
+        name = "payload-appkit-policy.json"; phase = "activation-policy-returned";
+        policy = policy_accepted ? "true" : "false";
+        selected = policy_accepted ? "null" : "67"; break;
+    case APPKIT_BEFORE_RUN:
+        name = "payload-appkit-before-run.json"; phase = "setup-complete-before-run"; break;
+    case APPKIT_DID_FINISH:
+        name = "payload-appkit-did-finish.json"; phase = "did-finish-launching-entered"; break;
+    case APPKIT_RUN_RETURNED:
+        name = "payload-appkit-run-returned.json"; phase = "run-returned"; selected = "74"; break;
+    default: return;
+    }
+    unsigned bit = (unsigned)progress;
+    if (appkit_attempted & bit) return;
+    appkit_attempted |= bit;
+    char record[768];
+    int n = snprintf(record, sizeof(record),
+        "{\"schemaVersion\":1,\"source\":\"%s\",\"case\":\"ls-full-payload\",\"phase\":\"%s\","
+        "\"policySwitchAccepted\":%s,\"selectedReturnCode\":%s}\n",
+        MRK_SOURCE, phase, policy, selected);
+    if (n > 0 && (size_t)n < sizeof(record))
+        (void)mrk_record(root_original, name, record);
+    /* Readable DATA is not final fsync/close, process exit or worker finality. */
+}
+
 @interface M2Payload : NSObject <NSApplicationDelegate>
 @property(strong) NSWindow *window;
 @property(strong) NSTimer *observationLimit;
@@ -57,6 +97,7 @@ static BOOL publish(NSString *name, NSDictionary *value) {
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
+    publish_appkit_progress(APPKIT_DID_FINISH, NO);
     self.didFinishLaunching = YES;
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 180)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
@@ -145,13 +186,20 @@ int main(int argc, char **argv) {
         }
         publish_main_outcome(MAIN_ADMITTED);
         NSApplication *app = NSApplication.sharedApplication;
-        if (![app setActivationPolicy:NSApplicationActivationPolicyRegular]) return 67;
+        publish_appkit_progress(APPKIT_SHARED_RETURNED, NO);
+        const BOOL policy_accepted = [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        const int selected_policy_return = policy_accepted ? 0 : 67;
+        publish_appkit_progress(APPKIT_POLICY_RETURNED, policy_accepted);
+        if (!policy_accepted) return selected_policy_return;
         M2Payload *delegate = [M2Payload new]; app.delegate = delegate;
         NSMenu *main = [NSMenu new], *menu = [NSMenu new];
         NSMenuItem *application = [NSMenuItem new]; [main addItem:application];
         NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];
         quit.target = app; [menu addItem:quit]; application.submenu = menu; app.mainMenu = main;
+        publish_appkit_progress(APPKIT_BEFORE_RUN, NO);
         [app run];
-        return 74; /* Unexpected run-loop return is not normal Quit/finality. */
+        const int selected_run_return = 74;
+        publish_appkit_progress(APPKIT_RUN_RETURNED, NO);
+        return selected_run_return; /* Unexpected run-loop return is not normal Quit/finality. */
     }
 }
