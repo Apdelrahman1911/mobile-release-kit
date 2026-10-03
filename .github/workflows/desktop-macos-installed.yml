@@ -24,10 +24,11 @@ jobs:
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - name: Admit the actual fixed hosted helper-only source route
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
@@ -137,6 +138,8 @@ jobs:
         id: helper
         timeout-minutes: 10
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -uo pipefail
           set -o noclobber
