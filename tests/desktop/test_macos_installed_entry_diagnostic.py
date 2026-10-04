@@ -854,6 +854,91 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                     self.assertNotIn("generatedRunner", context.report)
                     self.assertFalse(context.report["diagnosticComplete"])
 
+    def test_owner_failure_kind_preserves_unreturned_facts_without_private_text(self):
+        class ProcessError(Exception):
+            dispatched, contained, cleanup_complete = True, True, True
+        class ProcessCleanupError(ProcessError):
+            pass
+        class ProcessOutcomeUnknown(ProcessError):
+            pass
+        class ProcessInterrupted(KeyboardInterrupt):
+            dispatched, contained, cleanup_complete = True, True, True
+        class UntrustedSubclass(ProcessError):
+            def __str__(self):
+                self.fail_if_stringified = True
+                raise AssertionError("Do not stringify an unrecognized owner error")
+        class UntrustedText(str):
+            def __hash__(self):
+                raise AssertionError("Do not look up an unrecognized string subclass")
+        class LyingExceptionMeta(type):
+            def __eq__(cls, other):
+                return True
+        class PretendedKnownError(ProcessError, metaclass=LyingExceptionMeta):
+            def __getattribute__(self, name):
+                if name == "args":
+                    raise AssertionError("Unrecognized class must not reach error args")
+                return super().__getattribute__(name)
+        owner = SimpleNamespace(ProcessError=ProcessError, ProcessCleanupError=ProcessCleanupError,
+            ProcessOutcomeUnknown=ProcessOutcomeUnknown, ProcessInterrupted=ProcessInterrupted)
+        known = {
+            "owned command output exceeds its bound": "output-limit",
+            "owned command exceeded its original deadline": "original-deadline",
+            "owned command protocol or original ownership is incomplete": "protocol-or-ownership-incomplete",
+            "owned command original parent ended": "parent-ended",
+            "owned command original observer ended": "observer-ended",
+            "owned command failed, timed out, or produced incomplete output": "failed-or-incomplete",
+            "owned command executable could not be started": "executable-start-refused",
+            "owned command was stopped before execution": "stopped-before-execution",
+            "owned command produced incomplete output": "incomplete-output",
+            "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+        }
+        cases = [(ProcessError(message), kind) for message, kind in known.items()]
+        cases += [(ProcessCleanupError("owned command cleanup could not be confirmed"), "cleanup-unconfirmed"),
+            (ProcessOutcomeUnknown("fixture-secret"), "other-or-unobserved"),
+            (ProcessInterrupted(), "interrupted"),
+            (ProcessError(), "other-or-unobserved"),
+            (ProcessError("fixture-secret", "second argument"), "other-or-unobserved"),
+            (ProcessError("fixture-secret /Users/private/path"), "other-or-unobserved"),
+            (ProcessError("owned command output exceeds its bound\n"), "other-or-unobserved"),
+            (ProcessError("fixture-secret" * 128), "other-or-unobserved"),
+            (ProcessError("fixture-secret\u00e9"), "other-or-unobserved"),
+            (ProcessError(UntrustedText("fixture-secret")), "other-or-unobserved"),
+            (UntrustedSubclass("owned command output exceeds its bound"), "other-or-unobserved"),
+            (PretendedKnownError("owned command output exceeds its bound"), "other-or-unobserved")]
+        for index, (error, kind) in enumerate(cases):
+            with self.subTest(index=index):
+                context, _, _ = self.ui_failure_context(None)
+                context.owner, context.inflight, context.last_returned = owner, True, False
+                with patch.object(MODULE, "ui_failure_diagnostics") as formatter:
+                    context.failure(error)
+                    formatter.assert_not_called()
+                self.assertEqual(context.report["ownerFailure"], {
+                    "dispatched": True, "contained": True, "cleanupComplete": True, "diagnosticKind": kind})
+                self.assertEqual(context.report["error"], "interrupted" if type(error) is ProcessInterrupted
+                                 else "diagnostic-or-owner-error")
+                self.assertFalse(context.report["originalCallReturned"])
+                self.assertTrue(context.inflight)
+                self.assertTrue(context.report["cleanup"]["unknownStateRetained"])
+                self.assertEqual(context.report["allWorkerFinality"], "not-established")
+                self.assertNotIn("originalTestReturncode", context.report)
+                self.assertNotIn("uiFailureDiagnostics", context.report)
+                self.assertNotIn("fixture-secret", json.dumps(context.report))
+                for flag in ("diagnosticValid", "diagnosticComplete", "uiScenarioObserved", "normalQuitQualified",
+                             "fullUIQualified", "fullM2Qualified", "productReady"):
+                    self.assertFalse(context.report[flag])
+        # A diagnostic reason never repairs false or unknown lifecycle facts.
+        for facts, expected in [((False, False, False), (False, False, False)),
+                                ((1, "yes", None), (None, None, None))]:
+            error = ProcessError("owned command output exceeds its bound")
+            error.dispatched, error.contained, error.cleanup_complete = facts
+            context, _, _ = self.ui_failure_context(None)
+            context.owner, context.inflight, context.last_returned = owner, True, False
+            context.failure(error)
+            self.assertEqual(context.report["ownerFailure"], dict(zip(
+                ("dispatched", "contained", "cleanupComplete", "diagnosticKind"), (*expected, "output-limit"))))
+            self.assertTrue(context.report["cleanup"]["unknownStateRetained"])
+            self.assertFalse(context.report["originalCallReturned"])
+
     def test_fixed_two_host_workflow_and_original_only_native_route(self):
         workflow = (ROOT / MODULE.WORKFLOW).read_text()
         native = (ROOT / MODULE.NATIVE).read_text()

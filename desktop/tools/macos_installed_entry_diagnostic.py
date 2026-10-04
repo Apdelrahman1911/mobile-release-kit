@@ -78,6 +78,36 @@ def need(value, reason):
         raise Refused(reason)
 
 
+def owner_failure_kind(error, owner):
+    """Closed explanation DATA only; never stringify errors or inspect captures."""
+    if type(error) is getattr(owner, "ProcessInterrupted", None):
+        return "interrupted"
+    known = tuple(getattr(owner, name, None) for name in
+                  ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown"))
+    if not any(type(error) is kind for kind in known):
+        return "other-or-unobserved"
+    args = error.args
+    if type(args) is not tuple or len(args) != 1 or type(args[0]) is not str:
+        return "other-or-unobserved"
+    message = args[0]
+    if len(message) > 128 or not message.isascii():
+        return "other-or-unobserved"
+    # Exact public literals from the pinned command owner, not text matching
+    # against native/private output. A known kind does not certify finality.
+    return {
+        "owned command output exceeds its bound": "output-limit",
+        "owned command exceeded its original deadline": "original-deadline",
+        "owned command protocol or original ownership is incomplete": "protocol-or-ownership-incomplete",
+        "owned command original parent ended": "parent-ended",
+        "owned command original observer ended": "observer-ended",
+        "owned command failed, timed out, or produced incomplete output": "failed-or-incomplete",
+        "owned command executable could not be started": "executable-start-refused",
+        "owned command was stopped before execution": "stopped-before-execution",
+        "owned command produced incomplete output": "incomplete-output",
+        "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+    }.get(message, "other-or-unobserved")
+
+
 def digest(body):
     return hashlib.sha256(body).hexdigest()
 
@@ -989,6 +1019,7 @@ class Context:
         if self.owner is not None and isinstance(error, (self.owner.ProcessError, self.owner.ProcessInterrupted)):
             self.report["ownerFailure"] = {name: value if type(value := getattr(error, attr, None)) is bool else None
                 for name, attr in (("dispatched", "dispatched"), ("contained", "contained"), ("cleanupComplete", "cleanup_complete"))}
+            self.report["ownerFailure"]["diagnosticKind"] = owner_failure_kind(error, self.owner)
         self.report["cleanup"]["unknownStateRetained"] = self.inflight or not self.report["diagnosticComplete"]
 
     def cleanup(self):
