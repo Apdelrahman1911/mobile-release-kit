@@ -7,6 +7,7 @@ installer, the controller, a sandbox, or a product process.
 from __future__ import annotations
 
 import base64
+import builtins
 import contextlib
 import csv
 import dataclasses
@@ -27,7 +28,7 @@ import unittest
 import warnings
 import zipfile
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from .workflow_harness import evaluate_condition, load_workflow, simulate_steps
@@ -6101,16 +6102,20 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
     def test_native_package_inspection_requires_complete_bytes_and_immutable_ordinary_nodes(self):
         checks = ci_module("ci_checks")
-        expected = {"__init__.py": b"# inert fixture\n", "data/apple-profile-roots.pem": b"synthetic public roots\n"}
+        expected = {"__init__.py": b"# inert fixture\n", "__main__.py": b"# never imported\n",
+                    "data/apple-profile-roots.pem": b"synthetic public roots\n",
+                    "api/__init__.py": b"# inert API package\n", "api/contracts.py": b"# inert API module\n",
+                    "api/data/field-help.json": b'{}\n'}
         deadline = time.monotonic() + 30.0
         actual_lstat = Path.lstat
         with tempfile.TemporaryDirectory(prefix="mrk-ci-native-package-") as temporary:
             root = Path(temporary).resolve() / "mobile_release"
             root.mkdir()
-            (root / "data").mkdir()
             for relative, content in expected.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
                 (root / relative).write_bytes(content)
             changes = {}
+            changed_path = root / "__init__.py"
 
             def metadata(path):
                 info = actual_lstat(path)
@@ -6121,14 +6126,14 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                 directory = stat.S_ISDIR(info.st_mode)
                 values = dict(st_uid=0, st_gid=0, st_nlink=info.st_nlink,
                               st_mode=(stat.S_IFDIR | 0o555) if directory else (stat.S_IFREG | 0o444))
-                if path == root / "__init__.py":
+                if path == changed_path:
                     values.update(changes)
                 return SimpleNamespace(**values)
 
             with patch.object(checks, "_source_package", return_value=expected), patch.object(Path, "lstat", metadata):
                 result = checks.inspect_native_package(ROOT, root, deadline=deadline)
-                self.assertEqual(result["files"], 2)
-                self.assertEqual(result["modules"], 1)
+                self.assertEqual(result["files"], 6)
+                self.assertEqual(result["modules"], 4)
                 self.assertTrue(result["bytes_match_source"])
                 self.assertTrue(result["immutable_modes"])
                 for changed in ({"st_uid": 60123}, {"st_gid": 60123}, {"st_nlink": 2},
@@ -6136,6 +6141,15 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     changes.clear()
                     changes.update(changed)
                     with self.subTest(metadata=changed), self.assertRaisesRegex(checks.CheckError, "NATIVE_PACKAGE_MODE"):
+                        checks.inspect_native_package(ROOT, root, deadline=deadline)
+                changes.clear()
+                for relative, bad_mode in (("api", stat.S_IFDIR | 0o755),
+                                           ("api/data", stat.S_IFDIR | 0o755),
+                                           ("api/__init__.py", stat.S_IFREG | 0o644),
+                                           ("api/data/field-help.json", stat.S_IFREG | 0o644)):
+                    changed_path = root / relative
+                    changes["st_mode"] = bad_mode
+                    with self.subTest(api_mode=relative), self.assertRaisesRegex(checks.CheckError, "NATIVE_PACKAGE_MODE"):
                         checks.inspect_native_package(ROOT, root, deadline=deadline)
                 changes.clear()
                 for mutation in ("changed", "missing", "extra-hook", "extra-directory"):
@@ -6156,6 +6170,173 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                             (root / "unreviewed.pth").unlink()
                         else:
                             (root / "extra").rmdir()
+
+    def test_source_package_accepts_only_reviewed_api_layout_and_data_declaration(self):
+        checks = ci_module("ci_checks")
+        deadline = time.monotonic() + 30.0
+        files = checks._source_package(ROOT, deadline=deadline)
+        directories = {"data", "api", "api/data"}
+        resources = {"data/apple-profile-roots.pem", *(
+            "api/data/" + name for name in (
+                "credential-guide-v1.json", "field-help.json", "github-connection-v1.json", "github-setup-v1.json",
+                "metadata-image-help-v1.json", "metadata-images-v1.json", "metadata-text-help-v1.json",
+                "project.schema.json", "release-version-help-v1.json"))}
+        self.assertEqual({name for name in files if not name.endswith(".py")}, resources)
+        self.assertEqual(sum(name.endswith(".py") for name in files), 129)
+        missing = ("__init__.py", "__main__.py", "api/__init__.py", *sorted(resources))
+        for relative in missing:
+            changed = dict(files)
+            changed.pop(relative)
+            with self.subTest(missing=relative), patch.object(checks, "_tree", return_value=(changed, directories)), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_FILES"):
+                checks._source_package(ROOT, deadline=deadline)
+        for relative in ("unexpected.json", "data/extra.pem", "api/extra.json", "api/data/extra.json",
+                         "api/data/hook.py", "api/nested/module.py", "other/module.py", "api/compiled.so"):
+            with self.subTest(extra=relative), patch.object(checks, "_tree", return_value=({**files, relative: b"inert"}, directories)), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_FILES"):
+                checks._source_package(ROOT, deadline=deadline)
+        for changed in (directories - {"api/data"}, directories | {"api/nested"}, directories | {"unreviewed"}):
+            with self.subTest(directories=changed), patch.object(checks, "_tree", return_value=(files, changed)), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_FILES"):
+                checks._source_package(ROOT, deadline=deadline)
+        original = (ROOT / "pyproject.toml").read_bytes()
+        read_regular = checks._read_regular
+        declarations = (
+            original.replace(b'"api/data/*.json"', b'"api/data/*"'),
+            original.replace(b', "api/data/*.json"', b''),
+            original.replace(b'mobile_release = [', b'unreviewed = ['),
+        )
+        for changed in declarations:
+            self.assertNotEqual(changed, original)
+            def read(path, *args, **kwargs):
+                return changed if path == ROOT / "pyproject.toml" else read_regular(path, *args, **kwargs)
+            with patch.object(checks, "_read_regular", side_effect=read), \
+                    self.assertRaisesRegex(checks.CheckError, "SOURCE_PACKAGE_DATA"):
+                checks._source_package(ROOT, deadline=deadline)
+
+    def test_installed_wheel_api_imports_exact_origins_without_executable_main(self):
+        """Actual import/origin loop with inert facades, never a product import."""
+        checks = ci_module("ci_checks")
+        deadline = time.monotonic() + 30.0
+        expected = checks._source_package(ROOT, deadline=deadline)
+        # Include an inert nested executable to prove it is never imported either.
+        expected["api/__main__.py"] = b"# never imported\n"
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-installed-origins-") as temporary:
+            prefix = Path(temporary).resolve() / "venv"
+            package_root = prefix / "lib/site-packages/mobile_release"
+            tooling_root = prefix / "share/mobile-release-kit"
+            tooling = {name: (ROOT / name).read_bytes() for name in checks.TOOLING_FILES}
+            package = ModuleType("mobile_release")
+            package.__file__, package.__version__ = str(package_root / "__init__.py"), checks.VERSION
+            package.__path__ = [str(package_root)]
+            roots = ModuleType("mobile_release.ios_profile_trust")
+            roots.apple_roots = lambda: (b"inert public root",) * 3
+            tools = ModuleType("mobile_release.tooling")
+            tools.REQUIRED_TOOLING_FILES = tuple(tooling)
+            tools.resolve_tooling_root = lambda *, environ: tooling_root if environ == {} else None
+            modules = {module.__name__: module for module in (package, roots, tools)}
+            original_import = builtins.__import__
+
+            def import_statement(name, globals=None, locals=None, fromlist=(), level=0):
+                if name == "mobile_release" or name.startswith("mobile_release."):
+                    self.assertEqual(level, 0)
+                    self.assertIn(name, modules)
+                    return modules[name]
+                return original_import(name, globals, locals, fromlist, level)
+
+            imports = {"mobile_release.api": "api/__init__.py"}
+            for relative in expected:
+                if relative.endswith(".py") and Path(relative).name not in {"__init__.py", "__main__.py"}:
+                    imports["mobile_release." + relative[:-3].replace("/", ".")] = relative
+            self.assertIn("mobile_release.api.contracts", imports)
+            actual, wrong_origin = [], None
+
+            def import_module(name):
+                self.assertIn(name, imports)
+                actual.append(name)
+                module = ModuleType(name)
+                module.__file__ = str((ROOT / "src/mobile_release" if name == wrong_origin else package_root) / imports[name])
+                return module
+
+            def tree(path, **_kwargs):
+                self.assertIn(path, (package_root, tooling_root))
+                return (expected, directories) if path == package_root else (tooling, set())
+
+            def read(path, *args, **kwargs):
+                if path == package_root.parent / "mobile_release_kit-0.3.0.dist-info/METADATA":
+                    return b"Metadata-Version: 2.4\n\n"
+                if path == package_root.parent / "mobile_release_kit-0.3.0.dist-info/licenses/LICENSE":
+                    return (ROOT / "LICENSE").read_bytes()
+                self.assertTrue(path.is_relative_to(ROOT))
+                return (ROOT / path.relative_to(ROOT)).read_bytes()
+
+            distribution = SimpleNamespace(locate_file=lambda _name: package_root.parent)
+            flags = SimpleNamespace(isolated=1, dont_write_bytecode=1)
+            directories = {"data", "api", "api/data"}
+            with patch.object(builtins, "__import__", import_statement), patch.object(checks.os, "getuid", return_value=60123), \
+                    patch.object(sys, "prefix", str(prefix)), patch.object(sys, "base_prefix", "/inert-base"), \
+                    patch.object(sys, "flags", flags), patch.object(checks.sysconfig, "get_path", return_value=str(package_root.parent)), \
+                    patch.object(checks, "_source_package", return_value=expected), patch.object(checks, "_tree", side_effect=tree), \
+                    patch.object(checks, "_read_regular", side_effect=read), patch.object(checks, "_validate_metadata"), \
+                    patch.object(checks.importlib.metadata, "distribution", return_value=distribution), \
+                    patch.object(checks.importlib.metadata, "distributions", return_value=()), \
+                    patch.object(checks.importlib, "import_module", side_effect=import_module):
+                result = checks.inspect_installed_wheel(ROOT, deadline=deadline)
+                self.assertEqual(result["module_count"], 130)  # 129 real leaves + the inert API main.
+                self.assertEqual(set(actual), set(imports))
+                self.assertEqual(len(actual), len(imports))
+                self.assertNotIn("mobile_release.api.__init__", actual)
+                for name in ("mobile_release.api", "mobile_release.api.contracts"):
+                    wrong_origin = name
+                    with self.subTest(wrong_origin=name), self.assertRaisesRegex(checks.CheckError, "WHEEL_MODULE_ORIGIN"):
+                        checks.inspect_installed_wheel(ROOT, deadline=deadline)
+                wrong_origin = None
+                directories.add("api/unreviewed")
+                with self.assertRaisesRegex(checks.CheckError, "WHEEL_INSTALLED_RESOURCE_BYTES"):
+                    checks.inspect_installed_wheel(ROOT, deadline=deadline)
+
+    def test_wheel_inspection_diagnostics_expose_only_exact_source_known_codes(self):
+        controller, checks = controller_module(), ci_module("ci_checks")
+        class Derived(checks.CheckError):
+            pass
+        class NeverFormat:
+            def __str__(self):
+                raise AssertionError("private error value must never be formatted")
+            __repr__ = __str__
+        bad_args = checks.CheckError("SOURCE_PACKAGE_FILES")
+        bad_args.args = ("SOURCE_PACKAGE_FILES", "synthetic-private-detail")
+        cases = (
+            (checks.CheckError("SOURCE_PACKAGE_FILES"), True),
+            (checks.CheckError("synthetic-private-detail"), False),
+            (checks.CheckError("UNREVIEWED_UPPERCASE_CODE"), False),
+            (checks.CheckError(NeverFormat()), False), (bad_args, False),
+            (Derived("SOURCE_PACKAGE_FILES"), False), (ValueError("SOURCE_PACKAGE_FILES"), False),
+        )
+        deadline = time.monotonic() + 30.0
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-wheel-diagnostic-") as temporary:
+            work = Path(temporary)
+            (work / "wheels").mkdir()
+            wheel = work / "wheels/fixture.whl"
+            wheel.write_bytes(b"inert; never inspected or installed\n")
+            paths = SimpleNamespace(work=work, wheel=wheel, source=ROOT)
+            session = SimpleNamespace(ensure_idle=lambda: None)
+            step = controller.Step("wheel-inspect", kind="inspection")
+            with patch.object(controller, "freeze_tree"), patch.object(controller, "check_capacity"):
+                for error, public in cases:
+                    with patch.object(checks, "inspect_project_wheel", side_effect=error), self.assertRaises(
+                            controller.VerificationError if public else type(error)) as caught:
+                        controller.perform_step(step, paths, session, checks, {}, "macos", deadline=deadline)
+                    if public:
+                        self.assertEqual(caught.exception.code, "SOURCE_PACKAGE_FILES")
+                        self.assertIs(caught.exception.__cause__, error)
+                    else:
+                        self.assertIs(caught.exception, error)
+                        self.assertEqual(controller.error_details(error)["error"], "CONTROLLER_FAILURE")
+                        self.assertNotIn("synthetic-private-detail", json.dumps(controller.error_details(error)))
+        # The workflow must dispatch these exact admitted verifier bytes.
+        workflow = (ROOT / ".github/workflows/desktop-macos-local-signing.yml").read_text(encoding="utf-8")
+        digest = hashlib.sha256((ROOT / ".github/scripts/verify_ci.py").read_bytes()).hexdigest()
+        self.assertEqual(workflow.count(digest + "  .github/scripts/verify_ci.py"), 1)
 
     def test_tree_checks_incremental_count_and_byte_budget_before_later_file_reads(self):
         checks = ci_module("ci_checks")
@@ -6386,8 +6567,12 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         package = "mobile_release/__init__.py"
         edits = (
             ("missing", lambda values: values.pop(package), {}, "WHEEL_COMPLETE_INVENTORY"),
+            ("missing-api", lambda values: values.pop("mobile_release/api/__init__.py"), {}, "WHEEL_COMPLETE_INVENTORY"),
+            ("missing-api-data", lambda values: values.pop("mobile_release/api/data/field-help.json"), {}, "WHEEL_COMPLETE_INVENTORY"),
             ("extra", lambda values: values.update({"extra.txt": b"fixture"}), {}, "WHEEL_COMPLETE_INVENTORY"),
             ("source-bytes", lambda values: values.update({package: b"different source bytes\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
+            ("api-bytes", lambda values: values.update({"mobile_release/api/contracts.py": b"# changed API\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
+            ("api-data-bytes", lambda values: values.update({"mobile_release/api/data/field-help.json": b"{}\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
             ("resource-bytes", lambda values: values.update({dist + "licenses/LICENSE": b"different license\n"}), {}, "WHEEL_FIRST_PARTY_BYTES"),
             ("runtime-dependency", lambda values: values.update({dist + "METADATA": values[dist + "METADATA"].replace(
                 b"Provides-Extra: test\n", b"Provides-Extra: test\nRequires-Dist: unexpected-runtime==1\n")}), {}, "WHEEL_RUNTIME_OR_UNPINNED_DEPENDENCY"),
@@ -6403,18 +6588,25 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             root = Path(temporary)
             valid = root / "valid.whl"
             self.write_wheel(valid, original)
-            observed = checks.inspect_project_wheel(valid, ROOT, deadline=deadline)
-            self.assertEqual(observed["sha256"], hashlib.sha256(valid.read_bytes()).hexdigest())
-            self.assertEqual(observed["member_count"], len(original) + 1)
-            self.assertEqual(observed["runtime_dependencies"], [])
+            try:
+                observed = checks.inspect_project_wheel(valid, ROOT, deadline=deadline)
+                self.assertEqual(observed["sha256"], hashlib.sha256(valid.read_bytes()).hexdigest())
+                self.assertEqual(observed["member_count"], len(original) + 1)
+                self.assertEqual(observed["module_count"], 129)
+                self.assertEqual(observed["runtime_dependencies"], [])
+            finally:
+                valid.unlink()
             for name, edit, options, code in edits:
                 with self.subTest(mutation=name):
                     members = dict(original)
                     edit(members)
                     path = root / (name + ".whl")
                     self.write_wheel(path, members, **options)
-                    with self.assertRaisesRegex(checks.CheckError, code):
-                        checks.inspect_project_wheel(path, ROOT, deadline=deadline)
+                    try:
+                        with self.assertRaisesRegex(checks.CheckError, code):
+                            checks.inspect_project_wheel(path, ROOT, deadline=deadline)
+                    finally:
+                        path.unlink()
 
     def test_consumer_requires_all_four_callers_empty_default_note_and_no_pending_transaction(self):
         checks = ci_module("ci_checks")

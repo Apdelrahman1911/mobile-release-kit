@@ -5842,7 +5842,24 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
         freeze_tree(paths.work / "wheels", deadline=deadline)
         if list((paths.work / "wheels").iterdir()) != [paths.wheel]:
             raise VerificationError("WHEEL_OUTPUT_INVENTORY")
-        details = checks.inspect_project_wheel(paths.wheel, paths.source, deadline=deadline)
+        try:
+            details = checks.inspect_project_wheel(paths.wheel, paths.source, deadline=deadline)
+        except checks.CheckError as error:
+            # Only literal policy codes from the exact admitted helper may
+            # cross this DATA boundary. Never stringify private/unknown errors.
+            codes = frozenset({
+                "SOURCE_BUILD_BACKEND", "SOURCE_PACKAGE_CONTRACT", "SOURCE_PACKAGE_DATA",
+                "SOURCE_PACKAGE_FILES", "SOURCE_PUBLIC_RESOURCE_PINS", "WHEEL_METADATA_SIZE",
+                "WHEEL_METADATA_PARSE", "WHEEL_METADATA_HEADER", "WHEEL_EXTRAS",
+                "WHEEL_RUNTIME_OR_UNPINNED_DEPENDENCY", "WHEEL_README_BYTES", "WHEEL_MEMBER_LIMIT",
+                "WHEEL_UNSAFE_MEMBER", "WHEEL_DUPLICATE_OR_OVERSIZED_MEMBER", "WHEEL_EXPANDED_LIMIT",
+                "WHEEL_MEMBER_SIZE", "WHEEL_COMPLETE_INVENTORY", "WHEEL_FIRST_PARTY_BYTES",
+                "WHEEL_RECORD_INVENTORY", "WHEEL_RECORD_SELF", "WHEEL_RECORD_BYTES", "WHEEL_ENTRY_CONTRACT",
+            })
+            if (type(error) is checks.CheckError and type(error.args) is tuple and len(error.args) == 1
+                    and type(error.args[0]) is str and error.args[0] in codes):
+                raise VerificationError(error.args[0]) from error
+            raise
     elif step.id == "wheel-freeze":
         current = paths.work / "wheel-venv"
         freeze_tree(current, deadline=deadline, link_roots=(current, *session.tool_prefixes))

@@ -48,6 +48,17 @@ MAX_TREE_ENTRIES = 2048
 MAX_STREAM_BYTES = 8 * 1024 * 1024
 MAX_RESULT_BYTES = 256 * 1024
 MAX_NATIVE_ABI_BYTES = 8192
+# The Desktop API is part of the same first-party distribution. Keep its
+# package/resource shape closed; a recursive wildcard is not package authority.
+PACKAGE_DIRECTORIES = frozenset({"data", "api", "api/data"})
+PACKAGE_RESOURCES = frozenset({
+    "data/apple-profile-roots.pem",
+    "api/data/credential-guide-v1.json", "api/data/field-help.json",
+    "api/data/github-connection-v1.json", "api/data/github-setup-v1.json",
+    "api/data/metadata-image-help-v1.json", "api/data/metadata-images-v1.json",
+    "api/data/metadata-text-help-v1.json", "api/data/project.schema.json",
+    "api/data/release-version-help-v1.json",
+})
 PYTHON_FULL_FSIZE = (1 << 32) + 1024 * 1024
 PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * 1024**2),) + tuple(
     (name, 16 * 1024**2) for name in
@@ -1350,9 +1361,17 @@ def _source_package(source_root: Path, *, deadline: float) -> dict[str, bytes]:
                           ("optional-dependencies", {"test": list(TEST_REQUIREMENTS)}),
                           ("scripts", {"mobile-release": "mobile_release.cli:main"})):
         _require(_exact(fields.get(key), expected), "SOURCE_PACKAGE_CONTRACT")
+    tool = project.get("tool")
+    setuptools = tool.get("setuptools") if type(tool) is dict else None
+    _require(type(setuptools) is dict and _exact(setuptools.get("package-data"),
+             {"mobile_release": ["data/apple-profile-roots.pem", "api/data/*.json"]}),
+             "SOURCE_PACKAGE_DATA")
     files, directories = _tree(source_root / "src/mobile_release", deadline=deadline)
-    _require(directories == {"data"} and "__init__.py" in files and "__main__.py" in files
-             and set(files) == {name for name in files if "/" not in name and name.endswith(".py")} | {"data/apple-profile-roots.pem"},
+    python_files = {name for name in files if name.endswith(".py")
+                    and ("/" not in name or name.startswith("api/") and name.count("/") == 1)}
+    _require(directories == PACKAGE_DIRECTORIES
+             and {"__init__.py", "__main__.py", "api/__init__.py"} <= files.keys()
+             and set(files) == python_files | PACKAGE_RESOURCES,
              "SOURCE_PACKAGE_FILES")
     _require(hashlib.sha256(files["data/apple-profile-roots.pem"]).hexdigest() == APPLE_ROOTS_SHA256
              and hashlib.sha256(_read_regular(source_root / "LICENSE", deadline=deadline)).hexdigest() == LICENSE_SHA256,
@@ -1372,7 +1391,7 @@ def inspect_native_package(source_root: Path, package_root: Path, *, deadline: f
              "NATIVE_PACKAGE_ROOT")
     expected = _source_package(source_root, deadline=deadline)
     actual, directories = _tree(package_root, deadline=deadline)
-    _require(actual == expected and directories == {"data"}, "NATIVE_PACKAGE_BYTES")
+    _require(actual == expected and directories == PACKAGE_DIRECTORIES, "NATIVE_PACKAGE_BYTES")
     for relative in ("", *sorted(directories), *sorted(actual)):
         _remaining(deadline, 3300)
         path = package_root / relative
@@ -1457,7 +1476,8 @@ def inspect_project_wheel(wheel_path: Path, source_root: Path, *, deadline: floa
              and members[dist + "entry_points.txt"] == b"[console_scripts]\nmobile-release = mobile_release.cli:main\n",
              "WHEEL_ENTRY_CONTRACT")
     return {"sha256": hashlib.sha256(data).hexdigest(), "member_count": len(members),
-            "module_count": len(package) - 1, "tooling_count": len(TOOLING_FILES), "generator": generator,
+            "module_count": sum(name.endswith(".py") for name in package),
+            "tooling_count": len(TOOLING_FILES), "generator": generator,
             "runtime_dependencies": [], "license_sha256": LICENSE_SHA256, "roots_sha256": APPLE_ROOTS_SHA256}
 
 
@@ -1477,9 +1497,10 @@ def inspect_installed_wheel(source_root: Path, *, deadline: float) -> dict:
              and Path(mobile_release.__file__).resolve() == package_root / "__init__.py"
              and resolve_tooling_root(environ={}) == tooling_root, "WHEEL_INSTALLED_ORIGIN")
     expected_package = _source_package(source_root, deadline=deadline)
-    package, _ = _tree(package_root, deadline=deadline)
+    package, directories = _tree(package_root, deadline=deadline)
     tooling, _ = _tree(tooling_root, deadline=deadline)
-    _require(package == expected_package and set(tooling) == set(TOOLING_FILES)
+    _require(package == expected_package and directories == PACKAGE_DIRECTORIES
+             and set(tooling) == set(TOOLING_FILES)
              and set(REQUIRED_TOOLING_FILES) == set(TOOLING_FILES)
              and all(tooling[name] == _read_regular(source_root / name, deadline=deadline) for name in TOOLING_FILES),
              "WHEEL_INSTALLED_RESOURCE_BYTES")
@@ -1490,9 +1511,12 @@ def inspect_installed_wheel(source_root: Path, *, deadline: float) -> dict:
     _require(hashlib.sha256(_read_regular(dist_info / "licenses/LICENSE", deadline=deadline)).hexdigest() == LICENSE_SHA256,
              "WHEEL_INSTALLED_LICENSE")
     for name in expected_package:
-        if name.endswith(".py") and name not in {"__main__.py", "__init__.py"}:
+        if name.endswith(".py") and name != "__init__.py" and PurePosixPath(name).name != "__main__.py":
             _remaining(deadline, 3300)
-            module = importlib.import_module("mobile_release." + name[:-3])
+            parts = PurePosixPath(name).with_suffix("").parts
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            module = importlib.import_module(".".join(("mobile_release", *parts)))
             _require(Path(module.__file__).resolve() == package_root / name, "WHEEL_MODULE_ORIGIN")
     _require(len(apple_roots()) == 3 and mobile_release.__version__ == VERSION, "WHEEL_ACTUAL_ROOTS_OR_VERSION")
     installed = {}
@@ -1501,7 +1525,8 @@ def inspect_installed_wheel(source_root: Path, *, deadline: float) -> dict:
         name = re.sub(r"[-_.]+", "-", _header(item.metadata, "Name")).lower()
         _require(name not in installed and Path(item.locate_file("")).resolve().is_relative_to(prefix), "WHEEL_DISTRIBUTION_ORIGIN")
         installed[name] = item.version
-    return {"module_count": len(expected_package) - 1, "tooling_count": len(tooling), "roots_count": 3,
+    return {"module_count": sum(name.endswith(".py") for name in expected_package),
+            "tooling_count": len(tooling), "roots_count": 3,
             "runtime_dependencies": [], "distributions": installed}
 
 
