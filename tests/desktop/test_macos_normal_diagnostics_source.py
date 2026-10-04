@@ -22,8 +22,10 @@ METHOD = "testSyntheticProjectBuildToolDiagnostics"
 SCOPE = "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"
 SOURCE_METHODS = ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
  'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result']
-# Baseline includes M2-A plus the reviewed ordinary original-owner/monitor-only UI correction.
-ORIGINAL_SWIFT_SHA256 = "b382c76042ce6f48a545967b98ea95548dabd447262cbc29b5078688f4a14bb9"
+# Exact restored efbd817 baseline, independently compared before readiness changes.
+# The historical b382c760... pin predates the reviewed packaged-entry/require-site
+# work. Only the explicitly checked blocks below are restored or removed.
+ORIGINAL_SWIFT_SHA256 = "460cd75c9006245564b0d5db353a877a7d4632718a551ec8ad406f41db76118b"
 DIAGNOSTICS_INSERTION_SHA256 = "d6c1730aa9c3b82467a5f6f15b549a463746e0901556174fc52a602d903b798d"
 DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; observations are non-atomic.\n'
 DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
@@ -33,6 +35,9 @@ RENDERER_QUERY_BEGIN = '        // Fixed renderer singleton diagnostic; no addit
 RENDERER_QUERY_END = '        // End fixed renderer singleton diagnostic.\n'
 RENDERER_QUERY_ORIGINAL = '        let renderer = try unique(window.webViews, "ordinary first-party renderer is missing or ambiguous")\n'
 RENDERER_QUERY_DIAGNOSTICS_SHA256 = 'dea59830e6aef376217856dc9779acffb9634aa5fd2d260847db0b876cb7a0c4'
+RENDERER_READINESS_BEGIN = '        // Bounded initial renderer readiness; observed ambiguity remains terminal.\n'
+RENDERER_READINESS_END = '        // End bounded initial renderer readiness.\n'
+RENDERER_READINESS_SHA256 = '9f8936dd612d12ae8dc10c561181686359171a3ce98021603c12c17a486c2a8a'
 ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
 ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
 # The normal result also binds M2-A entry identity without claiming full M2/maintenance readiness.
@@ -113,9 +118,62 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def restored_initial_renderer_readiness(self, swift: str) -> str:
+        # This one reviewed readiness allowance is not a general normalization:
+        # the other launch site and every byte outside this block remain bound.
+        self.assertEqual(swift.count(RENDERER_READINESS_BEGIN), 1)
+        self.assertEqual(swift.count(RENDERER_READINESS_END), 1)
+        begin = swift.index(RENDERER_READINESS_BEGIN)
+        end = swift.index(RENDERER_READINESS_END) + len(RENDERER_READINESS_END)
+        self.assertLess(begin, end)
+        block = swift[begin:end]
+        launch = swift.split('private func launchCancelAndQuit(profile:', 1)[1].split(
+            '    private struct FixtureSpec', 1)[0]
+        self.assertEqual(launch.count(block), 1)
+        self.assertEqual(digest(block.encode()), RENDERER_READINESS_SHA256)
+        ordered = (
+            'let rendererQuery = window.webViews',
+            'let rendererCount = rendererQuery.count',
+            'if rendererCount != 1 {',
+            'try require(rendererCount <= 1, "ordinary first-party renderer is ambiguous")',
+            'var observedReadyCount = rendererCount',
+            'if rendererCount == 0 {',
+            'try require(rendererQuery.element(boundBy: 0).waitForExistence(timeout: try remaining(5)),',
+            'observedReadyCount = rendererQuery.count',
+            'try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")',
+            'let renderer = rendererQuery.element(boundBy: 0)',
+        )
+        positions = []
+        for token in ordered:
+            self.assertEqual(block.count(token), 1, token)
+            positions.append(block.index(token))
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('if rendererCount == 0 {\n'
+                      '            try require(rendererQuery.element(boundBy: 0).waitForExistence(timeout: try remaining(5)),\n'
+                      '                        "ordinary first-party renderer did not appear")\n'
+                      '            observedReadyCount = rendererQuery.count\n'
+                      '        }\n', block)
+        for token, count in (('window.webViews', 1), ('.count', 2), ('.element(', 2),
+                             ('waitForExistence(', 1), ('remaining(5)', 1), ('print(', 1)):
+            self.assertEqual(block.count(token), count, token)
+        for forbidden in ('firstMatch', 'matching(', 'allElements', 'descendants(', 'children(',
+                          'snapshot(', 'debugDescription', 'sleep(', 'while ', 'return',
+                          'try?', 'catch', '.click(', 'evaluateJavaScript', 'app.', 'Process()',
+                          'FileManager', 'write(', 'beginCase(', 'journeyDeadline ='):
+            self.assertNotIn(forbidden, block, forbidden)
+        strict = swift.split('private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {', 1)[1].split(
+            '    private enum PrivateInput: String {', 1)[0]
+        self.assertEqual(strict.count(RENDERER_QUERY_BEGIN), 1)
+        self.assertEqual(strict.count(RENDERER_QUERY_END), 1)
+        original = strict[strict.index(RENDERER_QUERY_BEGIN):strict.index(RENDERER_QUERY_END) + len(RENDERER_QUERY_END)]
+        self.assertEqual(len(original.encode()), 576)
+        self.assertEqual(digest(original.encode()), RENDERER_QUERY_DIAGNOSTICS_SHA256)
+        return swift[:begin] + original + swift[end:]
+
     def restored_renderer_queries(self, swift: str) -> str:
-        # A new readiness/fallback policy is not authorized: bind the same one
-        # original query/count/refusal at exactly the two existing launch sites.
+        swift = self.restored_initial_renderer_readiness(swift)
+        # After that exact allowance, bind the same original query/count/refusal
+        # at exactly the two existing launch sites without other changes.
         self.assertEqual(swift.count(RENDERER_QUERY_BEGIN), 2)
         self.assertEqual(swift.count(RENDERER_QUERY_END), 2)
         self.assertEqual(swift.count(RENDERER_QUERY_ORIGINAL), 0)
@@ -403,7 +461,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertLess(finish.index('self.quiescence = "original"'), finish.index('self._checkpoint()'))
         self.assertNotIn('operator', block.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection()', 1)[1])
 
-    def test_normal_diagnostics_observes_original_complete_report_and_settled_projection(self):
+    def checked_diagnostics_source(self) -> tuple[str, str]:
         swift = (ROOT / SWIFT).read_text()
         swift = self.restored_renderer_queries(swift)
         swift = self.restored_dashboard_query(swift)
@@ -418,6 +476,13 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         # Fixture/content policy is unchanged; the separately reviewed common
         # original-owner/deadline migration is included in this pinned baseline.
         self.assertEqual(digest(swift.replace(insertion, "", 1).encode()), ORIGINAL_SWIFT_SHA256)
+        return swift, insertion
+
+    def test_renderer_readiness_preserves_one_query_and_current_baseline(self):
+        self.checked_diagnostics_source()
+
+    def test_normal_diagnostics_observes_original_complete_report_and_settled_projection(self):
+        swift, insertion = self.checked_diagnostics_source()
         self.assertEqual(insertion.count("@MainActor func " + METHOD + "() throws"), 1)
         for fragment in (
             'launchForJourney()', 'let fixture = LocalFixture()', 'ownedFixture = fixture', 'try fixture.prepare()',
