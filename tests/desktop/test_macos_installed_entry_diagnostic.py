@@ -105,6 +105,15 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                 MODULE.direct_outcome(result)
 
     def test_artifact_bound_and_roster_precede_any_materialization(self):
+        # Immutable genuine8b preview; synthetic archive cases below never
+        # substitute for these public source/run/archive/package bindings.
+        self.assertEqual(
+            (MODULE.APPLICATION_SOURCE, MODULE.SOURCE_RUN, MODULE.SOURCE_ATTEMPT,
+             MODULE.ARTIFACT_ID, MODULE.ARCHIVE_BYTES, MODULE.ARCHIVE_SHA,
+             MODULE.PACKAGE_BYTES, MODULE.PACKAGE_SHA),
+            ("8b67300f92d2e92cf909a0da12850a678bc2812f", "37195548745", "1",
+             "11301302356", 56256693, "a4dd135994251b3663da354650c7aa3e158134f12c236752f610af6baf75d64b",
+             56247938, "024523ce33675ecdad8e678b3fe5981f2824ccc26b4477e0bb1f5a6c196ee0ea"))
         def archive(names):
             target = io.BytesIO()
             with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as stream:
@@ -794,6 +803,16 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
         self.assertNotIn("contents: write", workflow)
         for unused in ("cargo ", "rustup ", "npm ", "xcodebuild ", "store upload", "--deep"):
             self.assertNotIn(unused, workflow)
+        # All fixed acquisition copies agree with the one owner authority.
+        # The existing per-branch guards still select only packaged_ui here.
+        for selected_job in (*jobs, ui):
+            for endpoint in (
+                "actions/artifacts/" + MODULE.ARTIFACT_ID,
+                "actions/artifacts/" + MODULE.ARTIFACT_ID + "/zip",
+                "actions/runs/" + MODULE.SOURCE_RUN + "/attempts/" + MODULE.SOURCE_ATTEMPT,
+            ):
+                self.assertEqual(selected_job.count('gh api "repos/' + MODULE.REPO + "/" + endpoint + '"'), 1)
+            self.assertEqual(selected_job.count("# Exact" + str(MODULE.ARCHIVE_BYTES) + "B"), 1)
         self.assertEqual(native.count("openApplicationAtURL:"), 1)
         self.assertEqual(native.count("[original_app terminate]"), 1)
         self.assertEqual(native.count("[original_app forceTerminate]"), 1)

@@ -22,10 +22,21 @@ METHOD = "testSyntheticProjectBuildToolDiagnostics"
 SCOPE = "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"
 SOURCE_METHODS = ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
  'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result']
-# Exact restored efbd817 baseline, independently compared before readiness changes.
-# The historical b382c760... pin predates the reviewed packaged-entry/require-site
-# work. Only the explicitly checked blocks below are restored or removed.
-ORIGINAL_SWIFT_SHA256 = "460cd75c9006245564b0d5db353a877a7d4632718a551ec8ad406f41db76118b"
+# Exact accepted normal3 two-lifetime baseline plus fixed8b package reuse.
+# Only the explicitly checked heading/readiness/diagnostic blocks below are
+# restored or removed; original-owner and restart paths remain bound.
+ORIGINAL_SWIFT_SHA256 = "deb8a2945f39a45844a37d87d0a4a030c384a30b03b07009f0b049c0dd8c3bc4"
+# Reversing only these six private package literals must recover the complete
+# independently accepted normal3 Swift, including shared one-shot activation.
+PACKAGED_REUSE_BASE_SWIFT_SHA256 = "3b5d7615f332cce2f0e8c0bd104c557cc205b2a359ed791a6e2a328c351cbc1e"
+PACKAGED_REUSE_BINDINGS = (
+    ("53850a9fd94768a2521f2634db6121550dbdd71c", "8b67300f92d2e92cf909a0da12850a678bc2812f"),
+    ("11281078057", "11301302356"),
+    ("50972943", "56256693"),
+    ("dfb46e23f7b397facc1a9b69b77d1440960fb846bedc90a573f2410b230255d0", "a4dd135994251b3663da354650c7aa3e158134f12c236752f610af6baf75d64b"),
+    ("50964188", "56247938"),
+    ("618c873f0b841b54faceae9e5ad1ca073a94215a1a53cee0bf28c3aa17361119", "024523ce33675ecdad8e678b3fe5981f2824ccc26b4477e0bb1f5a6c196ee0ea"),
+)
 DIAGNOSTICS_INSERTION_SHA256 = "d6c1730aa9c3b82467a5f6f15b549a463746e0901556174fc52a602d903b798d"
 DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; observations are non-atomic.\n'
 DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
@@ -68,6 +79,8 @@ SEMANTIC_HEADING_LINES = (
      '            let fresh = panel.staticTexts.matching(NSPredicate(format: "title == %@", "Tool observations from this run"))\n', 1),
     ('                _ = try unique(panel.staticTexts.matching(identifier: label), "fixed Android diagnostics card is missing or repeated")\n',
      '                _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)), "fixed Android diagnostics card is missing or repeated")\n', 1),
+    ('            _ = try waitElement(restartedRenderer.staticTexts.matching(identifier: "Let’s get project ready."), in: restartedRenderer,\n',
+     '            _ = try waitElement(restartedRenderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: restartedRenderer,\n', 1),
 )
 RENDERER_QUERY_BEGIN = '        // Fixed renderer singleton diagnostic; no additional query or wait.\n'
 RENDERER_QUERY_END = '        // End fixed renderer singleton diagnostic.\n'
@@ -262,7 +275,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def restored_semantic_heading_queries(self, swift: str) -> str:
         # Refuse a missing, duplicate, broadened or unexpected title selector
         # before restoring only the reviewed complete source lines.
-        self.assertEqual(swift.count(SEMANTIC_HEADING_PREFIX), 21)
+        self.assertEqual(len(SEMANTIC_HEADING_LINES), 17)
+        self.assertEqual(swift.count(SEMANTIC_HEADING_PREFIX), 22)
         for original, semantic, count in SEMANTIC_HEADING_LINES:
             self.assertEqual(swift.count(semantic), count, semantic)
             self.assertEqual(swift.count(original), 0, original)
@@ -531,13 +545,23 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_renderer_readiness_preserves_one_query_and_current_baseline(self):
         self.checked_diagnostics_source()
         source = (ROOT / SWIFT).read_text()
+        accepted = source
+        for previous, reused in PACKAGED_REUSE_BINDINGS:
+            self.assertEqual(source.count(reused), 1, reused)
+            self.assertNotIn(previous, source)
+            accepted = accepted.replace(reused, previous, 1)
+        self.assertEqual(digest(accepted.encode()), PACKAGED_REUSE_BASE_SWIFT_SHA256)
         original, semantic, count = SEMANTIC_HEADING_LINES[0]
         self.assertEqual(count, 1)
+        restart_original, restart_semantic, restart_count = SEMANTIC_HEADING_LINES[-1]
+        self.assertEqual(restart_count, 1)
+        self.assertIn("restartedRenderer.staticTexts", restart_semantic)
         for label, changed in (
             ("broad identifier reversion", source.replace(semantic, original, 1)),
             ("duplicate dashboard heading", source.replace(semantic, semantic + semantic, 1)),
             ("looser title predicate", source.replace(
                 semantic, semantic.replace("title == %@", "title CONTAINS %@", 1), 1)),
+            ("broad restart heading reversion", source.replace(restart_semantic, restart_original, 1)),
         ):
             with self.subTest(semantic_heading_refusal=label):
                 with self.assertRaises(AssertionError):

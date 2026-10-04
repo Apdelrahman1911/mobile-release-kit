@@ -340,12 +340,19 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(source.count("packagedRequireDiagnosticEmitted = true"), 1)
         selected = source.split("func testPackagedEntryLaunchCancelAndQuit() throws {", 1)[1].split(
             "\n    @MainActor private func launchCancelAndQuit", 1)[0]
-        self.assertLess(selected.index("packagedRequireDiagnosticActive = true"),
-                        selected.index("defer { packagedRequireDiagnosticActive = false }"))
-        self.assertLess(selected.index("defer { packagedRequireDiagnosticActive = false }"),
-                        selected.index("try launchCancelAndQuit(profile: .packagedEntry)"))
+        self.assertIn("try launchCancelAndQuit(profile: .packagedEntry)", selected)
+        self.assertNotIn("packagedRequireDiagnosticActive", selected)
+        shared = source.split("@MainActor private func launchCancelAndQuit(profile: SourceProfile) throws {", 1)[1]
+        order = ("packagedRequireDiagnosticActive = true", "defer { packagedRequireDiagnosticActive = false }",
+                 "try beginCase(seconds: 60)", "try admittedJourneyApplication(profile: profile)")
+        self.assertEqual([shared.index(item) for item in order], sorted(shared.index(item) for item in order))
+        self.assertEqual(source.count("try launchCancelAndQuit(profile: .sameBuild)"), 1)
+        self.assertEqual(source.count("try launchCancelAndQuit(profile: .packagedEntry)"), 1)
+        self.assertEqual(MODULE.NORMAL_SELECTIONS["test.xcresult"][0], ("testLaunchCancelAndQuit",))
+        self.assertFalse(any("testPackagedEntryLaunchCancelAndQuit" in methods
+                             for methods, _, _ in MODULE.NORMAL_SELECTIONS.values()))
         require = source.split("private func require(", 1)[1].split("private func unique(", 1)[0]
-        false_guard = require.split("guard value else {", 1)[1].split("\n        if let owner", 1)[0]
+        false_guard = require.split("guard value else {", 1)[1].split("\n        try checkOriginalOwners()", 1)[0]
         ordered = ("let originalFailureAbsent = caseClock?.firstFailure == nil",
                    "let refusal = caseClock?.fail(reason) ?? Refusal.condition(reason)",
                    "if packagedRequireDiagnosticActive && originalFailureAbsent && !packagedRequireDiagnosticEmitted",
@@ -356,10 +363,11 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(source.count("MRK_MACOS_PACKAGED_REQUIRE_FAILURE="), 1)
         self.assertEqual(require.count("caseClock?.fail(reason) ?? Refusal.condition(reason)"), 1)
-        for forbidden in ("XCTFail", "recordIssue", "waitFor", "remaining(", "systemUptime", "owner.", "catch", "try?"):
+        for forbidden in ("XCTFail", "recordIssue", "waitFor", "remaining(", "systemUptime", "owner.", "checkOriginalOwners(", "catch", "try?"):
             self.assertNotIn(forbidden, false_guard)
+        self.assertEqual(require.count("try checkOriginalOwners()"), 1)
         # A false guard still throws; true values retain BOTH original gates.
-        self.assertIn("throw refusal\n        }\n        if let owner = originalLaunch { try owner.healthy() }\n"
+        self.assertIn("throw refusal\n        }\n        try checkOriginalOwners()\n"
                       "        if let clock = caseClock { _ = try clock.remaining(1, before: journeyDeadline) }", require)
         unique = source.split("private func unique(", 1)[1].split("private func click(", 1)[0]
         click = source.split("private func click(", 1)[1].split("private func dashboard(", 1)[0]
@@ -378,7 +386,9 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(source.count("try beginCase(seconds: 60)"), 1)
         self.assertEqual(source.count("try beginCase(seconds: 300)"), 5)
         self.assertEqual(source.count("try completeNormalQuit(app)"), 6)
-        self.assertEqual(source.count("try acceptFinalScenario()"), 6)
+        self.assertEqual(source.count("try completeNormalQuit(restartedApp)"), 1)
+        self.assertEqual(source.count("try acceptFinalScenario()"), 5)
+        self.assertEqual(source.count("try acceptPersistenceRestart()"), 1)
         self.assertEqual(source.count("normalQuitObserved = true"), 1)
         for required in ("let deadline: TimeInterval", "value.isFinite, value >= last",
                          "if firstFailure == nil", "caseClock == nil && journeyDeadline == nil",

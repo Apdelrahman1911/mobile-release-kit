@@ -115,14 +115,19 @@ desktop-macos-entry-diagnostic.yml. Both old diagnostic jobs remain confined
 to the old push/ref. No direct-entry dependency/rerun, default-branch edit or
 generic dispatcher is required.
 
-Reuse application source53850a9fd94768a2521f2634db6121550dbdd71c,
-artifact11281078057 (50972943 bytes; SHA256
-dfb46e23f7b397facc1a9b69b77d1440960fb846bedc90a573f2410b230255d0),
-and inner package50964188 bytes (SHA256
-618c873f0b841b54faceae9e5ad1ca073a94215a1a53cee0bf28c3aa17361119).
+Reuse application source8b67300f92d2e92cf909a0da12850a678bc2812f,
+source run37195548745/attempt1 (.github/workflows/desktop-macos-installed.yml),
+artifact11301302356 (56256693 bytes; SHA256
+a4dd135994251b3663da354650c7aa3e158134f12c236752f610af6baf75d64b),
+and inner package56247938 bytes (SHA256
+024523ce33675ecdad8e678b3fe5981f2824ccc26b4477e0bb1f5a6c196ee0ea).
 Fresh-only Installer/readback, actual current harness source/roster and actual
 runner admission are separate bindings. No app/runtime rebuild, package
 mutation or fake same-source receipt is permitted.
+Only the external harness is newer: the application remains that exact8b package.
+Both basic methods share the same one-shot finite require-site diagnostic; this
+packaged-only route keeps its dedicated parser and never widens NORMAL_SELECTIONS.
+sameBuildQualified, fullUIQualified, fullM2Qualified and productReady remain false.
 
 Only this new diagnostic UI profile uses /Applications/Xcode.app/Contents/Developer;
 old diagnostics retain CommandLineTools. The closed ui-test.json requires

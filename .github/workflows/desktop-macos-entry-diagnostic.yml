@@ -65,11 +65,11 @@ jobs:
           set -o noclobber
           umask 077
           # Finite ceiling in shell file-size blocks, not archive authority.
-          # Exact50972943B and digest checked before use; no token reaches native jobs.
+          # Exact56256693B and digest checked before use; no token reaches native jobs.
           ulimit -S -f 131072
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37143431561/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11301302356" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37195548745/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11301302356/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
       - name: Verify original archive, complete package roster and fresh destination
         id: prepare
         timeout-minutes: 3
@@ -209,11 +209,11 @@ jobs:
           set -o noclobber
           umask 077
           # Finite ceiling in shell file-size blocks, not archive authority.
-          # Exact50972943B and digest checked before use; no token reaches native jobs.
+          # Exact56256693B and digest checked before use; no token reaches native jobs.
           ulimit -S -f 131072
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37143431561/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11301302356" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37195548745/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11301302356/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
       - name: Verify original archive, complete package roster and fresh destination
         id: prepare
         timeout-minutes: 3
@@ -354,11 +354,11 @@ jobs:
           set -o noclobber
           umask 077
           # Finite ceiling in shell file-size blocks, not archive authority.
-          # Exact50972943B and digest checked before use; no token reaches native jobs.
+          # Exact56256693B and digest checked before use; no token reaches native jobs.
           ulimit -S -f 131072
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37143431561/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
-          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11281078057/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11301302356" > "$MRK_ENTRY_DIAGNOSTIC_WORK/artifact.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/runs/37195548745/attempts/1" > "$MRK_ENTRY_DIAGNOSTIC_WORK/source-run.json"
+          gh api "repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/11301302356/zip" > "$MRK_ENTRY_DIAGNOSTIC_WORK/original-preview.zip"
       - name: Verify original archive, complete package roster and fresh destination
         id: prepare
         timeout-minutes: 3
