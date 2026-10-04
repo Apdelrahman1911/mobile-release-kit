@@ -31,6 +31,44 @@ DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; obse
 DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
 DASHBOARD_QUERY_ORIGINAL = '        _ = try unique(heading, "dashboard heading is ambiguous")\n'
 DASHBOARD_QUERY_DIAGNOSTICS_SHA256 = "4a0f78d6468535805756ea785f0cdf5fbcede31c38d276635485a476b9fb6ad6"
+# Authored h1/h2/h3 singleton queries only; no badge, native-sheet or
+# existence-only selector is normalized. Every complete line and multiplicity
+# is independently enumerated, then the unchanged whole-source pins apply.
+SEMANTIC_HEADING_PREFIX = 'staticTexts.matching(NSPredicate(format: "title == %@", '
+SEMANTIC_HEADING_LINES = (
+    ('        let heading = renderer.staticTexts.matching(identifier: "Good releases start here.")\n',
+     '        let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here."))\n', 1),
+    ('        _ = try waitElement(review.staticTexts.matching(identifier: title), in: storage, failures: Self.privateInputFailures)\n',
+     '        _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", title)), in: storage, failures: Self.privateInputFailures)\n', 1),
+    ('        _ = try waitElement(storage.staticTexts.matching(identifier: "Supplied-input assessment"), in: storage,\n',
+     '        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@", "Supplied-input assessment")), in: storage,\n', 1),
+    ('            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,\n',
+     '            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,\n', 5),
+    ('            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"), in: renderer,\n',
+     '            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")), in: renderer,\n', 1),
+    ('            _ = try waitElement(review.staticTexts.matching(identifier: "Submitted configuration saved"), in: review,\n',
+     '            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Submitted configuration saved")), in: review,\n', 1),
+    ('            _ = try waitElement(proposal.staticTexts.matching(identifier: "Four read-only workflow previews"), in: proposal)\n',
+     '            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)\n', 1),
+    ('            _ = try waitElement(review.staticTexts.matching(identifier: "Reviewed local workflow bundle installed"), in: review,\n',
+     '            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed local workflow bundle installed")), in: review,\n', 1),
+    ('            _ = try waitElement(review.staticTexts.matching(identifier: "Text saved"), in: review, timeout: 48, failures: Self.textFailures)\n',
+     '            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Text saved")), in: review, timeout: 48, failures: Self.textFailures)\n', 1),
+    ('                _ = try waitElement(renderer.staticTexts.matching(identifier: "Original image selection cancelled"), in: renderer,\n',
+     '                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Original image selection cancelled")), in: renderer,\n', 1),
+    ('                _ = try unique(review.staticTexts.matching(identifier: "Final lexical Store input order"), "final image order was not displayed")\n',
+     '                _ = try unique(review.staticTexts.matching(NSPredicate(format: "title == %@", "Final lexical Store input order")), "final image order was not displayed")\n', 1),
+    ('                _ = try waitElement(review.staticTexts.matching(identifier: "Reviewed public images copied locally"), in: review,\n',
+     '                _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed public images copied locally")), in: review,\n', 1),
+    ('            _ = try unique(report.staticTexts.matching(identifier: "Returned offline-check report"), "returned offline report heading is missing")\n',
+     '            _ = try unique(report.staticTexts.matching(NSPredicate(format: "title == %@", "Returned offline-check report")), "returned offline report heading is missing")\n', 1),
+    ('            _ = try unique(panel.staticTexts.matching(identifier: "No pending build-input record observed"),\n',
+     '            _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", "No pending build-input record observed")),\n', 2),
+    ('            let fresh = panel.staticTexts.matching(identifier: "Tool observations from this run")\n',
+     '            let fresh = panel.staticTexts.matching(NSPredicate(format: "title == %@", "Tool observations from this run"))\n', 1),
+    ('                _ = try unique(panel.staticTexts.matching(identifier: label), "fixed Android diagnostics card is missing or repeated")\n',
+     '                _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)), "fixed Android diagnostics card is missing or repeated")\n', 1),
+)
 RENDERER_QUERY_BEGIN = '        // Fixed renderer singleton diagnostic; no additional query or wait.\n'
 RENDERER_QUERY_END = '        // End fixed renderer singleton diagnostic.\n'
 RENDERER_QUERY_ORIGINAL = '        let renderer = try unique(window.webViews, "ordinary first-party renderer is missing or ambiguous")\n'
@@ -221,6 +259,18 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(digest(block.encode()), RENDERER_QUERY_DIAGNOSTICS_SHA256)
         return swift.replace(block, RENDERER_QUERY_ORIGINAL)
 
+    def restored_semantic_heading_queries(self, swift: str) -> str:
+        # Refuse a missing, duplicate, broadened or unexpected title selector
+        # before restoring only the reviewed complete source lines.
+        self.assertEqual(swift.count(SEMANTIC_HEADING_PREFIX), 21)
+        for original, semantic, count in SEMANTIC_HEADING_LINES:
+            self.assertEqual(swift.count(semantic), count, semantic)
+            self.assertEqual(swift.count(original), 0, original)
+        for original, semantic, _count in SEMANTIC_HEADING_LINES:
+            swift = swift.replace(semantic, original)
+        self.assertNotIn(SEMANTIC_HEADING_PREFIX, swift)
+        return swift
+
     def restored_dashboard_query(self, swift: str) -> str:
         # Validate this exact diagnostic allowance before reconstructing the old
         # singleton line for the unchanged whole-original-source pin below.
@@ -309,7 +359,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         return block
 
     def test_normal_saved_offline_and_empty_recovery_use_original_gui_only(self):
-        swift = (ROOT / SWIFT).read_text()
+        swift = self.restored_semantic_heading_queries((ROOT / SWIFT).read_text())
         block = self.checked_saved_checks_block(swift)
         offline = block.split('@MainActor func testSyntheticProjectSavedOfflineChecks() throws {', 1)[1]
         offline, recovery = offline.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {', 1)
@@ -462,7 +512,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertNotIn('operator', block.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection()', 1)[1])
 
     def checked_diagnostics_source(self) -> tuple[str, str]:
-        swift = (ROOT / SWIFT).read_text()
+        swift = self.restored_semantic_heading_queries((ROOT / SWIFT).read_text())
         swift = self.restored_renderer_queries(swift)
         swift = self.restored_dashboard_query(swift)
         added = self.checked_saved_checks_block(swift)
@@ -480,6 +530,18 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_renderer_readiness_preserves_one_query_and_current_baseline(self):
         self.checked_diagnostics_source()
+        source = (ROOT / SWIFT).read_text()
+        original, semantic, count = SEMANTIC_HEADING_LINES[0]
+        self.assertEqual(count, 1)
+        for label, changed in (
+            ("broad identifier reversion", source.replace(semantic, original, 1)),
+            ("duplicate dashboard heading", source.replace(semantic, semantic + semantic, 1)),
+            ("looser title predicate", source.replace(
+                semantic, semantic.replace("title == %@", "title CONTAINS %@", 1), 1)),
+        ):
+            with self.subTest(semantic_heading_refusal=label):
+                with self.assertRaises(AssertionError):
+                    self.restored_semantic_heading_queries(changed)
 
     def test_normal_diagnostics_observes_original_complete_report_and_settled_projection(self):
         swift, insertion = self.checked_diagnostics_source()

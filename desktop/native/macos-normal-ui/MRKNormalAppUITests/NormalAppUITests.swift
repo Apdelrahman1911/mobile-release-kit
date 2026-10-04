@@ -430,7 +430,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func dashboard(_ renderer: XCUIElement) throws {
-        let heading = renderer.staticTexts.matching(identifier: "Good releases start here.")
+        let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here."))
         try require(heading.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "dashboard heading did not render")
         // Fixed dashboard query diagnostics only; observations are non-atomic.
         let observedCount = heading.count
@@ -1496,12 +1496,12 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func privateReview(_ storage: XCUIElement, title: String, target: String) throws -> XCUIElement {
         let review = try waitElement(named(storage, "Explicit private-input review"), in: storage,
                                      timeout: 48, failures: Self.privateInputFailures)
-        _ = try waitElement(review.staticTexts.matching(identifier: title), in: storage, failures: Self.privateInputFailures)
+        _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", title)), in: storage, failures: Self.privateInputFailures)
         try privateValue(storage, review, label: "Private-input review target", value: target)
         return review
     }
     @MainActor private func privateAssessment(_ storage: XCUIElement, input: PrivateInput) throws {
-        _ = try waitElement(storage.staticTexts.matching(identifier: "Supplied-input assessment"), in: storage,
+        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@", "Supplied-input assessment")), in: storage,
                             failures: Self.privateInputFailures)
         try require(storage.staticTexts.matching(identifier: "Configured only").count >= 1,
                     "mechanical supplied-input assessment did not configure this input")
@@ -1620,7 +1620,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Open project folder", renderer: renderer)
             let project = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected persistence project differs")
             try press(renderer, "Credentials", renderer: renderer)
@@ -1767,7 +1767,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
@@ -1790,7 +1790,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Metadata", renderer: renderer)
             try require(field(renderer, "Android locales, entry 2").value as? String == "fr-FR", "navigation lost the locale draft")
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")), in: renderer,
                                 failures: Self.configurationFailures)
             try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
             let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)
@@ -1808,7 +1808,7 @@ final class NormalAppUITests: XCTestCase {
             try press(review, "Apply reviewed save", renderer: renderer)
             try confirmedDialog(renderer, title: "Apply this configuration save?", action: "Apply reviewed save",
                                 checkbox: "I reviewed this exact inventory and understand that cancellation may be too late after Apply.")
-            _ = try waitElement(review.staticTexts.matching(identifier: "Submitted configuration saved"), in: review,
+            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Submitted configuration saved")), in: review,
                                 timeout: 48, failures: Self.configurationFailures)
             try fixture.accept("config")
             try press(renderer, "Dashboard", renderer: renderer)
@@ -1829,7 +1829,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Preview GitHub setup", renderer: renderer)
             let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
                                           failures: Self.workflowFailures)
-            _ = try waitElement(proposal.staticTexts.matching(identifier: "Four read-only workflow previews"), in: proposal)
+            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
             for path in LocalFixture.callers {
                 let shownPath = String(path.dropFirst("project/".count))
                 try expand(proposal, prefix: shownPath, renderer: renderer)
@@ -1853,7 +1853,7 @@ final class NormalAppUITests: XCTestCase {
             try press(review, "Confirm reviewed local files", renderer: renderer)
             try confirmedDialog(renderer, title: "Apply this four-caller bundle?", action: "Apply reviewed local files",
                                 checkbox: "I reviewed all four paths and complete before/after text.")
-            _ = try waitElement(review.staticTexts.matching(identifier: "Reviewed local workflow bundle installed"), in: review,
+            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed local workflow bundle installed")), in: review,
                                 timeout: 48, failures: Self.workflowFailures)
             try fixture.accept("workflows")
         }
@@ -1888,7 +1888,7 @@ final class NormalAppUITests: XCTestCase {
             try confirmedDialog(renderer, title: "Save this reviewed locale bundle?", action: "Save text",
                                 checkbox: "I reviewed all exact paths, full original/replacement text, digests and line-ending changes.",
                                 typedLabel: "Type SAVE to confirm only this local text operation")
-            _ = try waitElement(review.staticTexts.matching(identifier: "Text saved"), in: review, timeout: 48, failures: Self.textFailures)
+            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Text saved")), in: review, timeout: 48, failures: Self.textFailures)
             try fixture.accept("text")
             let older = try waitElement(editor.staticTexts.matching(identifier:
                 "The passive observation predates the original settled save check. Saved facts come from that exact native plan, not a fabricated fresh file read."), in: editor)
@@ -1937,7 +1937,7 @@ final class NormalAppUITests: XCTestCase {
                 let sheet = try nativeSheet(window, title: "Choose up to 10 public PNG or JPEG listing images")
                 try click(sheet.buttons.matching(identifier: "Cancel"), "native image Cancel unavailable")
                 try waitGone(sheet)
-                _ = try waitElement(renderer.staticTexts.matching(identifier: "Original image selection cancelled"), in: renderer,
+                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Original image selection cancelled")), in: renderer,
                                     timeout: 48, failures: Self.imageFailures)
                 try fixture.assertUnchanged()
             }
@@ -1967,7 +1967,7 @@ final class NormalAppUITests: XCTestCase {
                     try require(review.staticTexts.matching(identifier: String(path.dropFirst("project/".count))).count >= 1,
                                 "exact public image destination missing")
                 }
-                _ = try unique(review.staticTexts.matching(identifier: "Final lexical Store input order"), "final image order was not displayed")
+                _ = try unique(review.staticTexts.matching(NSPredicate(format: "title == %@", "Final lexical Store input order")), "final image order was not displayed")
                 _ = try unique(review.staticTexts.matching(identifier:
                     "The core supplies this order for the resulting paths. It is not drag-and-drop order or a promise that a Store accepts the images."),
                     "image preview lost its explicit no-Store-assurance distinction")
@@ -1983,7 +1983,7 @@ final class NormalAppUITests: XCTestCase {
                 try fixture.assertUnchanged()
                 try reveal(choice, in: renderer); choice.click()
                 try press(consent, "Confirm local image copy", renderer: renderer, failures: Self.imageFailures)
-                _ = try waitElement(review.staticTexts.matching(identifier: "Reviewed public images copied locally"), in: review,
+                _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed public images copied locally")), in: review,
                                     timeout: 48, failures: Self.imageFailures)
                 try fixture.accept("images")
             }
@@ -2074,7 +2074,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "offline project path is not exact")
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
@@ -2131,7 +2131,7 @@ final class NormalAppUITests: XCTestCase {
                 "No lifecycle failure has been reported. Individual findings retain their own core status."),
                 "offline operation did not settle without a lifecycle failure")
             let report = try unique(named(panel, "Saved offline check findings"), "the original offline report is missing or ambiguous")
-            _ = try unique(report.staticTexts.matching(identifier: "Returned offline-check report"), "returned offline report heading is missing")
+            _ = try unique(report.staticTexts.matching(NSPredicate(format: "title == %@", "Returned offline-check report")), "returned offline report heading is missing")
             _ = try unique(report.staticTexts.matching(identifier: "This invocation only"), "offline report is not current to this invocation")
             _ = try unique(report.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Complete is not PASS or release readiness.")),
                            "offline completion was misrepresented as readiness")
@@ -2191,7 +2191,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery inspection project path is not exact")
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
@@ -2223,7 +2223,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(panel.staticTexts.matching(identifier: "Original operation settled"), in: panel,
                                 timeout: 135, failures: failures)
             try savedOperationComplete(panel)
-            _ = try unique(panel.staticTexts.matching(identifier: "No pending build-input record observed"),
+            _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", "No pending build-input record observed")),
                            "the actual original build-input inspection was not Idle")
             _ = try unique(panel.staticTexts.matching(identifier:
                 "No lifecycle failure was reported. This operation concerns project build inputs only, not release readiness."),
@@ -2248,7 +2248,7 @@ final class NormalAppUITests: XCTestCase {
         try stage("recovery-idle-readback-and-quit") {
             try fixture.assertUnchanged()
             try savedOperationComplete(panel)
-            _ = try unique(panel.staticTexts.matching(identifier: "No pending build-input record observed"),
+            _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", "No pending build-input record observed")),
                            "original Idle inspection disappeared before normal Quit")
             for label in [unconfirmed, historical] + failures {
                 try require(panel.staticTexts.matching(identifier: label).count == 0, "inspection state changed before normal Quit")
@@ -2314,7 +2314,7 @@ final class NormalAppUITests: XCTestCase {
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(sheet, path: fixture.projectPath)
             try nativeOpen(sheet)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "diagnostics project path is not exact")
             _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
@@ -2347,7 +2347,7 @@ final class NormalAppUITests: XCTestCase {
             journeyDeadline = min(wholeDeadline, try clock.end(within: 15))
             defer { journeyDeadline = wholeDeadline } // Restore that SAME absolute outer deadline, never renew it.
             start.click() // The sole Start. Native work6/finality10 clocks are unchanged.
-            let fresh = panel.staticTexts.matching(identifier: "Tool observations from this run")
+            let fresh = panel.staticTexts.matching(NSPredicate(format: "title == %@", "Tool observations from this run"))
             let phase = panel.staticTexts.matching(identifier: "Phase: settled")
             let outcome = panel.staticTexts.matching(identifier: "Outcome: complete")
             let finality = panel.staticTexts.matching(identifier: "Native finality: settled")
@@ -2369,7 +2369,7 @@ final class NormalAppUITests: XCTestCase {
             }
             let originalContext = context.element(boundBy: 0).label
             for label in ["macOS developer selection", "Git version", "Java runtime version", "Java compiler version"] {
-                _ = try unique(panel.staticTexts.matching(identifier: label), "fixed Android diagnostics card is missing or repeated")
+                _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)), "fixed Android diagnostics card is missing or repeated")
             }
             try require(panel.staticTexts.matching(identifier: "Xcode version and build").count == 0,
                         "this is the four-card Android roster, not an iOS Xcode qualification")
