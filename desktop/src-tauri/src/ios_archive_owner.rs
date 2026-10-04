@@ -71,5 +71,5 @@ impl IOSArchiveOwner {
     }
 }
 pub(crate) fn unavailable() -> BridgeError {
-    BridgeError::new("ios_archive_unavailable", "Saved unsigned iOS archives are unavailable for this original document, Mac, installed runtime and full-Xcode custody.")
+    BridgeError::new("ios_archive_unavailable", "The selected local iOS action is unavailable for this original document, Mac and installed runtime qualification.")
 }

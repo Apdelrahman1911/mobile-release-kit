@@ -25,6 +25,8 @@ pub(crate) const IPC_LIMIT: usize = 8 * 1024;
 pub(crate) const REQUEST_LIMIT: usize = 32 * 1024;
 pub(crate) const RESPONSE_LIMIT: usize = 64 * 1024;
 pub(crate) const STATUS_LIMIT: usize = 64 * 1024;
+// Only the outer native Status version; core frames/results keep their own versions.
+pub(crate) const STATUS_SCHEMA_VERSION: u32 = 2;
 pub(crate) const MAX_FRAMES: usize = 9;
 pub(crate) const SIGNED_MAX_FRAMES: usize = 13;
 pub(crate) const SIGNED_COMMAND_LIMIT: u32 = 4096;
@@ -698,6 +700,18 @@ pub(crate) enum Phase { AwaitingConsent, Starting, Running, Stopping, Terminal, 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Availability { Available, Busy, Shutdown, CleanupUnknown, DocumentLost, UnsupportedPlatform, RuntimeUnqualified, ToolchainUnqualified }
+// Mode-gate DATA only. These bits never grant consent, original ownership,
+// signing material, exact-session recovery or finality.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ModeCapabilities { pub(crate) unsigned: bool, pub(crate) signed: bool, pub(crate) recovery: bool }
+impl ModeCapabilities {
+    pub(crate) const NONE: Self = Self { unsigned: false, signed: false, recovery: false };
+    pub(crate) fn supports(self, operation: Operation) -> bool { match operation {
+        Operation::IOSUnsignedArchive => self.unsigned, Operation::IOSSignedExport => self.signed,
+        Operation::IOSLocalRecovery => self.recovery,
+    } }
+}
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "ProjectionWire")]
 pub(crate) struct Projection {
@@ -788,11 +802,12 @@ impl Projection { fn valid(&self) -> bool {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Status { pub(crate) schema_version: u32, pub(crate) status_revision: u32, pub(crate) availability: Availability,
+    pub(crate) mode_capabilities: ModeCapabilities,
     #[serde(deserialize_with = "nullable")] pub(crate) operation: Option<Projection> }
 pub(crate) fn status(value: &Value) -> Result<Status, BridgeError> {
     if !structure(value) { return Err(protocol_error()); }
     let result = Status::deserialize(value).map_err(|_| protocol_error())?;
-    if result.schema_version != 1 || result.status_revision == u32::MAX || result.operation.as_ref().is_some_and(|p| !p.valid()) { return Err(protocol_error()); }
+    if result.schema_version != STATUS_SCHEMA_VERSION || result.status_revision == u32::MAX || result.operation.as_ref().is_some_and(|p| !p.valid()) { return Err(protocol_error()); }
     bounded(value, STATUS_LIMIT).map_err(|_| protocol_error())?; Ok(result)
 }
 pub(crate) fn status_bytes(value: &Status) -> Result<Vec<u8>, BridgeError> {
@@ -880,6 +895,29 @@ pub(crate) mod tests {
         let mut foreign = FrameDecoder::new(&"a".repeat(32), &"b".repeat(32), &context()).unwrap();
         let bytes = String::from_utf8(accepted).unwrap().replace(PROTOCOL, crate::android_build_protocol::PROTOCOL).into_bytes();
         assert!(foreign.push(&bytes).is_err());
+    }
+    #[test]
+    fn status_requires_exact_native_mode_data_without_changing_core_or_request_versions() {
+        let original = json!({"schemaVersion":STATUS_SCHEMA_VERSION,"statusRevision":1,"availability":"available",
+            "modeCapabilities":{"unsigned":true,"signed":false,"recovery":false},"operation":null});
+        let parsed = status(&original).unwrap();
+        assert!(parsed.mode_capabilities.supports(Operation::IOSUnsignedArchive));
+        assert!(!parsed.mode_capabilities.supports(Operation::IOSSignedExport));
+        assert!(!parsed.mode_capabilities.supports(Operation::IOSLocalRecovery));
+        assert_eq!(status(&serde_json::from_slice(&status_bytes(&parsed).unwrap()).unwrap()).unwrap(), parsed);
+        for modes in [Value::Null, json!({}), json!([]), json!({"unsigned":true,"signed":false}),
+            json!({"unsigned":true,"signed":1,"recovery":false}),
+            json!({"unsigned":true,"signed":false,"recovery":false,"all":true})] {
+            let mut changed = original.clone(); changed["modeCapabilities"] = modes;
+            assert!(status(&changed).is_err());
+        }
+        let mut missing = original.clone(); missing.as_object_mut().unwrap().remove("modeCapabilities");
+        assert!(status(&missing).is_err());
+        let mut old = original.clone(); old["schemaVersion"] = json!(1); assert!(status(&old).is_err());
+        let mut request = json!({"projectId":"inert-ios","recovery":{"action":"inspect"}});
+        request["modeCapabilities"] = original["modeCapabilities"].clone(); assert!(prepare(&request).is_err());
+        // Outer Status v2 is not a change to the actual core frame/terminal protocol.
+        assert!(check(&complete()).is_ok());
     }
     #[test]
     fn native_status_cannot_publish_a_provisional_result_or_foreign_retained_path() {
@@ -1108,7 +1146,8 @@ pub(crate) mod tests {
         let projection = Projection { operation_id:"a".repeat(32),owner_generation:"b".repeat(32),context:context.clone(),
             phase:Phase::Terminal,intent_usable:false,outcome:Some(Outcome::Complete),reason:Reason::None,stage:Some(Stage::DisposingWork),
             activity:Some(accepted.activity),disposition:None,result:None,report:accepted.report };
-        let status = Status { schema_version:1,status_revision:1,availability:Availability::Available,operation:Some(projection) };
+        let status = Status { schema_version:STATUS_SCHEMA_VERSION,status_revision:1,availability:Availability::Available,
+            mode_capabilities:ModeCapabilities { unsigned:false,signed:false,recovery:true },operation:Some(projection) };
         let encoded = status_bytes(&status).unwrap(); let data: Value = serde_json::from_slice(&encoded).unwrap();
         assert!(!data["operation"].as_object().unwrap().contains_key("result"));
         assert!(!data["operation"].as_object().unwrap().contains_key("disposition"));

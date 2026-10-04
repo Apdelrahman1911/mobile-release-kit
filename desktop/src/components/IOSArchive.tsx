@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import type { IOSArchiveController, IOSArchiveState } from '../iosArchive.ts';
 import { iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp, iosArchiveOwnerReason } from '../iosArchive.ts';
-import { isIOSRecoveryOperation, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
+import { isIOSRecoveryOperation, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveModeAvailability, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
 import type { IOSArchiveCoreStatus, IOSArchivePhase, IOSArchiveRole, IOSArchiveStage, IOSRecoveryRowState } from '../iosArchiveTypes.ts';
 import type { HelpContent } from '../types.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
@@ -100,7 +100,7 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
       {onReadVersion && <button type="button" className="button secondary small" data-mrk-ios-archive-action="observe-version" disabled={!project || !!versionReason || project.versionPending} onClick={() => { controller.versionIntent(); onReadVersion(); }}>Read saved version</button>}
     </div>
     {refreshReason && <p className="save-note">Configuration refresh: {refreshReason}</p>}{versionReason && <p className="save-note">Version read: {versionReason}</p>}
-    <p className="save-note">{state.status ? iosArchiveAvailabilityText[state.status.availability] : 'The separate native iOS archive capability has not been observed. Passive checks do not enable it.'}</p>
+    <p className="save-note">{state.status ? iosArchiveAvailabilityText[iosArchiveModeAvailability(state.status, signed ? 'ios-signed-export' : 'ios-unsigned-archive')] : 'The separate native iOS archive capability has not been observed. Passive checks do not enable it.'}</p>
     {!consent && <><button type="button" className="button" data-mrk-ios-archive-action="review" disabled={prepareReason !== null} onClick={() => void controller.prepare()}>Review saved iOS inputs</button>{prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && consent.binding.selection && consent.binding.context.operation !== 'ios-local-recovery' && <div className="session-review" role="group" aria-label={signed ? 'Confirm this saved signed iOS export intent' : 'Confirm this saved unsigned iOS archive intent'}>
       <h3>{signed ? 'Sign and export this saved app once?' : 'Create this unsigned archive once?'}</h3>
@@ -162,7 +162,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
     <h3 id={label}>Selected project: {projectName ?? 'Choose a registered source project'}</h3>
     <p>This uses the existing iOS operation owner and core recovery predicates, not a shell or an arbitrary path. No saved configuration, version, Xcode archive or private credential import is required. Account state is checked before project state; a failure does not start another inspection clock.</p>
     <p><strong>A live Unknown operation must retain its original Status and Cancel.</strong> An elapsed timeout or your confirmation is not worker finality. Do not disconnect to bypass ownership, reset keychains, delete profiles, or remove project recovery controls.</p>
-    <p>{state.status ? iosArchiveAvailabilityText[state.status.availability] : 'A separately admitted native recovery capability has not been observed.'}</p>
+    <p>{state.status ? iosArchiveAvailabilityText[iosArchiveModeAvailability(state.status, 'ios-local-recovery')] : 'A separately admitted native recovery capability has not been observed.'}</p>
     <button type="button" className="button" data-mrk-ios-recovery-action="review-inspect" disabled={inspectReason !== null} onClick={() => void controller.prepareRecovery('inspect')}>Review local recovery inspection</button>
     {inspectReason && <p className="review-caution">{inspectReason}</p>}
     {consent && choice && <div className="session-review" role="group" aria-label="Confirm this exact local recovery action">

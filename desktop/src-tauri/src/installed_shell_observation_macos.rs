@@ -517,6 +517,7 @@ struct OpenInputSample {
     attempted: Option<bool>, press_returned: Option<bool>, triggered: Option<bool>,
     worker_registered: bool, worker_joined: bool, rechecks_settled: Option<bool>,
     diagnostic: Option<mrk_macos_installed_native::OpenDiagnostic>, report: Option<mrk_macos_installed_native::OpenReport>,
+    press_timing: Option<mrk_macos_installed_native::OpenPressTiming>,
 }
 impl OpenInputSample {
     fn preparing(id: u32, step: Step) -> Self {
@@ -529,7 +530,7 @@ impl OpenInputSample {
         Self { id, step, selection, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
             entered: Some(false), native_entered: Some(false), returned: false, joined: false, retired: false,
             expired: false, timely: None, custody_known: None, attempted: Some(false), press_returned: Some(false),
-            triggered: None, worker_registered: false, worker_joined: false, rechecks_settled: None, diagnostic: None, report: None }
+            triggered: None, worker_registered: false, worker_joined: false, rechecks_settled: None, diagnostic: None, report: None, press_timing: None }
     }
     fn requested(&mut self) {
         self.requested = true; self.state = "requested";
@@ -553,6 +554,7 @@ impl OpenInputSample {
         self.timely = Some(timely); self.custody_known = Some(body.custody_known() && progress.state != "unknown");
         *self = self.reconciled(progress);
         self.report = body.native.and_then(|n| n.report);
+        self.press_timing = body.native.and_then(|n| n.press_timing);
         if let Some(r) = self.report {
             self.attempted = Some(r.attempted); self.press_returned = Some(r.press_returned); self.triggered = r.triggered;
             self.diagnostic = Some(r.diagnostic);
@@ -569,6 +571,17 @@ impl OpenInputSample {
             && !self.expired && self.timely == Some(true) && self.custody_known == Some(true)
             && self.attempted == Some(true) && self.press_returned == Some(true) && self.triggered == Some(true)
             && self.report.is_some_and(|r| r.selection_mode == self.selection && r.succeeded() && self.diagnostic == Some(r.diagnostic))
+    }
+    fn failed_press_timing(self) -> Option<mrk_macos_installed_native::OpenPressTiming> {
+        let report = self.report?; let timing = self.press_timing?;
+        if self.entered != Some(true) || self.native_entered != Some(true) || !self.returned
+            || self.attempted != Some(true) || self.press_returned != Some(true) || self.triggered != Some(false)
+            || !report.attempted || !report.press_returned || report.triggered != Some(false)
+            || report.selection_mode != self.selection || self.diagnostic != Some(report.diagnostic)
+            || report.button.ax_error != -25204
+            || report.button.ax_failure != Some(mrk_macos_installed_native::AxFailure {
+                operation: "perform-action", attribute: None }) { return None; }
+        Some(timing)
     }
     fn value(self) -> Value {
         let mechanism = if self.selection { "accessibility-version-source-selection-press-v8" }
@@ -1041,7 +1054,7 @@ fn received_input_sample(mut sample: OpenInputSample, progress: OpenProgress,
     sample.timely = progress.expired.then_some(false);
     sample.custody_known = Some(body.custody_known() && progress.state != "unknown");
     sample.worker_joined = worker_joined; // Actual joined handle, never receipt arrival.
-    sample.report = Some(report); sample.diagnostic = Some(report.diagnostic);
+    sample.report = Some(report); sample.diagnostic = Some(report.diagnostic); sample.press_timing = native.press_timing;
     sample.attempted = Some(report.attempted); sample.press_returned = Some(report.press_returned);
     sample.triggered = report.triggered;
     Some(sample)
@@ -1105,6 +1118,16 @@ impl FailureSnapshot {
         snapshot.accessibility = Some(returned);
         Some(snapshot)
     }
+    fn press_timing(&self) -> Option<mrk_macos_installed_native::OpenPressTiming> {
+        let sample = self.accessibility?; let identity = self.identity_binding?;
+        let native = self.native_dispatch?; let panel = self.last_panel?;
+        let step = if matches!(native.step, Step::ProjectFields(_)) { native.step } else { Step::OpenProject };
+        if !identity.input_bound(sample.id) || !identity.case.accepted_id(sample.id)
+            || identity.case.open_id(native.step) != Some(sample.id) || !native.entered || !native.returned
+            || panel.step != native.step || panel.id != sample.id || panel.kind != identity.case.kind_name(sample.id)
+            || sample.step != step || sample.selection != (panel.kind == "version-source") { return None; }
+        sample.failed_press_timing()
+    }
     fn frame(self, reason: &'static str) -> Option<Vec<u8>> {
         let step = format!("{:?}", self.step);
         if step.len() > 32 || !step.is_ascii() || !FAILURE_REASONS.contains(&reason) { return None; }
@@ -1115,12 +1138,33 @@ impl FailureSnapshot {
         if self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason)) { return None; }
         if self.vault.is_some_and(|sample| self.source != "record" || reason != "vault-finality-contract"
             || self.step != Step::Vault(sample.step)) { return None; }
-        let context = edit::bounded(&failure_context(&self), 8192).ok()?;
-        if !context.is_ascii() { return None; }
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
-        frame.extend_from_slice(&context); frame.extend_from_slice(b"\nMRK_MACOS_AQUA=failed\n");
+        let tail = b"\nMRK_MACOS_AQUA=failed\n";
+        let context = bounded_failure_context(failure_context(&self), self.press_timing(), frame.len().checked_add(tail.len())?)?;
+        frame.extend_from_slice(&context); frame.extend_from_slice(tail);
         (frame.len() <= 8448).then_some(frame)
     }
+}
+fn press_diagnostic_value(timing: mrk_macos_installed_native::OpenPressTiming) -> Option<Value> {
+    if !(1..=100_000_000).contains(&timing.installed_allowance_ns) { return None; }
+    // AX did not acknowledge success; actual effect is unknown. These are
+    // existing permit/return-admission samples, not pure IPC time or a receipt.
+    Some(json!({"acknowledgment":"not-acknowledged","effect":"unknown",
+        "installedAllowanceNs":timing.installed_allowance_ns.to_string(),
+        "lastPermitToReturnAdmissionNs":timing.last_permit_to_return_admission_ns.map(|ns| ns.to_string())}))
+}
+fn bounded_failure_context(mut value: Value, timing: Option<mrk_macos_installed_native::OpenPressTiming>,
+    overhead: usize) -> Option<Vec<u8>> {
+    let fits = |bytes: &[u8]| overhead.checked_add(bytes.len()).is_some_and(|total| total <= 8448);
+    let baseline = edit::bounded(&value, 8192).ok()?;
+    if !baseline.is_ascii() || !fits(&baseline) { return None; }
+    // Serialize baseline FIRST. Optional DATA can cost at most165 context
+    // bytes and one additional8192B buffer, never the original failure frame.
+    let Some(diagnostic) = timing.and_then(press_diagnostic_value) else { return Some(baseline); };
+    let Some(accessibility) = value.get_mut("accessibility").and_then(Value::as_object_mut) else { return Some(baseline); };
+    if accessibility.contains_key("pressDiagnostic") { return Some(baseline); }
+    accessibility.insert("pressDiagnostic".into(), diagnostic);
+    Some(edit::bounded(&value, 8192).ok().filter(|bytes| bytes.is_ascii() && fits(bytes)).unwrap_or(baseline))
 }
 fn failure_context(r: &FailureSnapshot) -> Value {
     let pending = r.pending.map(|pending| {
@@ -3676,6 +3720,81 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
 
 // Pure regression checks in the already-required instrumented native entry.
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
+fn press_diagnostic_data_check(full: OpenInputSample) -> bool {
+    // Synthetic scalar/JSON DATA, never an AX duration, receipt or native effect.
+    use mrk_macos_installed_native::{AxFailure, ControlContainerButtonProof, IdentityConfiguration,
+        OpenDiagnostic, OpenInputReturn, OpenPressTiming, OpenReport};
+    let Some(original) = full.report else { return false; };
+    let timing = OpenPressTiming { installed_allowance_ns: 100_000_000,
+        last_permit_to_return_admission_ns: Some(u64::MAX) };
+    let report = OpenReport { triggered: Some(false), diagnostic: OpenDiagnostic { site: "press", error: "cannot-complete" },
+        button: ControlContainerButtonProof { ax_error: -25204,
+            ax_failure: Some(AxFailure { operation: "perform-action", attribute: None }), ..original.button }, ..original };
+    let failed = OpenInputSample { report: Some(report), diagnostic: Some(report.diagnostic),
+        triggered: Some(false), press_timing: Some(timing), ..full };
+    if failed.failed_press_timing() != Some(timing) || failed.succeeded() || full.failed_press_timing().is_some()
+        || failed.value().get("pressDiagnostic").is_some() || full.value() != (OpenInputSample { press_timing: Some(timing), ..full }).value()
+        || !(OpenInputSample { state: "unknown", expired: true, timely: Some(false), custody_known: Some(false), ..failed })
+            .failed_press_timing().is_some_and(|t| t == timing) { return false; }
+    let mut before = OpenInputSample::preparing(2, Step::OpenProject);
+    before.prepared = true; before.requested(); before.worker_registered = true;
+    let progress = OpenProgress { state: "unknown", requested: true, dispatched: true, entered: true,
+        returned: true, joined: false, retired: false, expired: true };
+    let body = OpenActionBody { native: Some(OpenInputReturn {
+        entered: true, report: Some(report), custody_known: true, press_timing: Some(timing) }), admitted: None };
+    let Some(received) = received_input_sample(before, progress, body, false) else { return false; };
+    if received.press_timing != Some(timing) || received.failed_press_timing() != Some(timing)
+        || received.timely != Some(false) || received.custody_known != Some(false) || received.succeeded()
+        || received.joined || received.retired || received.worker_joined { return false; }
+    let configuration = IdentityConfiguration { attempted: true, parent_setter_entered: true, parent_setter_returned: true,
+        prompt_setter_entered: true, prompt_setter_returned: true,
+        initial_directory_setter_entered: true, initial_directory_setter_returned: true,
+        file_panel: false, file_name_setter_entered: false, file_name_setter_returned: false,
+        parent: Some("match"), prompt: Some("match"), site: Some("complete"), error: Some("none") };
+    let identity = IdentitySample { case: Case::FirstSave, id: 2, start_result: "ok", configuration, binding: report.initial_proof };
+    let native = NativeDispatch { step: Step::OpenProject, entered: true, returned: true };
+    let panel = PanelSample { step: Step::OpenProject, id: 2, kind: "project", parent_present: true, panel_present: true,
+        parent_references_panel: Some(true), panel_references_parent: Some(true), panel_visible: Some(true),
+        directory_bound: true, directory_returned: true, directory_ready: true, directory_readiness: "ready", wait_location: None };
+    let snapshot = FailureSnapshot { source: "record", step: Step::OpenProject, pending: None, native_dispatch: Some(native),
+        input_body_admission: None, bootstrap: None, vault: None, dom: None, original_window: None, last_panel: Some(panel),
+        native_action: None, accessibility: Some(failed), identity_binding: Some(identity),
+        completion_selection: None, project_selection: None, field_preparation: None };
+    if snapshot.press_timing() != Some(timing) || snapshot.frame("native-default-input").is_none() { return false; }
+    for invalid in [FailureSnapshot { native_dispatch: None, ..snapshot },
+        FailureSnapshot { native_dispatch: Some(NativeDispatch { returned: false, ..native }), ..snapshot },
+        FailureSnapshot { last_panel: Some(PanelSample { id: 3, ..panel }), ..snapshot },
+        FailureSnapshot { last_panel: Some(PanelSample { kind: "file", ..panel }), ..snapshot },
+        FailureSnapshot { identity_binding: Some(IdentitySample { case: Case::NoopStale, ..identity }), ..snapshot },
+        FailureSnapshot { accessibility: Some(full), ..snapshot }] {
+        if invalid.press_timing().is_some() { return false; }
+    }
+    let base = FailureSnapshot { accessibility: Some(OpenInputSample { press_timing: None, ..failed }), ..snapshot };
+    let Some(context) = edit::bounded(&failure_context(&base), 8192).ok() else { return false; };
+    let mut expected = b"MRK_MACOS_AQUA_FAILURE_STEP=OpenProject\nMRK_MACOS_AQUA_FAILURE_REASON=native-default-input\nMRK_MACOS_AQUA_FAILURE_CONTEXT=".to_vec();
+    expected.extend_from_slice(&context); expected.extend_from_slice(b"\nMRK_MACOS_AQUA=failed\n");
+    if base.frame("native-default-input") != Some(expected) { return false; }
+    let value = json!({"accessibility":{"inert":null}});
+    let Some(baseline) = edit::bounded(&value, 8192).ok() else { return false; };
+    let Some(enriched) = bounded_failure_context(value.clone(), Some(timing), 0) else { return false; };
+    let Some(diagnostic) = press_diagnostic_value(timing).and_then(|v| edit::bounded(&v, 146).ok()) else { return false; };
+    if diagnostic.len() != 146 || enriched.len() != baseline.len() + 165
+        || bounded_failure_context(value.clone(), Some(timing), 8448 - baseline.len()) != Some(baseline.clone())
+        || bounded_failure_context(value.clone(), Some(timing), usize::MAX).is_some()
+        || bounded_failure_context(value.clone(), Some(OpenPressTiming { installed_allowance_ns: 0, ..timing }), 0) != Some(baseline) { return false; }
+    let mut near = json!({"accessibility":{},"padding":""});
+    let Some(length) = edit::bounded(&near, 8192).ok().map(|b| b.len()) else { return false; };
+    near["padding"] = json!("x".repeat(8192 - length));
+    let Some(baseline) = edit::bounded(&near, 8192).ok() else { return false; };
+    if baseline.len() != 8192 || bounded_failure_context(near.clone(), Some(timing), 256) != Some(baseline) { return false; }
+    near["padding"] = json!("x".repeat(8193 - length));
+    if bounded_failure_context(near, Some(timing), 0).is_some()
+        || bounded_failure_context(json!({"accessibility":{},"note":"\u{e9}"}), Some(timing), 0).is_some() { return false; }
+    let missing = json!({"accessibility":null});
+    bounded_failure_context(missing.clone(), Some(timing), 0) == edit::bounded(&missing, 8192).ok()
+        && press_diagnostic_value(OpenPressTiming { installed_allowance_ns: 1, last_permit_to_return_admission_ns: None })
+            .is_some_and(|v| v["lastPermitToReturnAdmissionNs"].is_null() && v["effect"] == "unknown")
+}
 fn native_recheck_data_check() -> bool {
     use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport};
     let proof = IdentityBinding { purpose: "full-open", attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
@@ -3690,7 +3809,8 @@ fn native_recheck_data_check() -> bool {
         entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
         timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
         worker_registered: true, worker_joined: true, rechecks_settled: Some(true),
-        diagnostic: Some(report.diagnostic), report: Some(report) };
+        diagnostic: Some(report.diagnostic), report: Some(report), press_timing: None };
+    if !press_diagnostic_data_check(full) { return false; }
     let value = full.value();
     if !full.succeeded() || value.get("confirmReturned").is_some()
         || value["mechanism"] != "accessibility-preconfigured-original-press-v5"
@@ -3768,7 +3888,7 @@ fn native_recheck_data_check() -> bool {
     let returned_progress = OpenProgress { state: "returned", returned: true, ..base_progress };
     let mut before_return = OpenInputSample::preparing(2, Step::OpenProject);
     before_return.prepared = true; before_return.requested(); before_return.worker_registered = true;
-    let native_body = mrk_macos_installed_native::OpenInputReturn { entered: true, report: Some(report), custody_known: true };
+    let native_body = mrk_macos_installed_native::OpenInputReturn { entered: true, report: Some(report), custody_known: true, press_timing: None };
     for admitted in [None, Some(false)] {
         let body = OpenActionBody { native: Some(native_body), admitted };
         let progress = if admitted.is_none() { OpenProgress { state: "unknown", ..returned_progress } } else { returned_progress };

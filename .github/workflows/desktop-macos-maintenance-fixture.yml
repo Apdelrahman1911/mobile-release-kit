@@ -1,0 +1,729 @@
+name: Desktop macOS fixed maintenance fixture
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-maintenance-fixture
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-maintenance-fixture-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  e2_fixture:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      # No shell startup file, inherited compiler switch or credential reaches
+      # a preparation/native child. Child environments below are reconstructed.
+      BASH_ENV: ''
+      ENV: ''
+    steps:
+      - name: Admit only this fixed fresh hosted route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-maintenance-fixture && "$GITHUB_JOB" == e2_fixture ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-maintenance-fixture.yml@$GITHUB_REF" ]]
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit && "$RUNNER_TEMP" == /Users/runner/work/_temp ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]]
+
+      - name: Check out the exact reviewed source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select fixed isolated preparation Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+
+      - name: Prepare only the locked fixture graphs through the original command owner
+        id: prepare
+        timeout-minutes: 18
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -n 1024
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" GITHUB_JOB="$GITHUB_JOB" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_PREPARE'
+          import hashlib, importlib.util, json, os, platform, re, secrets, shutil, stat, sys, threading, tomllib
+          from pathlib import Path
+
+          CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+          WORK_PARENT = Path("/Users/runner/work/_temp")
+          HOME = Path("/Users/runner")
+          TARGET = "aarch64-apple-darwin"
+          TOOLCHAIN = "1.98.1"
+          SOURCE = os.environ["GITHUB_SHA"]
+          WORKFLOW = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-maintenance-fixture.yml@refs/heads/verify/desktop-macos-maintenance-fixture"
+          FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+          phase = "route"
+          book = None
+          scratch = None
+          scratch_identity = None
+          entered_calls = []
+          failure = False
+
+          def need(value, label):
+              if not value:
+                  raise ValueError(label)
+
+          def sig(info):
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+          def bootstrap(relative, name):
+              # Actions' exact-SHA checkout is the bootstrap SOURCE trust.
+              # Both modules are DATA-only on import. This is not a remote Git
+              # object authentication claim or a user-supplied import path.
+              path = CHECKOUT / relative
+              fds, directories, leaf = [], [], None
+              closed = True
+              try:
+                  parent = None
+                  current = Path("/")
+                  for piece in path.parent.parts:
+                      current = Path("/") if piece == "/" else current / piece
+                      fd = os.open(str(current) if parent is None else piece, FLAGS | os.O_DIRECTORY,
+                                   dir_fd=parent)
+                      fds.append(fd)
+                      before = sig(os.fstat(fd))
+                      need(stat.S_ISDIR(before[2]) and before[3] in (0, os.getuid())
+                           and not before[2] & 0o022, "bootstrap-directory")
+                      directories.append((fd, parent, str(current) if parent is None else piece, before[:5]))
+                      parent = fd
+                  fd = os.open(path.name, FLAGS, dir_fd=parent)
+                  fds.append(fd)
+                  before = sig(os.fstat(fd))
+                  need(stat.S_ISREG(before[2]) and before[3] == os.getuid() and before[5] == 1
+                       and stat.S_IMODE(before[2]) in (0o444, 0o644) and 0 < before[6] <= 1048576,
+                       "bootstrap-source")
+                  leaf = (fd, parent, path.name, before)
+                  content, offset = bytearray(), 0
+                  while offset < before[6]:
+                      part = os.pread(fd, min(65536, before[6] - offset), offset)
+                      need(part, "bootstrap-short-read")
+                      content.extend(part)
+                      offset += len(part)
+                  need(os.pread(fd, 1, offset) == b"", "bootstrap-source-grew")
+                  need(sig(os.fstat(fd)) == before
+                       and sig(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == before,
+                       "bootstrap-source-changed")
+                  spec = importlib.util.spec_from_file_location(name, path)
+                  need(spec is not None and spec.loader is not None and name not in sys.modules, "bootstrap-loader")
+                  module = importlib.util.module_from_spec(spec)
+                  sys.modules[name] = module
+                  spec.loader.exec_module(module)
+                  need(sig(os.fstat(fd)) == before
+                       and sig(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == before,
+                       "bootstrap-import-changed")
+                  for held, at, child, expected in directories:
+                      need(sig(os.fstat(held))[:5] == expected
+                           and sig(os.stat(child, dir_fd=at, follow_symlinks=False))[:5] == expected,
+                           "bootstrap-directory-changed")
+                  return module, hashlib.sha256(content).hexdigest()
+              finally:
+                  for fd in reversed(fds):
+                      try:
+                          os.close(fd)  # Consuming close; never retry a numeric fd.
+                      except OSError:
+                          closed = False
+                  need(closed, "bootstrap-close-unknown")
+
+          def output(name, value):
+              need(name in ("root",) and re.fullmatch(r"/Users/runner/work/_temp/mrk-macos-maintenance-fixture\.[A-Za-z0-9]{8}", value),
+                   "step-output-value")
+              path = Path(os.environ["GITHUB_OUTPUT"])
+              need(path.parent == WORK_PARENT / "_runner_file_commands"
+                   and re.fullmatch(r"set_output_[A-Za-z0-9-]+", path.name), "step-output-route")
+              fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+                       and before.st_nlink == 1, "step-output-original")
+                  body = (name + "=" + value + "\n").encode("ascii")
+                  need(os.write(fd, body) == len(body), "step-output-write")
+                  os.fsync(fd)
+                  need(sig(os.fstat(fd)) == sig(os.stat(path, follow_symlinks=False)), "step-output-changed")
+              finally:
+                  os.close(fd)
+
+          try:
+              need(sys.version_info >= (3, 11) and sys.flags.isolated and sys.flags.no_site
+                   and sys.dont_write_bytecode and sys.platform == "darwin"
+                   and platform.machine() == "arm64" and platform.mac_ver()[0].split(".")[0] == "26"
+                   and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
+                   and threading.current_thread() is threading.main_thread()
+                   and Path.cwd() == CHECKOUT, "preparation-platform-account")
+              required = {
+                  "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
+                  "RUNNER_ARCH": "ARM64", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+                  "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/verify/desktop-macos-maintenance-fixture",
+                  "GITHUB_WORKFLOW_REF": WORKFLOW, "GITHUB_WORKFLOW_SHA": SOURCE,
+                  "GITHUB_WORKSPACE": str(CHECKOUT), "RUNNER_TEMP": str(WORK_PARENT),
+                  "GITHUB_JOB": "e2_fixture", "HOME": str(HOME),
+              }
+              need(re.fullmatch(r"[0-9a-f]{40}", SOURCE) and SOURCE != "0" * 40
+                   and all(os.environ.get(key) == value for key, value in required.items())
+                   and all(re.fullmatch(r"[1-9][0-9]{0,19}", os.environ.get(key, ""))
+                           for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")), "preparation-route")
+
+              fixture, fixture_hash = bootstrap("desktop/tools/macos_e2_native_fixture.py", "_mrk_e2_prepare_fixture")
+              qualification, qualification_hash = bootstrap("desktop/tools/macos_aqua_qualification.py", "_mrk_e2_prepare_owner_loader")
+              book = fixture.Originals()
+              need(book.file(CHECKOUT / ".git/HEAD", 64, modes=(0o600, 0o644))[1] == (SOURCE + "\n").encode("ascii"),
+                   "preparation-detached-source")
+              # Hold the actual bootstrap and pinned command-owner closure.
+              for relative, expected in (
+                  ("desktop/tools/macos_e2_native_fixture.py", fixture_hash),
+                  ("desktop/tools/macos_aqua_qualification.py", qualification_hash),
+                  *(("src/mobile_release/" + name, pin) for name, pin in qualification.OWNER_PINS.items()),
+              ):
+                  entry, content = book.file(CHECKOUT / relative, 1048576, modes=(0o444, 0o644))
+                  need(hashlib.sha256(content).hexdigest() == expected, "preparation-bootstrap-binding")
+              owner = qualification.load_owner(CHECKOUT)
+              book.check()
+
+              parent = book.directory(WORK_PARENT)
+              work = WORK_PARENT / ("mrk-macos-maintenance-fixture." + secrets.token_hex(4))
+              os.mkdir(work.name, 0o700, dir_fd=parent["fd"])  # Exclusive; a collision refuses.
+              work_entry = book.directory(work)
+              work_info = os.fstat(work_entry["fd"])
+              need(work_info.st_uid == os.getuid() and stat.S_IMODE(work_info.st_mode) == 0o700, "private-work")
+              output("root", str(work))
+              scratch = work / "preparation"
+              os.mkdir(scratch.name, 0o700, dir_fd=work_entry["fd"])
+              scratch_entry = book.directory(scratch)
+              scratch_identity = sig(os.fstat(scratch_entry["fd"]))[:5]
+              for name in ("home", "tmp"):
+                  os.mkdir(name, 0o700, dir_fd=scratch_entry["fd"])
+                  book.directory(scratch / name)
+
+              clean = {
+                  "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(scratch / "home"),
+                  "TMPDIR": str(scratch / "tmp"), "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+              }
+              git_env = dict(clean, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+                             GIT_CONFIG_SYSTEM="/dev/null", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+              git_prefix = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                            "-c", "credential.helper=", "-c", "core.autocrlf=false"]
+
+              def call(role, argv, environment, timeout, limit=65536, cwd=CHECKOUT):
+                  global phase
+                  phase = role
+                  book.check()
+                  record = {"role": role, "returned": False}
+                  entered_calls.append(record)
+                  result = owner.run_owned(argv, environ=environment, cwd=cwd, timeout=timeout,
+                                           capture=True, text=False, output_limit=limit)
+                  fixture.completed(result, argv, limit)
+                  record["returned"] = True
+                  # Bounded raw diagnostics remain PRIVATE, never an artifact glob.
+                  book.publish(work / ("prepare-" + role + ".stdout"), result.stdout)
+                  book.publish(work / ("prepare-" + role + ".stderr"), result.stderr)
+                  book.check()
+                  need(result.returncode == 0, "preparation-original-command-failed")
+                  return result.stdout
+
+              phase = "source-inventory"
+              tree_output = call("git-tree", git_prefix + ["rev-parse", "--verify", SOURCE + "^{tree}"], git_env, 15, 4096)
+              need(re.fullmatch(rb"[0-9a-f]{40}\n", tree_output), "tree-shape")
+              tree = tree_output.decode("ascii").strip()
+              roster = call("git-roster", git_prefix + ["ls-tree", "-r", "-z", "--full-tree", SOURCE], git_env, 15, 2097152)
+              raw_rows = roster.split(b"\0")
+              need(raw_rows[-1] == b"" and 1 < len(raw_rows) <= 4097, "source-roster-bound")
+              rows = []
+              names = set()
+
+              def source_file(relative, expected=None):
+                  # Inventory consumes each leaf and its traversal immediately;
+                  # it does not hold the entire checkout under nofile1024.
+                  reader = fixture.Originals()
+                  try:
+                      entry, content = reader.file(CHECKOUT / relative, 32 * 1024 * 1024)
+                      info = entry["identity"]
+                      blob = hashlib.sha1(b"blob " + str(len(content)).encode("ascii") + b"\0" + content).hexdigest()
+                      row = {"path": relative, "gitMode": "100755" if stat.S_IMODE(info[2]) in (0o555, 0o755) else "100644",
+                             "blob": blob, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                      need(stat.S_IMODE(info[2]) in (0o444, 0o644, 0o555, 0o755)
+                           and (expected is None or row == expected), "source-file-correspondence")
+                      reader.check()
+                      return row, content
+                  finally:
+                      need(reader.finish(), "source-file-close-unknown")
+
+              for raw in raw_rows[:-1]:
+                  header, encoded = raw.split(b"\t", 1)
+                  mode, kind, blob = header.split(b" ")
+                  name = encoded.decode("utf-8", "strict")
+                  need(kind == b"blob" and mode in (b"100644", b"100755") and len(name) <= 512
+                       and name not in names and not name.startswith("/") and "\\" not in name and "\0" not in name
+                       and all(piece not in ("", ".", "..") for piece in name.split("/")), "source-roster-entry")
+                  names.add(name)
+                  row, _content = source_file(name)
+                  need(row["gitMode"].encode("ascii") == mode and row["blob"].encode("ascii") == blob, "source-roster-bytes-mode")
+                  rows.append(row)
+              by_name = {row["path"]: row for row in rows}
+              fixture.source_names(by_name)  # Includes this committed workflow.
+              need(by_name["desktop/tools/macos_e2_native_fixture.py"]["sha256"] == fixture_hash
+                   and by_name["desktop/tools/macos_aqua_qualification.py"]["sha256"] == qualification_hash,
+                   "source-bootstrap-roster")
+
+              manifests = ("desktop/native/macos-installed-native", "desktop/helpers/macos-android-register")
+              cargo_home, rustup_home = HOME / ".cargo", HOME / ".rustup"
+              book.directory(cargo_home)
+              book.directory(rustup_home)
+              configuration_parents = {cargo_home}
+              for manifest in manifests:
+                  directory = CHECKOUT / manifest
+                  configuration_parents.update(parent / ".cargo" for parent in (directory, *directory.parents))
+
+              def no_configuration():
+                  for directory in sorted(configuration_parents):
+                      try:
+                          info = os.stat(directory, follow_symlinks=False)
+                      except FileNotFoundError:
+                          continue
+                      need(stat.S_ISDIR(info.st_mode), "ambient-cargo-directory")
+                      original = book.directory(directory)  # No parent-link traversal.
+                      for name in ("config", "config.toml", "credentials", "credentials.toml"):
+                          try:
+                              os.stat(name, dir_fd=original["fd"], follow_symlinks=False)
+                          except FileNotFoundError:
+                              pass
+                          else:
+                              raise ValueError("ambient-cargo-configuration")
+
+              no_configuration()
+              for directory in manifests:
+                  lock_name = directory + "/Cargo.lock"
+                  _row, content = source_file(lock_name, by_name[lock_name])
+                  lock = tomllib.loads(content.decode("utf-8", "strict"))
+                  need(lock.get("version") == 4 and type(lock.get("package")) is list
+                       and 0 < len(lock["package"]) <= 2048, "locked-registry-shape")
+                  for package in lock["package"]:
+                      need(type(package) is dict, "locked-package-shape")
+                      if "source" in package:
+                          need(package["source"] == "registry+https://github.com/rust-lang/crates.io-index"
+                               and type(package.get("checksum")) is str
+                               and re.fullmatch(r"[0-9a-f]{64}", package["checksum"]), "locked-public-source")
+                      else:
+                          need("checksum" not in package, "local-source-checksum")
+              _row, toolchain_bytes = source_file("desktop/rust-toolchain.toml", by_name["desktop/rust-toolchain.toml"])
+              need(tomllib.loads(toolchain_bytes.decode("utf-8"))["toolchain"]["channel"] == "1.98.0",
+                   "repository-toolchain-default")
+
+              tool_environment = dict(clean, CARGO_HOME=str(cargo_home), RUSTUP_HOME=str(rustup_home),
+                                      RUSTUP_TOOLCHAIN=TOOLCHAIN, RUSTUP_AUTO_INSTALL="0",
+                                      RUSTUP_DIST_SERVER="https://static.rust-lang.org",
+                                      RUSTUP_UPDATE_ROOT="https://static.rust-lang.org/rustup")
+              rustup = cargo_home / "bin/rustup"
+              rustup_parent = book.directory(rustup.parent)
+              rustup_info = os.stat(rustup.name, dir_fd=rustup_parent["fd"], follow_symlinks=False)
+              need(stat.S_ISREG(rustup_info.st_mode) and rustup_info.st_uid in (0, os.getuid())
+                   and not rustup_info.st_mode & 0o022 and rustup_info.st_mode & 0o111, "hosted-rustup-tool")
+              call("rustup", [str(rustup), "toolchain", "install", TOOLCHAIN, "--profile", "minimal",
+                             "--target", TARGET, "--no-self-update"], tool_environment, 240)
+              bin_directory = rustup_home / "toolchains" / (TOOLCHAIN + "-" + TARGET) / "bin"
+              book.directory(bin_directory)
+              tool_environment["PATH"] = str(bin_directory) + ":/usr/bin:/bin:/usr/sbin:/sbin"
+              tool_environment["RUSTC"] = str(bin_directory / "rustc")
+              tools = {}
+              for tool in ("rustc", "cargo"):
+                  executable = bin_directory / tool
+                  info = os.stat(executable, follow_symlinks=False)
+                  need(stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid())
+                       and not info.st_mode & 0o022 and info.st_mode & 0o111, "prepared-rust-tool")
+                  raw = call(tool + "-version", [str(executable), "--version", "--verbose"],
+                             tool_environment, 15, 4096, cwd=CHECKOUT / "desktop/src-tauri")
+                  text = raw.decode("utf-8", "strict").strip()
+                  need(text.startswith(tool + " "), "effective-tool-version")
+                  if tool == "rustc":
+                      need("release: 1.98.1" in text.splitlines()
+                           and "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985" in text.splitlines(),
+                           "effective-rust-clock-binding")
+                  tools[tool] = {"command": [tool, "--version", "--verbose"], "output": text}
+              # Acquisition only: no build scripts, credential helpers, alternate
+              # registries, token/proxy/SSL overrides or inherited Cargo settings.
+              fetch_environment = dict(tool_environment, CARGO_NET_OFFLINE="false",
+                                       CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse", CARGO_NET_RETRY="1",
+                                       CARGO_HTTP_TIMEOUT="30", CARGO_HTTP_SSL_VERIFY="true",
+                                       CARGO_NET_GIT_FETCH_WITH_CLI="false")
+              for index, directory in enumerate(manifests):
+                  no_configuration()
+                  call("fetch-" + str(index), [str(bin_directory / "cargo"), "fetch", "--manifest-path",
+                                             str(CHECKOUT / directory / "Cargo.toml"), "--locked", "--target", TARGET],
+                       fetch_environment, 240, 262144)
+              no_configuration()
+              phase = "source-recheck"
+              for row in rows:
+                  source_file(row["path"], row)
+              book.check()
+
+              common = {"schemaVersion": 1, "source": SOURCE, "workflowSource": SOURCE,
+                        "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"]}
+              binding = dict(common, tree=tree, workDirectory=[work_info.st_dev, work_info.st_ino, work_info.st_uid],
+                             fixtureAdministrativeDomain={
+                                 "schemaVersion": 1, "allocation": "fresh-github-hosted-single-job",
+                                 "writer": "macos_e2_native_fixture.py",
+                                 "root": "/Library/Application Support/MobileReleaseKit-E2NativeFixture",
+                                 "receipt": "dev.mobile-release-kit.fixture.e2.pkg.v1", "priorFixtureUse": False,
+                             })
+              inventory = {"source": SOURCE, "tree": tree, "files": rows}
+              rust = dict(common, cwd="desktop/src-tauri", autoInstall=False,
+                          selectedMacToolchain=TOOLCHAIN, repositoryDefault="1.98.0", tools=tools)
+              fixture.binding_data(os.environ, binding, inventory, rust, sig(work_info))
+              phase = "input-publication"
+              for name, value, limit in (("source-binding.json", binding, 65536),
+                                         ("source-inventory.json", inventory, 2097152),
+                                         ("effective-rust-toolchain.json", rust, 16384)):
+                  body = fixture.canonical(value)
+                  need(len(body) <= limit, "prepared-input-bound")
+                  book.publish(work / name, body, 0o600)
+              book.check()
+          except BaseException:
+              failure = True
+              # Only closed phase labels, no tool/environment/source traceback.
+              print("E2 preparation refused in " + phase + "; native fixture was not entered.", file=sys.stderr)
+          finally:
+              closes_known = book is None or book.finish()
+              if not closes_known:
+                  failure = True
+              all_returned = all(record["returned"] for record in entered_calls)
+              if scratch is not None and scratch_identity is not None and closes_known and all_returned:
+                  cleanup = fixture.Originals()
+                  try:
+                      parent = cleanup.directory(scratch.parent)
+                      need(sig(os.stat(scratch.name, dir_fd=parent["fd"], follow_symlinks=False))[:5] == scratch_identity
+                           and shutil.rmtree.avoids_symlink_attacks, "preparation-scratch-original")
+                      shutil.rmtree(scratch.name, dir_fd=parent["fd"])
+                      try:
+                          os.stat(scratch.name, dir_fd=parent["fd"], follow_symlinks=False)
+                      except FileNotFoundError:
+                          pass
+                      else:
+                          raise ValueError("preparation-scratch-remains")
+                  except BaseException:
+                      failure = True
+                      print("E2 preparation scratch retirement was not established.", file=sys.stderr)
+                  finally:
+                      if not cleanup.finish():
+                          failure = True
+              elif scratch is not None:
+                  print("E2 preparation retains task scratch because original finality is unknown.", file=sys.stderr)
+          if failure:
+              raise SystemExit(1)
+          print("Locked fixture inputs prepared; source/input originals closed. No native qualification is claimed.")
+          PY_PREPARE
+
+      - name: Run the one reviewed fixture owner and its three native cases
+        id: native
+        timeout-minutes: 55
+        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -n 1024
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          # This original owner alone compiles/signs/installs/observes the fixed
+          # fixture. Its 990s/993s native call covers ALL THREE cases, with one
+          # distinct aggregate 60s auxiliary ledger. Step timeout is no receipt.
+          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
+            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
+            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \
+            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \
+            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \
+            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \
+            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \
+            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
+            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
+            '${{ steps.python.outputs.python-path }}' -I -S -B \
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py
+
+      - name: Publish only the closed source-bound fixture summary
+        id: publication
+        if: always() && !cancelled() && steps.prepare.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_MACOS_WORK: ${{ steps.prepare.outputs.root }}
+          MRK_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -n 1024
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
+            MRK_MACOS_WORK="$MRK_MACOS_WORK" MRK_NATIVE_STEP_OUTCOME="$MRK_NATIVE_STEP_OUTCOME" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            "$MRK_PYTHON" -I -S -B - <<'PY_PUBLISH'
+          import hashlib, importlib.util, json, os, re, stat, sys
+          from pathlib import Path
+
+          CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+          WORK_PARENT = Path("/Users/runner/work/_temp")
+          work = Path(os.environ["MRK_MACOS_WORK"])
+          source = os.environ["GITHUB_SHA"]
+          outcome = os.environ["MRK_NATIVE_STEP_OUTCOME"]
+          if (Path.cwd() != CHECKOUT or work.parent != WORK_PARENT
+                  or re.fullmatch(r"mrk-macos-maintenance-fixture\.[A-Za-z0-9]{8}", work.name) is None
+                  or re.fullmatch(r"[0-9a-f]{40}", source) is None or source == "0" * 40
+                  or os.environ["GITHUB_WORKFLOW_SHA"] != source
+                  or outcome not in ("success", "failure", "cancelled", "skipped")):
+              raise SystemExit("E2 summary route refused.")
+          # Same reviewed DATA-only module, from the successfully prepared exact
+          # checkout. No owner.main(), process query, signal or native action.
+          module_path = CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
+          module_fd = None
+          bootstrap_ok = False
+          try:
+              module_fd = os.open(module_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              before = os.fstat(module_fd)
+              if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                      or stat.S_IMODE(before.st_mode) not in (0o444, 0o644) or not 0 < before.st_size <= 1048576):
+                  raise ValueError("summary-bootstrap-source")
+              module_bytes, offset = bytearray(), 0
+              while offset < before.st_size:
+                  part = os.pread(module_fd, min(65536, before.st_size - offset), offset)
+                  if not part:
+                      raise ValueError("summary-bootstrap-short")
+                  module_bytes.extend(part)
+                  offset += len(part)
+              if os.pread(module_fd, 1, offset) != b"":
+                  raise ValueError("summary-bootstrap-grew")
+              attributes = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                            "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+              expected = tuple(getattr(before, name) for name in attributes)
+              held, named = os.fstat(module_fd), os.stat(module_path, follow_symlinks=False)
+              if (tuple(getattr(held, name) for name in attributes) != expected
+                      or tuple(getattr(named, name) for name in attributes) != expected):
+                  raise ValueError("summary-bootstrap-original")
+              spec = importlib.util.spec_from_file_location("_mrk_e2_publication_data", module_path)
+              if spec is None or spec.loader is None:
+                  raise ValueError("summary-bootstrap-loader")
+              fixture = importlib.util.module_from_spec(spec)
+              sys.modules[spec.name] = fixture
+              spec.loader.exec_module(fixture)
+              fixture.need(fixture.signature(os.fstat(module_fd)) == fixture.signature(before)
+                           and fixture.signature(os.stat(module_path, follow_symlinks=False)) == fixture.signature(before),
+                           "summary-bootstrap-changed")
+              bootstrap_ok = True
+          except BaseException:
+              bootstrap_ok = False
+          finally:
+              if module_fd is not None:
+                  try:
+                      os.close(module_fd)
+                  except OSError:
+                      bootstrap_ok = False
+          if not bootstrap_ok:
+              raise SystemExit("E2 summary DATA source admission refused.")
+          module_hash = hashlib.sha256(module_bytes).hexdigest()
+          book = fixture.Originals()
+          summary = {
+              "schemaVersion": 1, "type": "mrk-macos-e2-native-fixture-workflow-v1",
+              "source": source, "workflowSource": source, "workflow": fixture.WORKFLOW,
+              "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "platform": "macos-26-arm64", "toolchain": "1.98.1",
+              "nativeStepOutcome": outcome, "ownerOriginalCallerSucceeded": outcome == "success",
+              "ownerResultAdmitted": False, "ownerResultSha256": None, "tree": None,
+              "bindingSha256": None, "sourceInventorySha256": None, "sourceReleaseId": None,
+              "ownerOutcome": None, "originalCallCount": 0, "ownerFinality": None, "native": None,
+              "failure": "owner-result-missing-or-refused", "accepted": False,
+              "syntheticIdentity": True, "productionIdentityQualified": False,
+              "actualAppIntegrationQualified": False, "distributionQualified": False,
+              "overlapQualified": False, "protectedRootRetired": False, "exactReceiptRetired": False,
+              "rawOutputIncluded": False, "environmentValuesIncluded": False,
+          }
+          try:
+              work_entry = book.directory(work)
+              work_info = os.fstat(work_entry["fd"])
+              fixture.need(work_info.st_uid == os.getuid() and stat.S_IMODE(work_info.st_mode) == 0o700,
+                           "summary-work-original")
+              _entry, binding_body = book.file(work / "source-binding.json", 65536, modes=(0o600,))
+              _entry, inventory_body = book.file(work / "source-inventory.json", 2097152, modes=(0o600,))
+              _entry, rust_body = book.file(work / "effective-rust-toolchain.json", 16384, modes=(0o600,))
+              binding = fixture.decode(binding_body, 65536)
+              inventory = fixture.decode(inventory_body, 2097152)
+              rust = fixture.decode(rust_body, 16384)
+              rows = fixture.binding_data(os.environ, binding, inventory, rust, fixture.signature(work_info))
+              fixture.fixture_domain(binding)
+              fixture.need(rows["desktop/tools/macos_e2_native_fixture.py"]["sha256"] == module_hash,
+                           "summary-bootstrap-inventory")
+              for relative in ("desktop/tools/macos_e2_native_fixture.py",
+                               ".github/workflows/desktop-macos-maintenance-fixture.yml",
+                               "desktop/macos-installed-inputs/build-release.json"):
+                  row = rows[relative]
+                  _entry, content = book.file(CHECKOUT / relative, 1048576, modes=(0o444, 0o644))
+                  fixture.need(len(content) == row["size"] and fixture.digest(content) == row["sha256"]
+                               and hashlib.sha1(b"blob " + str(len(content)).encode("ascii") + b"\0" + content).hexdigest() == row["blob"],
+                               "summary-source-correspondence")
+                  if relative.endswith("/build-release.json"):
+                      release_data = fixture.decode(content, 65536)
+                      release = release_data["release"]
+                      fixture.need(type(release) is str and re.fullmatch(r"[a-z0-9_.-]{1,63}", release),
+                                   "summary-release-source")
+              _entry, result_body = book.file(work / "e2-native-result.json", 65536, modes=(0o600,))
+              result = fixture.decode(result_body, 65536)
+              expected_keys = set("""schemaVersion type source tree workflowSource workflow runId runAttempt platform toolchain
+                  sourceInventorySha256 sourceOriginalHandleCount sourceOriginalHandleReserve bindingSha256 sourceReleaseId
+                  outcome failure phase originalCalls workTimeoutSeconds hardTimeoutSeconds auxiliaryBudgetNanoseconds
+                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native
+                  installerEntered installationReturnedSuccess nativeEntered nativeOwnerReturned sourceClosesKnown
+                  protectedClosesKnown outputClosesKnown cleanupErrors scratchRetired protectedRootRetired exactReceiptRetired
+                  protectedRetentionRequired administrativeDomain arbitraryConcurrentPrivilegedWriterResistance flatPayloadAtomicNoReplace
+                  syntheticIdentity productionIdentityQualified actualAppIntegrationQualified distributionQualified
+                  rawOutputIncluded environmentValuesIncluded outerReceiptWriteCloseAndOriginalCallerExitRequired passed""".split())
+              fixture.need(type(result) is dict and set(result) == expected_keys
+                           and type(result["schemaVersion"]) is int and result["schemaVersion"] == 1
+                           and result["type"] == "mrk-macos-e2-native-fixture-owner-v1"
+                           and result["source"] == result["workflowSource"] == source
+                           and result["tree"] == binding["tree"] and result["workflow"] == fixture.WORKFLOW
+                           and result["runId"] == summary["runId"] and result["runAttempt"] == summary["runAttempt"]
+                           and result["platform"] == "macos-26-arm64" and result["toolchain"] == "1.98.1"
+                           and result["bindingSha256"] == fixture.digest(binding_body)
+                           and result["sourceInventorySha256"] == fixture.digest(inventory_body),
+                           "summary-owner-binding")
+              fixture.need(type(result["passed"]) is bool and result["outcome"] in ("passed", "failed", "unavailable")
+                           and (result["sourceReleaseId"] is None or result["sourceReleaseId"] == release)
+                           and result["workTimeoutSeconds"] == 990 and result["hardTimeoutSeconds"] == 993
+                           and result["auxiliaryBudgetNanoseconds"] == "60000000000"
+                           and result["administrativeDomain"] == "reviewed-fresh-single-hosted-job-sole-fixture-writer"
+                           and result["syntheticIdentity"] is True
+                           and result["outerReceiptWriteCloseAndOriginalCallerExitRequired"] is True
+                           and all(result[key] is False for key in (
+                               "productionIdentityQualified", "actualAppIntegrationQualified", "distributionQualified",
+                               "arbitraryConcurrentPrivilegedWriterResistance", "flatPayloadAtomicNoReplace",
+                               "rawOutputIncluded", "environmentValuesIncluded", "protectedRootRetired", "exactReceiptRetired")),
+                           "summary-owner-scope")
+              flags = ("installerEntered", "installationReturnedSuccess", "nativeEntered", "nativeOwnerReturned",
+                       "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired", "protectedRetentionRequired")
+              fixture.need(all(type(result[key]) is bool for key in flags)
+                           and type(result["cleanupErrors"]) is list and len(result["cleanupErrors"]) <= 64
+                           and all(type(label) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", label)
+                                   for label in result["cleanupErrors"])
+                           and type(result["originalCalls"]) is list and 0 <= len(result["originalCalls"]) <= 64,
+                           "summary-owner-finality-shape")
+              calls = result["originalCalls"]
+              for call in calls:
+                  fixture.need(type(call) is dict and type(call.get("role")) is str
+                               and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", call["role"])
+                               and call.get("entered") is True and type(call.get("returned")) is bool,
+                               "summary-original-call")
+                  if call["returned"]:
+                      fixture.need(type(call.get("returncode")) is int and 0 <= call["returncode"] <= 255
+                                   and fixture.identity(call.get("stdoutSha256"), 64)
+                                   and fixture.identity(call.get("stderrSha256"), 64), "summary-returned-call")
+              native = None
+              if result["native"] is not None:
+                  native_calls = [call for call in calls if call["role"] == "native-run"]
+                  fixture.need(len(native_calls) == 1 and native_calls[0]["returned"]
+                               and result["nativeOwnerReturned"] and result["nativeEntered"]
+                               and result["sourceReleaseId"] == release, "summary-native-call")
+                  native = fixture.native_result(fixture.canonical(result["native"]),
+                                                  native_calls[0]["returncode"], source, release)
+              known_pass = (
+                  outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
+                  and result["failure"] is None and all(result[key] for key in flags)
+                  and result["cleanupErrors"] == [] and calls
+                  and all(call["returned"] and call["returncode"] == 0 for call in calls)
+                  and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
+              )
+              # Explicit whitelist only: do not project failure/phase text,
+              # compiler captures, environment, package bytes or arbitrary keys.
+              summary.update(
+                  ownerResultAdmitted=True, ownerResultSha256=fixture.digest(result_body), tree=binding["tree"],
+                  bindingSha256=fixture.digest(binding_body), sourceInventorySha256=fixture.digest(inventory_body),
+                  sourceReleaseId=release, ownerOutcome=result["outcome"], originalCallCount=len(calls),
+                  ownerFinality={key: result[key] for key in flags}, native=native, accepted=bool(known_pass),
+                  failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
+              book.check()
+          except BaseException:
+              summary["accepted"] = False
+              summary["failure"] = "owner-result-missing-or-refused"
+          finally:
+              if not book.finish():
+                  summary["accepted"] = False
+                  summary["failure"] = "summary-input-close-unknown"
+          publisher = fixture.Originals()
+          try:
+              body = fixture.canonical(summary)
+              fixture.need(len(body) <= 49152, "summary-output-bound")
+              publisher.publish(work / "e2-workflow-result.json", body, 0o600)
+              fixture.need(publisher.finish(), "summary-output-close")
+              output_path = Path(os.environ["GITHUB_OUTPUT"])
+              fixture.need(output_path.parent == WORK_PARENT / "_runner_file_commands"
+                           and re.fullmatch(r"set_output_[A-Za-z0-9-]+", output_path.name), "summary-step-output-route")
+              fd = os.open(output_path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  fixture.need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+                               and before.st_nlink == 1, "summary-step-output-original")
+                  line = b"accepted=true\n" if summary["accepted"] else b"accepted=false\n"
+                  fixture.need(os.write(fd, line) == len(line), "summary-step-output-write")
+                  os.fsync(fd)
+                  fixture.need(fixture.signature(os.fstat(fd)) == fixture.signature(os.stat(output_path, follow_symlinks=False)),
+                               "summary-step-output-changed")
+              finally:
+                  os.close(fd)
+          except BaseException:
+              publisher.finish()
+              raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
+          print("E2 native fixture accepted." if summary["accepted"] else
+                "E2 native fixture is not accepted; retained summary is failure evidence only.")
+          PY_PUBLISH
+
+      - name: Preserve only the bounded reviewed summary
+        if: always() && steps.publication.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-maintenance-fixture-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.root }}/e2-workflow-result.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+
+      - name: Require actual complete acceptance
+        if: always() && !cancelled()
+        shell: bash
+        env:
+          ACCEPTED: ${{ steps.publication.outputs.accepted }}
+          PREPARATION_OUTCOME: ${{ steps.prepare.outcome }}
+          NATIVE_OUTCOME: ${{ steps.native.outcome }}
+          PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
+        run: |
+          set -euo pipefail
+          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == true ]]
+          # No protected-root/receipt removal, adoption or process scan here.
+          # Owner retirement is immediate and original-finality-gated. Shared
+          # Cargo/Rust/Python homes and required evidence remain untouched.

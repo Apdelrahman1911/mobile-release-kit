@@ -23,6 +23,9 @@ fn android_requirements() -> Option<(String, String)> {
 }
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(mrk_e2_native_fixture_native)");
+    assert!(std::env::var_os("CARGO_CFG_MRK_E2_NATIVE_FIXTURE_NATIVE").is_none(),
+        "E2 fixture native handshake is build-script output only");
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification_native)");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_MRK_WRAPPING_KEYCHAIN_QUALIFICATION");
@@ -39,6 +42,32 @@ fn main() {
     let observation = std::env::var_os("CARGO_FEATURE_INSTALLED_OBSERVATION").is_some();
     let helper = std::env::var_os("CARGO_FEATURE_VAULT_HELPER").is_some();
     let android_helper = std::env::var_os("CARGO_FEATURE_ANDROID_REGISTRATION_HELPER").is_some();
+    let desktop_image = std::env::var_os("CARGO_FEATURE_DESKTOP_IMAGE").is_some();
+    let resident_image = std::env::var_os("CARGO_FEATURE_RESIDENT_IMAGE").is_some();
+    let e2_fixture = std::env::var_os("CARGO_FEATURE_E2_NATIVE_FIXTURE").is_some();
+    assert!(!e2_fixture || (desktop_image != resident_image) && !helper && !observation && !qualification,
+        "E2 fixture requires exactly one isolated desktop or resident image graph");
+    assert!(!resident_image || android_helper && !desktop_image && !helper && !observation && !qualification,
+        "resident image requires the isolated helper image graph");
+    // The existing package owner validates these projections against complete
+    // SOURCE/build-release.json. Native Rust and the facade use the same values.
+    println!("cargo:rerun-if-env-changed=MRK_MACOS_INSTALL_SOURCE_COMMIT");
+    println!("cargo:rerun-if-env-changed=MRK_IMAGE_RELEASE_ID");
+    let projection = std::env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok()
+        .zip(std::env::var("MRK_IMAGE_RELEASE_ID").ok());
+    if let Some((source, release)) = projection.as_ref() {
+        assert!(source.len()==40 && source.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && source.bytes().any(|b|b!=b'0'), "complete lowercase nonzero SOURCE commit");
+        assert!(!release.is_empty() && release.len()<64
+            && release.bytes().all(|b|b.is_ascii_alphanumeric() || matches!(b,b'-'|b'_'|b'.')),
+            "bounded build-release projection");
+        println!("cargo:rustc-env=MRK_IMAGE_SOURCE_COMMIT={source}");
+        println!("cargo:rustc-env=MRK_IMAGE_RELEASE_ID={release}");
+    }
+    assert!(!desktop_image && !resident_image || projection.is_some(),
+        "image roles require both authenticated source/release projections");
+    assert!(!desktop_image || !helper && !android_helper && !observation && !qualification,
+        "ordinary product image cannot contain helper/observation/fixture roles");
     println!("cargo:rustc-check-cfg=cfg(mrk_android_registration_helper_native)");
     assert!(std::env::var_os("CARGO_CFG_MRK_ANDROID_REGISTRATION_HELPER_NATIVE").is_none(),
         "Android helper native handshake is build-script output only");
@@ -77,6 +106,27 @@ fn main() {
     println!("cargo:rerun-if-changed=src/vault_helper_auth.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain_fixture.m");
     let mut build = cc::Build::new();
+    if e2_fixture {
+        // Fixed test identity is independently validated at runtime. This
+        // compile gate is never an identity-ready or native-finality receipt.
+        println!("cargo:rerun-if-changed=src/e2_native_fixture_identity.m");
+        println!("cargo:rerun-if-changed=src/e2_native_fixture_identity.h");
+        println!("cargo:rerun-if-changed=src/e2_native_fixture_fixed.h");
+        build.define("MRK_E2_NATIVE_FIXTURE", Some("1"));
+        build.file("src/e2_native_fixture_identity.m");
+        println!("cargo:rustc-cfg=mrk_e2_native_fixture_native");
+        if desktop_image {
+            // The other examples require mutually excluded observation.
+            println!("cargo:rustc-link-arg-examples=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib");
+            println!("cargo:rustc-link-arg-examples=-mmacosx-version-min=26.0");
+        }
+    }
+    if let Some((source,release))=projection.as_ref() {
+        let source=format!("{source:?}");let release=format!("{release:?}");
+        build.define("MRK_IMAGE_SOURCE_COMMIT",Some(source.as_str()));
+        build.define("MRK_IMAGE_RELEASE_ID",Some(release.as_str()));
+    }
+    if resident_image { build.define("MRK_ANDROID_RESIDENT_IMAGE",Some("1")); }
     let app_path = format!("{:?}", installed_paths::PAYLOAD_APP);
     build.define("MRK_ANDROID_APP_PATH", Some(app_path.as_str()));
     if let Some((app, helper)) = android_requirements() {

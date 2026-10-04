@@ -51,9 +51,9 @@ pub struct FrozenFailure { pub first: Option<u64>, pub cleanup: Option<u64>, pub
 /// takes no Registry, Document, native-book or ingress lock. Failure/Unknown and
 /// finality freeze share ONE atomic word: a callback cannot pass a separate
 /// terminal flag then overwrite the immutable terminal result.
-pub struct Signal { bounds: OnceLock<Bounds>, state: AtomicU64 }
+pub struct Signal { bounds: OnceLock<Bounds>, state: AtomicU64, maintenance_cutoff: AtomicU64 }
 impl Signal {
-    pub fn reserved() -> Self { Self { bounds: OnceLock::new(), state: AtomicU64::new(0) } }
+    pub fn reserved() -> Self { Self { bounds: OnceLock::new(), state: AtomicU64::new(0), maintenance_cutoff: AtomicU64::new(0) } }
     fn arm_at(&self, bounds: Bounds, now: u64) -> Result<(), Failure> {
         if !bounds.valid() || now < bounds.origin || now >= bounds.work
             || self.bounds.set(bounds).is_err()
@@ -117,10 +117,32 @@ impl Signal {
                 Some(_) => None, None => Some(bounds.hard),
             }
         });
+        let narrow=self.maintenance_cutoff.load(Ordering::SeqCst);
+        let cleanup=cleanup.map(|end|if narrow==0{end}else{end.min(narrow)});
         FrozenFailure { first, cleanup, unknown: word & UNKNOWN_BIT != 0 }
     }
     pub fn snapshot(&self) -> FrozenFailure { self.snapshot_word(self.state.load(Ordering::SeqCst)) }
     pub fn cleanup(&self) -> Option<u64> { self.snapshot().cleanup }
+    /// A normal maintenance R/cutoff only narrows this SAME Signal. It is not F.
+    pub(crate) fn narrow_maintenance(&self, cutoff:u64, now:u64)->bool {
+        let Some(bounds)=self.bounds()else{self.unknown_clock();return false;};
+        if now<bounds.origin || now>FIRST_MASK || cutoff<=bounds.origin || cutoff>bounds.hard
+            || self.state.load(Ordering::SeqCst)&TERMINAL_BIT!=0{self.unknown_clock();return false;}
+        let _=self.maintenance_cutoff.fetch_update(Ordering::SeqCst,Ordering::SeqCst,
+            |old|Some(if old==0{cutoff}else{old.min(cutoff)}));
+        let retained=self.maintenance_cutoff.load(Ordering::SeqCst);
+        if now>=retained{self.failure_at(retained,false);return false;}
+        !self.unknown()
+    }
+    pub(crate) fn maintenance_tail(&self,first:u64,cutoff:u64,now:u64)->bool{
+        // Import the original F BEFORE exposing any positive tail admission.
+        if first!=0 {
+            if first>now{self.unknown_clock();return false;}
+            self.failure_at(first,false);
+        }
+        self.narrow_maintenance(cutoff,now) && first==0 && self.first().is_none()
+            && !self.unknown() && self.admitted_at(false,now)
+    }
     /// Validate comparison DATA against this exact original clock. A peer
     /// cannot select/extend W/H or import future/pre-origin F. Missing cleanup
     /// is accepted only with explicit peer Unknown, never as a renewed clock.
@@ -144,7 +166,7 @@ impl Signal {
         if word & (CLOCK_UNKNOWN_BIT | TERMINAL_BIT) != 0 { return false; }
         if !cleanup && now >= bounds.work { self.failure_at(bounds.work, false); }
         if cleanup { self.cleanup().is_some_and(|end| now < end) }
-        else { !self.unknown() && self.first().is_none() && now < bounds.work }
+        else { !self.unknown() && self.first().is_none() && now < bounds.work && self.cleanup().is_some_and(|end|now<end) }
     }
     pub fn admitted(&self, cleanup: bool) -> bool {
         match uptime() { Some(now) => self.admitted_at(cleanup, now), None => { self.unknown_clock(); false } }
@@ -452,6 +474,70 @@ unsafe extern "C" fn signal_callback(context: *const c_void, first: u64, unknown
     signal.failure_at(first, unknown != 0);
 }
 
+
+#[cfg(feature="e2-native-fixture")]
+#[repr(C)]
+#[derive(Clone,Copy,Debug,Default)]
+pub(crate) struct FixtureIdentityFacts {
+    pub version:u32,pub bytes:u32,pub role:u32,pub allocated:u32,pub allocation_entered:u32,
+    pub allocation_returned:u32,pub consumed:u32,pub ready:u32,pub failed:u32,pub unknown:u32,
+    pub in_call:u32,pub calls:u32,pub returns:u32,pub phase:u32,pub borrow_count:u32,
+    pub pool:u32,pub acl_frame:u32,pub acl_generation:u32,pub acl_resources:[u32;3],
+    pub fds:[u32;28],pub cf:[u32;12],pub recheck_epoch:u32,pub spent_epoch:u32,pub reserved:u32,
+    pub last_ns:u64,pub first_ns:u64,
+}
+#[cfg(feature="e2-native-fixture")]
+const _: [();272]=[();std::mem::size_of::<FixtureIdentityFacts>()];
+#[cfg(feature="e2-native-fixture")]
+const _: [();84]=[();std::mem::offset_of!(FixtureIdentityFacts,fds)];
+#[cfg(feature="e2-native-fixture")]
+const _: [();196]=[();std::mem::offset_of!(FixtureIdentityFacts,cf)];
+#[cfg(feature="e2-native-fixture")]
+const _: [();256]=[();std::mem::offset_of!(FixtureIdentityFacts,last_ns)];
+#[cfg(feature="e2-native-fixture")]
+const _: [();264]=[();std::mem::offset_of!(FixtureIdentityFacts,first_ns)];
+#[cfg(feature="e2-native-fixture")]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum FixtureIdentityCustody { NotEntered,ReturnedEmpty,Settled,Unresolved }
+#[cfg(feature="e2-native-fixture")]
+impl FixtureIdentityFacts {
+    pub(crate) fn inert()->Self { Self { version:1,bytes:272,..Self::default() } }
+    pub(crate) fn valid(&self)->bool {
+        self.version==1 && self.bytes==272 && self.role<=3 && self.reserved==0
+            && [self.allocated,self.allocation_entered,self.allocation_returned,self.consumed,
+                self.ready,self.failed,self.unknown,self.in_call,self.borrow_count].iter().all(|v|*v<=1)
+            && self.allocation_returned<=self.allocation_entered && self.allocated<=self.allocation_returned
+            && self.consumed<=self.allocated && self.returns<=self.calls && self.calls<=131_072
+            && self.calls-self.returns<=1 && self.in_call==self.calls-self.returns
+            && self.phase<=13 && self.pool<=7 && self.acl_frame<=5 && self.acl_generation<=28
+            && self.fds.iter().chain(self.cf.iter()).chain(self.acl_resources.iter()).all(|v|*v<=5)
+            && self.spent_epoch<=self.recheck_epoch && self.last_ns<=((1_u64<<61)-1)
+            && self.first_ns<=self.last_ns
+    }
+    pub(crate) fn custody(&self)->FixtureIdentityCustody {
+        use FixtureIdentityCustody::*;
+        if !self.valid() || self.unknown!=0 || self.in_call!=0 || self.calls!=self.returns { return Unresolved; }
+        let empty=self.fds.iter().chain(self.cf.iter()).chain(self.acl_resources.iter()).all(|v|*v==0)
+            && self.pool==0 && self.acl_frame==0 && self.borrow_count==0 && self.ready==0 && self.consumed==0;
+        if self.allocation_entered==0 && self.allocated==0 && empty { return NotEntered; }
+        if self.allocation_returned==1 && self.allocated==0 && empty { return ReturnedEmpty; }
+        if self.allocated==1 && self.consumed==1 && self.ready==0 && self.borrow_count==0
+            && matches!(self.pool,0|6) && matches!(self.acl_frame,0|4)
+            && self.fds.iter().chain(self.cf.iter()).chain(self.acl_resources.iter()).all(|v|matches!(*v,0|4)) { return Settled; }
+        Unresolved
+    }
+}
+#[cfg(feature="e2-native-fixture")]
+#[repr(C)]
+pub(crate) struct FixtureCheckpointApi {
+    pub context:*mut c_void,
+    pub point:unsafe extern "C" fn(*mut c_void,u32,u32,u32,u64,u32)->u32,
+}
+#[cfg(feature="e2-native-fixture")]
+unsafe extern "C" {
+    fn mrk_android_e2_fixture_client_identity_facts(book:*mut c_void,out:*mut FixtureIdentityFacts)->c_int;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct NativeFacts {
@@ -479,6 +565,17 @@ unsafe extern "C" {
         notify: unsafe extern "C" fn(*const c_void, u64, u32),
         admit: unsafe extern "C" fn(*const c_void, u32) -> u32,
         data: *const client_data::Api) -> *mut c_void;
+    fn mrk_android_maintenance_client_new(context:*const c_void,
+        notify:unsafe extern "C" fn(*const c_void,u64,u32),admit:unsafe extern "C" fn(*const c_void,u32)->u32,
+        data:*const client_data::Api)->*mut c_void;
+    fn mrk_android_maintenance_exchange(book:*mut c_void,method:u32,input:*const u8,output:*mut u8)->c_int;
+    #[cfg(feature = "e2-native-fixture")]
+    fn mrk_android_e2_fixture_missing_b(book:*mut c_void,input:*const u8,output:*mut u8)->c_int;
+    #[cfg(feature = "e2-native-fixture")]
+    fn mrk_android_e2_fixture_no_tail_exit(book:*mut c_void,exited:*mut u32)->c_int;
+    fn mrk_android_maintenance_watch(book:*mut c_void)->c_int;
+    fn mrk_android_maintenance_receive(book:*mut c_void)->c_int;
+    fn mrk_android_maintenance_step(book:*mut c_void,output:*mut u8,capacity:u32,bytes:*mut u32,eof:*mut u32,exited:*mut u32)->c_int;
     pub(crate) fn mrk_android_client_begin(book: *mut c_void) -> c_int;
     pub(crate) fn mrk_android_client_exchange(book: *mut c_void, input: *const u8, count: usize, cleanup: u32, output: *mut u8) -> c_int;
     pub(crate) fn mrk_android_client_prepare(book: *mut c_void, input: *const u8, output: *mut u8) -> c_int;
@@ -487,20 +584,61 @@ unsafe extern "C" {
     pub(crate) fn mrk_android_client_retire(book: *mut c_void) -> c_int;
 }
 
+#[cfg(feature = "e2-native-fixture")]
+#[derive(Clone, Copy, Default)]
+struct FixtureClientAllocation {
+    entered:bool, returned:bool, allocated:bool, consumed:bool,
+    missing_b_attempted:bool, missing_b_returned:bool,
+}
+/// Copied original bookkeeping, not a close or authorization operation. An
+/// inert/empty ClientBook may retire Rust DATA without closing a native cell.
+#[cfg(feature = "e2-native-fixture")]
+#[derive(Clone, Copy)]
+pub(crate) struct FixtureClientCustody {
+    pub allocation_entered:bool, pub allocation_returned:bool, pub allocated:bool,
+    pub consumed:bool, pub settled:bool, pub unknown:bool, pub native:NativeFacts,
+}
+
 /// Native connection originals, owned by the SAME pre-registered IPC worker.
 /// new() is inert. No automatic destructor closes a connection or releases a
 /// callback context. Unknown stays retained by the enclosing original owner.
 pub struct ClientBook {
     pointer: Option<NonNull<c_void>>, signal: ManuallyDrop<Arc<Signal>>,
     facts: NativeFacts, started: bool, retired: bool, poisoned: bool, in_call: bool, bytes: usize, account: u32,
-    prepare: Option<prepare::ClientAttempt>, prepare_last: u64, data: Option<DataOwner>,
+    prepare: Option<prepare::ClientAttempt>, prepare_last: u64, data: Option<DataOwner>, maintenance:bool,
+    #[cfg(feature="e2-native-fixture")] fixture_identity:FixtureIdentityFacts,
+    #[cfg(feature = "e2-native-fixture")]
+    e2_allocation:FixtureClientAllocation,
 }
 unsafe impl Send for ClientBook {}
 impl ClientBook {
     pub fn new(signal: Arc<Signal>) -> Self {
         Self { pointer: None, signal: ManuallyDrop::new(signal), facts: NativeFacts { version: 1, ..NativeFacts::default() },
             started: false, retired: false, poisoned: false, in_call: false, bytes: 0, account: 0,
-            prepare: None, prepare_last: 0, data: None }
+            prepare: None, prepare_last: 0, data: None, maintenance:false,
+            #[cfg(feature="e2-native-fixture")] fixture_identity:FixtureIdentityFacts::inert(),
+            #[cfg(feature = "e2-native-fixture")]
+            e2_allocation:FixtureClientAllocation::default(),
+        }
+    }
+    #[cfg(feature = "e2-native-fixture")]
+    pub(crate) fn fixture_custody(&self)->FixtureClientCustody {
+        FixtureClientCustody {
+            allocation_entered:self.e2_allocation.entered, allocation_returned:self.e2_allocation.returned,
+            allocated:self.e2_allocation.allocated, consumed:self.e2_allocation.consumed,
+            settled:self.settled(), unknown:self.poisoned || self.in_call || self.facts.unknown!=0
+                || self.e2_allocation.entered && !self.e2_allocation.returned,
+            native:self.facts,
+        }
+    }
+    pub(crate) fn new_maintenance(signal:Arc<Signal>)->Self{let mut book=Self::new(signal);book.maintenance=true;book}
+    pub(crate) fn maintenance_account(&self)->u32{self.account}
+    pub(crate) fn maintenance_endpoint_absent(&self)->bool{
+        self.maintenance && !self.in_call && !self.poisoned && self.facts.quiescent() && self.facts.slots[6]==0
+    }
+    pub(crate) fn tail_capture(&self)->Option<client_data::TailCapture>{
+        if !self.maintenance || self.retired || self.poisoned{return None;}
+        self.data.as_ref()?.tail_capture()
     }
     pub fn identity_available() -> bool { unsafe { mrk_android_identity_available() == 1 } }
     fn ptr(&self) -> *mut c_void { self.pointer.map_or(std::ptr::null_mut(), NonNull::as_ptr) }
@@ -512,6 +650,21 @@ impl ClientBook {
             self.poisoned = true; self.signal.failure_now(true); return false;
         }
         self.facts = next;
+        #[cfg(feature="e2-native-fixture")]
+        {
+            let mut identity=FixtureIdentityFacts::default();
+            if unsafe{mrk_android_e2_fixture_client_identity_facts(self.ptr(),&mut identity)}!=1
+                || !identity.valid() || identity.calls<self.fixture_identity.calls
+                || identity.returns<self.fixture_identity.returns || identity.allocated<self.fixture_identity.allocated
+                || identity.consumed<self.fixture_identity.consumed || identity.role!=2
+                || identity.failed<self.fixture_identity.failed || identity.unknown<self.fixture_identity.unknown
+                || identity.last_ns<self.fixture_identity.last_ns {
+                self.poisoned=true;self.signal.failure_now(true);return false;
+            }
+            self.fixture_identity=identity;
+            if identity.unknown!=0 { self.signal.failure_at(identity.first_ns,true); }
+            else if identity.failed!=0 { self.signal.failure_at(identity.first_ns,false); }
+        }
         if next.unknown != 0 { self.signal.failure_now(true); }
         true
     }
@@ -524,13 +677,23 @@ impl ClientBook {
         if !self.signal.admitted(false) { return Err(Failure::Stopped); }
         self.account = crate::real_user().map_err(|_| { self.signal.failure_now(false); Failure::Unavailable })?;
         if !self.signal.admitted(false) { return Err(Failure::Stopped); }
+        // Fixture begin validates its own attached native provider before XPC use.
+        // No feature/global Boolean is substituted for ordinary profile readiness.
+        #[cfg(not(feature="e2-native-fixture"))]
         if !Self::identity_available() { self.signal.failure_now(false); return Err(Failure::Unavailable); }
         self.in_call = true;
         let size = unsafe { mrk_android_client_bytes() };
         if !(1..=16_384).contains(&size) { self.in_call = false; self.poisoned = true; self.signal.failure_now(true); return Err(Failure::Bounds); }
         self.data = Some(DataOwner::new(ClientData::registration(Arc::clone(&self.signal))));
         let context = self.data.as_ref().map_or(std::ptr::null(), DataOwner::pointer);
-        self.pointer = NonNull::new(unsafe { mrk_android_client_new(context, client_data::notify, client_data::admit, &client_data::API) });
+        #[cfg(feature = "e2-native-fixture")]
+        { self.e2_allocation.entered=true; }
+        self.pointer = NonNull::new(unsafe {
+            if self.maintenance{mrk_android_maintenance_client_new(context,client_data::notify,client_data::admit,&client_data::API)}
+            else{mrk_android_client_new(context, client_data::notify, client_data::admit, &client_data::API)}
+        });
+        #[cfg(feature = "e2-native-fixture")]
+        { self.e2_allocation.returned=true; self.e2_allocation.allocated=self.pointer.is_some(); }
         self.in_call = false;
         if self.pointer.is_none() { self.signal.failure_now(false); return Err(Failure::Native); }
         self.bytes = size;
@@ -541,6 +704,85 @@ impl ClientBook {
         if !self.signal.admitted(false) { return Err(Failure::Stopped); }
         Ok(())
     }
+    pub(crate) fn maintenance_exchange(&mut self,method:u32,input:&[u8;crate::android_maintenance_wire::BYTES])
+        ->Result<[u8;crate::android_maintenance_wire::BYTES],Failure>{
+        let cleanup=method==7;
+        if !matches!(method,3|4|5|7) || !self.maintenance || !self.started || self.retired || self.poisoned
+            || self.in_call || !self.facts.quiescent() || !self.request_available(cleanup){return Err(Failure::Stopped);}
+        let mut output=[0;crate::android_maintenance_wire::BYTES];self.in_call=true;
+        let returned=unsafe{mrk_android_maintenance_exchange(self.ptr(),method,input.as_ptr(),
+            if cleanup{std::ptr::null_mut()}else{output.as_mut_ptr()})};self.in_call=false;
+        if !self.refresh() || returned!=1 || !self.facts.quiescent() || self.facts.peer!=0{
+            self.signal.failure_now(true);return Err(Failure::Native);
+        }
+        if !self.signal.admitted(cleanup){return Err(Failure::Stopped);}Ok(output)
+    }
+    /// The one fixed negative calls the SAME native method5 body, without B.
+    /// Its return is still only bytes until Client verifies Refused + full A.
+    #[cfg(feature = "e2-native-fixture")]
+    pub(crate) fn fixture_missing_b(&mut self,input:&[u8;crate::android_maintenance_wire::BYTES])
+        ->Result<[u8;crate::android_maintenance_wire::BYTES],Failure> {
+        if !self.maintenance || !self.started || self.retired || self.poisoned || self.in_call
+            || self.e2_allocation.missing_b_attempted || !self.facts.quiescent()
+            || self.facts.slots[7]!=2 || self.facts.slots[6]!=0 || !self.request_available(false) {
+            return Err(Failure::Stopped);
+        }
+        let mut output=[0;crate::android_maintenance_wire::BYTES];
+        self.e2_allocation.missing_b_attempted=true; self.in_call=true;
+        let returned=unsafe { mrk_android_e2_fixture_missing_b(self.ptr(),input.as_ptr(),output.as_mut_ptr()) };
+        self.in_call=false; self.e2_allocation.missing_b_returned=true;
+        if !self.refresh() || returned!=1 || !self.facts.quiescent() || self.facts.peer!=0
+            || self.facts.slots[7]!=2 || self.facts.slots[6]!=0 {
+            self.signal.failure_now(true); return Err(Failure::Native);
+        }
+        if !self.signal.admitted(false) { return Err(Failure::Stopped); }
+        Ok(output)
+    }
+    /// Only original NOTE_EXIT DATA. Client additionally requires its actually
+    /// verified fixed Refused reply; no tail/EOF/capture/admission is created.
+    #[cfg(feature = "e2-native-fixture")]
+    pub(crate) fn fixture_no_tail_exit(&mut self)->Result<bool,Failure> {
+        if !self.maintenance || !self.started || self.retired || self.poisoned || self.in_call
+            || !self.e2_allocation.missing_b_attempted || !self.e2_allocation.missing_b_returned
+            || !self.facts.quiescent() || self.facts.slots[7]!=2 || self.facts.slots[6]!=0
+            || !self.signal.admitted(true) {
+            return Err(Failure::Stopped);
+        }
+        let mut exited=0; self.in_call=true;
+        let returned=unsafe { mrk_android_e2_fixture_no_tail_exit(self.ptr(),&mut exited) };
+        self.in_call=false;
+        if !self.refresh() || returned!=1 || exited>1 || !self.facts.quiescent()
+            || self.facts.slots[7]!=2 || self.facts.slots[6]!=0 {
+            self.signal.failure_now(true); return Err(Failure::Native);
+        }
+        if !self.signal.admitted(true) { return Err(Failure::Stopped); }
+        Ok(exited==1)
+    }
+    pub(crate) fn maintenance_watch(&mut self)->Result<(),Failure>{
+        if !self.maintenance || self.retired || self.poisoned || self.in_call || !self.signal.admitted(false){return Err(Failure::Stopped);}
+        self.in_call=true;let returned=unsafe{mrk_android_maintenance_watch(self.ptr())};self.in_call=false;
+        if !self.refresh() || returned!=1 || !self.facts.quiescent(){self.signal.failure_now(self.poisoned);return Err(Failure::Native);}
+        Ok(())
+    }
+    pub(crate) fn maintenance_receive(&mut self)->Result<(),Failure>{
+        if !self.maintenance || self.retired || self.poisoned || self.in_call || !self.signal.admitted(true){return Err(Failure::Stopped);}
+        self.in_call=true;let returned=unsafe{mrk_android_maintenance_receive(self.ptr())};self.in_call=false;
+        if !self.refresh() || returned!=1 || !self.facts.quiescent(){self.signal.failure_now(true);return Err(Failure::Native);}Ok(())
+    }
+    pub(crate) fn maintenance_step(&mut self,output:&mut[u8])->Result<(usize,bool,bool),Failure>{
+        if !self.maintenance || self.retired || self.poisoned || self.in_call || !self.signal.admitted(true)
+            || output.is_empty() || output.len()>crate::android_maintenance_wire::BYTES+1{return Err(Failure::Stopped);}
+        let(mut bytes,mut eof,mut exited)=(0,0,0);self.in_call=true;
+        let returned=unsafe{mrk_android_maintenance_step(self.ptr(),output.as_mut_ptr(),output.len() as u32,&mut bytes,&mut eof,&mut exited)};
+        self.in_call=false;
+        if !self.refresh() || returned!=1 || !self.facts.quiescent() || bytes as usize>output.len() || eof>1 || exited>1{
+            self.signal.failure_now(true);return Err(Failure::Native);
+        }Ok((bytes as usize,eof==1,exited==1))
+    }
+    #[cfg(feature="e2-native-fixture")]
+    pub(crate) fn fixture_identity_custody(&self)->FixtureIdentityCustody { self.fixture_identity.custody() }
+    #[cfg(feature="e2-native-fixture")]
+    pub(crate) fn fixture_identity_facts(&self)->FixtureIdentityFacts { self.fixture_identity }
     pub fn allocation_requirements() -> crate::android_service_budget::ClientRequirements {
         crate::android_service_budget::client_requirements()
     }
@@ -566,6 +808,7 @@ impl ClientBook {
     /// One original native prepare call (or an identical Pending observation).
     /// The same registered pthread/connection/Signal survives every failure.
     pub fn prepare(&mut self) -> Result<prepare::Reply, Failure> {
+        if self.maintenance{return Err(Failure::Binding);}
         if !self.started || self.retired || self.poisoned || self.in_call || !self.facts.quiescent()
             || !self.signal.admitted(false) { return Err(Failure::Stopped); }
         if !self.request_available(false) { return Err(Failure::Stopped); }
@@ -665,6 +908,8 @@ impl ClientBook {
         self.in_call = false;
         if retired != 1 { self.poisoned = true; self.signal.failure_now(true); return false; }
         self.pointer = None; self.bytes = 0;
+        #[cfg(feature = "e2-native-fixture")]
+        { self.e2_allocation.consumed=true; }
         if !self.signal.admitted(true) || self.data.as_mut().is_none_or(|data| !data.settle()) { return false; }
         self.data = None; self.retired = true;
         // Only actual native return PLUS same-DATA exclusivity ends this owner.
@@ -759,5 +1004,42 @@ mod tests {
         ingress.exchange(501, &stop, 50);
         assert_eq!(ingress.signal.first(), Some(40));
         assert_eq!(ingress.signal.cleanup(), Some(40 + CLEANUP_NS));
+    }
+}
+
+#[cfg(all(test,feature="e2-native-fixture"))]
+mod fixture_identity_data_tests {
+    use super::{FixtureIdentityFacts,FixtureIdentityCustody as Custody};
+    #[test]
+    fn identity_original_custody_never_comes_from_readiness_or_empty_defaults() {
+        let mut f=FixtureIdentityFacts::inert();
+        assert_eq!(f.custody(),Custody::NotEntered);
+        f.role=1;f.allocation_entered=1;
+        assert_eq!(f.custody(),Custody::Unresolved);
+        f.allocation_returned=1;
+        assert_eq!(f.custody(),Custody::ReturnedEmpty);
+        f.allocated=1;f.ready=1;f.pool=4;f.fds[0]=2;
+        assert_eq!(f.custody(),Custody::Unresolved);
+        f.ready=0;f.consumed=1;f.pool=6;
+        assert_eq!(f.custody(),Custody::Unresolved); // acquired FD still survives
+        f.fds[0]=4;
+        assert_eq!(f.custody(),Custody::Settled);
+        f.unknown=1;
+        assert_eq!(f.custody(),Custody::Unresolved); // consumed cannot erase ambiguity
+    }
+    #[test]
+    fn identity_pending_phase_borrow_and_acl_originals_gate_finality() {
+        let mut f=FixtureIdentityFacts{role:1,allocated:1,allocation_entered:1,
+            allocation_returned:1,consumed:1,..FixtureIdentityFacts::inert()};
+        f.calls=1;f.in_call=1;
+        assert_eq!(f.custody(),Custody::Unresolved);
+        f.returns=1;f.in_call=0;f.borrow_count=1;
+        assert_eq!(f.custody(),Custody::Unresolved);
+        f.borrow_count=0;f.acl_frame=4;f.acl_resources[0]=2;
+        assert_eq!(f.custody(),Custody::Unresolved);
+        f.acl_resources[0]=4;
+        assert_eq!(f.custody(),Custody::Settled);
+        f.first_ns=2;f.last_ns=1;
+        assert!(!f.valid());assert_eq!(f.custody(),Custody::Unresolved);
     }
 }

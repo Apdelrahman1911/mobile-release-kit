@@ -347,6 +347,22 @@ class AquaDataTests(unittest.TestCase):
             self.assertLessEqual(info.st_size, 256 * 1024, name)
             self.assertEqual(M.digest(path.read_bytes()), expected, name)
 
+        # Follow the live parent pins as SOURCE DATA, without importing helpers.
+        def assigned(tree, name):
+            values = [node.value for node in tree.body
+                      if isinstance(node, ast.Assign) and len(node.targets) == 1
+                      and isinstance(node.targets[0], ast.Name)
+                      and node.targets[0].id == name]
+            self.assertEqual(len(values), 1, name)
+            return values[0]
+
+        loader_relative = "desktop/tools/macos_aqua_qualification.py"
+        runner_relative = "desktop/tools/macos_normal_ui_runner.py"
+        runner_tree = ast.parse((root / runner_relative).read_bytes())
+        self.assertEqual(ast.literal_eval(assigned(runner_tree, "LOADER")), loader_relative)
+        self.assertEqual(ast.literal_eval(assigned(runner_tree, "LOADER_SHA")),
+                         M.digest((root / loader_relative).read_bytes()))
+
         # The positive check above reads only DATA. The actual loader is entered
         # only with the known stale pin, under a blocker installed before entry.
         def core_modules():
@@ -955,7 +971,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("bootstrap: r.bootstrap_failure", snapshot)
         self.assertIn("self.bootstrap = None;", snapshot.split("fn at_expiry(", 1)[1].split("fn frame(", 1)[0])
         self.assertIn('self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason))', snapshot)
-        self.assertIn('edit::bounded(&failure_context(&self), 8192)', snapshot)
+        self.assertIn('bounded_failure_context(failure_context(&self), self.press_timing(),', snapshot)
         self.assertIn('(frame.len() <= 8448).then_some(frame)', snapshot)
         self.assertIn("if !bootstrap_diagnostic_data_checks() { return false; }", observer)
         bridge = (PATH.parents[1] / "src-tauri" / "src" / "bridge.rs").read_text(encoding="utf-8")
@@ -1149,7 +1165,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(set(M.re.findall(r'"([a-z-]+)"', labels)), M.DOM_CHOOSER_REASONS)
         self.assertIn('if r.evaluations >= 160 { self.fail_with("dom-evaluation-budget"); return; }', observer)
         self.assertIn('else { 45 }', observer)
-        self.assertIn('edit::bounded(&failure_context(&self), 8192)', observer)
+        self.assertIn('bounded_failure_context(failure_context(&self), self.press_timing(),', observer)
         self.assertIn('(frame.len() <= 8448).then_some(frame)', observer)
         self.assertIn("self.dom = None;", observer.split("fn at_expiry(", 1)[1].split("fn frame(", 1)[0])
         body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
@@ -1354,6 +1370,120 @@ class AquaDataTests(unittest.TestCase):
             parts = ("accessibility", "promptButton", "axFailure", key)
             self.assertEqual(M._result_location(parts), ".".join(parts))
         self.assertIsNone(M._result_location(("accessibility", "promptButton", "axFailure", "INERT_PRIVATE")))
+
+    def test_press_timing_diagnostic_is_failure_only_bound_and_closed(self):
+        # Synthetic nanoseconds/JSON only, never an AX measurement or receipt.
+        diagnostic = {"acknowledgment": "not-acknowledged", "effect": "unknown",
+                      "installedAllowanceNs": "99999995", "lastPermitToReturnAdmissionNs": "100123456"}
+
+        def failed(frame):
+            frame = deepcopy(frame)
+            frame["accessibility"].update(triggered=False, error="cannot-complete", pressDiagnostic=deepcopy(diagnostic))
+            frame["accessibility"]["promptButton"].update(axError=-25204,
+                axFailure={"operation": "perform-action", "attribute": None})
+            return frame
+
+        field = accessibility_context_data()
+        field["nativeHandler"]["step"] = "ProjectFields(Native(0))"
+        field["lastPanel"].update(step="ProjectFields(Native(0))", id=2, kind="version-source")
+        history = M.expected_result(BINDING, "project-fields")["projectFields"]["acceptedOpenHistories"][1]
+        field["accessibility"] = deepcopy(history["selectionInput"])
+        field["accessibilityBinding"] = deepcopy(history["selectionBinding"])
+        fixtures = (("first-save", accessibility_context_data()),
+                    ("ios-signing-inputs", file_failure_context_data("ios-signing-inputs", 0, 2)),
+                    ("project-fields", field))
+        for case, source in fixtures:
+            for allowance, elapsed in (("1", "0"), ("100000000", "18446744073709551615"), ("99999995", None)):
+                frame = failed(source)
+                frame["accessibility"]["pressDiagnostic"].update(
+                    installedAllowanceNs=allowance, lastPermitToReturnAdmissionNs=elapsed)
+                with self.subTest(case=case, allowance=allowance, elapsed=elapsed):
+                    self.assertEqual(M.failure_context(b"", context_row(frame), case), frame)
+                    self.assertFalse(M._accessibility_succeeded(frame["accessibility"]))
+        frame = failed(accessibility_context_data())
+        sample, native, panel = (frame[k] for k in ("accessibility", "nativeHandler", "lastPanel"))
+        for changes in ({"error": "deadline", "expired": True, "timely": False}, {"state": "unknown", "custodyKnown": False}):
+            changed = deepcopy(frame); changed["accessibility"].update(changes)
+            self.assertEqual(M.failure_context(b"", context_row(changed), "first-save"), changed)
+            self.assertFalse(M._accessibility_succeeded(changed["accessibility"]))
+        for options in ({}, {"historical": True}, {"allow_press_diagnostic": 1},
+                        {"allow_press_diagnostic": True, "expected_id": 2},
+                        {"allow_press_diagnostic": True, "field_history": True, "expected_id": 2}):
+            self.assertIsNone(M._accessibility_context(sample, native, panel, case="first-save", **options))
+        for case in (None, "noop-stale", "picker-loss", "INERT_UNKNOWN"):
+            self.assertIsNone(M._accessibility_context(sample, native, panel, case=case, allow_press_diagnostic=True))
+        for bad_native, bad_panel in (
+            (dict(native, step="ProjectSettled"), dict(panel, step="ProjectSettled")),
+            (native, dict(panel, id=1)), (native, dict(panel, kind="file")), (None, panel), (native, None),
+        ):
+            self.assertIsNone(M._accessibility_context(sample, bad_native, bad_panel, case="first-save",
+                                                       allow_press_diagnostic=True))
+        malformed = [None, False, {}, dict(diagnostic, extra="INERT"), dict(diagnostic, acknowledgment="acknowledged"),
+                     dict(diagnostic, effect="no-effect")]
+        for key, values in (
+            ("installedAllowanceNs", (None, True, 1, 1.0, "", "0", "01", "-1", "+1", "1e2", "100000001", "1000000000", " 1", "1 ", "\u0661")),
+            ("lastPermitToReturnAdmissionNs", (False, 0, 0.0, "", "00", "-1", "1e2", "18446744073709551616", "0" * 21)),
+        ):
+            malformed.extend(dict(diagnostic, **{key: value}) for value in values)
+        for value in malformed:
+            with self.subTest(diagnostic=value):
+                changed = deepcopy(sample); changed["pressDiagnostic"] = value
+                self.assertIsNone(M._accessibility_context(changed, native, panel, case="first-save",
+                                                           allow_press_diagnostic=True))
+        for changes in ({"attempted": False}, {"pressReturned": False}, {"triggered": True}):
+            changed = deepcopy(sample); changed.update(changes)
+            self.assertIsNone(M._accessibility_context(changed, native, panel, case="first-save",
+                                                       allow_press_diagnostic=True))
+        for changes in ({"axError": -25202}, {"axFailure": {"operation": "set-messaging-timeout", "attribute": None}}):
+            changed = deepcopy(sample); changed["promptButton"].update(changes)
+            self.assertIsNone(M._accessibility_context(changed, native, panel, case="first-save",
+                                                       allow_press_diagnostic=True))
+        for action in (sample, deepcopy(accessibility_context_data()["accessibility"])):
+            action = deepcopy(action); action["pressDiagnostic"] = deepcopy(diagnostic)
+            result = M.expected_result(BINDING, "first-save"); result["native"]["projectOpenInput"] = action
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(result), b"", BINDING, "first-save")
+        for key in diagnostic:
+            self.assertEqual(M._result_location(("accessibility", "pressDiagnostic", key)),
+                             "accessibility.pressDiagnostic." + key)
+        self.assertIsNone(M._result_location(("accessibility", "pressDiagnostic", "INERT_PRIVATE")))
+
+    def test_press_timing_source_reuses_admission_and_preserves_baseline(self):
+        # Source invariants complement real callback/JSON DATA checks in the
+        # already-required native entry; they are not native execution evidence.
+        root = PATH.parents[1]
+        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        helper = PATH.read_text()
+        callback = rust.split('unsafe extern "C" fn open_admission<', 1)[1].split('unsafe extern "C" fn open_recheck<', 1)[0]
+        ordered = ("context.press.first_return_attempt(after)", "if !matches!(after, 0 | 1)",
+                   "(context.admit)(after == 1)", "let now = Instant::now();",
+                   "context.press.returned_at = Some(now)", "context.end.saturating_duration_since(now)",
+                   "if remaining.is_zero()", "if !allowed", "if after == 0 && required_ns > 0",
+                   "context.press.permit = Some((required_ns, now))")
+        self.assertEqual([callback.index(item) for item in ordered], sorted(callback.index(item) for item in ordered))
+        self.assertEqual(callback.count("Instant::now()"), 1)
+        capture = rust.split("struct OpenPressCapture", 1)[1].split("pub struct OpenInputReturn", 1)[0]
+        self.assertNotIn("Instant::now()", capture)
+        self.assertIn("if after == 1 { self.after_attempted = true; }", capture)
+        self.assertIn("checked_duration_since(permitted_at)", capture)
+        self.assertIn("u64::try_from(duration.as_nanos()).ok()", capture)
+        returned = rust.split("pub fn installed_prompt_button<", 1)[1].split("pub fn installed_accessibility_trusted", 1)[0]
+        self.assertLess(returned.index("returned.report = open_return("), returned.index("context.press.timing(returned.report)"))
+        self.assertIn("if !press_timing_data_check(failed_press) { return false; }", rust)
+        self.assertIn('if !cfg!(panic = "unwind") { return false; }', rust)
+        sample = observer.split("impl OpenInputSample", 1)[1].split("struct IdentitySample", 1)[0]
+        self.assertIn("self.press_timing = body.native.and_then(|n| n.press_timing);", sample)
+        self.assertNotIn("pressDiagnostic", sample.split("fn value(self)", 1)[1])
+        encoded = observer.split("fn bounded_failure_context(", 1)[1].split("fn failure_context(", 1)[0]
+        self.assertLess(encoded.index("let baseline = edit::bounded(&value, 8192)"), encoded.index("timing.and_then(press_diagnostic_value)"))
+        self.assertIn("total <= 8448", encoded)
+        self.assertIn("unwrap_or(baseline)", encoded)
+        self.assertNotIn(".clone()", encoded)
+        self.assertIn("if !press_diagnostic_data_check(full) { return false; }", observer)
+        self.assertEqual(helper.count("allow_press_diagnostic=True"), 1)
+        self.assertIn("allow_press_diagnostic=False", helper)
+        self.assertIn('value["mechanism"] == mechanism', helper)
 
     def test_ax_failure_source_preserves_original_calls_and_first_status(self):
         # Source and bounded scalar DATA, not an AX emulator, native CaseReturn,
@@ -2331,6 +2461,15 @@ class AquaDataTests(unittest.TestCase):
         good = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-runtime_unavailable\n"
         other = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-cleanup_unknown\n"
         prefix = b"MRKDBG_DESKTOP_BOOTSTRAP"
+        ordinary = (
+            b"MRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n",
+            b"MRKDBG_DESKTOP_BOOTSTRAP=page-start-trusted\n",
+            b"MRKDBG_DESKTOP_BOOTSTRAP=page-finish-trusted\n",
+            b"MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter\n",
+            b"MRKDBG_DESKTOP_BOOTSTRAP=catalog-enter\n",
+            b"MRKDBG_DESKTOP_BOOTSTRAP=page-start-untrusted\n",
+            b"MRKDBG_DESKTOP_BOOTSTRAP=page-finish-untrusted\n",
+        )
         malformed = (
             good[:-1], prefix, prefix + b"=capabilities-admission-",
             b"PRIVATE " + good, b" " + good, good.replace(b"=", b"= "),
@@ -2339,11 +2478,21 @@ class AquaDataTests(unittest.TestCase):
             good.replace(b"runtime_unavailable", b"RUNTIME_UNAVAILABLE"),
             good.replace(b"runtime_unavailable", b"\xff"), good.replace(b"=", b"?"),
             prefix + b"=capabilities-cause-selection-profile-closed\n", prefix + b"=PRIVATE\n",
+            prefix + b"=setup-enter-extra\n", prefix + b"=hook-installed\n",
             b"PRIVATE " + prefix[:-1],
         )
         malformed += tuple(prefix[:length] for length in range(1, len(prefix)))
         absent = (b"", b"PRIVATE ONLY", b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject",
                   b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\nMRK_MACOS_AQUA_FAILURE_REASON")
+        # Ordinary shell rows are non-authorizing context, not failure facts.
+        for context in ordinary:
+            with self.subTest(context=context):
+                self.assertIsNone(M._inner_bootstrap_diagnostic(b"", context))
+                self.assertEqual(M._inner_bootstrap_diagnostic(b"", context + good + context),
+                                 {"origin": "admission", "code": "runtime_unavailable"})
+                for bad in (context[:-1], b"PRIVATE " + context):
+                    self.assertIsNone(M._inner_bootstrap_diagnostic(b"", good + bad))
+                    self.assertIsNone(M._inner_bootstrap_diagnostic(b"", bad + good))
         ambiguous = malformed + (good + good, good + other, other + good)
         ambiguous += tuple(good + bad for bad in malformed) + tuple(bad + good for bad in malformed)
         for stderr in absent + ambiguous:
@@ -2374,8 +2523,8 @@ class AquaDataTests(unittest.TestCase):
             self.assertIsNone(fixtures.inner_bootstrap_diagnostic)
         # A complete closed marker alone is useful even if unrelated stderr is
         # partial. The informational rows and private tail never leave here.
-        informative = (b"PRIVATE START\nMRKDBG_DESKTOP_BOOTSTRAP=app-info-enter\n"
-                       b"MRK_DESKTOP_CAPABILITIES=PRIVATE\n" + good + b"PRIVATE INCOMPLETE TAIL")
+        informative = (b"PRIVATE START\n" + b"".join(ordinary[:4])
+                       + b"MRK_DESKTOP_CAPABILITIES=PRIVATE\n" + good + b"PRIVATE INCOMPLETE TAIL")
         with inert_exception_owner(stderr=informative) as call:
             fixtures = InertFixtures()
             with self.assertRaises(RuntimeError) as caught:

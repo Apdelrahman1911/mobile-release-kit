@@ -13,7 +13,7 @@ _Static_assert(sizeof(MRK_MAINTENANCE_GATE_BYTES) == 31, "fixed30B permanent gat
 _Static_assert(sizeof(mrk_entry_book) <= 1024, "bounded fixed gate startup book");
 
 static const char *const ancestors[MRK_ENTRY_ANCESTORS] = {
-    "/", "Library", "Application Support", "MobileReleaseKit"
+    "/", "Library", "Application Support", MRK_INSTALLED_ROOT_LEAF
 };
 static int fail(mrk_entry_book *book) { book->failed = 1; return 0; }
 static int identity(const struct stat *a, const struct stat *b, int leaf) {

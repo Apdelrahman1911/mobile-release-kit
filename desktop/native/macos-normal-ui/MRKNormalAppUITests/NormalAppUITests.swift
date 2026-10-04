@@ -13,6 +13,37 @@ import XCTest
 final class NormalAppUITests: XCTestCase {
     private enum Refusal: Error { case condition(String) }
     private enum RequireCheck: String { case condition, singleton, actionable }
+    private enum DashboardReason: String {
+        case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
+        case selectionUnavailable = "selection-unavailable", selectionInProgress = "selection-in-progress"
+        case shuttingDown = "shutting-down"
+        case ownerOfflinePreflight = "owner-offline-preflight", ownerAndroidBuild = "owner-android-build"
+        case ownerIOSArchive = "owner-ios-archive", ownerProjectRecovery = "owner-project-recovery"
+        case ownerGitHubPreflight = "owner-github-preflight", ownerGitHubRelease = "owner-github-release"
+        case ownerProjectPath = "owner-project-path", ownerSavedVersionEdit = "owner-saved-version-edit"
+        case ownerMetadataImages = "owner-metadata-images"
+        case otherOrUnobserved = "other-or-unobserved", ambiguous
+    }
+    private enum DashboardWaiter: String {
+        case completed, timedOut = "timed-out", incorrectOrder = "incorrect-order"
+        case invertedFulfillment = "inverted-fulfillment", interrupted, unknown
+        init(_ result: XCTWaiter.Result) {
+            switch result {
+            case .completed: self = .completed
+            case .timedOut: self = .timedOut
+            case .incorrectOrder: self = .incorrectOrder
+            case .invertedFulfillment: self = .invertedFulfillment
+            case .interrupted: self = .interrupted
+            @unknown default: self = .unknown
+            }
+        }
+    }
+    private struct DashboardSnapshot {
+        let ordinal: UInt8
+        let enabled: Bool
+        let hittable: Bool
+        let reason: DashboardReason
+    }
     @MainActor private var packagedRequireDiagnosticActive = false
     @MainActor private var packagedRequireDiagnosticEmitted = false
     @MainActor private var originalLaunch: OrdinaryLaunch?
@@ -454,7 +485,8 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func require(_ value: Bool, _ reason: String,
-                                    line: UInt = #line, check: RequireCheck = .condition) throws {
+                                    line: UInt = #line, check: RequireCheck = .condition,
+                                    dashboard: (DashboardSnapshot, DashboardWaiter)? = nil) throws {
         guard value else {
             let originalFailureAbsent = caseClock?.firstFailure == nil
             let refusal = caseClock?.fail(reason) ?? Refusal.condition(reason)
@@ -463,6 +495,10 @@ final class NormalAppUITests: XCTestCase {
                 && line >= 1 && line <= 65535 {
                 packagedRequireDiagnosticEmitted = true
                 print("MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\(line);check=\(check.rawValue)")
+                if let (sample, waiter) = dashboard, (1...4).contains(sample.ordinal), waiter != .completed {
+                    // Immutable pre-wait DATA only; no native observation after failure.
+                    print("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=\(line);ordinal=\(sample.ordinal);waiter=\(waiter.rawValue);enabled=\(sample.enabled ? 1 : 0);hittable=\(sample.hittable ? 1 : 0);reason=\(sample.reason.rawValue);sample=pre-wait;nonAtomic=1")
+                }
             }
             throw refusal
         }
@@ -483,7 +519,7 @@ final class NormalAppUITests: XCTestCase {
         element.click()
     }
 
-    @MainActor private func dashboard(_ renderer: XCUIElement) throws {
+    @MainActor private func dashboard(_ renderer: XCUIElement, diagnosticOrdinal: UInt8? = nil) throws {
         let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here."))
         try require(heading.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "dashboard heading did not render")
         // Fixed dashboard query diagnostics only; observations are non-atomic.
@@ -504,8 +540,106 @@ final class NormalAppUITests: XCTestCase {
         // End fixed dashboard query diagnostics.
         let open = try unique(renderer.buttons.matching(identifier: "Open project folder"),
                               "ordinary first-party project control is missing or ambiguous")
+        let snapshot: DashboardSnapshot?
+        if packagedRequireDiagnosticActive, let ordinal = diagnosticOrdinal, (1...4).contains(ordinal) {
+            // The added fixed observations use the same originals and case end.
+            try checkOriginalOwners()
+            _ = try remaining(5)
+            let enabled = open.isEnabled
+            let hittable = open.isHittable
+            // Closed public literals only; never fetch or emit arbitrary AX text.
+            // Sequential counts are non-atomic observations, not an internal cause.
+            let reasons: [([String], DashboardReason)] = [
+                ([
+                    "Application capabilities are being loaded.",
+                ], .loading),
+                ([
+                    "Application capabilities have not been loaded.",
+                ], .notLoaded),
+                ([
+                    "The native desktop bridge is unavailable.",
+                ], .bridgeUnavailable),
+                ([
+                    "Project selection is not available in the current desktop runtime profile.",
+                ], .selectionUnavailable),
+                ([
+                    "Finish the original project selection first.",
+                ], .selectionInProgress),
+                ([
+                    "The application is shutting down.",
+                ], .shuttingDown),
+                ([
+                    "Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                    "Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original offline-check status is unverified. Check retained status before conflicting work.",
+                ], .ownerOfflinePreflight),
+                ([
+                    "Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                    "The original Android service action is active or unconfirmed. Keep its Status and Cancel; do not repeat registration.",
+                    "The original Android source inspection or protected registration is active or unconfirmed. Keep its Status and Cancel; do not repeat copy.",
+                    "An original source review is retained. Register that exact review or explicitly discard it before conflicting work.",
+                    "The original Android tool picker or folder check is active or unconfirmed. Keep tool-selection Status and Cancel before conflicting work.",
+                    "The original Android tool catalog is still reading, stopping or unconfirmed. Keep catalog Status and Cancel before conflicting work.",
+                    "The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original Android-build status is unverified. Check retained Status before conflicting work.",
+                ], .ownerAndroidBuild),
+                ([
+                    "iOS-archive ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                    "The iOS archive holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original iOS-archive status is unverified. Check retained Status before conflicting work.",
+                ], .ownerIOSArchive),
+                ([
+                    "Project-recovery ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                    "Project build-input recovery holds the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original project-recovery status is unverified. Check retained status before conflicting work.",
+                ], .ownerProjectRecovery),
+                ([
+                    "The original GitHub preflight action is running or unverified. Read its local Status before starting another operation.",
+                ], .ownerGitHubPreflight),
+                ([
+                    "The original protected release workflow action is running or unverified. Read its local Status before starting another operation.",
+                ], .ownerGitHubRelease),
+                ([
+                    "The original project-path outcome or cleanup is unverified. Conflicting native operations remain blocked.",
+                    "Finish the original project-path selection. Changing drafts or projects does not cancel it.",
+                ], .ownerProjectPath),
+                ([
+                    "Saved-version edit ownership is unverified. Keep its original operation and do not retry.",
+                    "A saved-version edit is still owned. Close or finish that original session before another operation.",
+                    "This project needs separately authorized saved-version recovery. No other edit can clear that journal.",
+                ], .ownerSavedVersionEdit),
+                ([
+                    "Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one.",
+                    "An original image selection or local-copy review is retained. Finish or stop that operation first.",
+                    "This project needs a separate image recovery inspection. Another edit cannot bypass its journal.",
+                ], .ownerMetadataImages),
+            ]
+            var selected: DashboardReason?
+            var ambiguous = false
+            // Already-ready samples need no refusal queries; the real wait below is still required.
+            if !enabled || !hittable {
+                for (titles, reason) in reasons {
+                    try checkOriginalOwners()
+                    _ = try remaining(5)
+                    let matches = renderer.staticTexts.matching(NSPredicate(
+                        format: "identifier IN %@ OR label IN %@ OR title IN %@",
+                        argumentArray: [titles, titles, titles])).count
+                    if matches > 1 || (matches == 1 && selected != nil) {
+                        ambiguous = true
+                        break // No further diagnostic observation can repair ambiguity.
+                    }
+                    if matches == 1 { selected = reason }
+                }
+            }
+            try checkOriginalOwners()
+            _ = try remaining(5)
+            snapshot = DashboardSnapshot(ordinal: ordinal, enabled: enabled, hittable: hittable,
+                                         reason: ambiguous ? .ambiguous : selected ?? .otherOrUnobserved)
+        } else { snapshot = nil }
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true AND hittable == true"), object: open)
-        try require(XCTWaiter.wait(for: [ready], timeout: try remaining(5)) == .completed, "ordinary project control is not usable")
+        let returned = XCTWaiter.wait(for: [ready], timeout: try remaining(5))
+        let readiness = snapshot.map { ($0, DashboardWaiter(returned)) }
+        try require(returned == .completed, "ordinary project control is not usable", dashboard: readiness)
         try require(renderer.staticTexts.matching(identifier: "BROWSER PREVIEW — EXAMPLE DATA ONLY").count == 0,
                     "browser-preview data is not ordinary-app evidence")
     }
@@ -513,9 +647,11 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func quitSheet(_ app: XCUIApplication, _ window: XCUIElement) throws -> XCUIElement {
         try require(window.sheets.count == 0, "an unrelated sheet is already present")
         let menuBar = try unique(app.menuBars, "application menu bar is missing or ambiguous")
-        try click(menuBar.menuBarItems.matching(identifier: "File"), "the application's File menu is unavailable")
+        // The first Tauri submenu occupies the native application menu,
+        // regardless of its source label. The fixed bundle names this app.
+        try click(menuBar.menuBarItems.matching(identifier: "Mobile Release Kit"), "the application's native menu is unavailable")
         // Scoped to this application's opened menu bar, never a global keystroke.
-        try click(menuBar.menuItems.matching(identifier: "Quit"), "the File menu has no unique Quit action")
+        try click(menuBar.menuItems.matching(identifier: "Quit"), "the application menu has no unique Quit action")
         let query = window.sheets
         try require(query.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "normal Quit did not present its native sheet")
         let sheet = try unique(query, "normal Quit sheet is ambiguous")
@@ -663,7 +799,7 @@ final class NormalAppUITests: XCTestCase {
         try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
         // End bounded initial renderer readiness.
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 1)
         try gate.probe(busy: true)
         // Exercise the real same-window native picker without selecting a
         // project or creating a document/Store operation.
@@ -673,21 +809,21 @@ final class NormalAppUITests: XCTestCase {
         try click(picker.buttons.matching(identifier: "Cancel"), "native project picker Cancel is unavailable")
         let pickerDismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: picker)
         try require(XCTWaiter.wait(for: [pickerDismissed], timeout: try remaining(5)) == .completed, "native picker Cancel did not settle")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 2)
 
         let first = try quitSheet(app, window)
         try click(first.buttons.matching(identifier: "Cancel"), "normal Quit Cancel is unavailable")
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: first)
         try require(XCTWaiter.wait(for: [dismissed], timeout: try remaining(5)) == .completed, "Cancel did not dismiss the normal Quit sheet")
         try require(app.state == .runningForeground && window.exists, "Cancel did not preserve the running application")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 3)
         // Prove renderer responsiveness after Cancel without selecting a project,
         // changing configuration or invoking a Store.
         try click(renderer.buttons.matching(identifier: "Project settings"), "post-Cancel navigation is unavailable")
         try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
                     .element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "post-Cancel settings navigation failed")
         try click(renderer.buttons.matching(identifier: "Dashboard"), "post-Cancel Dashboard navigation is unavailable")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 4)
 
         let second = try quitSheet(app, window)
         try click(second.buttons.matching(identifier: "Quit"), "normal affirmative Quit is unavailable")

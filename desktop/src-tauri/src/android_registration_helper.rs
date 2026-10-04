@@ -9,7 +9,7 @@ use mrk_macos_installed_native::{
     android_registration::TERMINAL_BYTES,
     android_service_control::LIVE_CONTEXTS,
     android_service_resident::{ServiceBook,ServiceControl,ServiceRegistry,ServiceDomain,ServiceRole,
-        NativeReturn,SUPERVISOR_STACK,PAYLOAD_STACK,COORDINATOR_STACK},
+        NativeReturn,SupervisorReturn,ResidentReturn,PumpReturn,SUPERVISOR_STACK,PAYLOAD_STACK,COORDINATOR_STACK},
 };
 use crate::android_registration_publisher::{Publisher,WorkerEnd};
 use crate::android_catalog_query_helper::{QueryReader,QueryWorkerEnd};
@@ -194,10 +194,10 @@ impl Transaction{
             .spawn(move||coordinate(input));
         self.domain.spawn_returned(true,spawned.is_ok());
         match spawned{Ok(handle)=>self.coordinator=Some(ManuallyDrop::new(handle)),Err(_)=>{self.fail_setup(false);return;}}
-        // All ORIGINAL handles/custody are published while CLOSED. No Ready
-        // constructor exists: recheck, GO once, then advertise the same context.
-        if !self.domain.work_admitted() || !self.go.publish(){self.fail_setup(false);return;}
-        if !self.domain.ready_after_go(){self.fail_setup(false);}
+        // The fixed CAS and Ready publication share the ORIGINAL RegistrySlots
+        // maintenance cut. No caller-supplied closure or native/spawn work is
+        // invoked under that DATA guard; both original spawns already returned.
+        if !self.domain.publish_go_and_ready(&self.go.0){self.fail_setup(false);}
     }
     fn poll(&mut self){
         if self.disposable{return;}
@@ -251,15 +251,26 @@ struct Supervisor{
     active:Option<ManuallyDrop<Transaction>>,
 }
 impl Supervisor{
-    fn run(&mut self){
-        if !self.native.bind(){self.startup.bound.store(2,Ordering::SeqCst);return;}
+    fn run(mut self)->SupervisorReturn{
+        let bound=loop{
+            if let Some(bound)=self.native.bind(){break bound;}
+            self.registry.watch_maintenance();thread::park_timeout(Duration::from_millis(2));
+        };
+        if !bound{
+            self.startup.bound.store(2,Ordering::SeqCst);
+            // A failed/ambiguous original bind is not an owning control return.
+            // Retain this supervisor, native borrow and DATA, never exit merely
+            // because startup failed while originals may still exist.
+            loop{self.registry.watch_maintenance();thread::park_timeout(Duration::from_millis(2));}
+        }
         self.startup.bound.store(1,Ordering::SeqCst);
         let active=loop{
             match self.startup.command.0.load(Ordering::SeqCst){GO=>break true,ABORT=>break false,_=>{}}
-            thread::park_timeout(Duration::from_millis(2));
+            self.registry.watch_maintenance();thread::park_timeout(Duration::from_millis(2));
         };
         if !active{self.registry.close_admission();}
         loop{
+            self.registry.watch_maintenance();self.native.progress_reclaim();
             for index in 0..LIVE_CONTEXTS{
                 let Some(domain)=self.registry.context(index)else{continue;};
                 let number=domain.number();
@@ -296,13 +307,23 @@ impl Supervisor{
                 // all positively settled temporary/transaction holders are gone.
                 drop(domain);self.native.reclaim(index,number);
             }
-            if !active && self.active.is_none() && self.registry.empty_known(){return;}
+            if self.active.is_none() && self.registry.control_ready_to_return(){
+                match self.native.retire_original(){
+                    Ok(end)=>{
+                        // The same consumed supervisor actually returns. All
+                        // original payload/coordinator handles are already
+                        // joined and their temporary DATA holders are gone.
+                        drop(self.registry);drop(self.startup);return end;
+                    }
+                    Err(original)=>self.native=original,
+                }
+            }
             thread::park_timeout(Duration::from_millis(2));
         }
     }
 }
 struct MainCustody{
-    native:ServiceBook,supervisor:Option<ManuallyDrop<JoinHandle<()>>>,startup:Arc<Startup>,
+    native:ServiceBook,supervisor:Option<ManuallyDrop<JoinHandle<SupervisorReturn>>>,startup:Arc<Startup>,
 }
 fn arc_bytes<T>()->usize{
     #[repr(C)] struct Allocation<T>{counts:[usize;2],data:T}
@@ -316,40 +337,91 @@ fn fixed_helper_bytes()->Option<usize>{
         std::mem::size_of::<Transaction>(),arc_bytes::<Startup>(),arc_bytes::<Barrier>(),
         arc_bytes::<Mutex<OriginalWorker>>(),arc_bytes::<Mutex<Payload>>(),
         std::mem::size_of::<PayloadInputs>(),std::mem::size_of::<CoordinatorInputs>(),
-        std::mem::size_of::<WorkerReturn>(),std::mem::size_of::<CoordinatorEnd>()]
+        std::mem::size_of::<WorkerReturn>(),std::mem::size_of::<CoordinatorEnd>(),std::mem::size_of::<SupervisorReturn>()]
         .into_iter().try_fold(0_usize,usize::checked_add)
 }
 impl MainCustody{
-    fn start()->Option<Self>{
-        let registry=ServiceRegistry::new(fixed_helper_bytes()?)?;
+    fn start()->Option<Self>{Self::start_bound(None)}
+    fn start_bound(host:Option<mrk_macos_installed_native::installed_image::AdmittedHost>)->Option<Self>{
+        // None is possible only before ANY native book/control original entry.
+        let registry=if let Some(host)=host.as_ref(){ServiceRegistry::new_image(fixed_helper_bytes()?,host)?}
+            else{ServiceRegistry::new(fixed_helper_bytes()?)?};
         let startup=Arc::new(Startup::reserved());
-        let mut native=ServiceBook::new(registry.clone());
-        let control=native.reserve_control().ok()?;
-        let mut supervisor=ManuallyDrop::new(Supervisor{native:control,registry,startup:startup.clone(),active:None});
+        let native=if let Some(host)=host{ServiceBook::new_image(registry.clone(),host)}else{ServiceBook::new(registry.clone())};
+        let mut original=Self{native,supervisor:None,startup};
+        let control=match original.native.reserve_control(){
+            Ok(control)=>control,Err(_)=>{original.native.retain_unknown();return Some(original);}
+        };
+        let supervisor=ManuallyDrop::new(Supervisor{native:control,registry,startup:original.startup.clone(),active:None});
         let spawned=thread::Builder::new().name("mrk-android-resident".into()).stack_size(SUPERVISOR_STACK)
-            .spawn(move||supervisor.run()).ok()?;
-        let mut original=Self{native,supervisor:Some(ManuallyDrop::new(spawned)),startup};
+            .spawn(move||ManuallyDrop::into_inner(supervisor).run());
+        match spawned{
+            Ok(handle)=>original.supervisor=Some(ManuallyDrop::new(handle)),
+            Err(_)=>{
+                // The unstarted closure's ManuallyDrop retains its original
+                // control/DATA custody. Do not return an error that exits this
+                // process or recreate a supervisor around the same raw book.
+                original.native.retain_unknown();return Some(original);
+            }
+        }
         loop{
             let bound=original.startup.bound.load(Ordering::SeqCst);
             if bound==1{break;}
             if bound==2 || original.supervisor.as_ref().is_some_and(|handle|handle.is_finished()){
-                original.startup.command.abort();original.join_failed_start();return None;
+                original.startup.command.abort();original.native.retain_unknown();return Some(original);
             }
             thread::park_timeout(Duration::from_millis(2));
         }
-        if original.native.begin().is_err(){
-            original.startup.command.abort();original.join_failed_start();return None;
+        loop{
+            match original.native.begin(){
+                Ok(true)=>break,
+                Ok(false)=>thread::park_timeout(Duration::from_millis(2)), // original native call never entered
+                Err(_)=>{original.startup.command.abort();original.native.retain_unknown();return Some(original);}
+            }
         }
-        if !original.startup.command.publish(){original.join_failed_start();return None;}
+        if !original.startup.command.publish(){
+            original.startup.command.abort();original.native.retain_unknown();
+        }
         Some(original)
     }
-    fn join_failed_start(&mut self){
-        // Never detach a started supervisor or use a thread/process identifier.
-        // Unknown originals may retain this startup indefinitely, not pass it.
-        while self.supervisor.as_ref().is_some_and(|handle|!handle.is_finished()){
-            thread::park_timeout(Duration::from_millis(2));
+    fn drive(mut self)->ResidentReturn{
+        loop{
+            self.native.advance_teardown();
+            if self.supervisor.as_ref().is_some_and(|handle|handle.is_finished()){
+                match self.native.ready_to_join(){
+                    Some(true)=>{
+                        if let Some(handle)=self.supervisor.take(){
+                            // Readiness is advisory. Only the boundary method
+                            // actually consumes/joins this SAME original handle.
+                            if let Some(same)=self.native.join_original_supervisor(ManuallyDrop::into_inner(handle)){
+                                self.supervisor=Some(ManuallyDrop::new(same)); // known no-entry contention only
+                            }
+                            self.native.advance_teardown();
+                        }
+                    }
+                    Some(false)=>{
+                        // Panic/unexpected return is not control retirement.
+                        // Preserve the original handle/book and charge.
+                        self.native.retain_unknown();
+                    }
+                    None=>{}, // contended DATA observation, not a join attempt
+                }
+            }
+            if self.native.has_consumed_book(){
+                match self.native.try_return(){
+                    Ok(original)=>return original,
+                    Err(same)=>self.native=same,
+                }
+            }
+            // CFRunLoop Finished (no sources/timers) and Stopped can return
+            // immediately. Reuse the EXISTING bounded park; never empty-loop
+            // spin, dispatch_main, replacement watchdog, or recursive runloop.
+            match self.native.pump_once(){
+                PumpReturn::TimedOut|PumpReturn::HandledSource=>{},
+                PumpReturn::Finished|PumpReturn::Stopped|PumpReturn::Unavailable=>
+                    thread::park_timeout(Duration::from_millis(2)),
+            }
         }
-        if let Some(handle)=self.supervisor.take(){let _=ManuallyDrop::into_inner(handle).join();}
     }
 }
 /// Fixed daemon entrypoint only: no source path, tool name or generic command
@@ -357,8 +429,16 @@ impl MainCustody{
 pub fn run()->i32{
     if std::env::args_os().take(2).count()!=1 || nix::unistd::getuid().as_raw()!=0
         || nix::unistd::geteuid().as_raw()!=0 || !mrk_macos_installed_native::ANDROID_REGISTRATION_HELPER_BUILD{return 2;}
-    let Some(mut resident)=MainCustody::start()else{return 2;};
-    resident.native.run_forever()
+    let Some(resident)=MainCustody::start()else{return 2;};
+    resident.drive().into_exit_code()
+}
+/// Safe isolated image seam. The tiny native adapter validated the fixed host
+/// BEFORE any book/thread entry; this reuses the same returning main owner.
+#[cfg(feature="macos-installed-resident-image")]
+pub fn run_image(host:mrk_macos_installed_native::installed_image::AdmittedHost)->Option<ResidentReturn>{
+    if nix::unistd::getuid().as_raw()!=0 || nix::unistd::geteuid().as_raw()!=0
+        || !mrk_macos_installed_native::RESIDENT_IMAGE_BUILD{return None;}
+    Some(MainCustody::start_bound(Some(host))?.drive())
 }
 #[cfg(test)]
 mod tests{

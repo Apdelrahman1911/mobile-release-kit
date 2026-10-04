@@ -47,6 +47,27 @@ impl AndroidServiceSetupCensus<'_> {
             .then_some(self.bytes)
     }
 }
+/// Same original Document/zero-to-three-picker census, with no project/edit or
+/// credential-copy prerequisite. The borrow cannot outlive admission's mutex.
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(crate) struct MacosMaintenanceCensus<'a>{
+    bytes:usize,document:&'a Arc<()>,pickers:&'a [Option<Arc<OriginalWork>>;3],_state:&'a DocumentState,
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+impl MacosMaintenanceCensus<'_>{
+    pub(crate) fn for_originals(&self,document:&Arc<()>,pickers:&[Option<Arc<OriginalWork>>;3])->Option<usize>{
+        (Arc::ptr_eq(self.document,document) && self.pickers.iter().zip(pickers).all(|(before,after)|
+            match(before,after){(None,None)=>true,(Some(before),Some(after))=>Arc::ptr_eq(before,after),_=>false}))
+            .then_some(self.bytes)
+    }
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(super) fn macos_maintenance_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
+    pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<MacosMaintenanceCensus<'a>,Reason>{
+    if !state.maintenance.data_only() || !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
+    let bytes=known::android_service_setup_bytes(state,pickers)?;
+    Ok(MacosMaintenanceCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
+}
 fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if !document.inner.installed_session.try_lock().is_ok_and(|history|history.is_none()){return false;}
@@ -386,7 +407,7 @@ mod known {
         }
         fn document(&mut self, state: &DocumentState) -> Count<()> {
             if state.unknown || state.exhausted || state.stopping || state.retiring || state.lock_pending
-                || state.quit_pending || state.compatibility_picker_pending
+                || !state.maintenance.data_only() || state.quit_pending || state.compatibility_picker_pending
                 || state.session_owner_reason == Some(Reason::CleanupUnknown) { return Err(Reason::Capacity); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -456,7 +477,7 @@ mod known {
         let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,
-            session_owner_reason:None,context:Some(context),slot:Some(slot),records,assignments,
+            session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
             quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),
             evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};
         // Two mentions of one identity proxy, not two made-up returned lanes.
@@ -544,7 +565,7 @@ mod known {
             DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
                 quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None,
-                session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+                session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
                 quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(),
                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),
                 installation: installation::Registry::new(), vault: None }

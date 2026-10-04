@@ -55,6 +55,9 @@ windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
 # Separate fixed headless Android registration helper; never unified into UI.
 macos-android-registration-helper = ["mrk-macos-installed-native/android-registration-helper"]
+macos-installed-resident-image = ["macos-android-registration-helper", "mrk-macos-installed-native/resident-image"]
+# Separate ordinary cdylib adapter; never the normal bin/compiler authority.
+macos-installed-desktop-image = ["desktop-shell", "custom-protocol", "mrk-macos-installed-native/desktop-image"]
 # Separate fixed eight-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
 # Explicit engineering observer controls; absent from every shipping profile.

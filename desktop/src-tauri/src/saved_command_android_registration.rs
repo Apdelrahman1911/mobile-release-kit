@@ -8,6 +8,8 @@ use std::sync::{Weak, TryLockError};
 use android_sources::SourceSnapshot;
 #[path = "saved_command_android_service_setup.rs"]
 pub(super) mod service_setup;
+#[path = "saved_command_android_maintenance.rs"]
+pub(super) mod maintenance;
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 #[path = "saved_command_android_registration_client.rs"]
 mod client;
@@ -253,7 +255,7 @@ impl Drop for Publisher {
     fn drop(&mut self) { if !self.finished { self.slot.poisoned(); } }
 }
 #[derive(Clone,Copy,PartialEq,Eq)]
-enum ControlLane { Sources, Service }
+enum ControlLane { Sources, Service, Maintenance }
 pub(super) struct Control {
     lane:ControlLane,
     owner:Weak<Inner>,id:String,generation:u32,admitted:Instant,work:Instant,hard:Instant,
@@ -293,6 +295,15 @@ impl Control {
     fn endpoint(&self)->Instant{
         let end=self.failure().and_then(|(_,first)|first.checked_add(SETTLEMENT)).map_or(self.hard,|end|end.min(self.hard));
         end.min(*self.audit.borrow())
+    }
+    /// Same original audit only. Normal resident retirement is NOT failure.
+    fn narrow_maintenance(&self,end:Instant)->bool{
+        if self.lane!=ControlLane::Maintenance || end<=self.admitted || end>self.hard{
+            self.poisoned();return false;
+        }
+        let shortened=self.audit.send_if_modified(|old|if end<*old{*old=end;true}else{false});
+        if shortened{self.changed();}
+        Instant::now()<self.endpoint() && !self.unknown.load(Ordering::SeqCst)
     }
     fn stop_at(&self,reason:wire::Reason,at:Instant){
         // The supplied captured F is never resampled or rounded forward to T.
@@ -397,7 +408,9 @@ impl WorkGate {
         let ready = !ControlSlot::pending(&book) && !self.control.unknown.load(Ordering::SeqCst);
         let at = Instant::now();
         drop(book);
-        if at >= self.control.work { self.control.advance(at); None } else { Some(ready) }
+        if at >= self.control.work || self.control.lane==ControlLane::Maintenance && at>=self.control.endpoint() {
+            self.control.advance(at); None
+        } else { Some(ready) }
     }
     /// The caller retains the SAME short book at its Proceed admission cut.
     /// Exact Cancel can have completed its whole projection while WORK waited
@@ -468,10 +481,16 @@ impl WorkGate {
                 }
                 // Lock contention is part of the original W, not free time.
                 let entered_at = Instant::now();
-                if entered_at >= self.control.work { drop(book); self.control.advance(entered_at); continue; }
+                if entered_at >= self.control.work
+                    || self.control.lane==ControlLane::Maintenance && entered_at>=self.control.endpoint() {
+                    drop(book); self.control.advance(entered_at); continue;
+                }
                 return Ok(());
             }
-            let remaining = self.control.work.saturating_duration_since(Instant::now());
+            let end=if self.control.lane==ControlLane::Maintenance {
+                self.control.work.min(self.control.endpoint())
+            }else{self.control.work};
+            let remaining = end.saturating_duration_since(Instant::now());
             if remaining.is_zero() { drop(book); continue; }
             #[cfg(test)] {
                 self.slot.wait_entries.fetch_add(1, Ordering::SeqCst);
@@ -623,7 +642,7 @@ struct Last {data:wire::Operation,phase:wire::Phase,reason:wire::Reason,report:O
 pub(super) struct Registration {
     generation:u32,active:Option<Arc<Operation>>,review:Option<Arc<Review>>,last:Option<Last>,
     capability:Option<(Availability,wire::Prerequisite)>,
-    service:service_setup::State,
+    service:service_setup::State,maintenance:maintenance::State,
 }
 enum InvokeEntry {
     Inspection(oneshot::Sender<()>),
@@ -728,21 +747,21 @@ impl Operation {
 }
 impl Registration {
     pub(super) fn sources_match(&self,sources:&android_sources::Sources)->bool{
-        self.service.sources_match(sources) && self.active.as_ref().is_none_or(|original|sources.same_snapshot(&original.source))
+        self.maintenance.sources_match(sources) && self.service.sources_match(sources) && self.active.as_ref().is_none_or(|original|sources.same_snapshot(&original.source))
             && self.review.as_ref().is_none_or(|review|sources.same_snapshot(&review.original.source))
     }
     pub(super) fn invalidation_failure(&self) -> Option<(wire::Reason, Instant)> {
         self.active.as_ref().or_else(|| self.review.as_ref().map(|review| &review.original))
             .and_then(|original| WorkGate { slot: original.cohort.slot.clone(), control: original.control.clone() }.first())
-            .or_else(||self.service.invalidation_failure())
+            .or_else(||self.service.invalidation_failure()).or_else(||self.maintenance.invalidation_failure())
     }
-    pub(super) fn busy(&self)->bool{self.active.is_some() || self.service.busy()}
+    pub(super) fn busy(&self)->bool{self.active.is_some() || self.service.busy() || self.maintenance.busy()}
     pub(super) fn unknown(&self)->bool{
-        self.service.unknown() || self.active.as_ref().is_some_and(|value|value.control.unknown.load(Ordering::SeqCst))
+        self.maintenance.unknown() || self.service.unknown() || self.active.as_ref().is_some_and(|value|value.control.unknown.load(Ordering::SeqCst))
             || self.review.as_ref().is_some_and(|review|review.original.control.unknown.load(Ordering::SeqCst)
                 || review.original.control.failure().is_some() && review.accepted_at>=review.original.control.endpoint())
     }
-    pub(super) fn installation_empty(&self)->bool{self.active.is_none()&&self.review.is_none()&&self.last.is_none()&&self.service.empty()}
+    pub(super) fn installation_empty(&self)->bool{self.active.is_none()&&self.review.is_none()&&self.last.is_none()&&self.service.empty()&&self.maintenance.empty()}
     pub(super) fn registration_matches(&self,registration:u32)->bool{
         self.service.registration_matches(registration) && self.active.as_ref().is_none_or(|value|value.source.registration==registration)
             && self.review.as_ref().is_none_or(|value|value.original.source.registration==registration)
@@ -753,6 +772,7 @@ impl Registration {
         // between final publication and this separate invalidation request.
         let mut changed=self.negative_review_at(at);
         changed|=self.service.stop(reason,at);
+        changed|=self.maintenance.stop(reason,at);
         changed|=self.review.is_some();
         if let Some(review)=self.review.take(){
             review.original.cohort.slot.clear_review(&review);
@@ -805,9 +825,15 @@ impl Registration {
             || review.original.control.unknown.load(Ordering::SeqCst){return None;}
         Some(review.clone())
     }
+    fn maintenance_retained_bytes(&self)->Option<usize>{
+        if self.active.is_some() || self.review.is_some(){return None;}
+        registration_allocation_bytes(self.service.retained_bytes()?,self.last.as_ref())?
+            .checked_add(self.maintenance.retained_bytes()?.checked_sub(std::mem::size_of::<maintenance::State>())?)
+    }
     fn retained_bytes(&self,source:&SourceSnapshot)->Option<usize>{
         if self.active.is_some(){return None;}
-        let mut bytes=registration_allocation_bytes(self.service.retained_bytes()?,self.last.as_ref())?;
+        let mut bytes=registration_allocation_bytes(self.service.retained_bytes()?,self.last.as_ref())?
+            .checked_add(self.maintenance.retained_bytes()?.checked_sub(std::mem::size_of::<maintenance::State>())?)?;
         if let Some(review)=&self.review{
             // A usable Review can retain only the SAME selected picker set.
             // Drift hooks retire it before a new selection is published. A
@@ -967,6 +993,7 @@ impl Registration {
         let at=Instant::now();
         let mut changed=self.negative_review_at(at);
         changed|=self.service.reconcile(inner);
+        changed|=self.maintenance.reconcile(inner);
         changed|=self.expire(at);
         if self.active.is_none(){return changed;}
         let original=self.active.as_ref().unwrap().clone();
@@ -1880,6 +1907,31 @@ mod lifecycle_book_tests {
             assert_eq!(control.failure(),Some((wire::Reason::Cancelled,publication.at())));
             publication.finish();assert!(slot.book.lock().unwrap().cancel.is_none());
         }
+    }
+
+
+    #[test]
+    fn maintenance_uses_same_control_but_not_source_or_service_cancel_ids() {
+        let(slot,control,_cohort,gate)=control_in_lane(Instant::now()-Duration::from_secs(2),ControlLane::Maintenance);
+        let source=wire::Cancel{operation_id:control.id.clone(),registration_generation:control.generation};
+        let service=wire::ServiceCancel{operation_id:control.id.clone(),setup_generation:control.generation};
+        assert!(slot.reserve_cancel(&source).unwrap().is_none());
+        assert!(slot.reserve_service_cancel(&service).unwrap().is_none());
+        assert!(control.failure().is_none() && !*control.stop.borrow());
+        let publisher=slot.reserve(PublisherKind::General,false).unwrap();
+        let cutoff=control.admitted+Duration::from_secs(3);
+        assert!(control.narrow_maintenance(cutoff));
+        assert!(control.narrow_maintenance(control.hard));
+        assert_eq!(control.endpoint(),cutoff);
+        assert!(control.failure().is_none() && !*control.stop.borrow()); // R is not F.
+        assert_eq!(gate.try_work(),Some(false)); // SAME pending publication still gates work.
+        let expired=control.admitted+Duration::from_secs(1);
+        assert!(!control.narrow_maintenance(expired));
+        assert!(!control.narrow_maintenance(control.hard)); // Later input cannot renew the earlier cut.
+        assert_eq!(control.endpoint(),expired);
+        assert_eq!(gate.try_work(),None);
+        assert!(gate.work().is_err() && control.unknown.load(Ordering::SeqCst));
+        publisher.reject();
     }
 
     #[test]

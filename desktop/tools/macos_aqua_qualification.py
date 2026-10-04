@@ -1459,8 +1459,8 @@ IOS_WORKSPACE = b'''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 OWNER_PINS = {
-    "owned_process.py": "d832b81894372f3c48b110f6e381fe00f6d71b75940f63a3d7eb5d61c1e2fad1",
-    "_command_process.py": "1ea5035578ae8ba0da31367f018d02b3669529077a65e2970cf92d1cc084b1c5",
+    "owned_process.py": "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8",
+    "_command_process.py": "30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69",
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
     "cancellation.py": "5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35",
 }
@@ -2401,7 +2401,8 @@ RESULT_LOCATION_KEYS = frozenset((
     "native nativeEntered nativeFinality nativeReason nativeReturned nativeUnknown navigationDenied noAttachedSheet "
     "ordinaryWindow originalDocumentAndQuitSettled originalLossSettled originalMain originalProof originalRelayJoined "
     "originalWindow originals originalsJoined outcome panel panelAttachments parent parentSetterEntered parentSetterReturned "
-    "path pollResult pollReturned prepared pressReturned projectCancelSettled projectCompletionSelection projectOpenBinding "
+    "path pollResult pollReturned prepared pressReturned pressDiagnostic acknowledgment installedAllowanceNs lastPermitToReturnAdmissionNs "
+    "projectCancelSettled projectCompletionSelection projectOpenBinding "
     "projectOpenInput prompt promptButton promptChecks promptSetterEntered promptSetterReturned quitCancelKeptOriginalReview "
     "reason receiptJoined recheckNodesExamined rechecksSettled reload requested resources response result returned reviewMatched "
     "runAttempt runId saveSessions schemaVersion scope secondStarted selectedPathMatched selection shippingBinaryQualified "
@@ -2717,6 +2718,26 @@ def _accessibility_native_proof(value, *, selection_parent=False):
     return value
 
 
+def _accessibility_press_diagnostic(value):
+    """Negative DATA: no AX success acknowledgment, actual effect unknown."""
+    label = "accessibility-press-diagnostic"
+    need(type(value) is dict and set(value) == {
+        "acknowledgment", "effect", "installedAllowanceNs", "lastPermitToReturnAdmissionNs"}, label)
+    need(type(value["acknowledgment"]) is str and value["acknowledgment"] == "not-acknowledged"
+         and type(value["effect"]) is str and value["effect"] == "unknown", label)
+    for key, minimum, maximum, digits in (
+        ("installedAllowanceNs", 1, 100000000, 9),
+        ("lastPermitToReturnAdmissionNs", 0, 18446744073709551615, 20),
+    ):
+        scalar = value[key]
+        if scalar is None and key == "lastPermitToReturnAdmissionNs":
+            continue
+        need(type(scalar) is str and 1 <= len(scalar) <= digits and scalar.isascii()
+             and scalar.isdecimal() and (scalar == "0" or scalar[0] != "0")
+             and minimum <= int(scalar) <= maximum, label)
+    return value
+
+
 def _accessibility_ax_failure(value, ax_error):
     """First actual AX status metadata only; absent iff the original AX error is zero."""
     label = "accessibility-ax-failure"
@@ -3013,7 +3034,8 @@ def _accessibility_succeeded(value):
             and value["promptButton"]["cfSlotsRetired"] == value["promptButton"]["cfSlots"])
 
 
-def _accessibility_context(value, native, panel, *, expected_id=None, case=None, field_history=False, historical=False):
+def _accessibility_context(value, native, panel, *, expected_id=None, case=None, field_history=False, historical=False,
+                           allow_press_diagnostic=False):
     if value is None:
         return None
     label = "accessibility-data"
@@ -3030,8 +3052,11 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
         need(value.get("mechanism") == mechanism or historical and version_source
              and value.get("mechanism") in ("accessibility-preconfigured-original-press-v5", "accessibility-version-source-selection-press-v7"), label)
         extra = {"selectionParentProof", "selectionParentPrompt", "selection"} if selecting else set()
+        diagnostic_fields = {"pressDiagnostic"} if "pressDiagnostic" in value else set()
+        need(not diagnostic_fields or allow_press_diagnostic is True and expected_id is None
+             and not field_history and value["mechanism"] == mechanism, label)
         need(set(value) == {"mechanism", "step", "id", "state", "site", "error",
-             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed, *extra}, label)
+             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed, *extra, *diagnostic_fields}, label)
         need(not field_history or expected_id is not None and selecting, label)
         # The actual File OpenInput projection retains its historical
         # OpenProject label. Only failure DATA with an exact case/ID/native
@@ -3187,6 +3212,16 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
                  and value["triggered"] is True and ready and button["axError"] == 0 and button["cleanupReturned"], label)
         if error == "cannot-complete":
             need(button is not None and button["axError"] == -25204, label)
+        if diagnostic_fields:
+            kind = _open_sample_kind(case, value["id"], allow_files=True)
+            native_step = field_step or file_step or "OpenProject"
+            need(kind is not None and native == {"step": native_step, "entered": True, "returned": True}
+                 and panel is not None and panel["step"] == native_step and panel["id"] == value["id"]
+                 and panel["kind"] == kind and value["bodyEntered"] is True and value["nativeEntered"] is True
+                 and value["bodyReturned"] and value["attempted"] is True and value["pressReturned"] is True
+                 and value["triggered"] is False and button is not None and button["axError"] == -25204
+                 and button["axFailure"] == {"operation": "perform-action", "attribute": None}, label)
+            _accessibility_press_diagnostic(value["pressDiagnostic"])
         if error == "invalid-element":
             need(button is not None and button["axError"] == -25202, label)
         if site in ("control-projection", "button", "control-recheck"):
@@ -3740,7 +3775,8 @@ def failure_context(stdout, stderr, case=None):
         if "nativeAction" in value:
             value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel, case=case)
         if "accessibility" in value:
-            value["accessibility"] = _accessibility_context(value["accessibility"], native, panel, case=case, historical=True)
+            value["accessibility"] = _accessibility_context(value["accessibility"], native, panel, case=case, historical=True,
+                                                          allow_press_diagnostic=True)
         if value.get("snapshotSource") == "prearm-open-progress":
             sample = value.get("accessibility")
             field_step = _field_open_step(case, sample["id"]) if sample is not None else None
@@ -3801,6 +3837,17 @@ _BOOTSTRAP_DIAGNOSTIC_LINES = {
     for origin in _BOOTSTRAP_DIAGNOSTIC_ORIGINS for code in _BOOTSTRAP_DIAGNOSTIC_CODES
 }
 _BOOTSTRAP_DIAGNOSTIC_LINE_LIMIT = max(len(line) for line in _BOOTSTRAP_DIAGNOSTIC_LINES)
+# Exact macOS shell context, never capability, trust, completion or finality evidence.
+# Linux-only hook/content/cause tags intentionally remain unknown.
+_BOOTSTRAP_INFORMATIONAL_LINES = (
+    b"MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter\n",
+    b"MRKDBG_DESKTOP_BOOTSTRAP=catalog-enter\n",
+    b"MRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n",
+    b"MRKDBG_DESKTOP_BOOTSTRAP=page-start-trusted\n",
+    b"MRKDBG_DESKTOP_BOOTSTRAP=page-start-untrusted\n",
+    b"MRKDBG_DESKTOP_BOOTSTRAP=page-finish-trusted\n",
+    b"MRKDBG_DESKTOP_BOOTSTRAP=page-finish-untrusted\n",
+)
 
 
 def _inner_bootstrap_diagnostic(stdout, stderr):
@@ -3828,7 +3875,7 @@ def _inner_bootstrap_diagnostic(stdout, stderr):
                 return None
             line = stderr[start:end + 1]
             cursor = end + 1
-            if line == b"MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter\n":
+            if line in _BOOTSTRAP_INFORMATIONAL_LINES:
                 continue
             found = _BOOTSTRAP_DIAGNOSTIC_LINES.get(line)
             if found is None or selected is not None:

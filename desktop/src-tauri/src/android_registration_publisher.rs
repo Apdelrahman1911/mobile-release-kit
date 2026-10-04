@@ -291,6 +291,7 @@ impl Publisher {
             .checked_add(native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?
             .checked_add(native::vault_filesystem::LEASE_WRITER_FRAME_BYTES)?
             .checked_add(policy::NATIVE_WORK_BYTES)?.checked_add(SUPPLIER_WORK_BYTES)?
+            .checked_add(crate::android_supplier_macos::CACHE_WORK_BYTES)?
             .checked_add(IO_WORK_BYTES)?.checked_add(64*std::mem::size_of::<Problem>())
     }
     pub(crate) fn service_high_water()->Option<usize>{

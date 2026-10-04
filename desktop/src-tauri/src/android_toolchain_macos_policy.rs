@@ -282,6 +282,26 @@ impl Inventory{
         self.data.dynamic_bytes()?.checked_add(self.directories.len().checked_add(1)?.checked_mul(POLICY_NODE_BYTES)?)?
             .checked_add(string_space(&self.directories)?)
     }
+    // Every constructor requires strictly increasing file and alias paths.
+    // Borrow that existing order; a lookup adds no cached identity or authority.
+    pub(crate) fn exact_file(&self, path: &str) -> Option<&FileSpec> {
+        let index = self.data.files.binary_search_by(|file| file.path.as_str().cmp(path)).ok()?;
+        self.data.files.get(index)
+    }
+    pub(crate) fn exact_alias(&self, path: &str) -> Option<&Alias> {
+        let index = self.data.aliases.binary_search_by(|alias| alias.path.as_str().cmp(path)).ok()?;
+        self.data.aliases.get(index)
+    }
+    pub(crate) fn file_under(&self, prefix: &str, relative: &str) -> Option<&FileSpec> {
+        if !prefix.ends_with('/') || relative.is_empty() || relative.starts_with('/') { return None; }
+        let index = self.data.files.binary_search_by(|file| {
+            // Compare the virtual prefix+relative key without allocating it.
+            // If prefix differs, the first difference precedes relative.
+            file.path.strip_prefix(prefix).map_or_else(
+                || file.path.as_str().cmp(prefix), |tail| tail.cmp(relative))
+        }).ok()?;
+        self.data.files.get(index).filter(|file| file.path.strip_prefix(prefix) == Some(relative))
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -728,14 +748,14 @@ pub(crate) fn local_loads(path: &str, commands: &MachCommands, inventory: &Inven
                     // The immutable native OS provider is admitted separately.
                     candidates.insert("/".to_owned()+&path);
                 } else {
-                    let canonical = inventory.data.aliases.iter().find(|a| a.path == path).map_or(path.as_str(), |a|a.canonical.as_str());
-                    if inventory.data.files.iter().any(|f| f.path == canonical) { candidates.insert(canonical.to_owned()); }
+                    let canonical = inventory.exact_alias(&path).map_or(path.as_str(), |a|a.canonical.as_str());
+                    if inventory.exact_file(canonical).is_some() { candidates.insert(canonical.to_owned()); }
                 }
             }
         } else {
             let Some(path) = token(load) else { return false; };
-            let canonical = inventory.data.aliases.iter().find(|a| a.path == path).map_or(path.as_str(), |a|a.canonical.as_str());
-            if inventory.data.files.iter().any(|f| f.path == canonical) { candidates.insert(canonical.to_owned()); }
+            let canonical = inventory.exact_alias(&path).map_or(path.as_str(), |a|a.canonical.as_str());
+            if inventory.exact_file(canonical).is_some() { candidates.insert(canonical.to_owned()); }
         }
         // Refuse ambiguous provider selection instead of inventing dyld facts.
         if candidates.len() != 1 { return false; }
@@ -803,8 +823,63 @@ mod tests {
         let raw=serde_json::to_vec(value).unwrap();selected.inventory_sha256=digest(&raw);parse_manifest(&raw,selected)
     }
     pub(super) fn closed_mac_roles_membership_and_selected_hashes_are_required_data() {
-        let (mut selected,value)=fixture();
-        assert!(inventory(&mut selected,&value).is_some()); // DATA predicate only.
+        let (mut selected,mut value)=fixture();
+        let canonical="jdk/Test.jdk/Contents/Home/lib/jli/libjli.dylib";
+        value["aliases"]=json!([
+            {"path":"jdk/Test.jdk/Contents/Home/lib/jli/link-a.dylib","target":"libjli.dylib","canonical":canonical},
+            {"path":"jdk/Test.jdk/Contents/Home/lib/jli/link-c.dylib","target":"libjli.dylib","canonical":canonical},
+        ]);
+        let admitted=inventory(&mut selected,&value).unwrap(); // DATA predicate only.
+        // Exact and prefix lookup retain the original row, including both ends
+        // of the sorted roster. Neither lookup silently resolves an alias.
+        for file in &admitted.data.files {
+            assert!(std::ptr::eq(admitted.exact_file(&file.path).unwrap(),file));
+            let split=file.path.rfind('/').unwrap()+1;
+            let (prefix,relative)=file.path.split_at(split);
+            assert!(std::ptr::eq(admitted.file_under(prefix,relative).unwrap(),file));
+            assert!(admitted.exact_alias(&file.path).is_none());
+        }
+        for alias in &admitted.data.aliases {
+            assert!(std::ptr::eq(admitted.exact_alias(&alias.path).unwrap(),alias));
+            assert!(admitted.exact_file(&alias.path).is_none());
+        }
+        for path in ["a/missing","jdk/Test.jdk/Contents/Home/bin/javaa","z/missing"] {
+            assert!(admitted.exact_file(path).is_none());
+        }
+        for path in ["a/missing","jdk/Test.jdk/Contents/Home/lib/jli/link-b.dylib","z/missing"] {
+            assert!(admitted.exact_alias(path).is_none());
+        }
+        // These span leading/trailing components and neighboring full keys.
+        for (prefix,relative) in [
+            ("jdk/Test.jdk/","Contents/Home/bin/java"),
+            ("jdk/","Test.jdk/Contents/Home/bin/javac"),
+            ("sdk/","platforms/android-35/android.jar"),
+            ("a/","missing"),("z/","missing"),
+            ("jdk/Test.jdk/","Contents/Home/bin/javaa"),
+            ("jdk/Test.jdk2/","Contents/Home/bin/java"),
+            ("jdk/Test.jdk/Contents/Home/bin/java/","child"),
+        ] {
+            assert_eq!(admitted.file_under(prefix,relative),
+                admitted.data.files.iter().find(|file|file.path.strip_prefix(prefix)==Some(relative)));
+        }
+        for (prefix,relative) in [
+            ("","jdk/Test.jdk/Contents/Home/bin/java"),
+            ("jdk/Test.","jdk/Contents/Home/bin/java"),
+            ("jdk/Test.jdk/",""),
+            ("jdk/Test.jdk/","/Contents/Home/bin/java"),
+        ] {
+            assert!(admitted.file_under(prefix,relative).is_none());
+        }
+        // Sorted unique paths are admission conditions, not a lookup fallback.
+        for field in ["files","aliases"] {
+            let mut changed=value.clone();
+            changed[field].as_array_mut().unwrap().swap(0,1);
+            assert!(inventory(&mut selected,&changed).is_none(),"{field} order");
+            let mut changed=value.clone();
+            let rows=changed[field].as_array_mut().unwrap();
+            let duplicate=rows[0].clone();rows.insert(1,duplicate);
+            assert!(inventory(&mut selected,&changed).is_none(),"{field} duplicate");
+        }
         let raw=serde_json::to_vec(&value).unwrap();let mut foreign=selected.clone();foreign.inventory_sha256="f".repeat(64);
         assert!(parse_manifest(&raw,&foreign).is_none());
         for (field,replacement) in [("profile",json!("android-registered-linux-x64-v1")),

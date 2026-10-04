@@ -23,6 +23,7 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.98.1"
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
       # Exact accepted current-payload DATA; ordinary installation is not Aqua qualification.
       MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0
@@ -108,6 +109,7 @@ jobs:
           source_tree = subprocess.run(["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD^{tree}"], check=True, stdout=subprocess.PIPE, timeout=15).stdout.decode().strip()
           value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                    "tree": source_tree, "workDirectory": [work_info.st_dev, work_info.st_ino, work_info.st_uid],
+                   "packageRole": os.environ["MRK_MACOS_PACKAGE_ROLE"],
                    "frontendAbsentAtAdmission": True,
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
@@ -546,7 +548,7 @@ jobs:
             --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
-      - name: Build and sign the separate fixed Android registration helper
+      - name: Build and sign the fixed resident image and C facades
         id: android_helper
         timeout-minutes: 10
         shell: bash
@@ -556,8 +558,8 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          # Fixed separate graph, original compiler/signature owners, and
-          # immediate target retirement. This never registers/runs the helper.
+          # The same original owner builds the real resident dylib and fixed C
+          # facades, then retires its target. No helper registration or execution.
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare >> "$GITHUB_OUTPUT"
       - name: Build and sign the separate fixed vault helper before binding the app
         timeout-minutes: 8
@@ -608,9 +610,11 @@ jobs:
               output.write("MRK_MACOS_VAULT_HELPER_SHA256=" + hashlib.sha256(body).hexdigest() + "\n")
               output.write("MRK_MACOS_VAULT_HELPER_BYTES=" + str(len(body)) + "\n")
           PY_HELPER
-      - name: Build only the normal ARM64 bundled-asset shell
+      - name: Build the ordinary ARM64 desktop image and embedded frontend
         timeout-minutes: 24
         shell: bash
+        env:
+          MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
         run: |
           set -euo pipefail
           cd desktop
@@ -619,14 +623,20 @@ jobs:
           cd src-tauri
           set -o noclobber
           set +e
-          cargo build --locked --release --no-default-features --features desktop-shell,custom-protocol \
-            --target aarch64-apple-darwin --bin mobile-release-kit-desktop --message-format=json \
+          cargo build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
+            --target aarch64-apple-darwin --message-format=json-render-diagnostics \
             > "$MRK_MACOS_WORK/normal-build.jsonl" 2> "$MRK_MACOS_WORK/normal-build.stderr"
           cargo_status=$?
           set -e
           printf '%s\n' "$cargo_status" > "$MRK_MACOS_WORK/normal-build.status"
           /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-build.stderr" > "$MRK_MACOS_WORK/normal-build.stderr.tail.txt"
           [[ "$cargo_status" == 0 ]] || exit "$cargo_status"
+          # Keep the original Cargo dylib unsigned; the stager binds its exact
+          # completed artifact and copies it before nested image signing.
+          image_sha=$(/usr/bin/shasum -a 256 "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/libmrk_desktop_image.dylib")
+          image_sha=${image_sha%% *}
+          [[ "$image_sha" =~ ^[0-9a-f]{64}$ ]]
+          printf 'MRK_MACOS_DESKTOP_IMAGE_SHA256=%s\n' "$image_sha" >> "$GITHUB_ENV"
       - name: Record the effective pinned compiler from the successful build context
         timeout-minutes: 1
         shell: bash
@@ -819,6 +829,14 @@ jobs:
               "desktop/src-tauri/src/macos_install_fixed_paths.rs",
               "desktop/src-tauri/src/macos_install_paths.rs",
               "desktop/src-tauri/tauri.conf.json",
+              "tests/desktop/test_android_build_tools.py",
+              "src/mobile_release/android_build_tools.py",
+              "src/mobile_release/android_build_tools_macos.py",
+              "src/mobile_release/android_build_operation.py",
+              "src/mobile_release/_desktop_android_build_files.py",
+              "src/mobile_release/android.py",
+              "src/mobile_release/credentials.py",
+              "src/mobile_release/local_signing.py",
           )
           source_bodies = {}
           for name in source_names:
@@ -917,9 +935,11 @@ jobs:
               "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection",
               "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result",
               "test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only",
+              "test_android_build_tools.MacToolAdmissionDataTests.test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only",
+              "test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot",
           ]
-          if len(names) != 82 or len(set(names)) != 82: raise ValueError("fixed selection")
-          if hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() != "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65":
+          if len(names) != 84 or len(set(names)) != 84: raise ValueError("fixed selection")
+          if hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() != "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94":
               raise ValueError("fixed selected IDs digest")
           data = root / "data-contracts"
           os.mkdir(data, 0o700)
@@ -952,17 +972,17 @@ jobs:
               if module not in ("test_workflow_transaction_profile", "test_candidate_evidence", "test_lifecycle_evidence",
                                 "test_metadata_images_edit", "test_metadata_images_recovery",
                                 "test_github_preflight_frames", "test_github_preflight", "test_github_release",
-                                "test_macos_normal_diagnostics_source") or not method.startswith("test_"):
+                                "test_macos_normal_diagnostics_source", "test_android_build_tools") or not method.startswith("test_"):
                   raise ValueError("fixed selected method required")
               suite.addTest(getattr(importlib.import_module(module), cls)(method))
-          if suite.countTestCases() != 82 or [case.id() for case in suite] != NAMES:
+          if suite.countTestCases() != 84 or [case.id() for case in suite] != NAMES:
               raise ValueError("exact original test IDs/count required")
           result = unittest.TextTestRunner(verbosity=2, failfast=False).run(suite)
           facts = {"testsRun": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
                    "skipped": len(result.skipped), "expectedFailures": len(result.expectedFailures),
                    "unexpectedSuccesses": len(result.unexpectedSuccesses), "testIds": NAMES, "actualHostBeforeAndAfter": bool(original_host())}
           print(json.dumps(facts, sort_keys=True, separators=(",", ":")), flush=True)
-          raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 82 and facts["actualHostBeforeAndAfter"]
+          raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 84 and facts["actualHostBeforeAndAfter"]
                            and not any(facts[key] for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")) else 1)
           '''
           receipt = {"schemaVersion": 1, "scope": "fixed-native-data-contracts-and-selected-host-python-regressions",
@@ -975,9 +995,9 @@ jobs:
                                        "MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256",
                                        "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_GITHUB_PREFLIGHT_TOOLING_SHA",
                                        "MRK_GITHUB_RELEASE_TOOLING_SHA", "MACOSX_DEPLOYMENT_TARGET", "DEVELOPER_DIR")},
-                     "pythonTestIds": names, "pythonExpectedCount": 82, "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
-                     "githubActionCount": 22, "normalDiagnosticsSourceCount": 3,
-                     "frozenSelectionSha256": "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65",
+                     "pythonTestIds": names, "pythonExpectedCount": 84, "workflowFilesystemCount": 2, "imageFilesystemCount": 18, "evidenceReaderCount": 37,
+                     "githubActionCount": 22, "normalDiagnosticsSourceCount": 3, "androidBuildToolsCallerCount": 2,
+                     "frozenSelectionSha256": "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94",
                      "aggregate": {"name": "observer_data_checks", "count": 1, "harness": False, "libtestCount": None,
                                    "sourceSha256": hashlib.sha256((start + aggregate).encode()).hexdigest(), "directSourceContractCalls": contract_calls},
                      "commands": [], "passed": False, "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
@@ -1144,7 +1164,7 @@ jobs:
                       receipt["artifact"]["originalClosed"] = True
                   else:
                       counts = json.loads(raw)
-                      if (counts.get("testsRun") != 82 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
+                      if (counts.get("testsRun") != 84 or counts.get("testIds") != names or counts.get("actualHostBeforeAndAfter") is not True
                               or any(type(counts.get(key)) is not int or counts[key] != 0
                                      for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"))):
                           raise ValueError("exact native Python original counts required")
@@ -1171,35 +1191,50 @@ jobs:
               receipt["failure"] = failure
               put("result.json", (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
           if failure is not None: raise SystemExit(1)
-          print("One native aggregate and 82 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
+          print("One native aggregate and 84 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")
           PY_DATA_CONTRACTS
-      - name: Assemble and ad-hoc sign the app only (never --deep or the runtime)
+      - name: Assemble the ordinary image app and sign code inside-out (never --deep)
         timeout-minutes: 3
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DESKTOP_FACADE_SHA256: ${{ steps.android_helper.outputs['desktop-facade-sha256'] }}
           MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
+          MRK_MACOS_RESIDENT_IMAGE_SHA256: ${{ steps.android_helper.outputs['resident-image-sha256'] }}
           MRK_MACOS_ENTRY_SHA256: ${{ steps.android_helper.outputs['entry-sha256'] }}
         run: |
           set -euo pipefail
           set -o noclobber
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
+            --package-role ordinary-image \
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
             --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
+            --resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib" \
+            --expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256" \
             --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \
             --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \
-            --binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop" \
-            --normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
-            --normal-cargo-target-dir "$CARGO_TARGET_DIR" \
+            --binary "$MRK_MACOS_WORK/mobile-release-kit-desktop" \
+            --expected-app-binary "$MRK_MACOS_DESKTOP_FACADE_SHA256" \
+            --desktop-image "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/libmrk_desktop_image.dylib" \
+            --expected-desktop-image "$MRK_MACOS_DESKTOP_IMAGE_SHA256" \
+            --desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
+            --desktop-image-cargo-target-dir "$CARGO_TARGET_DIR" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before
           payload="$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app"
-          # Existing independent helpers were signed first. Sign the original
-          # Rust payload, then its C entry container; never --deep repair.
+          # Resident image/facade and vault helper are already signed. Sign
+          # the copied desktop dylib before its C facade bundle and outer entry.
+          desktop_image="$payload/Contents/Frameworks/libmrk_desktop_image.dylib"
+          /usr/bin/codesign --force --sign - --options runtime \
+            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$desktop_image"
+          /usr/bin/codesign --verify --strict "$desktop_image"
+          desktop_image_sha=$(/usr/bin/shasum -a 256 "$desktop_image")
+          desktop_image_sha=${desktop_image_sha%% *}
+          [[ "$desktop_image_sha" =~ ^[0-9a-f]{64}$ ]]
           /usr/bin/codesign --force --sign - --options runtime \
             --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$payload"
           /usr/bin/codesign --verify --strict "$payload"
@@ -1209,26 +1244,32 @@ jobs:
           /usr/bin/codesign --force --sign - --options runtime \
             --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after
+          # verify-after independently rebinds the unchanged signed resident image.
+          /usr/bin/codesign --verify --strict "$desktop_image"
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-vault-keychain"
           /usr/bin/codesign --verify --strict "$payload"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           entry_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk-macos-entry")
           entry_sha=${entry_sha%% *}
           [[ "$entry_sha" =~ ^[0-9a-f]{64}$ ]]
-          printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\n' "$entry_sha" "$payload_sha" >> "$GITHUB_ENV"
+          printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\nMRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256=%s\n' "$entry_sha" "$payload_sha" "$desktop_image_sha" >> "$GITHUB_ENV"
       - name: Bind this completed signed app and current-source runtime into fresh Installer DATA
         timeout-minutes: 3
         shell: bash
         env:
           MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
+          MRK_MACOS_RESIDENT_IMAGE_SHA256: ${{ steps.android_helper.outputs['resident-image-sha256'] }}
           MRK_MACOS_ENTRY_SHA256: ${{ steps.android_helper.outputs['entry-sha256'] }}
         run: |
           set -euo pipefail
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
+            --package-role ordinary-image \
             --expected-entry "$MRK_MACOS_SIGNED_ENTRY_SHA256" --expected-app-binary "$MRK_MACOS_SIGNED_PAYLOAD_SHA256" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
+            --expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256" \
+            --expected-desktop-image "$MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256" \
             --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
             --current-runtime \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
@@ -3180,6 +3221,27 @@ jobs:
             ${{ steps.work.outputs.root }}/android-helper-build.jsonl
             ${{ steps.work.outputs.root }}/android-helper-build.stderr
             ${{ steps.work.outputs.root }}/android-helper-build.status
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stdout
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stderr
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.status
+            ${{ steps.work.outputs.root }}/android-helper-entry-build.stdout
+            ${{ steps.work.outputs.root }}/android-helper-entry-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-entry-build.status
+            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stdout
+            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.status
+            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stdout
+            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.status
             ${{ steps.work.outputs.root }}/android-helper-sign.stdout
             ${{ steps.work.outputs.root }}/android-helper-sign.stderr
             ${{ steps.work.outputs.root }}/android-helper-sign.status

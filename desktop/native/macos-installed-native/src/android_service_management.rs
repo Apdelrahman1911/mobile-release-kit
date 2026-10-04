@@ -7,13 +7,13 @@ use std::{ffi::{c_int,c_void},marker::PhantomData,ptr::NonNull,rc::Rc,time::Inst
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Status { NotRegistered,Enabled,RequiresApproval,NotFound,Unavailable,Error }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum Action { Observe,RequestRegistration,OpenApprovalSettings }
+pub enum Action { Observe,RequestRegistration,OpenApprovalSettings,UnregisterAfterQuiescence }
 impl Action {
-    fn code(self)->u32 { match self { Self::Observe=>0,Self::RequestRegistration=>1,Self::OpenApprovalSettings=>2 } }
+    fn code(self)->u32 { match self { Self::Observe=>0,Self::RequestRegistration=>1,Self::OpenApprovalSettings=>2,Self::UnregisterAfterQuiescence=>3 } }
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Outcome { NotEntered,Observed,RegistrationRequested,AlreadyRegistered,NeedsApproval,
-    SettingsRequested,Refused,Error,Unknown,DeniedByUser,Stopped }
+    SettingsRequested,Refused,Error,Unknown,DeniedByUser,Stopped,UnregisterAccepted }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct Observation {
     pub action:Action,pub status:Status,pub outcome:Outcome,
@@ -62,6 +62,7 @@ struct Report {
     phase:u32,service_state:u32,called:u32,reserved:u32,
 }
 fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
+    if action==Action::UnregisterAfterQuiescence{return decode_maintenance(raw,phase);}
     if raw.version!=2 || raw.action!=action.code() || Some(raw.phase)!=phase.code()
         || raw.status>5 || raw.outcome>9 || raw.entered>1 || raw.returned>raw.entered
         || raw.cleanup_known>1 || raw.unknown>1 || raw.called!=1 || raw.reserved!=0
@@ -89,7 +90,7 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
         }
         if phase==Phase::ObserveStatus {
             let expected=if raw.status==5 { 7 } else { match action {
-                Action::Observe=>1,Action::OpenApprovalSettings=>0,
+                Action::Observe=>1,Action::OpenApprovalSettings=>0,Action::UnregisterAfterQuiescence=>return None,
                 Action::RequestRegistration=>match raw.status { 0=>0,1=>3,2=>4,3=>6,_=>return None },
             } };
             if raw.outcome!=expected { return None; }
@@ -97,7 +98,7 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
         if phase==Phase::Mutate && match action {
             Action::RequestRegistration=>raw.status!=0 || !matches!(raw.outcome,2|3|4|7|9),
             Action::OpenApprovalSettings=>raw.status>3 || raw.outcome!=5,
-            Action::Observe=>true,
+            Action::Observe|Action::UnregisterAfterQuiescence=>true,
         } { return None; }
         if phase==Phase::ObserveResult
             && (!matches!(raw.outcome,2|3|4|7|9) || raw.status==5 && raw.outcome!=7) { return None; }
@@ -117,6 +118,40 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
     Some(Observation { action,status,outcome,mutation_entered:raw.entered==1,
         mutation_returned:raw.returned==1,mutation_uncertain:raw.unknown==1 && raw.entered==1 && raw.returned==0,
         native_settled:false })
+}
+/// v3 alone interprets the last word. Bit0=BOOL returned, bit1=YES,
+/// bit2=NSError present, bit3=exception. No private message crosses the seam.
+fn decode_maintenance(raw:Report,phase:Phase)->Option<Observation>{
+    let bits=raw.reserved;
+    if raw.version!=3 || raw.action!=3 || Some(raw.phase)!=phase.code() || raw.status>5
+        || !matches!(raw.outcome,0|6|7|8|10) || raw.entered>1 || raw.returned>raw.entered
+        || raw.cleanup_known>1 || raw.unknown>1 || raw.called!=1 || raw.service_state>5
+        || bits&!15!=0 || bits&6!=0 && bits&1==0 || (raw.returned==1)!=(bits&1==1)
+        || (raw.unknown==1)!=(raw.outcome==8) || (raw.unknown==1)!=(bits&8!=0)
+        || raw.unknown==1 && raw.cleanup_known!=0{return None;}
+    if raw.unknown==0{
+        if !matches!(raw.service_state,2|4){return None;}
+        if (phase==Phase::ReleaseService)!=(raw.cleanup_known==1){return None;}
+        match phase{
+            Phase::AcquireService if raw.status!=4 || raw.entered!=0 || bits!=0
+                || !matches!((raw.service_state,raw.outcome),(2,0)|(4,7))=>return None,
+            Phase::ObserveStatus if raw.service_state!=2 || raw.entered!=0 || bits!=0 || raw.status==4
+                || raw.outcome!=if raw.status==1{0}else if raw.status==5{7}else{6}=>return None,
+            Phase::Mutate if raw.service_state!=2 || raw.status!=1 || raw.entered!=1 || raw.returned!=1
+                || raw.outcome!=if bits==3{10}else{7}=>return None,
+            Phase::ObserveResult if raw.service_state!=2 || raw.entered!=1 || raw.returned!=1
+                || bits!=3 || raw.outcome!=10 || raw.status==4=>return None,
+            Phase::ReleaseService if raw.service_state!=4=>return None,
+            _=>{},
+        }
+        if raw.outcome==10 && (bits!=3 || raw.entered!=1 || raw.returned!=1){return None;}
+    }
+    let status=match raw.status{0=>Status::NotRegistered,1=>Status::Enabled,2=>Status::RequiresApproval,
+        3=>Status::NotFound,4=>Status::Unavailable,_=>Status::Error};
+    let outcome=match raw.outcome{0=>Outcome::NotEntered,6=>Outcome::Refused,7=>Outcome::Error,
+        8=>Outcome::Unknown,10=>Outcome::UnregisterAccepted,_=>return None};
+    Some(Observation{action:Action::UnregisterAfterQuiescence,status,outcome,mutation_entered:raw.entered==1,
+        mutation_returned:raw.returned==1,mutation_uncertain:raw.entered==1 && raw.returned==0,native_settled:false})
 }
 unsafe extern "C" {
     fn mrk_android_management_new(action:u32)->*mut c_void;
@@ -140,6 +175,153 @@ impl Native for Calls {
         unsafe { mrk_android_management_retire(pointer,u32::from(unentered)) }
     }
 }
+
+#[cfg(feature="e2-native-fixture")]
+use crate::android_registration::{FixtureCheckpointApi,FixtureIdentityFacts,FixtureIdentityCustody};
+#[cfg(feature="e2-native-fixture")]
+pub(crate) const FIXTURE_IDENTITY_POOL_ALLOCATE:u32=2;
+#[cfg(feature="e2-native-fixture")]
+pub(crate) const FIXTURE_IDENTITY_POOL_INIT:u32=3;
+#[cfg(feature="e2-native-fixture")]
+pub(crate) const FIXTURE_IDENTITY_POOL_DRAIN:u32=12;
+#[cfg(feature="e2-native-fixture")]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum FixtureIdentityOutcome { Success,Failure,Unknown }
+#[cfg(feature="e2-native-fixture")]
+#[derive(Clone,Copy,Debug)]
+pub(crate) struct FixtureIdentityCheckpoint {
+    pub phase:u32,pub returned:bool,pub cleanup:bool,pub raw_ns:u64,pub outcome:FixtureIdentityOutcome,
+}
+#[cfg(feature="e2-native-fixture")]
+struct FixtureGate<'a> {
+    gate:&'a mut dyn FnMut(FixtureIdentityCheckpoint)->Decision,poisoned:bool,
+}
+#[cfg(feature="e2-native-fixture")]
+unsafe extern "C" fn fixture_identity_point(raw:*mut c_void,phase:u32,edge:u32,cleanup:u32,now:u64,outcome:u32)->u32 {
+    let Some(bridge)=(unsafe{raw.cast::<FixtureGate<'_>>().as_mut()})else{return 2;};
+    if bridge.poisoned || !(1..=13).contains(&phase) || edge>1 || cleanup>1 || outcome>2 {
+        bridge.poisoned=true;return 2;
+    }
+    let outcome=match outcome {0=>FixtureIdentityOutcome::Success,1=>FixtureIdentityOutcome::Failure,_=>FixtureIdentityOutcome::Unknown};
+    // No Rust panic may unwind across C. A caught callback remains Unknown and
+    // retains all original native custody; this bridge never performs cleanup.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||(bridge.gate)(
+        FixtureIdentityCheckpoint{phase,returned:edge==1,cleanup:cleanup==1,raw_ns:now,outcome}))) {
+        Ok(Decision::Proceed)=>1,Ok(Decision::Stop)=>0,
+        _=>{bridge.poisoned=true;2}
+    }
+}
+#[cfg(feature="e2-native-fixture")]
+unsafe extern "C" {
+    fn mrk_e2_fixture_identity_project_bytes()->usize;
+    fn mrk_e2_fixture_main_identity_new(api:*const FixtureCheckpointApi,out:*mut FixtureIdentityFacts)->*mut c_void;
+    fn mrk_e2_fixture_identity_prepare(original:*mut c_void,api:*const FixtureCheckpointApi,out:*mut FixtureIdentityFacts)->c_int;
+    fn mrk_e2_fixture_identity_recheck(original:*mut c_void,cleanup:u32,api:*const FixtureCheckpointApi,out:*mut FixtureIdentityFacts)->c_int;
+    fn mrk_e2_fixture_identity_facts_read(original:*mut c_void,out:*mut FixtureIdentityFacts)->c_int;
+    fn mrk_e2_fixture_identity_close(original:*mut *mut c_void,api:*const FixtureCheckpointApi,out:*mut FixtureIdentityFacts)->c_int;
+    fn mrk_android_e2_fixture_management_new(action:u32,identity:*mut c_void)->*mut c_void;
+}
+/// Per-case ORIGINAL main identity/pool. No Clone, Send or Drop native cleanup.
+#[cfg(feature="e2-native-fixture")]
+pub(crate) struct FixtureMainIdentity {
+    pointer:Option<NonNull<c_void>>,facts:FixtureIdentityFacts,started:bool,in_call:bool,poisoned:bool,
+    _main:PhantomData<Rc<()>>,
+}
+#[cfg(feature="e2-native-fixture")]
+impl FixtureMainIdentity {
+    pub(crate) fn new()->Self { Self{pointer:None,facts:FixtureIdentityFacts::inert(),
+        started:false,in_call:false,poisoned:false,_main:PhantomData} }
+    pub(crate) fn project_owned_upper_bound()->Option<usize> {
+        let provider=crate::android_service_budget::FIXTURE_IDENTITY_PROVIDER_MAX;
+        let main=provider.checked_add(std::mem::size_of::<Self>())?
+            .checked_add(std::mem::size_of::<FixtureGate<'static>>())?
+            .checked_add(2*std::mem::size_of::<FixtureIdentityFacts>())?
+            .checked_add(std::mem::size_of::<FixtureCheckpointApi>())?;
+        // The other provider is already in ClientRequirements. This check is
+        // the extra identity-only per-process ceiling, not a second charge.
+        let combined=main.checked_add(provider)?.checked_add(std::mem::size_of::<FixtureIdentityFacts>())?;
+        (combined<=crate::android_service_budget::FIXTURE_IDENTITY_PROCESS_MAX).then_some(main)
+    }
+    fn ptr(&self)->*mut c_void { self.pointer.map_or(std::ptr::null_mut(),NonNull::as_ptr) }
+    pub(crate) fn facts(&self)->FixtureIdentityFacts {
+        let mut facts=self.facts;if self.poisoned || self.in_call {facts.unknown=1;}facts
+    }
+    pub(crate) fn custody(&self)->FixtureIdentityCustody { self.facts().custody() }
+    fn import(&mut self,next:FixtureIdentityFacts)->bool {
+        if !next.valid() || next.role!=1 || next.calls<self.facts.calls || next.returns<self.facts.returns
+            || next.allocated<self.facts.allocated || next.consumed<self.facts.consumed
+            || next.allocation_entered<self.facts.allocation_entered || next.allocation_returned<self.facts.allocation_returned
+            || next.failed<self.facts.failed || next.unknown<self.facts.unknown
+            || next.last_ns<self.facts.last_ns {
+            self.poisoned=true;return false;
+        }
+        self.facts=next;true
+    }
+    fn refresh(&mut self)->bool {
+        if self.in_call || self.poisoned {return false;}
+        if self.pointer.is_none(){return self.facts.valid();}
+        let mut next=FixtureIdentityFacts::default();
+        if unsafe{mrk_e2_fixture_identity_facts_read(self.ptr(),&mut next)}!=1 {self.poisoned=true;return false;}
+        self.import(next)
+    }
+    fn run(&mut self,gate:&mut dyn FnMut(FixtureIdentityCheckpoint)->Decision,
+        call:impl FnOnce(*mut c_void,*const FixtureCheckpointApi,*mut FixtureIdentityFacts)->(*mut c_void,bool))->bool {
+        if self.in_call || self.poisoned {return false;}
+        let mut bridge=FixtureGate{gate,poisoned:false};
+        let api=FixtureCheckpointApi{context:(&mut bridge as *mut FixtureGate<'_>).cast(),point:fixture_identity_point};
+        let mut next=FixtureIdentityFacts::default();self.in_call=true;
+        let (pointer,ok)=call(self.ptr(),&api,&mut next);
+        // Actual consuming NULL is authoritative even when later DATA/gate
+        // validation fails. Never reintroduce or probe a consumed pointer.
+        self.pointer=NonNull::new(pointer);self.in_call=false;
+        let imported=self.import(next);self.poisoned|=bridge.poisoned;
+        ok && imported && !self.poisoned && self.facts.unknown==0
+    }
+    pub(crate) fn prepare(&mut self,cleanup:bool,gate:&mut dyn FnMut(FixtureIdentityCheckpoint)->Decision)->bool {
+        if cleanup || self.started || self.pointer.is_some() || self.in_call || self.poisoned
+            || Self::project_owned_upper_bound().is_none() {return false;}
+        self.started=true;
+        let actual=unsafe{mrk_e2_fixture_identity_project_bytes()};
+        if actual==0 || actual>crate::android_service_budget::FIXTURE_IDENTITY_PROVIDER_MAX {self.poisoned=true;return false;}
+        if !self.run(gate,|_,api,out| {
+            let pointer=unsafe{mrk_e2_fixture_main_identity_new(api,out)};(pointer,!pointer.is_null())
+        }) || self.facts.failed!=0 {return false;}
+        self.run(gate,|pointer,api,out| (pointer,unsafe{mrk_e2_fixture_identity_prepare(pointer,api,out)}==1))
+    }
+    pub(crate) fn recheck(&mut self,cleanup:bool,gate:&mut dyn FnMut(FixtureIdentityCheckpoint)->Decision)->bool {
+        if self.pointer.is_none() {return false;}
+        self.run(gate,|pointer,api,out| (pointer,unsafe{mrk_e2_fixture_identity_recheck(pointer,u32::from(cleanup),api,out)}==1))
+    }
+    pub(crate) fn close(&mut self,cleanup:bool,gate:&mut dyn FnMut(FixtureIdentityCheckpoint)->Decision)->bool {
+        if !cleanup || self.in_call || self.poisoned {return false;}
+        if self.pointer.is_none() {return matches!(self.custody(),FixtureIdentityCustody::NotEntered|FixtureIdentityCustody::ReturnedEmpty|FixtureIdentityCustody::Settled);}
+        self.run(gate,|mut pointer,api,out| {
+            let ok=unsafe{mrk_e2_fixture_identity_close(&mut pointer,api,out)}==1;(pointer,ok)
+        })
+    }
+}
+#[cfg(feature="e2-native-fixture")]
+struct FixtureCalls<'a>{identity:&'a mut FixtureMainIdentity}
+#[cfg(feature="e2-native-fixture")]
+impl Native for FixtureCalls<'_> {
+    fn allocate(&mut self,action:u32)->*mut c_void {
+        let pointer=unsafe{mrk_android_e2_fixture_management_new(action,self.identity.ptr())};
+        self.identity.refresh();pointer
+    }
+    fn step(&mut self,pointer:*mut c_void,phase:u32,report:&mut Report)->c_int {
+        // Failed identity forbids another work selector; independent known
+        // ReleaseService remains gated by the SAME original manager/clock.
+        if phase!=6 && (self.identity.poisoned || self.identity.facts.failed!=0
+            || self.identity.facts.unknown!=0 || self.identity.facts.borrow_count!=1) {return 0;}
+        let returned=unsafe{mrk_android_management_step(pointer,phase,report)};
+        self.identity.refresh();returned
+    }
+    fn retire(&mut self,pointer:*mut c_void,unentered:bool)->c_int {
+        let returned=unsafe{mrk_android_management_retire(pointer,u32::from(unentered))};
+        self.identity.refresh();returned
+    }
+}
+
 /// Persistent TLS original. Unknown retains its actual pointer/ledger and
 /// denies another allocation. It never enters cleanup from Drop or after H.
 pub struct ServiceManager {
@@ -147,6 +329,7 @@ pub struct ServiceManager {
     observation:Option<Observation>,action_admitted:bool,cell:CellCustody,service:ServiceCustody,
     in_call:bool,in_gate:bool,unknown:bool,stopped:bool,deferred:bool,first:Option<Instant>,
     _main:PhantomData<Rc<()>>,
+    #[cfg(feature="e2-native-fixture")] fixture_identity_address:usize,
 }
 impl Default for ServiceManager { fn default()->Self { Self::new() } }
 impl ServiceManager {
@@ -154,6 +337,7 @@ impl ServiceManager {
         pointer:None,active:None,next:Phase::AllocateCell,report:Report::default(),observation:None,
         action_admitted:false,cell:CellCustody::Absent,service:ServiceCustody::NotAcquired,
         in_call:false,in_gate:false,unknown:false,stopped:false,deferred:false,first:None,_main:PhantomData,
+        #[cfg(feature="e2-native-fixture")] fixture_identity_address:0,
     } }
     /// Supplied C cell + complete Rust owner only, not framework/RSS storage.
     pub fn project_owned_upper_bound()->Option<usize> { 1024_usize.checked_add(std::mem::size_of::<Self>()) }
@@ -214,7 +398,27 @@ impl ServiceManager {
     /// * imports every returned timestamp/failure before another entry;
     /// * gates final publication and real callback return separately.
     pub fn perform_phased(&mut self,action:Action,gate:&mut dyn FnMut(Checkpoint)->Decision)->Progress {
+        #[cfg(feature="e2-native-fixture")]
+        {
+            if self.fixture_identity_address!=0 && (self.pointer.is_some() || self.active.is_some()) {
+                return self.mark_unknown(Instant::now());
+            }
+            self.fixture_identity_address=0;
+        }
         self.perform_with(action,gate,&mut Calls)
+    }
+    #[cfg(feature="e2-native-fixture")]
+    pub(crate) fn perform_fixture_phased(&mut self,action:Action,identity:&mut FixtureMainIdentity,
+        gate:&mut dyn FnMut(Checkpoint)->Decision)->Progress {
+        if !identity.refresh() || identity.pointer.is_none() || identity.facts.ready!=1
+            || identity.facts.failed!=0 || identity.facts.unknown!=0 || identity.facts.pool!=4 {
+            return self.mark_unknown(Instant::now());
+        }
+        let address=identity.ptr() as usize;
+        if self.pointer.is_some() || self.active.is_some() {
+            if self.fixture_identity_address!=address {return self.mark_unknown(Instant::now());}
+        } else {self.fixture_identity_address=address;}
+        self.perform_with(action,gate,&mut FixtureCalls{identity})
     }
     fn perform_with(&mut self,action:Action,gate:&mut dyn FnMut(Checkpoint)->Decision,
         native:&mut impl Native)->Progress {
@@ -225,7 +429,7 @@ impl ServiceManager {
         if self.active.is_none() {
             if self.pointer.is_some() { return self.mark_unknown(Instant::now()); }
             self.active=Some(action);self.next=Phase::AllocateCell;
-            self.report=Report { version:2,action:action.code(),status:4,..Report::default() };
+            self.report=Report { version:if action==Action::UnregisterAfterQuiescence{3}else{2},action:action.code(),status:4,..Report::default() };
             self.observation=Some(Observation { action,status:Status::Unavailable,outcome:Outcome::NotEntered,
                 mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:false });
             self.action_admitted=false;self.cell=CellCustody::Absent;self.service=ServiceCustody::NotAcquired;
@@ -286,7 +490,14 @@ impl ServiceManager {
                 raw.entered>=self.report.entered && raw.returned>=self.report.returned
             });
             if let Some(observation)=decoded {
-                self.report=raw;self.observation=Some(observation);
+                self.report=raw;
+                // Preserve a positive original unregister fact if a later
+                // status/release raises. Unknown is still absorbing separately.
+                let preserve=action==Action::UnregisterAfterQuiescence && raw.unknown==1
+                    && self.observation.is_some_and(|value|value.outcome==Outcome::UnregisterAccepted);
+                if !preserve{self.observation=Some(observation);}
+                if action==Action::UnregisterAfterQuiescence && phase==Phase::ObserveResult
+                    && observation.status!=Status::NotRegistered{self.note(at);}
                 self.service=match raw.service_state {
                     2=>ServiceCustody::Owned,4=>ServiceCustody::Settled,_=>ServiceCustody::Unknown,
                 };
@@ -312,7 +523,7 @@ impl ServiceManager {
             } else { match phase {
                 Phase::AcquireService if raw.service_state==2=>Phase::ObserveStatus,
                 Phase::ObserveStatus if raw.outcome==0=>Phase::Mutate,
-                Phase::Mutate if action==Action::RequestRegistration=>Phase::ObserveResult,
+                Phase::Mutate if matches!(action,Action::RequestRegistration|Action::UnregisterAfterQuiescence)=>Phase::ObserveResult,
                 Phase::ReleaseService=>Phase::RetireCell,
                 _=>Phase::ReleaseService,
             } };
@@ -729,5 +940,58 @@ mod tests {
             assert!(!result.mutation_entered && !result.mutation_returned && !result.native_settled);
             assert!(decode(raw,Action::OpenApprovalSettings,Phase::ObserveStatus).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod maintenance_report_tests{
+    use super::*;
+    #[test]
+    fn bool_error_exception_and_version_are_independent_facts(){
+        let good=Report{version:3,action:3,status:1,outcome:10,entered:1,returned:1,
+            phase:4,service_state:2,called:1,reserved:3,..Report::default()};
+        assert_eq!(decode(good,Action::UnregisterAfterQuiescence,Phase::Mutate).unwrap().outcome,Outcome::UnregisterAccepted);
+        for bits in [1,5,7]{let failed=Report{reserved:bits,outcome:7,..good};
+            assert_eq!(decode(failed,Action::UnregisterAfterQuiescence,Phase::Mutate).unwrap().outcome,Outcome::Error);}
+        for bits in [0,2,4,6,16]{assert!(decode(Report{reserved:bits,..good},Action::UnregisterAfterQuiescence,Phase::Mutate).is_none());}
+        assert!(decode(Report{version:2,..good},Action::UnregisterAfterQuiescence,Phase::Mutate).is_none());
+        assert!(decode(good,Action::RequestRegistration,Phase::Mutate).is_none());
+        let thrown=Report{outcome:8,returned:0,unknown:1,reserved:8,..good};
+        assert!(decode(thrown,Action::UnregisterAfterQuiescence,Phase::Mutate).unwrap().mutation_uncertain);
+        let final_status=Report{phase:5,status:0,..good};
+        assert_eq!(decode(final_status,Action::UnregisterAfterQuiescence,Phase::ObserveResult).unwrap().status,Status::NotRegistered);
+    }
+}
+
+#[cfg(all(test,feature="e2-native-fixture"))]
+mod fixture_identity_bridge_tests {
+    use super::*;
+    unsafe extern "C" {
+        fn mrk_e2_fixture_main_epoch_admits(rechecked:u32,spent:u32)->c_int;
+    }
+    #[test]
+    fn actual_main_epoch_predicate_rejects_unrechecked_and_already_spent_data() {
+        // Tests the SAME pure C comparison used by main_borrow, not a Rust
+        // duplicate. Preparation->epoch0 and call-site binding are separately
+        // source-reviewed; this DATA unit is not native-original qualification.
+        for (checked,spent,expected) in [
+            (0,0,0),(1,0,1),(1,1,0),(2,1,1),(1,2,0),(0,u32::MAX,0),(u32::MAX,u32::MAX,0),
+        ] {
+            assert_eq!(unsafe{mrk_e2_fixture_main_epoch_admits(checked,spent)},expected);
+        }
+    }
+    #[test]
+    fn callback_panic_and_defer_are_caught_before_the_c_boundary() {
+        let mut panic_gate=|_:FixtureIdentityCheckpoint|->Decision {panic!("synthetic callback failure")};
+        let mut bridge=FixtureGate{gate:&mut panic_gate,poisoned:false};
+        let raw=(&mut bridge as *mut FixtureGate<'_>).cast();
+        assert_eq!(unsafe{fixture_identity_point(raw,1,0,0,1,0)},2);
+        assert!(bridge.poisoned);
+        assert_eq!(unsafe{fixture_identity_point(raw,1,1,0,2,0)},2);
+        let mut defer=|_:FixtureIdentityCheckpoint|Decision::Defer;
+        let mut bridge=FixtureGate{gate:&mut defer,poisoned:false};
+        assert_eq!(unsafe{fixture_identity_point((&mut bridge as *mut FixtureGate<'_>).cast(),1,0,0,1,0)},2);
+        assert!(bridge.poisoned);
+        assert!(FixtureMainIdentity::project_owned_upper_bound().is_some());
     }
 }

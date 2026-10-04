@@ -44,6 +44,13 @@ PAYLOAD_NAME = "MobileReleaseKitPayload.app"
 PAYLOAD_RELATIVE = "Contents/Helpers/" + PAYLOAD_NAME
 PAYLOAD_CONTENTS = PAYLOAD_RELATIVE + "/Contents/"
 APP_BINARY = PAYLOAD_CONTENTS + "MacOS/mobile-release-kit-desktop"
+DESKTOP_IMAGE = PAYLOAD_CONTENTS + "Frameworks/libmrk_desktop_image.dylib"
+RESIDENT_IMAGE = PAYLOAD_CONTENTS + "Frameworks/libmrk_resident_image.dylib"
+PACKAGE_ROLES = ("ordinary-image", "installed-shell-observation")
+IMAGE_INSTALL_NAMES = {
+    "desktop": str(INSTALL_ROOT / APP_NAME / DESKTOP_IMAGE),
+    "resident": str(INSTALL_ROOT / APP_NAME / RESIDENT_IMAGE),
+}
 PAYLOAD_INFO = PAYLOAD_CONTENTS + "Info.plist"
 VAULT_HELPER = PAYLOAD_CONTENTS + "Helpers/mrk-vault-keychain"
 ANDROID_HELPER_BUNDLE_PROGRAM = "Contents/Helpers/mrk-android-register"
@@ -455,9 +462,11 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
                 with parent(Path(output) / directory) as (fd, leaf):
                     os.mkdir(leaf, 0o700, dir_fd=fd)
             for path, (body, mode) in sorted(files.items()):
-                # The separately signed nested helper is copied unchanged and
-                # stays read-only. Only the containing app is signed afterward.
-                allowed_modes = ((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER) else (0o644, 0o755)) if app_signing else (0o444, 0o555)
+                # Signed resident image/helpers are copied unchanged/read-only.
+                # The raw desktop image is executable code for inside-out signing.
+                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE)
+                                  else (0o755,) if path == DESKTOP_IMAGE else (0o644, 0o755))
+                                 if app_signing else (0o444, 0o555))
                 need(mode in allowed_modes, "output-mode")
                 with parent(Path(output) / path) as (fd, leaf):
                     opened = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=fd)
@@ -860,61 +869,207 @@ def entry_macho(body):
 
 
 
-def normal_cargo_artifact(messages, binary, target_dir, body):
-    """Bind one ordinary Cargo result to the exact bytes copied into the app.
+def package_role(value):
+    """A fixed trusted-caller role, never inferred from inventory/image absence."""
+    need(type(value) is str and value in PACKAGE_ROLES, "package-role")
+    return value
 
-    This is bounded DATA validation, not compiler execution or GUI acceptance.
-    The fixed workflow separately preserves Cargo's original process status.
-    """
-    name = "mobile-release-kit-desktop"
-    cargo_root = DESKTOP / "src-tauri"
+
+def image_macho(body, role):
+    """Closed MH_DYLIB DATA; executable names or signatures do not change kind."""
+    need(role in IMAGE_INSTALL_NAMES and type(body) is bytes and len(body) >= 32, "image-role-header")
+    magic, cpu, subtype, kind, count, size, flags, reserved = struct.unpack_from("<8I", body)
+    need(magic == 0xFEEDFACF and cpu == 0x0100000C and subtype == 0 and kind == 6 and reserved == 0
+         and 0 < count <= 128 and size <= 65536 and 32 + size <= len(body)
+         and flags & (0x4 | 0x80) == (0x4 | 0x80) and not flags & 0x20000,
+         "image-dylib-target")
+    # No LC_MAIN/dyld/rpath/environment, weak/reexport/lazy/upward library,
+    # routines, search path or unknown loader command. Product initialization
+    # belongs only in the loaded image, never either libSystem-only facade.
+    allowed = {0x19, 0x2, 0xB, 0xC, 0xD, 0x1B, 0x32, 0x2A,
+               0x26, 0x29, 0x1D, 0x2E, 0x80000022, 0x80000033, 0x80000034}
+    offset, identifiers, libraries, minimum = 32, [], [], []
+    for _ in range(count):
+        need(offset + 8 <= 32 + size, "image-command")
+        command, length = struct.unpack_from("<II", body, offset)
+        need(command in allowed and length >= 8 and length % 8 == 0
+             and offset + length <= 32 + size, "image-loader-command")
+        if command in (0xC, 0xD):
+            need(length >= 24, "image-library-command")
+            start = struct.unpack_from("<I", body, offset + 8)[0]
+            need(24 <= start < length, "image-library-offset")
+            raw = body[offset + start:offset + length]
+            need(b"\0" in raw, "image-library-termination")
+            name, padding = raw.split(b"\0", 1)
+            need(not any(padding), "image-library-padding")
+            if command == 0xD:
+                identifiers.append(name)
+            else:
+                need(name.startswith((b"/System/Library/", b"/usr/lib/"))
+                     and all(32 < byte < 127 for byte in name)
+                     and all(part not in (b"", b".", b"..") for part in name.split(b"/")[1:]),
+                     "image-absolute-apple-system-dependency")
+                libraries.append(name)
+        elif command == 0x19:
+            need(length >= 72, "image-segment-command")
+            sections = struct.unpack_from("<I", body, offset + 64)[0]
+            need(sections <= 256 and length == 72 + 80 * sections, "image-segment-sections")
+        elif command == 0x32:
+            need(length >= 24, "image-build-version")
+            minimum.append(struct.unpack_from("<II", body, offset + 8))
+        offset += length
+    need(offset == 32 + size and minimum == [(1, 26 << 16)]
+         and identifiers == [IMAGE_INSTALL_NAMES[role].encode("ascii")]
+         and len(libraries) == len(set(libraries))
+         and libraries.count(b"/usr/lib/libSystem.B.dylib") == 1, "image-fixed-install-name-and-system-closure")
+
+
+def cargo_records(messages):
     need(type(messages) is bytes and 0 < len(messages) <= 8 * 1024 * 1024
-         and messages.endswith(b"\n"), "normal-cargo-messages-bound")
-    need(type(body) is bytes and 32 <= len(body) <= MAX_BYTES, "normal-cargo-binary-bound")
+         and messages.endswith(b"\n"), "image-cargo-messages-bound")
+    lines = messages.splitlines()
+    need(1 < len(lines) <= 10000 and all(lines), "image-cargo-record-count")
+    records, finished = [], False
+    for line in lines:
+        need(not finished, "image-cargo-after-finish")
+        item = decode(line)
+        need(type(item) is dict and item.get("reason") in
+             ("compiler-artifact", "compiler-message", "build-script-executed", "build-finished"),
+             "image-cargo-record-kind")
+        if item["reason"] == "build-finished":
+            need(set(item) == {"reason", "success"} and item["success"] is True, "image-cargo-not-successful")
+            finished = True
+        elif item["reason"] == "compiler-artifact":
+            need(type(item.get("target")) is dict and type(item.get("filenames")) is list
+                 and all(type(value) is str for value in item["filenames"]), "image-cargo-target-shape")
+            records.append(item)
+    need(finished, "image-cargo-terminal-success")
+    return records
+
+
+def cargo_profile(row, *, test):
+    profile = row.get("profile")
+    need(type(profile) is dict and profile.get("test") is test
+         and profile.get("debug_assertions") is test
+         and profile.get("opt_level") == ("0" if test else "3"), "image-cargo-profile")
+    need(type(row.get("fresh")) is bool, "image-cargo-fresh-field")
+
+
+def cargo_features(row, expected):
+    features = row.get("features")
+    need(type(features) is list and all(type(value) is str for value in features)
+         and sorted(features) == sorted(expected), "image-cargo-exact-features")
+
+
+def cargo_library(records, directory, package, name, features, *, test):
+    selected = [row for row in records if row["target"].get("name") == name]
+    need(len(selected) == 1, "image-cargo-one-library")
+    row = selected[0]
+    need(row.get("package_id") == "path+" + directory.as_uri() + "#" + package + "@0.1.0"
+         and row.get("manifest_path") == str(directory / "Cargo.toml")
+         and row["target"].get("kind") == ["lib"] and row["target"].get("crate_types") == ["lib"]
+         and row["target"].get("src_path") == str(directory / "src/lib.rs")
+         and row["target"].get("edition") == "2021"
+         and "executable" in row and row["executable"] is None, "image-cargo-source-library")
+    cargo_profile(row, test=test)
+    cargo_features(row, features)
+
+
+def image_cargo_artifact(messages, binary, target_dir, body, role):
+    need(role in ("desktop", "resident"), "image-cargo-role")
+    name = "mrk_desktop_image" if role == "desktop" else "mrk_resident_image"
+    package = "mrk-desktop-image" if role == "desktop" else "mrk-android-register"
+    root = DESKTOP / "helpers" / ("macos-desktop-image" if role == "desktop" else "macos-android-register")
     target_dir, binary = Path(target_dir), Path(binary)
     need(target_dir.is_absolute() and binary.is_absolute()
-         and all(p not in (".", "..") for p in target_dir.parts + binary.parts),
-         "normal-cargo-absolute-path")
-    expected = target_dir / "aarch64-apple-darwin/release" / name
-    need(binary == expected, "normal-cargo-release-output")
-    lines = messages.splitlines()
-    need(1 < len(lines) <= 10000 and all(lines), "normal-cargo-record-count")
-    selected = []
-    finished = False
-    for line in lines:
-        need(not finished, "normal-cargo-after-finish")
-        item = decode(line)
-        need(type(item) is dict, "normal-cargo-record-shape")
-        reason = item.get("reason")
-        need(reason in ("compiler-artifact", "compiler-message", "build-script-executed", "build-finished"),
-             "normal-cargo-record-kind")
-        if reason == "build-finished":
-            need(set(item) == {"reason", "success"} and item["success"] is True, "normal-cargo-not-successful")
-            finished = True
-        elif reason == "compiler-artifact":
-            target = item.get("target")
-            need(type(target) is dict, "normal-cargo-target-shape")
-            if target.get("name") == name or item.get("executable") == str(expected):
-                selected.append(item)
-    need(finished and len(selected) == 1, "normal-cargo-unique-completed-bin")
-    item = selected[0]
-    target, profile = item["target"], item.get("profile")
-    need(target.get("name") == name and target.get("kind") == ["bin"]
-         and target.get("crate_types") == ["bin"] and target.get("src_path") == str(cargo_root / "src/main.rs"),
-         "normal-cargo-main-bin")
-    need(item.get("manifest_path") == str(cargo_root / "Cargo.toml")
-         and item.get("package_id") == "path+" + cargo_root.as_uri() + "#mobile-release-kit-desktop@0.1.0",
-         "normal-cargo-source-package")
-    need(type(profile) is dict and profile.get("test") is False and profile.get("debug_assertions") is False
-         and profile.get("opt_level") == "3", "normal-cargo-release-profile")
-    need(item.get("features") in (["custom-protocol", "desktop-shell"], ["desktop-shell", "custom-protocol"]),
-         "normal-cargo-exact-features")
-    need(item.get("executable") == str(expected) and item.get("filenames") == [str(expected)]
-         and type(item.get("fresh")) is bool, "normal-cargo-executable")
-    return {"schemaVersion": 1, "entrypoint": "src/main.rs", "targetKind": "bin", "target": "aarch64-apple-darwin",
-            "profileTest": False, "features": ["custom-protocol", "desktop-shell"],
-            "cargoMessagesSha256": digest(messages), "binarySha256": digest(body),
-            "binarySize": len(body), "instrumented": False, "qualification": "ordinary-bin-data-not-launched"}
+         and all(part not in (".", "..") for part in target_dir.parts + binary.parts), "image-cargo-absolute-path")
+    expected = target_dir / "aarch64-apple-darwin/release" / ("lib" + name + ".dylib")
+    need(binary == expected and type(body) is bytes and 32 <= len(body) <= MAX_BYTES, "image-cargo-release-output")
+    records = cargo_records(messages)
+    selected = [row for row in records if row["target"].get("name") == name
+                or str(expected) in row.get("filenames", []) or row.get("executable") == str(expected)]
+    need(len(selected) == 1, "image-cargo-unique-cdylib")
+    row = selected[0]
+    target = row["target"]
+    need(row.get("package_id") == "path+" + root.as_uri() + "#" + package + "@0.1.0"
+         and row.get("manifest_path") == str(root / "Cargo.toml")
+         and target.get("name") == name and target.get("kind") == ["cdylib"]
+         and target.get("crate_types") == ["cdylib"] and target.get("src_path") == str(root / "src/lib.rs")
+         and target.get("edition") == "2021" and "executable" in row and row["executable"] is None
+         and row.get("filenames") == [str(expected)], "image-cargo-cdylib-source")
+    cargo_profile(row, test=False)
+    cargo_features(row, [])
+    app_features = (["custom-protocol", "desktop-shell", "macos-installed-desktop-image"] if role == "desktop"
+                    else ["macos-android-registration-helper", "macos-installed-resident-image"])
+    native_features = (["default", "desktop-image"] if role == "desktop"
+                       else ["android-registration-helper", "default", "resident-image"])
+    cargo_library(records, DESKTOP / "src-tauri", "mobile-release-kit-desktop",
+                  "mobile_release_desktop", app_features, test=False)
+    cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
+                  "mrk_macos_installed_native", native_features, test=False)
+    need(not any(item["target"].get("kind") in (["bin"], ["test"], ["example"], ["bench"])
+                 or item is not row and item["target"].get("kind") == ["cdylib"]
+                 for item in records), "image-cargo-no-executable-role")
+    image_macho(body, role)
+    return {"schemaVersion": 1, "entrypoint": "src/lib.rs", "targetKind": "cdylib", "imageRole": role,
+            "package": package, "crate": name, "target": "aarch64-apple-darwin", "profileTest": False,
+            "features": [], "appFeatures": app_features, "nativeFeatures": native_features,
+            "cargoMessagesSha256": digest(messages), "binarySha256": digest(body), "binarySize": len(body),
+            "instrumented": False, "qualification": "actual-cdylib-data-not-launched"}
+
+
+def observer_cargo_artifact(messages, binary, target_dir, body):
+    root, name = DESKTOP / "src-tauri", "installed-shell-observation"
+    binary, target_dir = Path(binary), Path(target_dir)
+    need(binary.is_absolute() and target_dir.is_absolute()
+         and all(part not in (".", "..") for part in binary.parts + target_dir.parts)
+         and binary.parent == target_dir / "aarch64-apple-darwin/debug/deps"
+         and re.fullmatch(r"installed_shell_observation-[0-9a-f]+", binary.name) is not None,
+         "observer-cargo-fixed-output")
+    records = cargo_records(messages)
+    selected = [row for row in records if row["target"].get("name") == name or row.get("executable") == str(binary)]
+    need(len(selected) == 1, "observer-cargo-one-test")
+    row = selected[0]
+    target = row["target"]
+    features = ["custom-protocol", "desktop-shell", "macos-installed-observation"]
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.0"
+         and row.get("manifest_path") == str(root / "Cargo.toml")
+         and target.get("name") == name and target.get("kind") == ["test"]
+         and target.get("crate_types") == ["bin"]
+         and target.get("src_path") == str(root / "tests/installed_shell_observation.rs")
+         and target.get("edition") == "2021" and row.get("executable") == str(binary)
+         and row.get("filenames") == [str(binary)], "observer-cargo-source-test")
+    cargo_profile(row, test=True)
+    cargo_features(row, features)
+    # A --test build compiles the ordinary dependency library, not a libtest
+    # library. Its code is dev/opt0 but profile.test is false.
+    app = [item for item in records if item["target"].get("name") == "mobile_release_desktop"]
+    native = [item for item in records if item["target"].get("name") == "mrk_macos_installed_native"]
+    for selected_library, directory, package, expected_features in (
+        (app, root, "mobile-release-kit-desktop", features),
+        (native, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native", ["default", "installed-observation"]),
+    ):
+        need(len(selected_library) == 1, "observer-cargo-one-library")
+        item = selected_library[0]
+        need(item.get("package_id") == "path+" + directory.as_uri() + "#" + package + "@0.1.0"
+             and item.get("manifest_path") == str(directory / "Cargo.toml")
+             and item["target"].get("src_path") == str(directory / "src/lib.rs")
+             and item["target"].get("kind") == ["lib"] and item["target"].get("crate_types") == ["lib"]
+             and item["target"].get("edition") == "2021"
+             and "executable" in item and item["executable"] is None
+             and type(item.get("profile")) is dict and item["profile"].get("test") is False
+             and item.get("profile", {}).get("debug_assertions") is True
+             and item.get("profile", {}).get("opt_level") == "0"
+             and type(item.get("fresh")) is bool, "observer-cargo-source-library")
+        cargo_features(item, expected_features)
+    need(not any(item["target"].get("kind") in (["cdylib"], ["bin"], ["example"], ["bench"])
+                 or item is not row and item["target"].get("kind") == ["test"]
+                 for item in records), "observer-cargo-no-image-or-bin")
+    macho(body)
+    return {"schemaVersion": 1, "entrypoint": "tests/installed_shell_observation.rs", "targetKind": "test",
+            "target": "aarch64-apple-darwin", "profileTest": True, "features": features,
+            "cargoMessagesSha256": digest(messages), "binarySha256": digest(body), "binarySize": len(body),
+            "instrumented": True, "qualification": "observer-executable-data-not-image-or-launched"}
 
 
 def preview_command(args):
@@ -930,18 +1085,25 @@ def preview_command(args):
          and binding.get("workflowSource") == args.expected_source
          and source.get("tree") == binding.get("tree") and type(source.get("tree")) is str
          and re.fullmatch(r"[0-9a-f]{40}", source["tree"])
-         and binding.get("scope") == "normal-macos-early-preview" and binding.get("instrumented") is False,
+         and binding.get("scope") == "normal-macos-early-preview" and binding.get("instrumented") is False
+         and binding.get("packageRole") == "ordinary-image",
          "preview-source-binding")
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
              for k in ("runId", "runAttempt")), "preview-run-binding")
     need(read(work / "normal-build.status", 4) == b"0\n"
          and read(work / "installer-output.status", 4) == b"0\n", "preview-original-statuses")
-    original = work / "cargo-target/aarch64-apple-darwin/release/mobile-release-kit-desktop"
-    normal = normal_cargo_artifact(read(work / "normal-build.jsonl", 8 * 1024 * 1024),
-                                  original, work / "cargo-target", read(original))
+    original = work / "cargo-target/aarch64-apple-darwin/release/libmrk_desktop_image.dylib"
+    normal = image_cargo_artifact(read(work / "normal-build.jsonl", 8 * 1024 * 1024),
+                                 original, work / "cargo-target", read(original), "desktop")
+    facade = read(work / "mobile-release-kit-desktop", 1024 * 1024)
+    entry_macho(facade)
     app = decode(read(work / "app-result.json", 16384))
-    need(type(app) is dict and app.get("normalCargoArtifact") == normal
-         and app.get("appBinarySha256BeforeSigning") == normal["binarySha256"]
+    need(type(app) is dict and app.get("packageRole") == "ordinary-image"
+         and app.get("desktopImageCargoArtifact") == normal and "observerCargoArtifact" not in app
+         and "normalCargoArtifact" not in app
+         and app.get("desktopImageSha256BeforeSigning") == normal["binarySha256"]
+         and app.get("appBinarySha256BeforeSigning") == digest(facade)
+         and sha(app.get("residentImageSha256")) and sha(app.get("androidHelperSha256"))
          and sha(app.get("entryBinarySha256BeforeSigning"))
          and app.get("entryBundleIdentifier") == ENTRY_BUNDLE_ID
          and app.get("payloadBundleIdentifier") == BUNDLE_ID, "preview-normal-app-binding")
@@ -969,7 +1131,11 @@ def preview_command(args):
         "exclusionObserved": False, "workerFinalityEstablished": False}, "preview-maintenance-gate-readback")
     expected = observation_inventory(argparse.Namespace(input=work / "input",
         expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"]))
-    need(observed.get("nonrootReadbackFileCount") == len(expected), "preview-readback-roster")
+    need(observed.get("nonrootReadbackFileCount") == len(expected)
+         and all("app/" + path in expected for path in (ENTRY_BINARY, APP_BINARY, ANDROID_HELPER,
+                     ANDROID_SERVICE_PLIST, DESKTOP_IMAGE, RESIDENT_IMAGE))
+         and expected["app/" + RESIDENT_IMAGE]["sha256"] == app["residentImageSha256"]
+         and expected["app/" + ANDROID_HELPER]["sha256"] == app["androidHelperSha256"], "preview-readback-roster")
     audit = decode(read(work / "package-audit.json", 16384))
     package = read(work / "package-final/MobileReleaseKit.pkg")
     need(type(audit) is dict and audit.get("packageSha256") == digest(package)
@@ -981,7 +1147,11 @@ def preview_command(args):
         "sourceTree": source["tree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
         "runId": binding["runId"], "runAttempt": binding["runAttempt"], "platform": "macOS26-arm64",
         "packageSha256": digest(package), "packageSize": len(package), "runtimeManifestSha256": observed["runtimeManifestSha256"],
-        "installerInventorySha256": observed["inventorySha256"], "normalBinaryBeforeSigningSha256": normal["binarySha256"],
+        "installerInventorySha256": observed["inventorySha256"],
+        "packageRole": "ordinary-image", "normalBinaryBeforeSigningSha256": app["appBinarySha256BeforeSigning"],
+        "desktopImageBeforeSigningSha256": normal["binarySha256"],
+        "signedDesktopImageSha256": expected["app/" + DESKTOP_IMAGE]["sha256"],
+        "signedResidentImageSha256": expected["app/" + RESIDENT_IMAGE]["sha256"],
         "signedAppBinarySha256": expected["app/" + APP_BINARY]["sha256"], "instrumented": False,
         "signedEntryBinarySha256": expected["app/" + ENTRY_BINARY]["sha256"],
         "entryBundleIdentifier": ENTRY_BUNDLE_ID, "payloadBundleIdentifier": BUNDLE_ID,
@@ -1104,44 +1274,67 @@ def android_service_plist():
 
 
 def android_service_files(args):
-    helper = getattr(args, "android_helper", None)
-    expected = getattr(args, "expected_android_helper", None)
-    need((helper is None) == (expected is None), "android-service-paired-inputs")
+    helper, expected = getattr(args, "android_helper", None), getattr(args, "expected_android_helper", None)
+    image, expected_image = getattr(args, "resident_image", None), getattr(args, "expected_resident_image", None)
+    need((helper is None) == (expected is None) == (image is None) == (expected_image is None),
+         "android-service-paired-inputs")
     if helper is None:
         return {}
-    need(sha(expected), "android-helper-final-signed-digest")
-    body = read(helper, 32 * 1024 * 1024)
-    need(digest(body) == expected, "android-helper-final-signed-digest")
-    macho(body, system_only=True)
-    # This closed DATA pair merely stages the already supplied helper. No
-    # signing, registration, approval or service launch occurs in this tool.
-    return {ANDROID_HELPER: (body, 0o555), ANDROID_SERVICE_PLIST: (android_service_plist(), 0o644)}
+    need(sha(expected) and sha(expected_image), "android-helper-final-signed-digest")
+    body, image_body = read(helper, 32 * 1024 * 1024), read(image, 32 * 1024 * 1024)
+    need(digest(body) == expected and digest(image_body) == expected_image, "android-helper-final-signed-digest")
+    entry_macho(body)
+    image_macho(image_body, "resident")
+    # No native signing, service registration, approval or launch occurs here.
+    return {ANDROID_HELPER: (body, 0o555), RESIDENT_IMAGE: (image_body, 0o555),
+            ANDROID_SERVICE_PLIST: (android_service_plist(), 0o644)}
 
 
-def android_service_input(app, expected):
+def android_service_input(app, expected, expected_image=None):
     helper = ANDROID_HELPER in app
-    need(helper == (ANDROID_SERVICE_PLIST in app) == (expected is not None), "android-service-input-pair")
+    need(helper == (ANDROID_SERVICE_PLIST in app) == (RESIDENT_IMAGE in app)
+         == (expected is not None) == (expected_image is not None), "android-service-input-pair")
     if not helper:
         return
     body, mode = app[ANDROID_HELPER]
-    need(sha(expected) and digest(body) == expected, "android-helper-signature-bytes-changed")
-    macho(body, system_only=True)
-    need(mode == 0o555 and app[ANDROID_SERVICE_PLIST][0] == android_service_plist()
+    image_body, image_mode = app[RESIDENT_IMAGE]
+    need(sha(expected) and digest(body) == expected and sha(expected_image)
+         and digest(image_body) == expected_image, "android-helper-signature-bytes-changed")
+    entry_macho(body)
+    image_macho(image_body, "resident")
+    need(mode == image_mode == 0o555 and app[ANDROID_SERVICE_PLIST][0] == android_service_plist()
          and app[ANDROID_SERVICE_PLIST][1] in (0o444, 0o644), "android-service-plist")
 
 
 def app_command(args):
-    cargo_messages = getattr(args, "normal_cargo_messages", None)
-    cargo_target = getattr(args, "normal_cargo_target_dir", None)
-    need((cargo_messages is None) == (cargo_target is None), "normal-cargo-paired-inputs")
+    role = package_role(getattr(args, "package_role", None))
+    desktop_inputs = [getattr(args, key, None) for key in
+                      ("desktop_image", "expected_desktop_image", "desktop_image_cargo_messages", "desktop_image_cargo_target_dir")]
+    observer_inputs = [getattr(args, key, None) for key in ("observer_cargo_messages", "observer_cargo_target_dir")]
+    need((all(value is not None for value in desktop_inputs) and all(value is None for value in observer_inputs))
+         if role == "ordinary-image" else
+         (all(value is None for value in desktop_inputs) and all(value is not None for value in observer_inputs)),
+         "package-role-artifact-inputs")
+    need(getattr(args, "android_helper", None) is not None and getattr(args, "resident_image", None) is not None,
+         "package-role-resident-required")
     body = read(args.binary)
-    macho(body)
+    need(sha(getattr(args, "expected_app_binary", None)) and digest(body) == args.expected_app_binary,
+         "app-original-compiler-digest")
+    desktop_body = None
+    if role == "ordinary-image":
+        entry_macho(body)
+        desktop_body = read(args.desktop_image)
+        need(sha(args.expected_desktop_image) and digest(desktop_body) == args.expected_desktop_image,
+             "desktop-image-original-compiler-digest")
+        compiled = image_cargo_artifact(read(args.desktop_image_cargo_messages, 8 * 1024 * 1024),
+                                       args.desktop_image, args.desktop_image_cargo_target_dir, desktop_body, "desktop")
+    else:
+        compiled = observer_cargo_artifact(read(args.observer_cargo_messages, 8 * 1024 * 1024),
+                                          args.binary, args.observer_cargo_target_dir, body)
     helper = read(args.vault_helper, 32 * 1024 * 1024)
     need(sha(args.expected_vault_helper) and digest(helper) == args.expected_vault_helper,
          "helper-final-signed-digest")
     macho(helper, system_only=True)
-    normal = (normal_cargo_artifact(read(cargo_messages, 8 * 1024 * 1024), args.binary, cargo_target, body)
-              if cargo_messages is not None else None)
     entry = read(args.entry_binary, 1024 * 1024)
     need(sha(args.expected_entry) and digest(entry) == args.expected_entry, "entry-original-compiler-digest")
     entry_macho(entry)
@@ -1150,24 +1343,29 @@ def app_command(args):
              "Contents/Info.plist": (source_entry_info(), 0o644), PAYLOAD_INFO: (source_app_info(), 0o644),
              "Contents/PkgInfo": (b"APPL????", 0o644), PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
              "Contents/Resources/icon.png": (icon, 0o644), PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
+    if desktop_body is not None:
+        files[DESKTOP_IMAGE] = (desktop_body, 0o755)
     support_sha, support = android_support_files(args)
     files.update({PAYLOAD_RELATIVE + "/" + name: value for name, value in support.items()})
     android_service = android_service_files(args)
+    need(bool(android_service), "package-role-resident-required")
     files.update(android_service)
-    # Native codesign is a SEPARATE fixed workflow command after this returned
-    # copy. It may modify the app only; the runtime is not nested in the app.
-    # Payload is signed before the outer entry. Root/Contents at both levels
-    # must remain writable to those original codesign writers.
+    # Each image/helper is separately signed/verified before payload then outer
+    # bundle signing. No deep repair or image/executable fallback is permitted.
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
-    result = {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper),
+    result = {"schemaVersion": 1, "packageRole": role,
+              "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper),
               "entryBinarySha256BeforeSigning": digest(entry), "entryBundleIdentifier": ENTRY_BUNDLE_ID,
-              "payloadBundleIdentifier": BUNDLE_ID,
-              "androidSupportManifestSha256": support_sha, "qualification": "app-copied-not-signed-or-launched"}
-    if normal is not None:
-        result["normalCargoArtifact"] = normal
-    if android_service:
-        result["androidHelperSha256"] = digest(android_service[ANDROID_HELPER][0])
-        result["androidServicePlistSha256"] = digest(android_service[ANDROID_SERVICE_PLIST][0])
+              "payloadBundleIdentifier": BUNDLE_ID, "androidSupportManifestSha256": support_sha,
+              "androidHelperSha256": digest(android_service[ANDROID_HELPER][0]),
+              "residentImageSha256": digest(android_service[RESIDENT_IMAGE][0]),
+              "androidServicePlistSha256": digest(android_service[ANDROID_SERVICE_PLIST][0]),
+              "qualification": "app-copied-not-signed-or-launched"}
+    if role == "ordinary-image":
+        result["desktopImageCargoArtifact"] = compiled
+        result["desktopImageSha256BeforeSigning"] = digest(desktop_body)
+    else:
+        result["observerCargoArtifact"] = compiled
     return result
 
 
@@ -1184,49 +1382,66 @@ def runtime_tree(root, expected, *, current=False):
 
 
 def input_command(args):
+    role = package_role(getattr(args, "package_role", None))
+    expected_desktop = getattr(args, "expected_desktop_image", None)
+    expected_resident = getattr(args, "expected_resident_image", None)
+    need((expected_desktop is not None) == (role == "ordinary-image")
+         and sha(expected_resident) and sha(getattr(args, "expected_android_helper", None)),
+         "package-role-signed-inputs")
     runtime = runtime_tree(args.runtime, args.expected_manifest, current=args.current_runtime)
     app = tree(args.app)
     _support_sha, support_rows = android_support_manifest()
     support = {PAYLOAD_RELATIVE + "/" + row["resourcePath"] for row in support_rows}
     support.update(PAYLOAD_RELATIVE + "/" + notice["resourcePath"] for row in support_rows for notice in row["notices"])
-    expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, "Contents/Info.plist", PAYLOAD_INFO,
-                      "Contents/PkgInfo", PAYLOAD_CONTENTS + "PkgInfo", "Contents/Resources/icon.png",
-                      PAYLOAD_CONTENTS + "Resources/icon.png", "Contents/_CodeSignature/CodeResources",
-                      PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
-    if getattr(args, "expected_android_helper", None) is not None:
-        expected_names.update((ANDROID_HELPER, ANDROID_SERVICE_PLIST))
+    expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, ANDROID_HELPER, ANDROID_SERVICE_PLIST, RESIDENT_IMAGE,
+                      "Contents/Info.plist", PAYLOAD_INFO, "Contents/PkgInfo", PAYLOAD_CONTENTS + "PkgInfo",
+                      "Contents/Resources/icon.png", PAYLOAD_CONTENTS + "Resources/icon.png",
+                      "Contents/_CodeSignature/CodeResources", PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
+    if role == "ordinary-image":
+        expected_names.add(DESKTOP_IMAGE)
     need(set(app) == expected_names and app["Contents/Info.plist"][0] == source_entry_info()
          and app[PAYLOAD_INFO][0] == source_app_info(), "signed-app-roster")
     need(sha(args.expected_entry) and digest(app[ENTRY_BINARY][0]) == args.expected_entry
          and sha(args.expected_app_binary) and digest(app[APP_BINARY][0]) == args.expected_app_binary,
          "final-entry-payload-signature-bytes-changed")
     entry_macho(app[ENTRY_BINARY][0])
-    macho(app[APP_BINARY][0])
+    if role == "ordinary-image":
+        entry_macho(app[APP_BINARY][0])
+        image_macho(app[DESKTOP_IMAGE][0], "desktop")
+        need(sha(expected_desktop) and digest(app[DESKTOP_IMAGE][0]) == expected_desktop,
+             "desktop-image-signature-bytes-changed")
+    else:
+        macho(app[APP_BINARY][0])
     macho(app[VAULT_HELPER][0], system_only=True)
     need(sha(args.expected_vault_helper) and digest(app[VAULT_HELPER][0]) == args.expected_vault_helper,
          "nested-helper-signature-bytes-changed")
-    android_service_input(app, getattr(args, "expected_android_helper", None))
+    android_service_input(app, args.expected_android_helper, expected_resident)
     support_sha = android_support_input(app)
     files = {}
     for prefix, source in (("runtime/", runtime), ("app/", app)):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
-            expected_mode = 0o555 if prefix + name in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3") else 0o444
-            # codesign may have made its newly created CodeResources 0644. The
-            # fresh input copy normalizes modes; it never edits that source.
+            code = ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
+                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "runtime/python/bin/python3")
+            expected_mode = 0o555 if prefix + name in code else 0o444
+            # Normalize only the fresh copy, never the signed original.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
             files[prefix + name] = (body, expected_mode)
     rows = [{"path": path, "sha256": digest(body), "size": len(body), "executable": mode == 0o555} for path, (body, mode) in sorted(files.items())]
     need(len(rows) <= MAX_FILES - 3, "installer-inventory-bound")
     inventory = canonical({"schemaVersion": 1, "release": RELEASE, "runtimeManifestSha256": args.expected_manifest, "files": rows}) + b"\n"
-    decode(inventory)  # Same independent size/node bound the root installer uses.
+    decode(inventory)
     need(sum(len(data) for data, _mode in files.values()) + len(inventory) + INSTALLATION_RECORD_LIMIT
          + len(MAINTENANCE_GATE_BYTES) <= MAX_BYTES, "installer-complete-byte-bound")
     files["install-inventory.json"] = (inventory, 0o444)
     write_tree(args.output, files)
-    return {"schemaVersion": 1, "inventorySha256": digest(inventory), "runtimeManifestSha256": args.expected_manifest,
-            "androidSupportManifestSha256": support_sha,
-            "fileCount": len(rows), "qualification": "fresh-install-input-not-installed"}
+    result = {"schemaVersion": 1, "packageRole": role, "inventorySha256": digest(inventory),
+              "runtimeManifestSha256": args.expected_manifest, "androidSupportManifestSha256": support_sha,
+              "residentImageSha256": expected_resident, "fileCount": len(rows),
+              "qualification": "fresh-install-input-not-installed"}
+    if role == "ordinary-image":
+        result["desktopImageSha256"] = expected_desktop
+    return result
 
 
 def scripts_command(args):
@@ -1433,9 +1648,12 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest):
              and safe_path(row["path"]) and row["path"].startswith(("app/Contents/", "runtime/")) and row["path"] not in rows
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
-             and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER, "runtime/python/bin/python3")), "observation-inventory-row")
+             and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
+                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "runtime/python/bin/python3")), "observation-inventory-row")
         rows[row["path"]] = row
-    need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows), "android-service-input-pair")
+    need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows)
+         == ("app/" + RESIDENT_IMAGE in rows)
+         and ("app/" + DESKTOP_IMAGE not in rows or "app/" + RESIDENT_IMAGE in rows), "android-service-input-pair")
     need(list(rows) == sorted(rows) and sum(row["size"] for row in rows.values()) <= MAX_BYTES
          and {"app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "app/" + PAYLOAD_INFO,
               "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
@@ -2191,17 +2409,25 @@ def main(argv=None):
             command.add_argument("--expected-manifest", required=True)
             command.add_argument("--output", required=True, type=Path)
     app = commands.add_parser("app")
+    app.add_argument("--package-role", required=True, choices=PACKAGE_ROLES)
     app.add_argument("--binary", required=True, type=Path)
+    app.add_argument("--expected-app-binary", required=True)
+    app.add_argument("--desktop-image", type=Path)
+    app.add_argument("--expected-desktop-image")
+    app.add_argument("--desktop-image-cargo-messages", type=Path)
+    app.add_argument("--desktop-image-cargo-target-dir", type=Path)
+    app.add_argument("--observer-cargo-messages", type=Path)
+    app.add_argument("--observer-cargo-target-dir", type=Path)
+    app.add_argument("--resident-image", required=True, type=Path)
+    app.add_argument("--expected-resident-image", required=True)
     app.add_argument("--entry-binary", required=True, type=Path)
     app.add_argument("--expected-entry", required=True)
     app.add_argument("--vault-helper", required=True, type=Path)
     app.add_argument("--expected-vault-helper", required=True)
-    app.add_argument("--android-helper", type=Path,
-                     help="Optional already-signed fixed Android helper; requires its exact digest")
-    app.add_argument("--expected-android-helper")
+    app.add_argument("--android-helper", required=True, type=Path,
+                     help="Already-signed fixed resident facade; requires the resident image and exact signed digests")
+    app.add_argument("--expected-android-helper", required=True)
     app.add_argument("--output", required=True, type=Path)
-    app.add_argument("--normal-cargo-messages", type=Path)
-    app.add_argument("--normal-cargo-target-dir", type=Path)
     app.add_argument("--bundletool-archive", required=True, type=Path)
     app.add_argument("--aapt2-archive", required=True, type=Path)
     support = commands.add_parser("android-support", help="Verify only the two fixed original support archives and notices; never execute them")
@@ -2212,12 +2438,15 @@ def main(argv=None):
     preview.add_argument("--expected-source", required=True)
     preview.add_argument("--output", required=True, type=Path)
     inputs = commands.add_parser("input")
+    inputs.add_argument("--package-role", required=True, choices=PACKAGE_ROLES)
     inputs.add_argument("--app", required=True, type=Path)
+    inputs.add_argument("--expected-desktop-image")
+    inputs.add_argument("--expected-resident-image", required=True)
     inputs.add_argument("--expected-entry", required=True)
     inputs.add_argument("--expected-app-binary", required=True)
     inputs.add_argument("--expected-vault-helper", required=True)
-    inputs.add_argument("--expected-android-helper",
-                        help="Required exactly when the signed app contains the Android helper/plist pair")
+    inputs.add_argument("--expected-android-helper", required=True,
+                        help="Final signed resident facade digest; the complete helper/image/plist group is required")
     inputs.add_argument("--runtime", required=True, type=Path)
     inputs.add_argument("--expected-manifest", required=True)
     inputs.add_argument("--current-runtime", action="store_true",

@@ -16,6 +16,8 @@ pub const APP_BINARY: &str = paths::PAYLOAD_INVENTORY_PATH;
 pub const VAULT_HELPER: &str = paths::VAULT_HELPER_INVENTORY_PATH;
 pub const ANDROID_HELPER: &str = paths::ANDROID_HELPER_INVENTORY_PATH;
 pub const ANDROID_SERVICE_PLIST: &str = paths::ANDROID_SERVICE_INVENTORY_PATH;
+pub const DESKTOP_IMAGE: &str = paths::DESKTOP_IMAGE_INVENTORY_PATH;
+pub const RESIDENT_IMAGE: &str = paths::RESIDENT_IMAGE_INVENTORY_PATH;
 type Result<T> = std::result::Result<T, &'static str>;
 fn check(ok: bool, reason: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(reason) } }
 fn hex(value: &str, bytes: usize) -> bool {
@@ -56,6 +58,18 @@ pub struct Entry { pub path: String, pub sha256: String, pub size: u64, pub exec
 pub struct InventoryIndex<'a> {
     pub files: BTreeMap<String, &'a Entry>, pub directories: BTreeSet<String>, pub payload_bytes: u64,
 }
+/// Selected only by the trusted compile/build caller, never serialized in Kind,
+/// read from an inventory, or inferred from a missing image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeLayout { OrdinaryImage, ObserverExecutable }
+impl InventoryIndex<'_> {
+    pub(crate) fn require_layout(&self, layout: CodeLayout) -> Result<()> {
+        check(self.files.contains_key(ANDROID_HELPER) && self.files.contains_key(ANDROID_SERVICE_PLIST)
+            && self.files.contains_key(RESIDENT_IMAGE)
+            && self.files.contains_key(DESKTOP_IMAGE) == (layout == CodeLayout::OrdinaryImage),
+            "inventory-code-layout")
+    }
+}
 impl Inventory {
     pub fn parse(bytes: &[u8], runtime_manifest: &str) -> Result<Self> {
         check(!bytes.is_empty() && bytes.len() <= INVENTORY_LIMIT, "inventory-size")?;
@@ -76,7 +90,7 @@ impl Inventory {
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == matches!(item.path.as_str(),
-                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | "runtime/python/bin/python3"),
+                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -89,10 +103,13 @@ impl Inventory {
             && files.contains_key(VAULT_HELPER)
             && files.contains_key("runtime/python/bin/python3")
             && files.get("runtime/manifest.json").is_some_and(|f| f.sha256 == self.runtime_manifest_sha256), "inventory-required")?;
-        // Optional only as a complete fixed pair. Absent keeps the existing
-        // engineering package unavailable; presence is DATA completeness, not
-        // signature trust, service approval, peer Ready or execution authority.
-        check(files.contains_key(ANDROID_HELPER) == files.contains_key(ANDROID_SERVICE_PLIST), "inventory-android-service-pair")?;
+        // Common structural DATA accepts only the complete resident group;
+        // desktop implies resident. This is not an ordinary/observer selector.
+        // Real admission separately invokes require_layout from its source role.
+        check(files.contains_key(ANDROID_HELPER) == files.contains_key(ANDROID_SERVICE_PLIST)
+            && files.contains_key(ANDROID_HELPER) == files.contains_key(RESIDENT_IMAGE)
+            && (!files.contains_key(DESKTOP_IMAGE) || files.contains_key(RESIDENT_IMAGE)),
+            "inventory-android-service-pair")?;
         let mut folded = BTreeSet::new();
         for name in files.keys().chain(directories.iter()) {
             check(folded.insert(name.to_ascii_lowercase()), "inventory-collision")?;
@@ -282,21 +299,46 @@ mod tests {
     fn android_service_inventory_pair_and_executable_scope_data() {
         let manifest="c".repeat(64);
         let original:serde_json::Value=serde_json::from_slice(&inventory()).unwrap();
-        // The fixed seven-file unavailable package remains a valid DATA
-        // inventory; it cannot acquire service authority by this parse.
-        assert!(Inventory::parse(&inventory(),&manifest).unwrap().index().is_ok());
-        for (helper,plist,helper_executable,plist_executable,accepted) in [
-            (true,true,true,false,true), (true,false,true,false,false),
-            (false,true,true,false,false), (true,true,false,false,false),
-            (true,true,true,true,false),
+        // Minimal inventory stays nonauthorizing DATA; neither runtime role
+        // can use missing images as a fallback.
+        let base=Inventory::parse(&inventory(),&manifest).unwrap();
+        let index=base.index().unwrap();
+        assert!(index.require_layout(CodeLayout::OrdinaryImage).is_err());
+        assert!(index.require_layout(CodeLayout::ObserverExecutable).is_err());
+        for (helper,plist,resident,desktop,code,accepted) in [
+            (true,true,true,false,true,true), (true,true,true,true,true,true),
+            (true,false,true,false,true,false), (false,true,true,false,true,false),
+            (true,true,false,false,true,false), (false,false,true,false,true,false),
+            (false,false,false,true,true,false), (true,true,false,true,true,false),
+            (true,true,true,false,false,false), (true,true,true,true,false,false),
         ] {
             let mut changed=original.clone();let rows=changed["files"].as_array_mut().unwrap();
-            for (include,path,executable) in [(helper,ANDROID_HELPER,helper_executable),(plist,ANDROID_SERVICE_PLIST,plist_executable)] {
+            for (include,path,executable) in [
+                (helper,ANDROID_HELPER,code),(plist,ANDROID_SERVICE_PLIST,false),
+                (resident,RESIDENT_IMAGE,code),(desktop,DESKTOP_IMAGE,code),
+            ] {
                 if include { rows.push(json!({"path":path,"sha256":"b".repeat(64),"size":1,"executable":executable})); }
             }
             rows.sort_by(|a,b|a["path"].as_str().cmp(&b["path"].as_str()));
             let bytes=serde_json::to_vec(&changed).unwrap();
-            assert_eq!(Inventory::parse(&bytes,&manifest).unwrap().index().is_ok(),accepted);
+            let parsed=Inventory::parse(&bytes,&manifest).unwrap();
+            assert_eq!(parsed.index().is_ok(),accepted);
+            if accepted {
+                let index=parsed.index().unwrap();
+                assert_eq!(index.require_layout(CodeLayout::OrdinaryImage).is_ok(),desktop);
+                assert_eq!(index.require_layout(CodeLayout::ObserverExecutable).is_ok(),!desktop);
+                let mut wrong=changed.clone();
+                let plist=wrong["files"].as_array_mut().unwrap().iter_mut()
+                    .find(|row|row["path"]==ANDROID_SERVICE_PLIST).unwrap();
+                plist["executable"]=json!(true);
+                assert!(Inventory::parse(&serde_json::to_vec(&wrong).unwrap(),&manifest).unwrap().index().is_err());
+                let mut wrong=changed.clone();
+                wrong["files"].as_array_mut().unwrap().push(json!({"path":
+                    "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Frameworks/plugin.dylib",
+                    "sha256":"b".repeat(64),"size":1,"executable":true}));
+                wrong["files"].as_array_mut().unwrap().sort_by(|a,b|a["path"].as_str().cmp(&b["path"].as_str()));
+                assert!(Inventory::parse(&serde_json::to_vec(&wrong).unwrap(),&manifest).unwrap().index().is_err());
+            }
         }
     }
     #[test] fn closed_record_tuple_inventory_and_nonfinality() { closed_record_tuple_inventory_and_nonfinality_data(); }

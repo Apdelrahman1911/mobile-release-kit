@@ -23,6 +23,11 @@ CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
 WORK_PARENT = Path("/Users/runner/work/_temp")
 HELPER = "mrk-android-register"
 ENTRY = "mrk-macos-entry"
+DESKTOP_FACADE = "mobile-release-kit-desktop"
+RESIDENT_IMAGE = "libmrk_resident_image.dylib"
+IMAGE_TARGET = "mrk_resident_image"
+PREPARE_ROLES = ("build", "resident-image-sign", "resident-image-verify-signed", "entry-build",
+                 "desktop-facade-build", "resident-facade-build", "sign", "verify-signed")
 IDENTIFIER = "dev.mobile-release-kit.desktop.android-register"
 WORKSPACE = "desktop/helpers/macos-android-register"
 PROFILE = "desktop/packaging/macos-android-service-signing.profile"
@@ -67,47 +72,80 @@ def directory_identity(info):
 
 
 def artifact(messages, checkout, target):
-    """The actual separate release graph, not a plausible executable filename."""
-    need(type(messages) is bytes and 0 < len(messages) <= 4 * 1024 * 1024, "compiler-bound")
-    rows = [json.loads(line) for line in messages.splitlines()]
-    need(len(rows) <= 8192 and all(type(row) is dict for row in rows), "compiler-rows")
-    need([r.get("success") for r in rows if r.get("reason") == "build-finished"] == [True], "compiler-finish")
-    executables = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("executable") is not None]
-    need(len(executables) == 1, "one-helper-executable")
-    row = executables[0]
+    """One real resident cdylib graph; no executable can stand in for the image."""
+    need(type(messages) is bytes and 0 < len(messages) <= 4 * 1024 * 1024
+         and messages.endswith(b"\n"), "compiler-bound")
+    def pairs(items):
+        output = {}
+        for key, value in items:
+            need(key not in output, "compiler-duplicate-key")
+            output[key] = value
+        return output
+    try:
+        rows = [json.loads(line, object_pairs_hook=pairs) for line in messages.splitlines()]
+    except (ValueError, TypeError, RecursionError) as error:
+        raise Refused("compiler-json") from error
+    need(1 < len(rows) <= 8192 and all(type(row) is dict for row in rows), "compiler-rows")
+    records, finished = [], False
+    for row in rows:
+        need(not finished and row.get("reason") in
+             ("compiler-artifact", "compiler-message", "build-script-executed", "build-finished"), "compiler-terminal-order")
+        if row["reason"] == "build-finished":
+            need(set(row) == {"reason", "success"} and row["success"] is True, "compiler-finish")
+            finished = True
+        elif row["reason"] == "compiler-artifact":
+            need(type(row.get("target")) is dict and type(row.get("filenames")) is list
+                 and all(type(value) is str for value in row["filenames"]), "compiler-artifact-shape")
+            records.append(row)
+    need(finished and not any(row["target"].get("kind") in (["bin"], ["test"], ["example"], ["bench"])
+                             for row in records), "resident-image-only-graph")
     source = checkout / WORKSPACE
-    binary = target / "aarch64-apple-darwin/release" / HELPER
+    binary = target / "aarch64-apple-darwin/release" / RESIDENT_IMAGE
+    selected = [row for row in records if row["target"].get("name") == IMAGE_TARGET
+                or str(binary) in row["filenames"] or row.get("executable") == str(binary)]
+    need(len(selected) == 1, "one-resident-image")
+    row = selected[0]
+    need(not any(item is not row and item["target"].get("kind") == ["cdylib"] for item in records),
+         "resident-image-only-graph")
     need(row.get("package_id") == "path+" + source.as_uri() + "#" + HELPER + "@0.1.0"
          and row.get("manifest_path") == str(source / "Cargo.toml")
-         and row.get("features") == [] and row.get("executable") == str(binary)
-         and row.get("filenames") == [str(binary)], "helper-package-artifact")
-    target_row, profile = row.get("target", {}), row.get("profile", {})
-    need(target_row.get("name") == HELPER and target_row.get("kind") == ["bin"]
-         and target_row.get("crate_types") == ["bin"]
-         and target_row.get("src_path") == str(source / "src/main.rs")
-         and target_row.get("edition") == "2021"
-         and profile.get("test") is False and profile.get("debug_assertions") is False
-         and profile.get("opt_level") == "3", "helper-release-graph")
+         and row.get("features") == [] and "executable" in row and row["executable"] is None
+         and row["filenames"] == [str(binary)], "helper-package-artifact")
+    target_row = row["target"]
+    need(target_row.get("name") == IMAGE_TARGET and target_row.get("kind") == ["cdylib"]
+         and target_row.get("crate_types") == ["cdylib"]
+         and target_row.get("src_path") == str(source / "src/lib.rs")
+         and target_row.get("edition") == "2021", "helper-release-graph")
+    selected_rows = [row]
     for directory, package, name, features in (
-        ("desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", ["macos-android-registration-helper"]),
-        ("desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", ["android-registration-helper", "default"]),
+        ("desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop",
+         ["macos-android-registration-helper", "macos-installed-resident-image"]),
+        ("desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",
+         ["android-registration-helper", "default", "resident-image"]),
     ):
-        selected = [r for r in rows if r.get("reason") == "compiler-artifact"
-                    and r.get("target", {}).get("name") == name
-                    and r.get("target", {}).get("kind") == ["lib"]]
-        need(len(selected) == 1, "helper-one-library")
-        library = selected[0]
+        libraries = [item for item in records if item["target"].get("name") == name]
+        need(len(libraries) == 1, "helper-one-library")
+        library = libraries[0]
         need(library.get("package_id") == "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"
              and library.get("manifest_path") == str(checkout / directory / "Cargo.toml")
              and library.get("features") == features
              and library["target"].get("src_path") == str(checkout / directory / "src/lib.rs")
-             and library.get("profile", {}).get("test") is False, "helper-separate-library-features")
+             and library["target"].get("kind") == ["lib"] and library["target"].get("crate_types") == ["lib"]
+             and library["target"].get("edition") == "2021"
+             and "executable" in library and library["executable"] is None, "helper-separate-library-features")
+        selected_rows.append(library)
+    for selected in selected_rows:
+        profile = selected.get("profile")
+        need(type(profile) is dict and profile.get("test") is False and profile.get("debug_assertions") is False
+             and profile.get("opt_level") == "3" and type(selected.get("fresh")) is bool, "helper-release-profile")
     return binary
 
 
-def build_environment(environment, work):
-    # No inherited Rust flags/wrappers, service selectors, credential variables,
-    # private signing configuration or arbitrary compiler/profile switches.
+def build_environment(environment, work, release):
+    # release is the SAME owner's parsed, held source build-release projection;
+    # no inherited release/flags/wrapper or signing selector is copied.
+    need(type(release) is str and 0 < len(release) < 64 and release.isascii()
+         and re.fullmatch(r"[a-z0-9_.-]*[a-z0-9]", release) is not None, "image-source-release")
     selected = {key: environment[key] for key in ("PATH", "HOME", "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET")}
     for key in ("CARGO_HOME", "RUSTUP_HOME"):
         if key in environment:
@@ -115,7 +153,7 @@ def build_environment(environment, work):
     selected.update(LANG="C", LC_ALL="C", TZ="UTC", RUSTUP_TOOLCHAIN="1.98.1",
                     CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=str(work / "android-helper-target"),
                     TMPDIR=str(work / "android-helper-target/tmp"),
-                    MRK_MACOS_INSTALL_SOURCE_COMMIT=environment["GITHUB_SHA"])
+                    MRK_MACOS_INSTALL_SOURCE_COMMIT=environment["GITHUB_SHA"], MRK_IMAGE_RELEASE_ID=release)
     return selected
 
 
@@ -179,12 +217,15 @@ class Operation:
         self.owner, self.checkout, self.work = owner, checkout, work
         self.phase, self.environment, self.stager = phase, environment, stager
         self.entries, self.calls, self.errors = [], [], []
+        self.directories = {}
         self.work_entry = self.target_entry = None
         self.profile_entry = self.source_entry = None
         self.target_name = "android-helper-target" if phase == "prepare" else "android-helper-" + phase
         self.stage, self.sha256 = "owned-directory-admission", None
-        self.entry_sha256 = None
+        self.entry_sha256 = self.desktop_facade_sha256 = self.resident_image_sha256 = None
+        self.image_release = self.image_source = self.release_entry = None
         self.receipt = {"schemaVersion": 1, "phase": phase, "source": environment["GITHUB_SHA"],
+                        "packageRole": environment.get("MRK_MACOS_PACKAGE_ROLE"),
                         "workflowSource": environment["GITHUB_WORKFLOW_SHA"],
                         "workflow": environment["GITHUB_WORKFLOW_REF"], "runId": environment["GITHUB_RUN_ID"],
                         "runAttempt": environment["GITHUB_RUN_ATTEMPT"], "toolchain": "1.98.1",
@@ -209,11 +250,40 @@ class Operation:
         except BaseException as error:
             self.errors.append({"stage": "close", "role": entry["role"], "type": type(error).__name__})
 
+    def recheck_directory(self, entry):
+        need(any(owned is entry for owned in self.entries) and entry["kind"] == "directory"
+             and type(entry["fd"]) is int and not entry["closed"], "directory-original-unavailable")
+        parent = entry.get("parent_entry")
+        if parent is not None:
+            self.recheck_directory(parent)
+            need(entry["parent"] == parent["fd"], "directory-parent-changed")
+            named = os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False)
+        elif entry is self.work_entry:
+            named = self.work.lstat()
+        elif entry is self.source_entry:
+            named = self.checkout.lstat()
+        else:
+            raise Refused("directory-original-unbound")
+        need(directory_identity(os.fstat(entry["fd"])) == directory_identity(named)
+             == entry["identity"], "directory-original-changed")
+
     def directory(self, parent, name, role):
+        need(type(name) is str and name not in ("", ".", "..") and "/" not in name,
+             "directory-component")
+        self.recheck_directory(parent)
+        # entries retains each parent object for this operation's lifetime, so
+        # its identity cannot be recycled like a consumed numeric descriptor.
+        key = (id(parent), name)
+        if key in self.directories:
+            entry = self.directories[key]
+            self.recheck_directory(entry)
+            return entry  # Same original only; never reopen a closed/replaced hit.
         fd = os.open(name, READ_FLAGS | os.O_DIRECTORY, dir_fd=parent["fd"])
         entry = self.register(fd, role, "directory", parent["fd"], name)
+        entry["parent_entry"] = parent
         entry["identity"] = directory_identity(os.fstat(fd))
-        need(directory_identity(os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)) == entry["identity"], "directory-original-changed")
+        self.recheck_directory(entry)
+        self.directories[key] = entry
         return entry
 
     def descend(self, parent, names):
@@ -222,8 +292,10 @@ class Operation:
         return parent
 
     def original(self, parent, name, role, limit, modes, *, alias=False):
+        self.recheck_directory(parent)
         fd = os.open(name, READ_FLAGS, dir_fd=parent["fd"])
         entry = self.register(fd, role, "file", parent["fd"], name)
+        entry["parent_entry"] = parent
         before = os.fstat(fd)
         need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_gid == os.getgid()
              and before.st_nlink in ((1, 2) if alias else (1,))
@@ -242,12 +314,14 @@ class Operation:
         return self.original(parent, parts[-1], role, limit, (0o444, 0o644))
 
     def read(self, entry):
+        self.recheck_directory(entry["parent_entry"])
         need(signature(os.fstat(entry["fd"])) == entry["identity"]
              and signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)) == entry["identity"], "file-original-changed")
         size = entry["identity"][6]
         value = os.pread(entry["fd"], size + 1, 0)
         need(len(value) == size and signature(os.fstat(entry["fd"])) == entry["identity"]
              and signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)) == entry["identity"], "file-original-read-changed")
+        self.recheck_directory(entry["parent_entry"])
         return value
 
     def publish(self, name, data, *, mode=0o600):
@@ -315,52 +389,122 @@ class Operation:
         self.target_entry = self.directory(self.work_entry, self.target_name, "target")
         os.mkdir("tmp", 0o700, dir_fd=self.target_entry["fd"])
 
+    def image_binding(self):
+        self.stage = "source-image-binding"
+        self.release_entry = self.source_original("desktop/macos-installed-inputs/build-release.json",
+                                                 "source-image-release", self.stager.BUILD_RELEASE_LIMIT)
+        body = self.read(self.release_entry)
+        value = self.stager.build_release_data(body)
+        source, release = self.environment["GITHUB_SHA"], value["release"]
+        need(re.fullmatch(r"[0-9a-f]{40}", source) is not None and source != "0" * 40
+             and source == self.environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"]
+             and type(release) is str and 0 < len(release) < 64 and release.isascii(), "source-image-binding")
+        self.image_source, self.image_release = source, release
+        self.receipt.update(imageSourceCommit=source, imageReleaseId=release, imageReleaseSourceSha256=digest(body))
+        return body
+
     def prepare(self):
-        self.stage = "separate-helper-compiler"
-        # Artifact/build-finished JSON is authoritative; rich diagnostic JSON
-        # is not consumed. Render diagnostics normally under the same combined
-        # stdout/stderr bound and original command deadline.
+        self.stage = "separate-resident-image-compiler"
         result = self.call("build", ["cargo", "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
                            "--locked", "--release", "--jobs", "1", "--target", "aarch64-apple-darwin",
-                           "--bin", HELPER, "--message-format=json-render-diagnostics"],
-                           build_environment(self.environment, self.work), cwd=self.checkout / WORKSPACE,
-                           timeout=480, limit=4 * 1024 * 1024)
+                           "--lib", "--message-format=json-render-diagnostics"],
+                           build_environment(self.environment, self.work, self.image_release),
+                           cwd=self.checkout / WORKSPACE, timeout=480, limit=4 * 1024 * 1024)
         artifact(result.stdout, self.checkout, self.work / self.target_name)
         self.stage = "compiler-original-copy"
         release = self.descend(self.target_entry, ("aarch64-apple-darwin", "release"))
-        original = self.original(release, HELPER, "compiler-artifact", MAX_HELPER, (0o700, 0o755), alias=True)
+        original = self.original(release, RESIDENT_IMAGE, "compiler-artifact", MAX_HELPER, (0o700, 0o755), alias=True)
         if original["identity"][3] == 2:
             deps = self.directory(release, "deps", "compiler-deps")
             names = os.listdir(deps["fd"])
             need(len(names) <= 8192, "compiler-alias-directory-bound")
-            aliases = [name for name in names if re.fullmatch(r"mrk_android_register-[0-9a-f]{16}", name)]
+            # Cargo cdylib outputs have the fixed un-hashed name in deps; never
+            # accept a guessed executable alias or sign either linked original.
+            aliases = [name for name in names if name == RESIDENT_IMAGE]
             need(len(aliases) == 1, "one-compiler-alias")
             alias = self.original(deps, aliases[0], "compiler-alias", MAX_HELPER, (0o700, 0o755), alias=True)
             need(alias["identity"] == original["identity"], "compiler-alias-original")
         body = self.read(original)
-        self.stager.macho(body, system_only=True)
-        self.publish(HELPER, body, mode=0o755)  # nlink1 copy; never sign Cargo's alias.
+        self.stager.image_macho(body, "resident")
+        self.receipt["residentImageCargoArtifact"] = {
+            "targetKind": "cdylib", "crate": IMAGE_TARGET, "package": HELPER, "target": "aarch64-apple-darwin",
+            "entrypoint": "src/lib.rs", "profileTest": False, "features": [],
+            "cargoMessagesSha256": digest(result.stdout), "binarySha256BeforeSigning": digest(body),
+            "binaryBytesBeforeSigning": len(body), "instrumented": False}
+        self.publish(RESIDENT_IMAGE, body, mode=0o755)
         need(self.read(original) == body, "compiler-original-copy-changed")
         for entry in self.entries:
             if entry["role"] in ("compiler-artifact", "compiler-alias"):
                 self.close(entry)
                 need(entry["closed"], "compiler-artifact-close-unknown")
+        self.stage = "resident-image-ad-hoc-signing"
+        self.call("resident-image-sign", ["/usr/bin/codesign", "--force", "--sign", "-",
+                  "--identifier", IDENTIFIER + ".image", "--options", "runtime",
+                  "--entitlements", str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist"),
+                  "--timestamp=none", str(self.work / RESIDENT_IMAGE)],
+                  self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+        signed = self.original(self.work_entry, RESIDENT_IMAGE, "signed-resident-image", MAX_HELPER, (0o755,))
+        body = self.read(signed)
+        self.stager.image_macho(body, "resident")
+        self.strict_verify(signed, body, "resident-image-verify-signed", self.work / RESIDENT_IMAGE)
+        self.resident_image_sha256 = digest(body)
+        self.receipt.update(residentImageSha256=self.resident_image_sha256, residentImageBytes=len(body),
+                            residentImageOriginal=signed["identity"],
+                            residentImageSigning="ad-hoc-fixed-identifier-runtime-empty-entitlements-strictly-verified")
+        self.prepare_entry()
+        self.prepare_facade("desktop")
+        self.prepare_facade("resident")
+
+    def prepare_facade(self, role):
+        need(role in ("desktop", "resident"), "fixed-facade-role")
+        name = DESKTOP_FACADE if role == "desktop" else HELPER
+        self.stage = role + "-facade-compiler"
+        paths = ("desktop/native/macos-installed-entry/" + role + "_facade.c",
+                 "desktop/native/macos-installed-entry/gate.c", "desktop/native/macos-installed-entry/gate.h",
+                 "desktop/native/macos-installed-entry/fixed_paths.h", "desktop/native/macos-installed-entry/image_abi.h",
+                 "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs")
+        originals = [(path, self.source_original(path, role + "-facade-source-" + Path(path).name,
+                     256 * 1024 if path == paths[5] else 128 * 1024)) for path in paths]
+        bodies = [self.read(entry) for _path, entry in originals]
+        destination = self.work / self.target_name / name
+        self.call(role + "-facade-build", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "-x", "c", "-std=c11",
+                  "-Wall", "-Wextra", "-Werror", "-O2", "-arch", "arm64", "-mmacosx-version-min=26.0",
+                  "-DMRK_ENTRY_METADATA_ONLY=1", '-DMRK_IMAGE_SOURCE_COMMIT="' + self.image_source + '"',
+                  '-DMRK_IMAGE_RELEASE_ID="' + self.image_release + '"',
+                  str(self.checkout / paths[0]), str(self.checkout / paths[1]), str(self.checkout / paths[5]),
+                  "-o", str(destination)],
+                  dict(self.native_environment(), DEVELOPER_DIR=self.environment["DEVELOPER_DIR"]),
+                  cwd=self.checkout, timeout=30, limit=65536)
+        need(all(self.read(entry) == body for (_path, entry), body in zip(originals, bodies)), "facade-source-changed")
+        original = self.original(self.target_entry, name, role + "-facade-compiler-artifact", 1024 * 1024, (0o700, 0o755))
+        body = self.read(original)
+        self.stager.entry_macho(body)
+        self.publish(name, body, mode=0o755)
+        need(self.read(original) == body, "facade-compiler-original-changed")
+        self.receipt[role + "FacadeSources"] = [
+            {"path": path, "bytes": len(source), "sha256": digest(source)}
+            for (path, _entry), source in zip(originals, bodies)]
+        self.receipt[role + "FacadeSha256BeforeSigning"] = digest(body)
+        self.receipt[role + "FacadeBytesBeforeSigning"] = len(body)
+        self.receipt[role + "FacadeOriginalBeforeSigning"] = original["identity"]
+        self.close(original)
+        need(original["closed"], "facade-compiler-artifact-close-unknown")
+        if role == "desktop":
+            self.desktop_facade_sha256 = digest(body)
+            return
         self.stage = "helper-ad-hoc-signing"
         self.call("sign", ["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", IDENTIFIER,
                            "--options", "runtime", "--entitlements", str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist"),
                            "--timestamp=none", str(self.work / HELPER)],
                   self.native_environment(), cwd=self.work, timeout=30, limit=65536)
-        # codesign may replace the inode. Only its actual completed return
-        # allows this new post-sign original to be acquired and retained.
-        self.stage = "signed-helper-original"
         signed = self.original(self.work_entry, HELPER, "signed-helper", MAX_HELPER, (0o755,))
         body = self.read(signed)
-        self.stager.macho(body, system_only=True)
+        self.stager.entry_macho(body)
         self.strict_verify(signed, body, "verify-signed", self.work / HELPER)
         self.sha256 = digest(body)
         self.receipt.update(helperSha256=self.sha256, helperBytes=len(body), helperOriginal=signed["identity"],
                             signing="ad-hoc-fixed-identifier-runtime-empty-entitlements-strictly-verified")
-        self.prepare_entry()
+
 
     def prepare_entry(self):
         """One fixed C/libSystem-only compile through this same original owner."""
@@ -397,15 +541,21 @@ class Operation:
                            self.native_environment(), cwd=self.work, timeout=30, limit=65536)
         need(not result.stdout and not result.stderr and self.read(original) == body, "strict-original-verification")
 
-    def verify_staged(self, expected):
+    def verify_staged(self, expected, expected_image):
         need(type(expected) is str and re.fullmatch(r"[0-9a-f]{64}", expected), "expected-helper-digest")
+        need(type(expected_image) is str and re.fullmatch(r"[0-9a-f]{64}", expected_image), "expected-resident-image-digest")
         self.stage = "staged-helper-original"
         contents = self.descend(self.work_entry, ("app", "Mobile Release Kit.app", "Contents", "Helpers", "MobileReleaseKitPayload.app", "Contents"))
         helpers = self.directory(contents, "Helpers", "staged-helpers")
         original = self.original(helpers, HELPER, "staged-helper", MAX_HELPER, (0o555,))
         body = self.read(original)
         need(digest(body) == expected, "staged-helper-signature-bytes-changed")
-        self.stager.macho(body, system_only=True)
+        self.stager.entry_macho(body)
+        frameworks = self.directory(contents, "Frameworks", "staged-frameworks")
+        image = self.original(frameworks, RESIDENT_IMAGE, "staged-resident-image", MAX_HELPER, (0o555,))
+        image_body = self.read(image)
+        need(digest(image_body) == expected_image, "staged-resident-image-signature-bytes-changed")
+        self.stager.image_macho(image_body, "resident")
         daemons = self.descend(contents, ("Library", "LaunchDaemons"))
         plist = self.original(daemons, IDENTIFIER + ".plist", "staged-service-plist", 4096, (0o444, 0o644))
         source_plist = self.source_original("desktop/macos-installed-inputs/" + IDENTIFIER + ".plist", "source-service-plist", 4096)
@@ -416,9 +566,14 @@ class Operation:
              "source-service-plist")
         need(self.read(plist) == expected_plist, "staged-service-plist")
         self.strict_verify(original, body, self.phase, self.work / "app/Mobile Release Kit.app" / self.stager.ANDROID_HELPER)
-        need(self.read(plist) == self.read(source_plist) == expected_plist, "staged-service-plist-changed")
-        self.sha256 = expected
-        self.receipt.update(helperSha256=expected, helperBytes=len(body), helperOriginal=original["identity"])
+        self.strict_verify(image, image_body, self.phase + "-resident-image",
+                           self.work / "app/Mobile Release Kit.app" / self.stager.RESIDENT_IMAGE)
+        need(self.read(original) == body and self.read(image) == image_body
+             and self.read(plist) == self.read(source_plist) == expected_plist, "staged-service-group-changed")
+        self.sha256, self.resident_image_sha256 = expected, expected_image
+        self.receipt.update(helperSha256=expected, helperBytes=len(body), helperOriginal=original["identity"],
+                            residentImageSha256=expected_image, residentImageBytes=len(image_body),
+                            residentImageOriginal=image["identity"])
 
     def finish(self):
         # Close every artifact/output/descendant first. Raised or malformed
@@ -455,22 +610,32 @@ class Operation:
             self.open()
             self.profile_entry = self.source_original(PROFILE, "source-signing-profile", 1024)
             need(self.read(self.profile_entry) == UNCONFIGURED_PROFILE, "engineering-profile-only")
+            need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") in self.stager.PACKAGE_ROLES, "source-package-role")
+            release_body = self.image_binding()
             if self.phase == "prepare":
                 self.prepare()
             else:
-                self.verify_staged(expected)
+                self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
             need(self.read(self.profile_entry) == UNCONFIGURED_PROFILE, "engineering-profile-changed")
+            need(self.read(self.release_entry) == release_body, "source-image-release-changed")
         except BaseException as error:
             self.receipt["failure"] = {"stage": self.stage, "type": type(error).__name__,
                                        "reason": str(error) if type(error) is Refused else "original-operation-refused"}
+            if isinstance(error, OSError):
+                number = OSError.errno.__get__(error)
+                if type(number) is int and 0 < number < 65536:
+                    self.receipt["failure"]["errno"] = number
         finally:
             self.finish()
+        roles = PREPARE_ROLES if self.phase == "prepare" else (self.phase, self.phase + "-resident-image")
         self.receipt["passed"] = ("failure" not in self.receipt and not self.errors
                                   and self.receipt["targetRetired"] and self.receipt["originalClosesKnown"]
-                                   and len(self.calls) == (4 if self.phase == "prepare" else 1)
+                                  and tuple(call["role"] for call in self.calls) == roles
                                   and all(call["returned"] and call["returncode"] == 0 for call in self.calls)
-                                   and self.sha256 is not None
-                                   and (self.phase != "prepare" or self.entry_sha256 is not None))
+                                  and self.sha256 is not None and self.resident_image_sha256 is not None
+                                  and self.image_source is not None and self.image_release is not None
+                                  and (self.phase != "prepare" or self.entry_sha256 is not None
+                                       and self.desktop_facade_sha256 is not None))
         # This receipt remains provisional until its own write/readback/close
         # and the original Python caller's zero exit. No output digest on error.
         self.publish_receipt()
@@ -518,8 +683,10 @@ def admit(environment):
                 "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_SHA": sha,
                 "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/" + workflow + "@" + ref,
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
+                "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image",
                 "RUSTUP_TOOLCHAIN": "1.98.1", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
-    need(re.fullmatch(r"[0-9a-f]{40}", sha) and all(environment.get(k) == v for k, v in required.items()), "hosted-source-bindings")
+    need(re.fullmatch(r"[0-9a-f]{40}", sha) and sha != "0" * 40
+         and all(environment.get(k) == v for k, v in required.items()), "hosted-source-bindings")
     need(all(re.fullmatch(r"[1-9][0-9]{0,19}", environment.get(key, "")) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")), "run-identity")
     if workflow == "desktop-macos-aqua.yml":
         need(environment.get("MRK_MACOS_AQUA_SCOPE") in PACKAGE_SCOPES, "full-package-scope-only")
@@ -543,6 +710,9 @@ def main():
         if sys.argv[1] == "prepare":
             print("sha256=" + result, flush=True)
             print("entry-sha256=" + operation.entry_sha256, flush=True)
+            print("resident-image-sha256=" + operation.resident_image_sha256, flush=True)
+            print("desktop-facade-sha256=" + operation.desktop_facade_sha256, flush=True)
+            print("image-release-id=" + operation.image_release, flush=True)
         return 0
     except BaseException:
         # Native/owner messages can contain local paths. Exact bounded command

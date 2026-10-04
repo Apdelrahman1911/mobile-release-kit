@@ -43,6 +43,10 @@ impl ClientData {
 }
 /// No automatic destructor drops uncertain original callback DATA. Even a last
 /// producer's newly observed Unknown AFTER exclusivity remains owned/charged.
+pub(crate) struct TailCapture(ManuallyDrop<Arc<ClientData>>);
+impl TailCapture {
+    pub(crate) fn retire(self) { drop(ManuallyDrop::into_inner(self.0)); }
+}
 pub(crate) enum DataOwner {
     Shared(ManuallyDrop<Arc<ClientData>>),
     ExclusiveUnknown(ManuallyDrop<ClientData>),
@@ -50,6 +54,9 @@ pub(crate) enum DataOwner {
 }
 impl DataOwner {
     pub(crate) fn new(data:ClientData)->Self{Self::Shared(ManuallyDrop::new(Arc::new(data)))}
+    pub(crate) fn tail_capture(&self)->Option<TailCapture>{
+        match self { Self::Shared(held) if !held.uncertain()=>Some(TailCapture(ManuallyDrop::new(Arc::clone(held)))),_=>None }
+    }
     pub(crate) fn pointer(&self)->*const c_void{
         match self{Self::Shared(held)=>Arc::as_ptr(held).cast(),_=>std::ptr::null()}
     }

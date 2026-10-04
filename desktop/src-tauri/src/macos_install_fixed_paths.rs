@@ -18,6 +18,12 @@ pub const PAYLOAD_BINARY: &str = "Contents/Helpers/MobileReleaseKitPayload.app/C
 pub const PAYLOAD_CONTENTS: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents";
 pub const VAULT_HELPER_BINARY: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-vault-keychain";
 pub const PAYLOAD_HELPERS: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers";
+// Inert until the complete image stager/transport integration is verified.
+pub const ANDROID_HELPER_BINARY: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-android-register";
+pub const DESKTOP_IMAGE: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Frameworks/libmrk_desktop_image.dylib";
+pub const RESIDENT_IMAGE: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Frameworks/libmrk_resident_image.dylib";
+pub const DESKTOP_IMAGE_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Frameworks/libmrk_desktop_image.dylib";
+pub const RESIDENT_IMAGE_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Frameworks/libmrk_resident_image.dylib";
 pub const MAINTENANCE_GATE_NAME: &str = "maintenance-gate-v1";
 pub const MAINTENANCE_GATE: &str = "/Library/Application Support/MobileReleaseKit/maintenance-gate-v1";
 pub const MAINTENANCE_GATE_BYTES: &[u8] = b"MRK-MACOS-MAINTENANCE-GATE-v1\n";

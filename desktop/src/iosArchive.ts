@@ -13,7 +13,7 @@ import type { IOSArchiveApi, IOSArchiveContext, IOSArchiveIdentity, IOSArchiveOp
   IOSArchiveSavedVersion, IOSArchiveSelection, IOSArchiveStatus, IOSRecoveryIntent, IOSRecoveryOperation,
   IOSSigningAssignment, IOSSigningPolicy, PrepareIOSArchive, StartIOSArchive } from './iosArchiveTypes.ts';
 import { IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_RECOVERY_CONSENT, IOS_ACCOUNT_RECOVERY_CONFIRMATION,
-  IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_ARCHIVE_CONSENT_MS, IOS_ARCHIVE_COUNTER_MAX, iosArchiveAvailabilityText, isIOSRecoveryOperation,
+  IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_ARCHIVE_CONSENT_MS, IOS_ARCHIVE_COUNTER_MAX, iosArchiveAvailabilityText, iosArchiveModeAvailability, isIOSRecoveryOperation,
   iosArchiveCounter, iosArchiveError, iosArchiveOperationProgress, copyIOSArchiveRequest, parseIOSArchiveSavedConfig,
   parseIOSArchiveSavedVersion, parseIOSArchiveSelection, parseIOSArchiveStatus, parseIOSSigningPolicy,
   sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair } from './iosArchiveProtocol.ts';
@@ -418,7 +418,8 @@ export class IOSArchiveController {
     if (!this.observer?.active || this.observer.generation !== this.state.connectionGeneration || !this.state.listening || !this.state.initialized || !this.state.status || this.state.observationIssue)
       return 'A current original native Status and subscription are required. Passive diagnostics cannot qualify iOS archive execution.';
     if (this.state.status.statusRevision >= IOS_ARCHIVE_COUNTER_MAX) return 'The original status counter is exhausted. No counter or consent can be reused.';
-    if (!['available', 'busy'].includes(this.state.status.availability)) return iosArchiveAvailabilityText[this.state.status.availability];
+    const availability = iosArchiveModeAvailability(this.state.status, operation);
+    if (!['available', 'busy'].includes(availability)) return iosArchiveAvailabilityText[availability];
     if (operation === 'ios-local-recovery' ? !this.state.recoveryVisible : !this.state.visible)
       return operation === 'ios-local-recovery' ? 'Open Recovery to review this local account/project action.' : 'Open Releases to review this saved iOS archive and its project-code disclosure.';
     if (this.state.selectionPending) return 'Finish original project selection before reviewing this build.';

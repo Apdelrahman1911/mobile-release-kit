@@ -86,8 +86,11 @@ export interface IOSRecoveryOperation extends IOSArchiveOperationBase {
   context: IOSRecoveryContext; activity: IOSRecoveryActivity | null; report: IOSRecoveryReport | null; disposition?: never; result?: never;
 }
 export type IOSArchiveOperation = IOSArchiveBuildOperation | IOSRecoveryOperation;
+// Native mode-gate observation only, never consent or original ownership.
+export interface IOSArchiveModeCapabilities { unsigned: boolean; signed: boolean; recovery: boolean }
 export interface IOSArchiveStatus {
-  schemaVersion: 1; statusRevision: number; availability: IOSArchiveAvailability; operation: IOSArchiveOperation | null;
+  schemaVersion: 2; statusRevision: number; availability: IOSArchiveAvailability;
+  modeCapabilities: IOSArchiveModeCapabilities; operation: IOSArchiveOperation | null;
 }
 export interface IOSArchiveApi {
   prepareIOSArchive(request: PrepareIOSArchive): Promise<IOSArchiveStatus>;

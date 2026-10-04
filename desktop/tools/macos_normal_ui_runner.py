@@ -24,7 +24,7 @@ import time
 DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "e8e9d13cfa3946f39711459de01aeb89c0d9808339ac63447875948f6f7d4af7"
+LOADER_SHA = "6a46ad67e58c4428b9564d00eccc71ba3ea805591f9d5ee6cabf25ae9f31b698"
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -705,7 +705,8 @@ def failure_base(phase, selection, original):
         "stdoutBytes": len(original.stdout), "stdoutSha256": sha(original.stdout),
         "stderrBytes": len(original.stderr), "stderrSha256": sha(original.stderr),
         "status": "unavailable", "findingsTruncated": False, "errorCodes": [], "sourceFailures": [],
-        "queryObservations": [], "requireObservations": [], "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
+        "queryObservations": [], "requireObservations": [], "dashboardReadiness": None,
+        "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
             "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
 
 
@@ -753,6 +754,20 @@ def normal_failure_diagnostics(phase, selection, original):
             else:
                 require_invalid = True
 
+    # Only the existing basic-normal case can pair this supplementary observation.
+    dashboard_eligible = (phase == "test" and selection == "test.xcresult"
+                          and methods == ("testLaunchCancelAndQuit",))
+    dashboard_namespace = b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE"
+    dashboard_pattern = (re.escape(dashboard_namespace) + rb"=v1;line=([1-9][0-9]{0,4});ordinal=([1-4])"
+                         rb";waiter=(timed-out|incorrect-order|inverted-fulfillment|interrupted|unknown)"
+                         rb";enabled=([01]);hittable=([01]);reason=(loading|not-loaded|bridge-unavailable|"
+                         rb"selection-unavailable|selection-in-progress|shutting-down|owner-offline-preflight|"
+                         rb"owner-android-build|owner-ios-archive|owner-project-recovery|owner-github-preflight|"
+                         rb"owner-github-release|owner-project-path|owner-saved-version-edit|owner-metadata-images|"
+                         rb"other-or-unobserved|ambiguous)"
+                         rb";sample=pre-wait;nonAtomic=1")
+    dashboard_candidates, dashboard_candidate = 0, None
+
     def retain(key, finding, maximum, distinct=True):
         if not distinct or finding not in value[key]:
             if len(value[key]) < maximum:
@@ -775,13 +790,28 @@ def normal_failure_diagnostics(phase, selection, original):
                     retain("sourceFailures", {"stream": stream, "source": "NormalAppUITests.swift",
                         "method": match.group(3).decode("ascii"), "line": line, "column": column}, 4)
         offset = 0
-        while True:
+        while offset < len(body):
             end = body.find(b"\n", offset)
-            if end < 0:
-                break  # Incomplete records are not converted into complete observations.
+            complete = end != -1
+            if not complete:
+                end = len(body)
             record, offset = body[offset:end], end + 1
-            if record.endswith(b"\r"):
+            if complete and record.endswith(b"\r"):
                 record = record[:-1]
+            if dashboard_eligible and (dashboard_namespace in record or (record and dashboard_namespace.startswith(record))
+                    or (not complete and any(record.endswith(dashboard_namespace[:size])
+                                             for size in range(1, len(dashboard_namespace))))):
+                dashboard_candidates = min(2, dashboard_candidates + 1)
+                match = re.fullmatch(dashboard_pattern, record) if complete else None
+                dashboard_candidate = None
+                if dashboard_candidates == 1 and match is not None and int(match.group(1)) <= 65535:
+                    dashboard_candidate = {"stream": stream, "line": int(match.group(1)), "ordinal": int(match.group(2)),
+                        "waiter": match.group(3).decode("ascii"), "enabled": match.group(4) == b"1",
+                        "hittable": match.group(5) == b"1", "reason": match.group(6).decode("ascii"),
+                        "sample": "pre-wait", "nonAtomic": True}
+                continue
+            if not complete:
+                break  # Incomplete records may veto dashboard pairing, never become query observations.
             match = re.fullmatch(query, record)
             if match is None:
                 continue
@@ -793,6 +823,13 @@ def normal_failure_diagnostics(phase, selection, original):
             if exceeds == (count == 5):
                 retain("queryObservations", {"stream": stream, "kind": kind, "observation": observation,
                     "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 4, distinct=False)
+    if (dashboard_eligible and not require_invalid and dashboard_candidates == 1
+            and dashboard_candidate is not None and len(value["requireObservations"]) == 1
+            and original.stderr.count(b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE") == 0):
+        site = value["requireObservations"][0]
+        if (site["check"] == "condition" and site["line"] == dashboard_candidate["line"]
+                and dashboard_candidate["stream"] == "stdout"):
+            value["dashboardReadiness"] = dashboard_candidate
     value["status"] = ("unavailable" if require_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations")) else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")

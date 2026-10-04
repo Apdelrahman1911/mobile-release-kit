@@ -628,9 +628,8 @@ pub(crate) fn finite_nonhost_inventory(files: &[FileSpec]) -> bool {
         && files.iter().all(|file| gradle_foreign_launcher(file).is_ok())
 }
 fn selected_file<'a>(inventory: &'a Inventory, relative: &str) -> Option<&'a FileSpec> {
-    let bundle = inventory.data.roles.java_home()?.strip_suffix("/Contents/Home")?;
-    inventory.data.files.iter().find(|file| file.path.strip_prefix(bundle)
-        .and_then(|tail| tail.strip_prefix('/')) == Some(relative))
+    let bundle = inventory.data.roles.java_home()?.strip_suffix("Contents/Home")?;
+    inventory.file_under(bundle, relative)
 }
 fn jdk_release(inventory: &Inventory) -> bool {
     inventory.data.versions.jdk_vendor == "temurin" && inventory.data.versions.jdk_version == "17.0.20.1"

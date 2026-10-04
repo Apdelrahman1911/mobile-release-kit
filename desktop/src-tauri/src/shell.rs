@@ -1615,6 +1615,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut ios_archive_relay_failed = false;
         loop {
             if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; return; }
+            #[cfg(all(target_os="macos",target_arch="aarch64",feature="macos-installed-desktop-image"))]
+            document.finish_macos_maintenance(app.clone());
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
@@ -1863,6 +1865,17 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
         }
     });
     (handle, start)
+}
+
+/// Native-owned callable seam only. It is intentionally absent from
+/// generate_handler/public IPC and from observer/bin layouts. Public maintenance
+/// remains unavailable pending integrated review and actual native qualification.
+#[cfg(all(target_os="macos",target_arch="aarch64",feature="macos-installed-desktop-image"))]
+pub(crate) fn begin_installed_macos_maintenance(app:&tauri::AppHandle,confirmation:&str)
+    ->Result<crate::saved_command_owner::MacosMaintenanceStatus,BridgeError>{
+    let state=app.try_state::<ShellState>().ok_or_else(||BridgeError::new(
+        "macos_maintenance_unavailable","The original installed window is unavailable."))?;
+    state.document.start_macos_maintenance(confirmation)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -2962,6 +2975,7 @@ mod owned_gtk {
 #[derive(Debug)]
 pub struct InitializationFailed;
 
+#[cfg(not(feature = "macos-installed-desktop-image"))]
 pub fn run() -> Result<(), InitializationFailed> {
     // Installer is the only privileged entry. Do not even construct a native
     // window/document/project picker in a root or incompatible Mac process.
@@ -2976,6 +2990,15 @@ pub fn run() -> Result<(), InitializationFailed> {
         not(feature = "macos-installed-installer-fixture"), not(feature = "macos-android-registration-helper"),
         not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher")))]
     if mrk_macos_installed_native::installed_entry::admit_once().is_err() { return Err(InitializationFailed); }
+    run_builder(builder()).map(|_| ())
+}
+
+/// The separate fixed image facade already consumed argv admission and owns its
+/// actual pre-dlopen SH. Never rerun the duplicate linked gate static here.
+/// No renderer/CLI/env selector reaches this compile-time role.
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-desktop-image"))]
+pub fn run_installed_image() -> Result<(), InitializationFailed> {
+    if mrk_macos_installed_native::real_user().is_err() { return Err(InitializationFailed); }
     run_builder(builder()).map(|_| ())
 }
 

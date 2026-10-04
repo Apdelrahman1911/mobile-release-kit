@@ -1,4 +1,4 @@
-// Fixed normal-app SMAppService phases. No generic service/path, unregister,
+// Fixed normal-app SMAppService phases. No generic service/path, arbitrary unregister,
 // restart, automatic approval, callback scheduler or app-owned autorelease pool.
 // The original app owner queues this onto its verified AppKit event callback.
 #import <Foundation/Foundation.h>
@@ -13,7 +13,13 @@
 #if !defined(MRK_ANDROID_REGISTRATION_HELPER) && !defined(MRK_WRAPPING_VAULT_HELPER)
 extern int mrk_android_identity_available(void);
 #define MRK_ANDROID_MANAGEMENT_MAGIC UINT64_C(0x4d524b41534d4732)
+#if defined(MRK_E2_NATIVE_FIXTURE)
+#include "e2_native_fixture_fixed.h"
+#include "e2_native_fixture_identity.h"
+#define MRK_ANDROID_SERVICE_PLIST @MRK_E2_FIXTURE_PLIST
+#else
 #define MRK_ANDROID_SERVICE_PLIST @"dev.mobile-release-kit.desktop.android-register.plist"
+#endif
 #ifndef MRK_ANDROID_APP_PATH
 #error fixed installed Android app path is required
 #endif
@@ -35,6 +41,9 @@ typedef struct {
     uint64_t magic;
     id service; // explicit original +1 reference, NEVER a pool or borrowed NSError
     mrk_android_management_report report;
+#if defined(MRK_E2_NATIVE_FIXTURE)
+    void *fixture_identity;
+#endif
 } mrk_android_management;
 _Static_assert(sizeof(mrk_android_management)<=1024u,"supplied cell, not framework heap");
 _Static_assert(sizeof(mrk_android_management_report)==48u,"Rust/C phase report layout");
@@ -43,6 +52,7 @@ static int manager_valid(mrk_android_management *original) {
 }
 static void manager_unknown(mrk_android_management *original) {
     original->report.unknown=1;original->report.outcome=8;original->report.cleanup_known=0;
+    if (original->report.action==3) original->report.reserved|=8;
     if (original->report.service_state==1 || original->report.service_state==3)
         original->report.service_state=5;
 }
@@ -56,14 +66,29 @@ static uint32_t status_data(SMAppService *service) {
     }
 }
 void *mrk_android_management_new(uint32_t action) {
-    if (action>2 || pthread_main_np()!=1 || getuid()==0 || geteuid()!=getuid()
+    if (action>3 || pthread_main_np()!=1 || getuid()==0 || geteuid()!=getuid()
         || !mrk_android_identity_available()) return NULL;
     mrk_android_management *original=calloc(1,sizeof(*original));
     if (!original) return NULL;
     original->magic=MRK_ANDROID_MANAGEMENT_MAGIC;
-    original->report.version=2;original->report.action=action;original->report.status=4;
+    original->report.version=action==3?3:2;original->report.action=action;original->report.status=4;
     return original;
 }
+#if defined(MRK_E2_NATIVE_FIXTURE)
+void *mrk_android_e2_fixture_management_new(uint32_t action,void *identity) {
+    if (action>3 || pthread_main_np()!=1 || getuid()==0 || geteuid()!=getuid()
+        || !mrk_e2_fixture_main_borrow(identity)) return NULL;
+    // Consume the real recheck epoch even if this actual allocator returns nil.
+    mrk_android_management *original=calloc(1,sizeof(*original));
+    if (!original) {
+        (void)mrk_e2_fixture_main_borrow_return(identity); // no manager escaped
+        return NULL;
+    }
+    original->magic=MRK_ANDROID_MANAGEMENT_MAGIC;original->fixture_identity=identity;
+    original->report.version=action==3?3:2;original->report.action=action;original->report.status=4;
+    return original;
+}
+#endif
 static int phase_admitted(mrk_android_management *original,uint32_t phase) {
     const mrk_android_management_report *report=&original->report;
     if (report->unknown || report->cleanup_known) return 0;
@@ -76,10 +101,10 @@ static int phase_admitted(mrk_android_management *original,uint32_t phase) {
         case MRK_SERVICE_MUTATE:
             return report->called && report->phase==MRK_SERVICE_STATUS
                 && report->service_state==2 && original->service && report->outcome==0
-                && (report->action==2 || (report->action==1 && report->status==0));
+                && (report->action==2 || (report->action==1 && report->status==0) || (report->action==3 && report->status==1));
         case MRK_SERVICE_RESULT:
             return report->called && report->phase==MRK_SERVICE_MUTATE
-                && report->action==1 && report->entered && report->returned
+                && (report->action==1 || (report->action==3 && report->outcome==10 && report->reserved==3)) && report->entered && report->returned
                 && report->service_state==2 && original->service;
         case MRK_SERVICE_RELEASE:
             return report->called && report->phase>=MRK_SERVICE_ACQUIRE
@@ -124,6 +149,9 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                 original->report.status=status_data((SMAppService *)original->service);
                 if (original->report.status==5) original->report.outcome=7;
                 else if (original->report.action==0) original->report.outcome=1;
+                else if (original->report.action==3) {
+                    if (original->report.status!=1) original->report.outcome=6;
+                }
                 else if (original->report.action==1) {
                     if (original->report.status==1) original->report.outcome=3;
                     else if (original->report.status==2) original->report.outcome=4;
@@ -139,6 +167,12 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                     original->report.entered=1;
                     [SMAppService openSystemSettingsLoginItems];
                     original->report.returned=1;original->report.outcome=5;
+                } else if (original->report.action==3) {
+                    NSError *error=nil;original->report.entered=1;
+                    const BOOL accepted=[(SMAppService *)original->service unregisterAndReturnError:&error];
+                    original->report.returned=1;
+                    original->report.reserved=1u|(accepted?2u:0u)|(error?4u:0u);
+                    original->report.outcome=accepted && !error?10:7;
                 } else {
                     NSError *error=nil;original->report.entered=1;
                     const BOOL accepted=[(SMAppService *)original->service registerAndReturnError:&error];
@@ -149,7 +183,7 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
             }
             case MRK_SERVICE_RESULT:
                 original->report.status=status_data((SMAppService *)original->service);
-                if (original->report.status==5) original->report.outcome=7;
+                if (original->report.status==5 && original->report.action!=3) original->report.outcome=7;
                 break;
             case MRK_SERVICE_RELEASE:
                 if (original->report.service_state==2) {
@@ -175,6 +209,12 @@ int mrk_android_management_retire(void *raw,uint32_t unentered) {
             || original->report.entered || original->report.returned || original->report.cleanup_known) return 0;
     } else if (!original->report.called || original->report.phase!=MRK_SERVICE_RELEASE
         || !original->report.cleanup_known || original->report.service_state!=4) return 0;
+#if defined(MRK_E2_NATIVE_FIXTURE)
+    if (original->fixture_identity) {
+        if (!mrk_e2_fixture_main_borrow_return(original->fixture_identity)) return 0;
+        original->fixture_identity=NULL;
+    }
+#endif
     original->magic=0;free(original);return 1;
 }
 

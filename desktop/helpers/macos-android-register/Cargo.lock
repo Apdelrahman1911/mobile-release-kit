@@ -666,6 +666,7 @@ name = "mrk-android-register"
 version = "0.1.0"
 dependencies = [
  "mobile-release-kit-desktop",
+ "mrk-macos-installed-native",
 ]
 
 [[package]]

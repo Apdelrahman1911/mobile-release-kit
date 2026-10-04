@@ -68,7 +68,8 @@ impl Drop for Admitted {
 }
 
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
-use mrk_macos_installed_native::{self as installed_native,android_service_management as management};
+use mrk_macos_installed_native::{self as installed_native,android_service_management as management,
+    android_maintenance_client as maintenance_native,android_registration as registration_native};
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 use crate::installed_runtime::AndroidServiceIdentitySlots;
 
@@ -103,7 +104,24 @@ const OWNER_FINALIZED:u8=2;
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 struct Retirement {
     original:Arc<Control>,action:management::Action,require_enabled:bool,phase:std::sync::atomic::AtomicU8,
-    retired_serial:std::sync::atomic::AtomicU32,
+    retired_serial:std::sync::atomic::AtomicU32,maintenance:Option<MaintenanceTail>,
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+struct MaintenanceTail {
+    operation:[u8;16],cutoff:std::sync::OnceLock<Instant>,original:Mutex<Option<maintenance_native::TailAdmission>>,
+    retired:AtomicBool,
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+impl MaintenanceTail {
+    fn new(operation:[u8;16])->Self{Self{operation,cutoff:std::sync::OnceLock::new(),original:Mutex::new(None),retired:AtomicBool::new(false)}}
+    /// Only the actual extracted final callback or proved never-requested path
+    /// calls this. A status/callback-return bit cannot release the SAME DATA.
+    fn retire(&self)->bool{
+        let Ok(mut held)=self.original.try_lock()else{return false;};
+        if self.retired.load(Ordering::SeqCst){return held.is_none();}
+        if let Some(original)=held.take(){original.retire();}
+        self.retired.store(true,Ordering::SeqCst);true
+    }
 }
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 impl Retirement {
@@ -112,9 +130,12 @@ impl Retirement {
     fn callback_retired(&self,serial:u32,deferred:bool)->bool{
         if self.phase.load(Ordering::SeqCst)!=PENDING || serial==0 || serial==u32::MAX
             || self.retired_serial.compare_exchange(serial-1,serial,Ordering::SeqCst,Ordering::SeqCst).is_err(){return false;}
-        deferred || self.phase.compare_exchange(PENDING,CALLBACK_RETIRED,Ordering::SeqCst,Ordering::SeqCst).is_ok()
+        if deferred{return true;}
+        if self.maintenance.as_ref().is_some_and(|tail|!tail.retire()){return false;}
+        self.phase.compare_exchange(PENDING,CALLBACK_RETIRED,Ordering::SeqCst,Ordering::SeqCst).is_ok()
     }
     fn finalize(&self)->bool{
+        if self.maintenance.as_ref().is_some_and(|tail|!tail.retired.load(Ordering::SeqCst)){return false;}
         self.phase.compare_exchange(CALLBACK_RETIRED,OWNER_FINALIZED,Ordering::SeqCst,Ordering::SeqCst).is_ok()
     }
 }
@@ -256,8 +277,21 @@ impl CallbackOriginal {
             failure.first=*first;
         }
         let pending=ControlSlot::pending(&book);
-        let endpoint=failure.first.and_then(|(_,first)|first.checked_add(SETTLEMENT))
+        let mut endpoint=failure.first.and_then(|(_,first)|first.checked_add(SETTLEMENT))
             .map_or(self.gate.control.hard,|end|end.min(self.gate.control.hard));
+        // Immutable SAME-tail lower bound, never Control::endpoint/watch or a
+        // worker-owned native/identity mutex on AppKit. Missing is not admission.
+        if let Some(tail)=&self.retirement.maintenance{
+            let Some(cutoff)=tail.cutoff.get().copied()else{
+                drop(first);drop(book);self.unknown(failure);return Decision::Unknown;
+            };
+            if self.action!=management::Action::UnregisterAfterQuiescence || tail.operation==[0;16]{
+                drop(first);drop(book);self.unknown(failure);return Decision::Unknown;
+            }
+            endpoint=endpoint.min(cutoff);
+        }else if self.action==management::Action::UnregisterAfterQuiescence{
+            drop(first);drop(book);self.unknown(failure);return Decision::Unknown;
+        }
         drop(first);drop(book);
         if failure.unknown || now>=endpoint{self.unknown(failure);return Decision::Unknown;}
         if phase.is_cleanup(){return Decision::Proceed;}
@@ -314,21 +348,36 @@ pub(super) struct Preparation {
 }
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy)]
-struct PreparationReturn {known:bool,checked:bool,observation:Option<wire::ServiceObservation>,retained:Option<usize>}
+struct PreparationReturn {known:bool,checked:bool,observation:Option<wire::ServiceObservation>,retained:Option<usize>,maintenance:Option<MaintenanceRun>}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[derive(Clone,Copy,Default)]
+pub(super) struct MaintenanceRun {
+    pub(super) known:bool,pub(super) checked:bool,pub(super) started_or_uncertain:bool,
+    pub(super) tail_received:bool,pub(super) unregister_accepted:bool,pub(super) not_registered:bool,
+    pub(super) callback_retired:bool,pub(super) peer_ended:bool,pub(super) retained:Option<usize>,
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+impl MaintenanceRun {
+    pub(super) fn prepared(self)->bool{self.known && self.checked && self.started_or_uncertain && self.tail_received
+        && self.unregister_accepted && self.not_registered && self.callback_retired && self.peer_ended && self.retained.is_some()}
+}
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 impl Preparation {
     // Enforced on the ACTUAL settled identity ledger before Register can begin
     // its client/source phase. Peak inspector storage never overlaps sources.
     pub(super) const SETTLED_BYTES:usize=2*1024*1024;
     pub(super) fn new(gate:WorkGate,dispatcher:Arc<Dispatcher>,action:management::Action)->Self{
-        Self::create(gate,dispatcher,action,false)
+        Self::create(gate,dispatcher,action,false,None)
     }
     pub(super) fn for_registration(gate:WorkGate,dispatcher:Arc<Dispatcher>)->Self{
-        Self::create(gate,dispatcher,management::Action::Observe,true)
+        Self::create(gate,dispatcher,management::Action::Observe,true,None)
     }
-    fn create(gate:WorkGate,dispatcher:Arc<Dispatcher>,action:management::Action,require_enabled:bool)->Self{
+    pub(super) fn for_maintenance(gate:WorkGate,dispatcher:Arc<Dispatcher>,operation:[u8;16])->Self{
+        Self::create(gate,dispatcher,management::Action::UnregisterAfterQuiescence,true,Some(operation))
+    }
+    fn create(gate:WorkGate,dispatcher:Arc<Dispatcher>,action:management::Action,require_enabled:bool,operation:Option<[u8;16]>)->Self{
         let retirement=Arc::new(Retirement{original:gate.control.clone(),action,require_enabled,phase:std::sync::atomic::AtomicU8::new(PENDING),
-            retired_serial:std::sync::atomic::AtomicU32::new(0)});
+            retired_serial:std::sync::atomic::AtomicU32::new(0),maintenance:operation.map(MaintenanceTail::new)});
         Self{identity:Mutex::new(AndroidServiceIdentitySlots::new(gate.clone())),gate,dispatcher,retirement,
             requested:AtomicBool::new(false),main:Mutex::new(MainState::Dormant),returned:Mutex::new(None)}
     }
@@ -410,6 +459,7 @@ impl Preparation {
     fn observation(returned:CallbackReturned)->Option<wire::ServiceObservation>{
         let (progress,custody)=returned.native?;
         let management::Progress::Finished(observed)=progress else{return None;};
+        if observed.action==management::Action::UnregisterAfterQuiescence{return None;}
         if !observed.native_settled || !management_settled(custody){return None;}
         // Native denial/failure predates Stop. Preserve it even when a later
         // lifecycle gate makes Progress's public outcome Stopped.
@@ -424,7 +474,8 @@ impl Preparation {
                 management::Outcome::RegistrationRequested=>wire::ServiceOutcome::RegistrationRequested,management::Outcome::AlreadyRegistered=>wire::ServiceOutcome::AlreadyRegistered,
                 management::Outcome::NeedsApproval=>wire::ServiceOutcome::NeedsApproval,management::Outcome::SettingsRequested=>wire::ServiceOutcome::SettingsRequested,
                 management::Outcome::DeniedByUser=>wire::ServiceOutcome::DeniedByUser,management::Outcome::Stopped=>wire::ServiceOutcome::Stopped,
-                management::Outcome::Refused=>wire::ServiceOutcome::Refused,management::Outcome::Error=>wire::ServiceOutcome::Error,management::Outcome::Unknown=>wire::ServiceOutcome::Unknown},
+                management::Outcome::Refused=>wire::ServiceOutcome::Refused,management::Outcome::Error=>wire::ServiceOutcome::Error,management::Outcome::Unknown=>wire::ServiceOutcome::Unknown,
+                management::Outcome::UnregisterAccepted=>return None},
             mutation_entered:observed.mutation_entered,mutation_returned:observed.mutation_returned,
             mutation_uncertain:observed.mutation_uncertain,native_settled:true})
     }
@@ -432,6 +483,7 @@ impl Preparation {
     /// Main dispatch/actual capture extraction belongs to its independent async
     /// coordinator via tick; no worker-held book is needed to publish STOP.
     pub(super) fn run_once(&self)->bool{
+        if self.retirement.action==management::Action::UnregisterAfterQuiescence{self.gate.control.poisoned();return false;}
         let mut identity=match self.identity.try_lock(){Ok(identity)=>identity,
             Err(_)=>{self.gate.control.poisoned();return false;}};
         if self.returned.try_lock().map_or(true,|returned|returned.is_some()){
@@ -460,7 +512,7 @@ impl Preparation {
         if retained.is_some_and(|bytes|bytes>Self::SETTLED_BYTES){self.gate.control.stop_at(wire::Reason::ResultLimit,Instant::now());}
         let known=files_known && main.0 && retained.is_some() && !self.gate.control.unknown.load(Ordering::SeqCst)
             && Instant::now()<self.gate.control.endpoint();
-        let returned=PreparationReturn{known,checked,observation,retained};
+        let returned=PreparationReturn{known,checked,observation,retained,maintenance:None};
         drop(identity);
         let mut output=match self.returned.try_lock(){Ok(output)=>output,
             Err(_)=>{self.gate.control.poisoned();return false;}};
@@ -468,6 +520,181 @@ impl Preparation {
         *output=Some(returned);
         known && checked && self.gate.control.failure().is_none()
     }
+
+    fn request_maintenance(&self,tail:maintenance_native::TailAdmission,
+        clock:&maintenance::OriginalClock,signal:&registration_native::Signal)->bool{
+        let Some(retained)=self.retirement.maintenance.as_ref()else{
+            // TailAdmission's ManuallyDrop keeps uncertain DATA, not a guessed close.
+            self.gate.control.poisoned();return false;
+        };
+        let operation=tail.operation();let cutoff=tail.cutoff();
+        let mut held=match retained.original.try_lock(){Ok(held)=>held,Err(_)=>{self.gate.control.poisoned();return false;}};
+        if held.is_some() || retained.retired.load(Ordering::SeqCst) || retained.cutoff.get().is_some(){
+            self.gate.control.poisoned();return false;
+        }
+        *held=Some(tail); // Same owning capture remains in the original on every refusal.
+        if operation!=retained.operation || self.retirement.action!=management::Action::UnregisterAfterQuiescence
+            || retained.cutoff.set(cutoff).is_err() || !self.gate.control.narrow_maintenance(cutoff){
+            self.gate.control.poisoned();return false;
+        }
+        drop(held);
+        // All resident F has already been synchronized before this call. A new
+        // concurrent publisher is still enforced at each AppKit action cut.
+        loop {
+            clock.synchronize(&self.gate.control,signal);
+            if self.gate.control.failure().is_some() || self.gate.control.unknown.load(Ordering::SeqCst)
+                || !signal.admitted(false) || Instant::now()>=self.gate.control.endpoint(){return false;}
+            match self.gate.try_work(){
+                Some(true)=>break,
+                Some(false)=>std::thread::park_timeout(HEARTBEAT.min(
+                    self.gate.control.endpoint().saturating_duration_since(Instant::now()))),
+                None=>return false,
+            }
+        }
+        // A pending publisher is reversible waiting, not a fabricated refusal.
+        // Reimport the SAME F after that wait; no new R/timeout interval.
+        clock.synchronize(&self.gate.control,signal);
+        if self.gate.control.failure().is_some() || self.gate.control.unknown.load(Ordering::SeqCst)
+            || !signal.admitted(false) || Instant::now()>=self.gate.control.endpoint(){return false;}
+        if self.requested.swap(true,Ordering::SeqCst){self.gate.control.poisoned();return false;}
+        self.gate.control.changed();true
+    }
+    fn maintenance_observation(returned:Option<CallbackReturned>)->(bool,bool){
+        let Some((_progress,custody))=returned.and_then(|returned|returned.native)else{return(false,false);};
+        let actual=custody.observation.filter(|value|value.action==management::Action::UnregisterAfterQuiescence);
+        let accepted=actual.is_some_and(|value|value.outcome==management::Outcome::UnregisterAccepted
+            && value.mutation_entered && value.mutation_returned && !value.mutation_uncertain);
+        // These are retained same-service positive facts, not finality. A later
+        // release/retire/callback failure must not erase observed NotRegistered.
+        // run_maintenance's known and MaintenanceRun::prepared still separately
+        // require all native/owner settlement, closes and the original deadline.
+        let not_registered=accepted && actual.is_some_and(|value|value.status==management::Status::NotRegistered);
+        (accepted,not_registered)
+    }
+    pub(super) fn maintenance_partial(&self)->(bool,bool){
+        let Ok(main)=self.main.try_lock()else{return(false,false);};
+        match &*main{MainState::Finished(returned)|MainState::Unknown(Some(returned))=>Self::maintenance_observation(Some(*returned)),
+            _=>(false,false)}
+    }
+    pub(super) fn maintenance_return(&self)->Option<MaintenanceRun>{
+        self.returned.try_lock().ok()?.as_ref()?.maintenance
+    }
+    /// The ORIGINAL IPC worker owns identity -> A/watcher/B/drain -> tail ->
+    /// main-result observation -> identity cleanup -> EOF/exit -> client closes.
+    /// Its existing independent coordinator alone dispatches/extracts AppKit.
+    pub(super) fn run_maintenance(&self,client:&mut maintenance_native::Client,
+        clock:&maintenance::OriginalClock,signal:&registration_native::Signal)->MaintenanceRun{
+        let empty=MaintenanceRun::default();
+        if self.retirement.action!=management::Action::UnregisterAfterQuiescence
+            || self.retirement.maintenance.is_none() || self.requested.load(Ordering::SeqCst)
+            || self.returned.try_lock().map_or(true,|returned|returned.is_some()){
+            self.gate.control.poisoned();return empty;
+        }
+        let mut identity=match self.identity.try_lock(){Ok(identity)=>identity,
+            Err(_)=>{self.gate.control.poisoned();return empty;}};
+        let synchronize=||{
+            let _=self.gate.try_work(); // SAME durable cohort F, not just its later watch projection.
+            clock.synchronize(&self.gate.control,signal);
+        };
+        let cleanup=||{synchronize();Instant::now()<self.gate.control.endpoint() && signal.admitted(true)};
+        let fail=|reason|{let at=Instant::now();self.gate.control.stop_at(reason,at);synchronize();};
+        let stop=self.gate.control.stop.subscribe();
+        synchronize();
+        let checked=self.gate.source_work().is_ok() && identity.check_once(self.gate.control.work,&stop).is_ok();
+        if checked && self.gate.source_work().is_ok() && signal.admitted(false){
+            let entered=client.begin();let returned_at=Instant::now();
+            synchronize();
+            match entered{
+                Ok(maintenance_native::Drain::Busy)|Ok(maintenance_native::Drain::Refused)=>{
+                    self.gate.control.stop_at(wire::Reason::ServiceUnavailable,returned_at);synchronize();
+                },
+                Err(_)=>{
+                    if self.gate.control.failure().is_none(){self.gate.control.stop_at(wire::Reason::ServiceUnavailable,returned_at);}
+                    synchronize();
+                },
+                Ok(maintenance_native::Drain::Started)=>{
+                    while cleanup(){
+                        let progress=client.step();let returned_at=Instant::now();synchronize();
+                        match progress{
+                            Ok(maintenance_native::Progress::TailReceived)=>{
+                                // Import F BEFORE taking the opaque no-F admission,
+                                // and again before publishing main requested.
+                                if self.gate.control.failure().is_none() && !self.gate.control.unknown.load(Ordering::SeqCst){
+                                    if let Some(tail)=client.take_tail_admission(clock.bridge()){
+                                        synchronize();self.request_maintenance(tail,clock,signal);
+                                    }else{fail(wire::Reason::ServiceUnavailable);}
+                                }
+                                break;
+                            },
+                            Ok(maintenance_native::Progress::Pending)=>{
+                                if self.gate.control.failure().is_some() || self.gate.control.unknown.load(Ordering::SeqCst){break;}
+                                std::thread::park_timeout(HEARTBEAT);
+                            },
+                            _=>{
+                                if self.gate.control.failure().is_none(){self.gate.control.stop_at(wire::Reason::ServiceUnavailable,returned_at);}
+                                synchronize();break;
+                            },
+                        }
+                    }
+                },
+            }
+        }else if self.gate.control.failure().is_none(){fail(wire::Reason::ServiceUnavailable);}
+        let mut files_known=None;
+        let main=loop{
+            synchronize();
+            if self.gate.control.failure().is_some() && files_known.is_none(){files_known=Some(identity.settle());}
+            if let Some(result)=self.main_result(){break result;}
+            if !cleanup(){self.gate.control.mark_unknown(Instant::now());break(false,None);}
+            std::thread::park_timeout(HEARTBEAT);
+        };
+        // No main callback was ever requested, or it was skipped before capture.
+        // This is the only non-callback retirement route for the same tail.
+        if main.0{
+            if let Ok(main_state)=self.main.try_lock(){
+                if matches!(&*main_state,MainState::Dormant|MainState::Skipped)
+                    && self.retirement.maintenance.as_ref().is_some_and(|tail|!tail.retire()){
+                    self.gate.control.poisoned();
+                }
+            }else{self.gate.control.poisoned();}
+        }
+        let (unregister_accepted,not_registered)=Self::maintenance_observation(main.1);
+        if checked && main.0 && self.gate.control.failure().is_none()
+            && identity.recheck(self.gate.control.work,&stop).is_err(){fail(wire::Reason::SigningUnavailable);}
+        let files_known=files_known.unwrap_or_else(||identity.settle());
+        let identity_retained=identity.retained_bytes().and_then(|bytes|self.settled_storage(bytes));
+        drop(identity);
+        synchronize();
+        let mut peer_ended=false;
+        if unregister_accepted{
+            while cleanup(){
+                let progress=client.step();let at=Instant::now();synchronize();
+                match progress{
+                    Ok(maintenance_native::Progress::Exited)=>{peer_ended=client.final_observed();break;},
+                    Ok(maintenance_native::Progress::Pending)=>std::thread::park_timeout(HEARTBEAT),
+                    _=>{if self.gate.control.failure().is_none(){self.gate.control.stop_at(wire::Reason::ServiceUnavailable,at);}break;},
+                }
+            }
+        }
+        let started_or_uncertain=client.started_or_uncertain();
+        let tail_received=client.genuine_tail_received();
+        // Every owned close is attempted only through the SAME book's original
+        // cleanup bounds. Unknown never causes a second connection or retry.
+        let client_known=client.release() && client.settled();synchronize();
+        let retained=identity_retained.and_then(|bytes|bytes.checked_add(client.retained_bytes()?));
+        if retained.is_some_and(|bytes|bytes>Self::SETTLED_BYTES){fail(wire::Reason::ResultLimit);}
+        let callback_retired=self.retirement.maintenance.as_ref().is_some_and(|tail|tail.retired.load(Ordering::SeqCst));
+        let known=files_known && main.0 && callback_retired && client_known && retained.is_some()
+            && !self.gate.control.unknown.load(Ordering::SeqCst) && Instant::now()<self.gate.control.endpoint();
+        let result=MaintenanceRun{known,checked,started_or_uncertain,tail_received,unregister_accepted,not_registered,
+            callback_retired,peer_ended,retained};
+        // A valid private native result is still not overall Prepared. Both
+        // original worker/coordinator handles and the document cut remain owed.
+        let returned=PreparationReturn{known,checked,observation:None,retained,maintenance:Some(result)};
+        match self.returned.try_lock(){Ok(mut output) if output.is_none()=>*output=Some(returned),
+            _=>{self.gate.control.poisoned();return MaintenanceRun{known:false,..result};}}
+        result
+    }
+
     pub(super) fn registration_ready(&self)->bool{
         self.retirement.require_enabled && self.run_once() && self.returned.try_lock().is_ok_and(|returned|returned.is_some_and(|returned|
             returned.known && returned.checked && returned.observation.is_some_and(|observation|
@@ -488,8 +715,9 @@ impl Preparation {
         if !self.known_return(){return false;}
         let main=match self.main.try_lock(){Ok(main)=>main,Err(_)=>return false,};
         match &*main{
-            MainState::Dormant if !self.requested.load(Ordering::SeqCst)=>true,
-            MainState::Skipped=>true,MainState::Finished(_)=>self.retirement.finalize(),_=>false,
+            MainState::Dormant if !self.requested.load(Ordering::SeqCst)=>self.retirement.maintenance.as_ref().is_none_or(|tail|tail.retired.load(Ordering::SeqCst)),
+            MainState::Skipped=>self.retirement.maintenance.as_ref().is_none_or(|tail|tail.retired.load(Ordering::SeqCst)),
+            MainState::Finished(_)=>self.retirement.finalize(),_=>false,
         }
     }
     pub(super) fn retained_bytes(&self)->Option<usize>{
@@ -530,7 +758,7 @@ impl CatalogueServiceData {
         // State/Completed, Preparation, ServiceManager or finality is made.
         Self{data,retirement:Arc::new(Retirement{original:control,action:management::Action::Observe,
             require_enabled:false,phase:std::sync::atomic::AtomicU8::new(PENDING),
-            retired_serial:std::sync::atomic::AtomicU32::new(0)})}
+            retired_serial:std::sync::atomic::AtomicU32::new(0),maintenance:None})}
     }
     pub(super) fn retained_bytes(&self)->Option<usize>{
         assert_eq!(self.retirement.phase.load(Ordering::SeqCst),PENDING);
@@ -935,7 +1163,7 @@ mod callback_lifecycle_tests {
 
     fn callback(gate:WorkGate,require_enabled:bool)->(Arc<Retirement>,Arc<CallbackOriginal>){
         let retirement=Arc::new(Retirement{original:gate.control.clone(),action:Action::Observe,require_enabled,
-            phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0)});
+            phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),maintenance:None});
         let original=Arc::new(CallbackOriginal{gate,action:Action::Observe,serial:1,
             retirement:retirement.clone(),returned:Mutex::new(None)});
         (retirement,original)
@@ -1015,6 +1243,68 @@ mod callback_lifecycle_tests {
         control.stop_at(wire::Reason::Cancelled,Instant::now());
         assert!(binding.resumes(&next,deferred())); // Same original cleanup, not a new action.
         assert!(retirement.callback_retired(2,false));assert!(!binding.resumes(&next,deferred()));
+    }
+
+
+    #[test]
+    fn maintenance_preserves_observed_not_registered_after_later_cleanup_unknown() {
+        // Copied callback/custody DATA only; no manager, service or native pass.
+        let at=Instant::now();
+        let observed=management::Observation{action:Action::UnregisterAfterQuiescence,
+            status:management::Status::NotRegistered,outcome:management::Outcome::UnregisterAccepted,
+            mutation_entered:true,mutation_returned:true,mutation_uncertain:false,native_settled:false};
+        for (phase,cell,service) in [(Phase::ReleaseService,CellCustody::Owned,ServiceCustody::Unknown),
+            (Phase::RetireCell,CellCustody::Owned,ServiceCustody::Settled),
+            (Phase::RetireCell,CellCustody::Consumed,ServiceCustody::Settled)] {
+            let custody=management::Custody{action:Some(Action::UnregisterAfterQuiescence),phase:Some(phase),
+                action_admitted:true,cell,service,in_call:false,gate_entered:false,unknown:true,stopped:false,
+                first_failure:Some(at),observation:Some(observed)};
+            let returned=CallbackReturned{native:Some((management::Progress::Unknown(management::Observation{
+                outcome:management::Outcome::Unknown,..observed}),custody)),
+                failure:CapturedFailure{first:Some((wire::Reason::CleanupUnknown,at)),unknown:true},at};
+            let (unregister_accepted,not_registered)=Preparation::maintenance_observation(Some(returned));
+            assert!(unregister_accepted && not_registered);
+            assert!(!management_settled(custody));
+            // Even all other positive DATA cannot turn unsettled native custody
+            // into Prepared; these flags do not authorize an actual operation.
+            let facts=MaintenanceRun{known:management_settled(custody),checked:true,started_or_uncertain:true,
+                tail_received:true,unregister_accepted,not_registered,callback_retired:true,peer_ended:true,retained:Some(1)};
+            assert!(!facts.prepared());
+            for (observation,expected) in [
+                (management::Observation{status:management::Status::Enabled,..observed},(true,false)),
+                (management::Observation{mutation_returned:false,..observed},(false,false)),
+                (management::Observation{mutation_uncertain:true,..observed},(false,false)),
+                (management::Observation{action:Action::Observe,..observed},(false,false))] {
+                let mut changed=returned;
+                changed.native.as_mut().unwrap().1.observation=Some(observation);
+                assert_eq!(Preparation::maintenance_observation(Some(changed)),expected);
+            }
+        }
+        assert_eq!(Preparation::maintenance_observation(None),(false,false));
+    }
+
+    #[test]
+    fn maintenance_main_cut_needs_tail_action_no_f_and_original_endpoint_without_tail_lock() {
+        // Inert gate DATA only: no TailAdmission, manager, callback execution or receipt.
+        for case in 0..4 {
+            let admitted=Instant::now()-Duration::from_secs(2);
+            let (_,control,_cohort,gate)=control_in_lane(admitted,ControlLane::Maintenance);
+            let tail=MaintenanceTail::new([1;16]);
+            if case!=0 { tail.cutoff.set(if case==3{admitted+Duration::from_secs(1)}else{control.hard}).unwrap(); }
+            let action=if case==1{Action::Observe}else{Action::UnregisterAfterQuiescence};
+            let retirement=Arc::new(Retirement{original:control.clone(),action,require_enabled:true,
+                phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),
+                maintenance:Some(tail)});
+            let original=CallbackOriginal{gate,action,serial:1,retirement:retirement.clone(),returned:Mutex::new(None)};
+            if case==2 { control.stop_at(wire::Reason::Cancelled,admitted+Duration::from_secs(1)); }
+            // Deliberately held: the AppKit cut may inspect immutable cutoff,
+            // never wait for the IPC-owned capture/native/identity mutex.
+            let _held=retirement.maintenance.as_ref().unwrap().original.lock().unwrap();
+            let mut failure=CapturedFailure::default();
+            assert_eq!(original.cut(Phase::AdmitAction,true,&mut failure),
+                if case==2{Decision::Stop}else{Decision::Unknown});
+            assert_eq!(control.unknown.load(Ordering::SeqCst),case!=2);
+        }
     }
 
     #[test]

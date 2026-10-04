@@ -5,6 +5,32 @@ compile_error!("development-runtime is forbidden when debug assertions are disab
 #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "custom-protocol")))]
 compile_error!("normal desktop-shell builds require custom-protocol for the embedded production frontend");
 
+#[cfg(all(feature = "macos-installed-desktop-image", any(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    not(feature = "desktop-shell"), not(feature = "custom-protocol"), test,
+    feature = "development-runtime", feature = "ubuntu-runtime-publisher",
+    feature = "windows-runtime-publisher", feature = "macos-installed-installer",
+    feature = "macos-installed-installer-fixture", feature = "macos-android-registration-helper",
+    feature = "macos-installed-observation", feature = "windows-installed-observation"
+)))]
+compile_error!("ordinary installed image requires its isolated Mac ARM64 shell graph");
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const _: () = assert!(mrk_macos_installed_native::DESKTOP_IMAGE_BUILD
+    == cfg!(feature = "macos-installed-desktop-image"),
+    "ordinary image and normal-bin/helper/observer native roles must not unify");
+
+#[cfg(all(feature = "macos-installed-resident-image", any(
+    not(all(target_os = "macos", target_arch = "aarch64")), not(feature = "macos-android-registration-helper"),
+    feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-desktop-image",
+    feature = "development-runtime", feature = "ubuntu-runtime-publisher", feature = "windows-runtime-publisher",
+    feature = "macos-installed-installer", feature = "macos-installed-installer-fixture",
+    feature = "macos-installed-observation", feature = "windows-installed-observation", test
+)))]
+compile_error!("resident image requires its isolated headless Mac ARM64 graph");
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const _: () = assert!(mrk_macos_installed_native::RESIDENT_IMAGE_BUILD
+    == cfg!(feature = "macos-installed-resident-image"));
+
 pub mod error;
 pub mod protocol;
 mod environment;

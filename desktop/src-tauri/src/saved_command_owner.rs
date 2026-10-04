@@ -40,6 +40,12 @@ pub(crate) type AndroidServiceAdmitted = android_registration::service_setup::Ad
 pub(crate) type AndroidServiceFinalization = android_registration::service_setup::Finalization;
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 pub(crate) use android_registration::service_setup::Dispatcher as AndroidServiceDispatcher;
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(crate) use android_registration::maintenance::{
+    Request as MacosMaintenanceRequest,Snapshot as MacosMaintenanceSnapshot,Checked as MacosMaintenanceChecked,
+    Handle as MacosMaintenanceHandle,Admitted as MacosMaintenanceAdmitted,Completion as MacosMaintenanceCompletion,
+    Status as MacosMaintenanceStatus,Phase as MacosMaintenancePhase,
+};
 pub(crate) type AndroidCatalogAdmitted = android_catalog::Admitted;
 #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
 #[path = "saved_command_android_leased.rs"]
@@ -84,6 +90,14 @@ const RECOVERY_HARD: Duration = Duration::from_secs(130);
 // installed unsigned-archive observation or a successful format assessment.
 const IOS_SIGNED_NATIVE_QUALIFIED: bool = false;
 const IOS_RECOVERY_NATIVE_QUALIFIED: bool = false;
+// Shared mode selection DATA. An observed disallowed mode never falls back to
+// production; exact context/original admission remains in ios_mode_qualified.
+fn ios_mode_selection(unsigned: bool, observed: Option<ios_wire::ModeCapabilities>) -> ios_wire::ModeCapabilities {
+    match observed {
+        Some(modes) => ios_wire::ModeCapabilities { unsigned: unsigned && modes.unsigned, ..modes },
+        None => ios_wire::ModeCapabilities { unsigned, signed: IOS_SIGNED_NATIVE_QUALIFIED, recovery: IOS_RECOVERY_NATIVE_QUALIFIED },
+    }
+}
 const IOS_WORK: Duration = Duration::from_secs(5400);
 const IOS_HARD: Duration = Duration::from_secs(5410);
 const IOS_SIGNED_CLEANUP: Duration = Duration::from_secs(5520);
@@ -673,7 +687,8 @@ struct Inner {
 }
 struct Registry {
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
-    capability: Availability, prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
+    capability: Availability, ios_mode_capabilities: Option<ios_wire::ModeCapabilities>,
+    prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
     recovery: Option<Arc<IOSRecoveryObservation>>, android_catalog: android_catalog::Catalog, android_sources: android_sources::Sources,
     android_registration: android_registration::Registration,
 }
@@ -1454,6 +1469,10 @@ impl SavedCommandOwner {
 impl SavedCommandOwner {
     fn new(runtime: RuntimeConfig, domain: SavedCommandDomain) -> Self { Self::new_selected(runtime, domain, None) }
     fn new_selected(runtime: RuntimeConfig, domain: SavedCommandDomain, toolchain: Option<AndroidToolchainProfile>) -> Self {
+        // Pure immutable catalogue work before this owner has a Document,
+        // Registry or control book. Status/reconcile queries only use get().
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        if domain == SavedCommandDomain::AndroidBuild { crate::android_supplier_macos::prepare_compiled_catalogue(); }
         let android_original_owner = domain == SavedCommandDomain::AndroidBuild && runtime.claim_original_android_owner();
         let (changes, _) = watch::channel(0);
         Self { inner: Arc::new(Inner {
@@ -1472,7 +1491,7 @@ impl SavedCommandOwner {
             #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
             android_service_dispatcher:std::sync::OnceLock::new(),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
-            disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
+            disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified, ios_mode_capabilities: None,
             prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default(),
             android_registration: android_registration::Registration::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -2086,30 +2105,45 @@ impl Inner {
         self.domain == SavedCommandDomain::ProjectRecovery && cfg!(feature = "custom-protocol")
             && self.runtime.project_recovery_installed_profile_available()
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    fn ios_observed_mode_capabilities(&self, observation: &InstalledIOSObservation) -> ios_wire::ModeCapabilities {
+        ios_mode_selection(self.ios_unsigned_installed_selected(), Some(ios_wire::ModeCapabilities {
+            unsigned: observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive),
+            signed: observation.control.permits_mode(ios_wire::Operation::IOSSignedExport),
+            recovery: observation.control.permits_mode(ios_wire::Operation::IOSLocalRecovery),
+        }))
+    }
+    fn ios_mode_capabilities(&self) -> ios_wire::ModeCapabilities {
+        if self.domain != SavedCommandDomain::IOSArchive { return ios_wire::ModeCapabilities::NONE; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        {
+            let Ok(slot) = self.ios_observation.lock() else { return ios_wire::ModeCapabilities::NONE; };
+            if let Some(observation) = slot.as_ref() { return self.ios_observed_mode_capabilities(observation); }
+        }
+        ios_mode_selection(self.ios_unsigned_installed_selected(), None)
+    }
     fn ios_mode_qualified(&self, context: &Context, original: Option<&Session>) -> bool {
         if context.domain() != self.domain { return false; }
+        // Shared Prepare/Start call this for every domain. Matching non-iOS
+        // work passes through; the DATA-only iOS projection is not its gate.
+        let Context::IOSArchive(selected) = context else { return true; };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         {
             let Ok(slot) = self.ios_observation.lock() else { return false; };
             if let Some(observation) = slot.as_ref() {
-                let Context::IOSArchive(selected) = context else { return false; };
                 let Some(index) = observation.control.slot_for(selected) else { return false; };
                 let same_original = match (original, observation.originals[index].as_ref()) {
                     (None, None) => true,
                     (Some(owner), Some(bound)) => std::ptr::eq(bound.original.as_ref(), owner),
                     _ => false,
                 };
-                // A different observed mode never falls through to production
-                // qualification, including unsigned use of a signed Control.
-                return same_original && observation.control.permits_mode(selected.operation)
-                    && (selected.operation != ios_wire::Operation::IOSUnsignedArchive || self.ios_unsigned_installed_selected());
+                // The same mode selector feeds Status, but these original and
+                // context checks remain additional native admission requirements.
+                return same_original && self.ios_observed_mode_capabilities(observation).supports(selected.operation);
             }
         }
         let _ = original;
-        (!context.signed_ios() || IOS_SIGNED_NATIVE_QUALIFIED)
-            && (!context.recovery_ios() || IOS_RECOVERY_NATIVE_QUALIFIED)
-            && (context.domain() != SavedCommandDomain::IOSArchive || context.signed_ios() || context.recovery_ios()
-                || self.ios_unsigned_installed_selected())
+        ios_mode_selection(self.ios_unsigned_installed_selected(), None).supports(selected.operation)
     }
     fn start_clocks(&self, admitted: Instant) -> Clocks {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
@@ -2236,12 +2270,20 @@ impl Inner {
             }
         } else { gate }
     }
+    fn record_capabilities(&self, r: &mut Registry, reason: Availability, ios_modes: Option<ios_wire::ModeCapabilities>) {
+        if reason != r.capability || ios_modes != r.ios_mode_capabilities {
+            r.capability = reason; r.ios_mode_capabilities = ios_modes; self.bump(r);
+        }
+    }
     fn snapshot_locked(&self, r: &mut Registry, gate: Availability) -> Result<Status, BridgeError> {
         self.expire_prepared(r, Instant::now());
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.advance_locked(r, &owner, Instant::now()); }
         if r.exhausted || self.poisoned.load(Ordering::SeqCst) { return Err(BridgeError::cleanup_unknown()); }
         let reason = self.availability(r, gate);
-        if reason != r.capability { r.capability = reason; self.bump(r); }
+        // Capture once for this Status; mode-only changes require a fresh
+        // revision too. Other domains retain None and their original revision.
+        let ios_modes = (self.domain == SavedCommandDomain::IOSArchive).then(|| self.ios_mode_capabilities());
+        self.record_capabilities(r, reason, ios_modes);
         if r.exhausted { return Err(BridgeError::cleanup_unknown()); }
         let operation = r.active.as_ref().map(|a| a.projection.public())
             .or_else(|| r.prepared.as_ref().map(|p| p.projection.clone())).or_else(|| r.last.clone());
@@ -2262,8 +2304,8 @@ impl Inner {
                 crate::edit_protocol::bounded(&status, recovery_wire::STATUS_LIMIT)?; Ok(Status::ProjectRecovery(status))
             },
             SavedCommandDomain::IOSArchive => {
-                let status = ios_wire::Status { schema_version: 1, status_revision: r.revision, availability: reason.ios(),
-                    operation: operation.map(RunProjection::ios).transpose()? };
+                let status = ios_wire::Status { schema_version: ios_wire::STATUS_SCHEMA_VERSION, status_revision: r.revision, availability: reason.ios(),
+                    mode_capabilities: ios_modes.ok_or_else(BridgeError::protocol)?, operation: operation.map(RunProjection::ios).transpose()? };
                 ios_wire::status_bytes(&status)?; Ok(Status::IOSArchive(status))
             }
         }

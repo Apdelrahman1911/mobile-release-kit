@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import plistlib
 import re
+import tomllib
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -41,6 +42,8 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         selected = json.loads((INPUTS / "build-release.json").read_bytes())
         self.assertEqual(set(selected), {"schemaVersion", "packageVersion", "release"})
         self.assertEqual(selected["schemaVersion"], 1)
+        self.assertTrue(selected["release"].isascii())
+        self.assertTrue(0 < len(selected["release"]) < 64)
         self.assertEqual(component[0].get("version"), selected["packageVersion"])
         tauri = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_bytes())
         self.assertEqual(tauri["version"], selected["packageVersion"])
@@ -83,6 +86,30 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('pub const APP: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app";', stable)
         self.assertIn('pub const PAYLOAD_APP: &str = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app";', stable)
         self.assertNotIn('OUT_DIR', '\n'.join(line for line in stable.splitlines() if not line.startswith('//!')))
+        for root, package, library, feature in (
+            ("macos-desktop-image", "mrk-desktop-image", "mrk_desktop_image", "macos-installed-desktop-image"),
+            ("macos-android-register", "mrk-android-register", "mrk_resident_image", "macos-installed-resident-image"),
+        ):
+            manifest = tomllib.loads((ROOT / "desktop/helpers" / root / "Cargo.toml").read_text())
+            self.assertEqual(manifest["package"]["name"], package)
+            self.assertIs(manifest["package"]["autobins"], False)
+            self.assertEqual(manifest["lib"]["name"], library)
+            self.assertEqual(manifest["lib"]["path"], "src/lib.rs")
+            self.assertEqual(manifest["lib"]["crate-type"], ["cdylib"])
+            self.assertEqual(manifest["profile"]["release"]["panic"], "unwind")
+            self.assertEqual(manifest["dependencies"]["mobile-release-kit-desktop"]["features"], [feature])
+            self.assertIn(library + ".dylib", stable)
+        package = (ROOT / "desktop/tools/macos_android_helper_package.py").read_text()
+        self.assertIn('self.release_entry = self.source_original("desktop/macos-installed-inputs/build-release.json"', package)
+        self.assertIn('self.read(self.release_entry) == release_body', package)
+        self.assertIn('MRK_MACOS_INSTALL_SOURCE_COMMIT=environment["GITHUB_SHA"], MRK_IMAGE_RELEASE_ID=release', package)
+        self.assertIn('source == self.environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"]', package)
+        self.assertIn("'-DMRK_IMAGE_SOURCE_COMMIT=", package)
+        self.assertIn("'-DMRK_IMAGE_RELEASE_ID=", package)
+        self.assertNotIn('environment["MRK_IMAGE_RELEASE_ID"]', package)
+        self.assertIn('resident-image-sha256=', package)
+        self.assertIn('desktop-facade-sha256=', package)
+        self.assertIn('image-release-id=', package)
 
     def test_readme_is_static_honest_and_preserves_user_and_unknown_content(self):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())
@@ -105,3 +132,21 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('install_mode: "fresh-only", maintenance: "unavailable"', description)
         frontend = (ROOT / "desktop/src/installation.ts").read_text()
         self.assertIn("maintenance: 'unavailable'", frontend)
+        record = (ROOT / "desktop/src-tauri/src/macos_install_record.rs").read_text()
+        self.assertIn('enum CodeLayout { OrdinaryImage, ObserverExecutable }', record)
+        self.assertIn('pub(crate) fn require_layout', record)
+        self.assertIn('DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"', record)
+        self.assertIn('files.contains_key(ANDROID_HELPER) == files.contains_key(RESIDENT_IMAGE)', record)
+        self.assertIn('!files.contains_key(DESKTOP_IMAGE) || files.contains_key(RESIDENT_IMAGE)', record)
+        runtime = (ROOT / "desktop/src-tauri/src/installed_runtime_macos.rs").read_text()
+        self.assertIn('cfg!(feature = "macos-installed-desktop-image")', runtime)
+        self.assertIn('cfg!(feature = "macos-installed-observation")', runtime)
+        self.assertIn('index.require_layout(layout)', runtime)
+        self.assertIn('self.fixed_code_group(outer_contents,contents,layout,end,stop)?;', runtime)
+        self.assertNotIn('std::env::var("MRK_MACOS_PACKAGE_ROLE")', runtime)
+        for name in ('libmrk_desktop_image.dylib', 'libmrk_resident_image.dylib'):
+            self.assertIn(name, runtime)
+        guide = (ROOT / "desktop/packaging/macos-maintenance-data.md").read_text()
+        for boundary in ('ordinary-image', 'installed-shell-observation', 'non-image fixture',
+                         'public maintenance remains unavailable', 'No native acceptance'):
+            self.assertIn(boundary, guide)

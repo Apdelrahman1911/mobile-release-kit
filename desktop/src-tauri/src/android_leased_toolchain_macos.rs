@@ -174,7 +174,8 @@ impl LeasedAndroidToolchainSlots{
         if self.in_call || self.tail_taken{return None;}
         std::mem::size_of::<Self>().checked_add(selected_capacity(&self.selected)?)?
             .checked_add(self.client.retained_bytes()?)?.checked_add(self.tools.retained_bytes()?)?
-            .checked_add(self.lease[0].retained_bytes()?)
+            .checked_add(self.lease[0].retained_bytes()?)?
+            .checked_add(crate::android_supplier_macos::CACHE_STORAGE_BYTES)
     }
 }
 
@@ -363,6 +364,7 @@ impl LeasedAndroidCatalogSlots{
         }
         // Query control has its own additive limit. Full recovery's existing
         // tool-vector/native accounting is extra, never substituted for tool64.
+        bytes=bytes.checked_add(crate::android_supplier_macos::CACHE_STORAGE_BYTES)?;
         if bytes>QUERY_CONTROL_LIMIT{return None;}
         if let Some(selected)=&self.recovery{bytes=bytes.checked_add(selected_capacity(selected)?)?;}
         if let Some(full)=&self.full{bytes=bytes.checked_add(full.retained_bytes()?)?;}

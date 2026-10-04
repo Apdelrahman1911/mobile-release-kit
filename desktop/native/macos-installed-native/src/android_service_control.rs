@@ -92,8 +92,10 @@ impl WindowData {
 /// Not an Arc itself: every asynchronous producer must retain the SAME
 /// containing ConnectionData Arc. A naked independently retained clock Arc
 /// would invalidate the supervisor's final-after-exclusivity proof.
+#[derive(Clone, Copy)]
+enum PreparedBounds { Payload(Bounds), Maintenance(crate::android_maintenance_wire::Bounds) }
 pub struct ControlWindow {
-    acceptance: u64, initial_ceiling: u64, prepared: OnceLock<Bounds>,
+    acceptance: u64, initial_ceiling: u64, prepared: OnceLock<PreparedBounds>,
     state: AtomicU64, retirement: AtomicU64, closed: AtomicBool,
 }
 impl ControlWindow {
@@ -103,16 +105,32 @@ impl ControlWindow {
         Some(Self { acceptance, initial_ceiling, prepared: OnceLock::new(), state: AtomicU64::new(0),
             retirement: AtomicU64::new(0), closed: AtomicBool::new(false) })
     }
-    pub fn prepared(&self) -> Option<Bounds> { self.prepared.get().copied() }
+    pub fn prepared(&self) -> Option<Bounds> {
+        match self.prepared.get()? { PreparedBounds::Payload(bounds) => Some(*bounds), _ => None }
+    }
+    pub fn maintenance(&self) -> Option<crate::android_maintenance_wire::Bounds> {
+        match self.prepared.get()? { PreparedBounds::Maintenance(bounds) => Some(*bounds), _ => None }
+    }
     pub fn route_expiry(&self) -> u64 {
-        self.prepared.get().map_or(self.acceptance + CLEANUP_NS, |bounds| bounds.hard)
+        match self.prepared.get() {
+            Some(PreparedBounds::Payload(bounds)) => bounds.hard,
+            Some(PreparedBounds::Maintenance(bounds)) => bounds.work,
+            None => self.acceptance + CLEANUP_NS,
+        }
+    }
+    pub fn bind_maintenance(&self, bounds: crate::android_maintenance_wire::Bounds, now: u64) -> bool {
+        if !bounds.admits(now) || bounds.origin > self.acceptance || now < self.acceptance
+            || now >= self.acceptance + CLEANUP_NS || self.closed.load(Ordering::SeqCst)
+            || !self.snapshot().admits(now, false) || self.prepared.get().is_some() { return false; }
+        if self.prepared.set(PreparedBounds::Maintenance(bounds)).is_err() { return false; }
+        !self.closed.load(Ordering::SeqCst) && self.snapshot().admits(now, false)
     }
     pub fn bind(&self, bounds: Bounds, now: u64) -> bool {
         if !bounds.work_admitted(now) || now < self.acceptance
             || now >= self.acceptance + CLEANUP_NS || self.closed.load(Ordering::SeqCst)
             || !self.snapshot().admits(now, false) || self.prepared.get().is_some()
             || bounds.hard.checked_add(CLEANUP_NS).is_none() { return false; }
-        if self.prepared.set(bounds).is_err() { return false; }
+        if self.prepared.set(PreparedBounds::Payload(bounds)).is_err() { return false; }
         // A concurrent original expiry/failure cannot be erased by binding.
         !self.closed.load(Ordering::SeqCst) && self.snapshot().admits(now, false)
     }
@@ -161,8 +179,12 @@ impl ControlWindow {
         let state = self.state.load(Ordering::SeqCst);
         let first = state & MAX_RAW;
         let retirement = self.retirement.load(Ordering::SeqCst);
-        let ceiling = self.prepared.get().and_then(|bounds| bounds.hard.checked_add(CLEANUP_NS))
-            .map_or(self.initial_ceiling, |end| end.min(self.initial_ceiling));
+        let ceiling = match self.prepared.get() {
+            Some(PreparedBounds::Payload(bounds)) => bounds.hard.checked_add(CLEANUP_NS),
+            // Maintenance H already includes settlement. Never add another10s.
+            Some(PreparedBounds::Maintenance(bounds)) => Some(bounds.hard),
+            None => None,
+        }.map_or(self.initial_ceiling, |end| end.min(self.initial_ceiling));
         WindowData { acceptance: self.acceptance, ceiling,
             retirement: (retirement != 0).then_some(retirement), first: (first != 0).then_some(first),
             unknown: state & UNKNOWN != 0, clock_unknown: state & CLOCK_UNKNOWN != 0 }
@@ -279,6 +301,23 @@ mod tests {
         assert!(window.snapshot().unknown);
         assert_eq!(window.snapshot().cutoff(), Some(a + 50 + CLEANUP_NS));
         assert_eq!(window.snapshot().ceiling, fixed);
+    }
+    #[test]
+    fn maintenance_is_exclusive_no_payload_go_and_h_is_not_renewed() {
+        let origin=100;
+        let bounds=crate::android_maintenance_wire::Bounds{origin,work:origin+300_000_000_000,hard:origin+310_000_000_000};
+        let window=ControlWindow::new(origin+1).unwrap();
+        assert!(window.bind_maintenance(bounds,origin+2));
+        assert_eq!(window.prepared(),None);
+        assert!(!window.bind(request(Role::Registration,origin).bounds,origin+3));
+        assert_eq!(window.snapshot().ceiling,bounds.hard);
+        window.retire_at(origin+4);
+        assert_eq!(window.snapshot().first,None); // R is not F.
+        assert_eq!(window.snapshot().cutoff(),Some(origin+4+CLEANUP_NS));
+        let late=ControlWindow::new(origin+1).unwrap();
+        assert!(!late.bind_maintenance(bounds,origin+1+CLEANUP_NS));
+        let reverse=ControlWindow::new(origin-1).unwrap();
+        assert!(!reverse.bind_maintenance(bounds,origin));
     }
     #[test]
     fn provisional_expiry_cannot_be_repaired_by_late_prepare() {

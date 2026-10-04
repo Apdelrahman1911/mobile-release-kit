@@ -95,6 +95,22 @@ retaining them does not make them ARM64 launch roots. Known foreign resources
 inside Gradle and bundletool archives also remain in their original archives.
 Required ARM64 tools and JNI still need genuine native loader verification.
 
+Bundletool is used only for `dump manifest --bundle=<captured AAB> --module=base`;
+there is no caller-selected verb. Its pinned `macos/aapt2` executable stays intact
+inside the JAR, including both original relative RPATHs, but this fixed role does
+not extract or run it. The supplier checks its exact outer/member identity, full
+header bytes and parsed native semantics under the selected manifest role. This
+does not make those relative directories trusted providers, and a reserved-member
+mismatch cannot fall back to a generic native rule. Other native resources keep
+their existing loader checks.
+
+This distinction follows bundletool1.18.3's
+[fixed dispatch and eager help](https://github.com/google/bundletool/blob/586a43a450712a1067f3d92cf7574dee68226302/src/main/java/com/android/tools/build/bundletool/BundleToolMain.java),
+[manifest command](https://github.com/google/bundletool/blob/586a43a450712a1067f3d92cf7574dee68226302/src/main/java/com/android/tools/build/bundletool/commands/DumpCommand.java)
+and [explicit native extraction entry](https://github.com/google/bundletool/blob/586a43a450712a1067f3d92cf7574dee68226302/src/main/java/com/android/tools/build/bundletool/model/utils/SdkToolsLocator.java).
+Future build/install or generic bundletool commands need separate extraction,
+provider and native qualification; this manifest-only rule does not cover them.
+
 Gradle uses the same task-owned directory for native extraction in its client and
 single-use build JVM. Project settings cannot replace that directory, select Jansi
 providers, or falsify the JVM platform. Native extraction is real task output,

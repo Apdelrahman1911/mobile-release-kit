@@ -294,7 +294,8 @@ pub(super) fn data_checks(unsigned: &Snapshot) -> bool {
         let projection = wire::Projection { operation_id:operation.clone(), owner_generation:generation.clone(), context:context.clone(),
             phase:wire::Phase::AwaitingConsent, intent_usable:true, outcome:None, reason:wire::Reason::None,
             stage:None, activity:None, disposition:None, result:None, report:None };
-        let mut status = wire::Status { schema_version:1,status_revision:1+i as u32*3,availability:wire::Availability::Busy,operation:Some(projection) };
+        let mut status = wire::Status { schema_version:wire::STATUS_SCHEMA_VERSION,status_revision:1+i as u32*3,availability:wire::Availability::Busy,
+            mode_capabilities:wire::ModeCapabilities { unsigned:false,signed:false,recovery:true },operation:Some(projection) };
         if i == 1 {
             let mut reused = status.clone(); reused.operation.as_mut().unwrap().operation_id = "a".repeat(32);
             if pair.clone().result(Command::Prepare, &Ok(reused)) { return false; }

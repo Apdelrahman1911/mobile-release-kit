@@ -16,6 +16,59 @@ fn context(domain: SavedCommandDomain) -> Context { match domain {
     SavedCommandDomain::ProjectRecovery => Context::ProjectRecovery(recovery_wire::tests::context()),
     SavedCommandDomain::IOSArchive => Context::IOSArchive(ios_wire::tests::context()),
 } }
+#[test]
+fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
+    use ios_wire::{ModeCapabilities as Modes, Operation};
+    let unsigned = Modes { unsigned: true, signed: false, recovery: false };
+    let signed = Modes { unsigned: false, signed: true, recovery: false };
+    assert_eq!(ios_mode_selection(true, None), unsigned);
+    assert_eq!(ios_mode_selection(false, None), Modes::NONE);
+    assert_eq!(ios_mode_selection(true, Some(signed)), signed);
+    assert_eq!(ios_mode_selection(true, Some(Modes::NONE)), Modes::NONE);
+    assert_eq!(ios_mode_selection(false, Some(unsigned)), Modes::NONE);
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
+        let owner = application(domain);
+        assert_eq!(owner.inner.ios_mode_capabilities(), Modes::NONE);
+        for selected in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild,
+            SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
+            assert_eq!(owner.inner.ios_mode_qualified(&context(selected), None), selected == domain);
+        }
+    }
+    let ios = application(SavedCommandDomain::IOSArchive);
+    let modes = ios.inner.ios_mode_capabilities();
+    assert_eq!(ios.inner.ios_mode_qualified(&context(SavedCommandDomain::IOSArchive), None),
+        modes.supports(Operation::IOSUnsignedArchive));
+    assert!(!ios.inner.ios_mode_qualified(&Context::IOSArchive(ios_wire::tests::signed_context()), None));
+    assert!(!ios.inner.ios_mode_qualified(&Context::IOSArchive(ios_wire::tests::recovery_context()), None));
+    assert!(!ios.inner.ios_mode_qualified(&context(SavedCommandDomain::OfflinePreflight), None));
+    assert!(!modes.signed && !modes.recovery);
+}
+#[test]
+fn mode_only_status_changes_use_the_original_counter_without_changing_other_domains() {
+    let ios = application(SavedCommandDomain::IOSArchive);
+    let mut r = ios.inner.lock();
+    let unsigned = ios_wire::ModeCapabilities { unsigned: true, signed: false, recovery: false };
+    ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(ios_wire::ModeCapabilities::NONE));
+    let first = r.revision;
+    ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(ios_wire::ModeCapabilities::NONE));
+    assert_eq!(r.revision, first);
+    ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(unsigned));
+    assert_eq!(r.revision, first + 1); assert_eq!(r.ios_mode_capabilities, Some(unsigned));
+    ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(unsigned));
+    assert_eq!(r.revision, first + 1);
+    r.revision = u32::MAX - 1;
+    ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(ios_wire::ModeCapabilities::NONE));
+    assert!(r.exhausted && ios.inner.snapshot_locked(&mut r, Availability::Available).is_err());
+    drop(r);
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
+        let owner = application(domain); let mut r = owner.inner.lock();
+        owner.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, None);
+        assert_eq!(r.revision, 0);
+        owner.inner.record_capabilities(&mut r, Availability::Busy, None);
+        owner.inner.record_capabilities(&mut r, Availability::Busy, None);
+        assert_eq!(r.revision, 1); assert_eq!(r.ios_mode_capabilities, None);
+    }
+}
 fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection {
     operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context: context(domain),
     phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None,

@@ -1,7 +1,7 @@
 //! Private, compiled macOS Android supplier recipe and canonical proposal.
 //! Caller DATA never supplies a reference. This module performs no IO and
 //! cannot settle source custody, consent, original deadlines or native work.
-use std::{cmp::Ordering, mem::size_of};
+use std::{cmp::Ordering, mem::size_of, sync::OnceLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::android_toolchain_macos_policy as policy;
@@ -346,6 +346,15 @@ const NATIVE_ARCHIVES: &[NativeArchivePin] = &[
                 sha256: "112ec3a23028432599900c763a16d51eb89461e60cdac2fcee1bf97642a2d08b", mode: 0o100644, kind: NativeResourceKind::OtherPlatformPe },
         ] },
 ];
+// Exact retained executable inside the fixed bundletool dump-manifest role.
+// Its relative RPATHs are not admitted provider roots or native launch authority.
+const BUNDLETOOL_MANIFEST_NATIVE: native_profile::MachPin = native_profile::MachPin {
+    prefix_bytes: 4096,
+    prefix_sha256: "1fbb58d83791e214ca2c009c1056593357b02d4eacb570f955b214382a254716",
+    commands_sha256: "894583bc35304cf5e2cccc336995e5c931fc348cfe9c64385bb463df9294ea38",
+    file_type: 2, install_name: None, loads: &["/usr/lib/libSystem.B.dylib"],
+    rpaths: &["@loader_path/../lib64", "@loader_path/lib64"],
+};
 fn native_archive(path: &str) -> Option<&'static NativeArchivePin> {
     NATIVE_ARCHIVES.iter().find(|archive| archive.path == path)
 }
@@ -604,8 +613,8 @@ fn canonical_source(reference: &Reference, group: SourceGroup, relative: &str, c
 fn source_file(source: &SourceMemberSpec, file: &CanonicalFile) -> bool {
     matches!(source.kind, SourceKindSpec::File { bytes, sha256, .. } if bytes == file.size && sha256 == file.sha256)
 }
-/// Pure bounded byte pins only: structural()/available()/reservation discovery
-/// call this before there is a native work charge. Do not parse Mach-O here.
+/// Pure bounded byte pins only: immutable structural preparation calls this
+/// before there is a native work charge. Do not parse Mach-O here.
 fn native_snapshot_matches(value: &NativeHeader, pin: &native_profile::MachPin) -> bool {
     value.prefix.len() <= 4096 && (32..=NATIVE_HEADER).contains(&value.commands.len())
         && pin.snapshot_bytes(value.prefix, value.commands)
@@ -627,7 +636,8 @@ fn native_header_for(value: &NativeHeader, bytes: u64, architecture: policy::Mac
 /// never creates a second inventory/proposal, but this preserves all existing
 /// fixed supplier/parser/native allowances rather than guessing a zero budget.
 fn fixed_working_bytes() -> Option<usize> {
-    262144usize.checked_add(sdk_metadata::PARSER_WORK_BYTES)?.checked_add(policy::NATIVE_WORK_BYTES)
+    262144usize.checked_add(sdk_metadata::PARSER_WORK_BYTES)?.checked_add(policy::NATIVE_WORK_BYTES)?
+        .checked_add(CACHE_WORK_BYTES)
 }
 impl Reference {
     fn source_storage(&self) -> Option<SourceStorage> { SourceStorage::for_roster(self.source_members, self.payload) }
@@ -1121,10 +1131,16 @@ impl Reference {
         true
     }
 
+    #[cfg(test)]
     fn matches_inventory(&self, inventory: &Inventory) -> bool {
+        self.structural() && self.matches_checked_inventory(inventory)
+    }
+
+    // Only CheckedReference production callers have already proved immutable
+    // structure. Every inventory-dependent tuple and native join remains live.
+    fn matches_checked_inventory(&self, inventory: &Inventory) -> bool {
         let data = &inventory.data; let v = &data.versions; let r = &data.roles;
-        self.structural()
-            && (v.jdk_vendor.as_str(), v.jdk_version.as_str(), v.gradle_version.as_str(), v.agp_version.as_str(),
+        (v.jdk_vendor.as_str(), v.jdk_version.as_str(), v.gradle_version.as_str(), v.agp_version.as_str(),
                 v.sdk_platform.as_str(), v.sdk_platform_revision.as_str(), v.sdk_build_tools_version.as_str())
                 == (self.versions.jdk_vendor, self.versions.jdk_version, self.versions.gradle_version, self.versions.agp_version,
                     self.versions.sdk_platform, self.versions.sdk_platform_revision, self.versions.sdk_build_tools_version)
@@ -1141,6 +1157,32 @@ impl Reference {
             && inventory.directories.len() == self.directories.len()
             && inventory.directories.iter().map(String::as_str).eq(self.directories.iter().copied())
             && self.native_closure(inventory)
+    }
+
+    fn embedded_native_closure(&self, file: &CanonicalFile, member: &NestedNative,
+        commands: &policy::MachCommands, inventory: &Inventory) -> bool {
+        if (file.path, member.member) == ("bundletool/bundletool.jar", "macos/aapt2") {
+            // Only bundletool_command's fixed dump manifest/base use retains this
+            // exact executable without extracting or running it. A future build,
+            // install or generic-verb role needs its own native/provider review.
+            // Exact failure cannot fall through to generic system-only acceptance.
+            let Some(archive) = native_archive(file.path) else { return false; };
+            let Some(pin) = archive.members.iter().find(|pin| pin.member == member.member) else { return false; };
+            return self.profile == crate::android_build_protocol::MAC_TOOLCHAIN_PROFILE
+                && self.roles.bundletool == file.path && inventory.data.roles.bundletool == file.path
+                && file.size == archive.bytes && file.sha256 == archive.sha256 && file.mode == 0o444
+                && inventory.exact_file(file.path).is_some_and(|selected|
+                    selected.size == file.size && selected.sha256 == file.sha256 && selected.mode == file.mode)
+                && (member.member, member.bytes, member.sha256, member.mode, member.kind)
+                    == (pin.member, pin.bytes, pin.sha256, pin.mode, pin.kind)
+                && member.kind == NativeResourceKind::Arm64
+                && member.header.as_ref().is_some_and(|header|
+                    BUNDLETOOL_MANIFEST_NATIVE.snapshot_bytes(header.prefix, header.commands))
+                && BUNDLETOOL_MANIFEST_NATIVE.matches(commands);
+        }
+        // Other current-platform resources keep the original system-only rule.
+        commands.loads.iter().all(|p| policy::system_load(p))
+            && commands.rpaths.iter().all(|p| policy::OS_ROOTS.contains(&p.as_str()) || policy::system_load(p))
     }
 
     fn native_closure(&self, inventory: &Inventory) -> bool {
@@ -1173,8 +1215,7 @@ impl Reference {
                                 // the same retained bundle, not a hash-only search.
                                 let Some(bundle) = file.installed.path.strip_suffix(archive.relative) else { return false; };
                                 let Some(pin) = native_profile::jdk_native(relative) else { return false; };
-                                let Some(counterpart) = inventory.data.files.iter().find(|f|
-                                    f.path.strip_prefix(bundle) == Some(relative)) else { return false; };
+                                let Some(counterpart) = inventory.file_under(bundle, relative) else { return false; };
                                 if counterpart.size != member.bytes || counterpart.sha256 != member.sha256
                                     || !pin.matches(&counterpart.path, counterpart.size, &counterpart.sha256, counterpart.mode)
                                     || !policy::local_loads(&counterpart.path, &commands, inventory) { return false; }
@@ -1186,10 +1227,7 @@ impl Reference {
                         // finite foreign tuple, not a path or caller flag.
                         let Some(header) = &member.header else { continue; };
                         let Some(commands) = native_header(header, member.bytes) else { return false; };
-                        // Extracted current-platform natives keep their actual
-                        // system-only loader proof; no external provider is added.
-                        if !commands.loads.iter().all(|p| policy::system_load(p))
-                            || !commands.rpaths.iter().all(|p| policy::OS_ROOTS.contains(&p.as_str()) || policy::system_load(p)) { return false; }
+                        if !self.embedded_native_closure(&file.installed, member, &commands, inventory) { return false; }
                     }
                 }
                 _ => {}
@@ -1207,19 +1245,65 @@ impl std::io::Write for ReferenceDigest {
     }
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
-fn reference_digest(reference: &Reference) -> Option<[u8; 32]> {
-    let mut writer = ReferenceDigest { count: 0, hash: Sha256::new() };
-    std::io::Write::write_all(&mut writer, b"mrk-macos-android-canonical-supplier-reference-v3\0").ok()?;
+fn emit_reference<W: std::io::Write>(reference: &Reference, writer: &mut W) -> Option<()> {
+    std::io::Write::write_all(writer, b"mrk-macos-android-canonical-supplier-reference-v3\0").ok()?;
     // Bind full compiled provenance and the fixed optional observation contract,
     // not only enum identities. Generated XML bytes have exact document pins.
-    serde_json::to_writer(&mut writer, &(reference, &sdk_metadata::OPTIONAL,
+    serde_json::to_writer(writer, &(reference, &sdk_metadata::OPTIONAL,
         [sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::Platform35Revision2),
          sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::BuildTools35)],
          native_profile::record_authority())).ok()?;
+    Some(())
+}
+fn reference_digest(reference: &Reference) -> Option<[u8; 32]> {
+    let mut writer = ReferenceDigest { count: 0, hash: Sha256::new() };
+    emit_reference(reference, &mut writer)?;
     Some(writer.hash.finalize().into())
 }
+/// A successful check of one immutable reference, never an inventory, source,
+/// account, provider, ownership, consent, deadline or native-execution receipt.
+#[derive(Clone, Copy)]
+struct CheckedReference {
+    reference: &'static Reference,
+    digest: [u8; 32],
+}
+impl CheckedReference {
+    fn new(reference: &'static Reference) -> Option<Self> {
+        if !reference.structural() { return None; }
+        Some(Self { reference, digest: reference_digest(reference)? })
+    }
+    fn matches_inventory(&self, inventory: &Inventory) -> bool {
+        self.reference.matches_checked_inventory(inventory)
+    }
+}
+type CheckedCatalogue = [Option<CheckedReference>; REFERENCES.len()];
+static COMPILED_CATALOGUE: OnceLock<CheckedCatalogue> = OnceLock::new();
+// The complete static state, two fixed construction-array layouts, candidate
+// and transient Recipe are additive to the existing supplier work allowance.
+// The retained Recipe is also charged by its original SourceSlots/Review owner.
+pub(crate) const CACHE_STORAGE_BYTES: usize = size_of::<OnceLock<CheckedCatalogue>>();
+pub(crate) const CACHE_WORK_BYTES: usize = CACHE_STORAGE_BYTES + 2 * size_of::<CheckedCatalogue>()
+    + size_of::<CheckedReference>() + size_of::<Recipe>();
+const _: () = assert!(CACHE_WORK_BYTES <= 4096, "compiled supplier cache must remain fixed and small");
+
+fn compiled_catalogue() -> &'static CheckedCatalogue {
+    // REFERENCES is generated const DATA, so separate uses need not have equal
+    // addresses. Each ordinal is checked against itself; no pointer/profile/
+    // digest key or deduplication can attach a proof to a different reference.
+    // None is a cached immutable failure, not a retry or authorization token.
+    COMPILED_CATALOGUE.get_or_init(|| std::array::from_fn(|index|
+        CheckedReference::new(&REFERENCES[index])))
+}
+/// Pure synchronous bootstrap before the ordinary Android owner's short books
+/// exist. Other non-query consumers initialize on their existing work path.
+/// A panic publishes nothing; get() stays unavailable while cold or initializing.
+pub(crate) fn prepare_compiled_catalogue() { let _ = compiled_catalogue(); }
+fn catalogue_available<const N: usize>(cache: &OnceLock<[Option<CheckedReference>; N]>) -> bool {
+    cache.get().is_some_and(|entries| !entries.is_empty() && entries.iter().all(Option::is_some))
+}
 pub(crate) fn available() -> bool {
-    !REFERENCES.is_empty() && REFERENCES.iter().all(|r| r.structural() && reference_digest(r).is_some())
+    // Called under Registry/control books: never initialize or wait here.
+    catalogue_available(&COMPILED_CATALOGUE)
 }
 /// Pure compiled DATA, not a grant or a second64MiB pool. The app source book
 /// adds its concrete layout/capacities and the whole existing caller census.
@@ -1229,10 +1313,11 @@ pub(crate) struct SourceCatalogueBudget {
     pub(crate) proposal_work: usize,
     pub(crate) reproof_work: usize,
 }
-fn catalogue_budget(catalogue: &[Reference]) -> Result<SourceCatalogueBudget, Failure> {
+fn checked_catalogue_budget<'a>(catalogue: impl IntoIterator<Item = Option<&'a Reference>>)
+    -> Result<SourceCatalogueBudget, Failure> {
     let mut maximum: Option<SourceCatalogueBudget> = None;
     for reference in catalogue {
-        if !reference.structural() || reference_digest(reference).is_none() { return Err(Failure::Reference); }
+        let reference = reference.ok_or(Failure::Reference)?;
         let storage = reference.source_storage().ok_or(Failure::Bounds)?;
         let proposal_work = reference.working_bytes().filter(|n| *n > 0).ok_or(Failure::Bounds)?;
         let reproof_work = fixed_working_bytes().ok_or(Failure::Bounds)?;
@@ -1244,7 +1329,16 @@ fn catalogue_budget(catalogue: &[Reference]) -> Result<SourceCatalogueBudget, Fa
     }
     maximum.ok_or(Failure::Unavailable)
 }
-pub(crate) fn source_catalogue_budget() -> Result<SourceCatalogueBudget, Failure> { catalogue_budget(REFERENCES) }
+#[cfg(test)]
+fn catalogue_budget(catalogue: &[Reference]) -> Result<SourceCatalogueBudget, Failure> {
+    // Inert/copied references never borrow a compiled ordinal's validation.
+    checked_catalogue_budget(catalogue.iter().map(|reference|
+        (reference.structural() && reference_digest(reference).is_some()).then_some(reference)))
+}
+pub(crate) fn source_catalogue_budget() -> Result<SourceCatalogueBudget, Failure> {
+    checked_catalogue_budget(compiled_catalogue().iter().map(|entry|
+        entry.as_ref().map(|checked| checked.reference)))
+}
 /// Full construction validity remains required even for a read-only reproof.
 pub(crate) fn max_working_reservation_bytes() -> Result<usize, Failure> {
     source_catalogue_budget().map(|budget| budget.proposal_work)
@@ -1252,58 +1346,71 @@ pub(crate) fn max_working_reservation_bytes() -> Result<usize, Failure> {
 /// Full tuple/membership is compared in the same predicate used by canonical
 /// proposal, Publisher and installed readback. A claimed digest alone cannot
 /// admit any inventory, and no file/local report fills REFERENCES.
-pub(crate) fn admit(inventory: &Inventory, supplier_record: &[u8; 32]) -> Result<(), SupplierFailure> {
+fn admit_checked(catalogue: &[Option<CheckedReference>], inventory: &Inventory,
+    supplier_record: &[u8; 32]) -> Result<(), SupplierFailure> {
     let mut matches = 0usize;
-    for reference in REFERENCES {
-        if reference_digest(reference).as_ref() == Some(supplier_record) && reference.matches_inventory(inventory) { matches += 1; }
+    for checked in catalogue.iter().flatten() {
+        // Equal digests/records at different ordinals still count separately.
+        // Every matching digest must also pass the full fresh inventory join.
+        if &checked.digest == supplier_record && checked.matches_inventory(inventory) { matches += 1; }
     }
     if matches == 1 { Ok(()) } else { Err(SupplierFailure::Unavailable) }
+}
+pub(crate) fn admit(inventory: &Inventory, supplier_record: &[u8; 32]) -> Result<(), SupplierFailure> {
+    admit_checked(compiled_catalogue(), inventory, supplier_record)
 }
 
 
 pub(crate) struct Recipe {
-    reference: &'static Reference,
+    selected: CheckedReference,
     layout: JdkLayout,
 }
-fn choose<'a>(catalogue: &'static [Reference], layout: &SourceLayouts<'a>) -> Result<Recipe, Failure> {
+fn choose_checked<'a>(catalogue: &'static [Reference], layout: &SourceLayouts<'a>,
+    checked: impl Fn(usize, &'static Reference) -> Option<CheckedReference>) -> Result<Recipe, Failure> {
     if layout.jdk_vendor.is_empty() || layout.jdk_vendor.len() > 128
         || layout.jdk_version.is_empty() || layout.jdk_version.len() > 64 { return Err(Failure::UnsupportedLayout); }
     let mut chosen = None;
-    for reference in catalogue {
+    for (index, reference) in catalogue.iter().enumerate() {
+        // Match RAW ordinal labels first: a matching invalid record is Reference,
+        // not Unavailable; an unrelated invalid ordinal must not disable a match.
         if reference.observed_jdk_vendor == layout.jdk_vendor && reference.observed_jdk_version == layout.jdk_version {
-            if chosen.is_some() || !reference.structural() || reference_digest(reference).is_none() { return Err(Failure::Reference); }
-            chosen = Some(reference);
+            if chosen.is_some() { return Err(Failure::Reference); }
+            chosen = Some(checked(index, reference).ok_or(Failure::Reference)?);
         }
     }
-    Ok(Recipe { reference: chosen.ok_or(Failure::Unavailable)?, layout: layout.jdk })
+    Ok(Recipe { selected: chosen.ok_or(Failure::Unavailable)?, layout: layout.jdk })
+}
+#[cfg(test)]
+fn choose<'a>(catalogue: &'static [Reference], layout: &SourceLayouts<'a>) -> Result<Recipe, Failure> {
+    choose_checked(catalogue, layout, |_, reference| CheckedReference::new(reference))
 }
 pub(crate) fn recipe(layout: &SourceLayouts<'_>) -> Result<Recipe, Failure> {
-    choose(REFERENCES, layout)
+    choose_checked(REFERENCES, layout, |index, _| compiled_catalogue()[index])
 }
 impl Recipe {
     /// Exact roster first. The source book must retain the selected roots and
     /// enumerate these complete closures, rejecting unexplained extra entries.
     pub(crate) fn source_roster(&self) -> SourceRoster {
-        SourceRoster { trees: self.reference.trees, members: self.reference.source_members,
-            support: self.reference.support, archive_members: self.reference.support_members,
+        SourceRoster { trees: self.selected.reference.trees, members: self.selected.reference.source_members,
+            support: self.selected.reference.support, archive_members: self.selected.reference.support_members,
             optional_sdk_metadata: &sdk_metadata::OPTIONAL }
     }
     pub(crate) fn jdk_layout(&self) -> JdkLayout { self.layout }
     /// Compiled tuple labels only; never project or renderer compatibility claims.
     pub(crate) fn source_versions(&self) -> [&'static str; 3] {
-        [self.reference.versions.jdk_version, self.reference.versions.sdk_build_tools_version,
-            self.reference.versions.gradle_version]
+        [self.selected.reference.versions.jdk_version, self.selected.reference.versions.sdk_build_tools_version,
+            self.selected.reference.versions.gradle_version]
     }
     /// DATA reservation, not a new pool/grant. App owner must reserve its actual
     /// simultaneous source/native/Review data PLUS this within the same64MiB.
     pub(crate) fn working_reservation_bytes(&self) -> Result<usize, Failure> {
-        self.reference.working_bytes().ok_or(Failure::Bounds)
+        self.selected.reference.working_bytes().ok_or(Failure::Bounds)
     }
     pub(crate) fn source_storage(&self) -> Result<SourceStorage, Failure> {
-        self.reference.source_storage().ok_or(Failure::Bounds)
+        self.selected.reference.source_storage().ok_or(Failure::Bounds)
     }
     fn observations_match(&self, observations: &SourceObservations<'_>) -> bool {
-        let reference = self.reference;
+        let reference = self.selected.reference;
         if observations.members.len() != reference.source_members.len()
             || observations.support.len() != reference.support.len()
             || observations.archive_members.len() != reference.support_members.len()
@@ -1336,7 +1443,7 @@ impl Recipe {
             return Err(Failure::SourceMismatch);
         }
         if os_provider_files.len() != policy::OS_FILES.len() { return Err(Failure::Metadata); }
-        let payload_bytes = self.reference.payload.iter().try_fold(0u64, |sum, value| sum.checked_add(value.installed.size))
+        let payload_bytes = self.selected.reference.payload.iter().try_fold(0u64, |sum, value| sum.checked_add(value.installed.size))
             .ok_or(Failure::Bounds)?;
         let provider_bytes = os_provider_files.iter().try_fold(0u64, |sum, file| sum.checked_add(file.size))
             .ok_or(Failure::Bounds)?;
@@ -1352,7 +1459,7 @@ impl Recipe {
         let provider = policy::proposal_provider(os_files).ok_or(Failure::Metadata)?;
         let provider = policy::encode_provider(&provider).ok_or(Failure::Bounds)?;
         let os_digest = provider.digest_hex();
-        let r = self.reference; let v = &r.versions; let role = &r.roles;
+        let r = self.selected.reference; let v = &r.versions; let role = &r.roles;
         let mut files = bounded_vec(r.payload.len())?;
         for value in r.payload {
             files.push(FileSpec { path: owned(value.installed.path)?, size: value.installed.size,
@@ -1373,8 +1480,8 @@ impl Recipe {
             files, aliases,
         };
         let inventory = policy::proposal_inventory(fields, instance, &os_digest).ok_or(Failure::Metadata)?;
-        if !r.matches_inventory(&inventory) { return Err(Failure::Reference); }
-        let supplier_record = reference_digest(r).ok_or(Failure::Bounds)?;
+        if !self.selected.matches_inventory(&inventory) { return Err(Failure::Reference); }
+        let supplier_record = self.selected.digest;
         // Same full-tuple predicate as admit; production r came only from the
         // compiled REFERENCES. Tests use a deliberately separate inert catalogue.
         let manifest = policy::encode_inventory(&inventory).ok_or(Failure::Bounds)?;
@@ -1460,12 +1567,27 @@ mod tests {
         assert!(REFERENCES.iter().all(|compiled| reference_digest(compiled) != Some(digest)),
             "comparison fixtures must never be production suppliers");
     }
+    fn compiled_bundletool_native() -> (&'static CanonicalFile, NestedNative) {
+        let reference = REFERENCES.first().expect("genuine compiled catalogue");
+        let index = reference.payload.iter().position(|p|
+            p.installed.path == "bundletool/bundletool.jar").expect("fixed bundletool JAR");
+        let FileClass::JvmArchive { native_members } = &reference.classes[index] else {
+            panic!("bundletool must keep its original native resource class");
+        };
+        (&reference.payload[index].installed, *native_members.iter().find(|m|
+            m.member == "macos/aapt2").expect("retained bundletool native member"))
+    }
     fn native_fixture(file: &CanonicalFile) -> &'static [NestedNative] {
-        // Exact tuple/roster comparison DATA with deliberately synthetic headers.
-        // This is NOT an actual archive-byte/native execution receipt.
+        // Exact tuple/roster DATA, otherwise deliberately synthetic headers.
+        // Only the reserved manifest-role member borrows its captured header.
+        // This is NOT an original archive read or native execution receipt.
         static_slice(native_archive(file.path).map_or_else(Vec::new, |archive| archive.members.iter().map(|pin|
             NestedNative { member: pin.member, bytes: pin.bytes, sha256: pin.sha256, mode: pin.mode, kind: pin.kind,
-                header: (pin.kind == NativeResourceKind::Arm64).then_some(NativeHeader { prefix: THIN, commands: THIN }) }
+                header: if (file.path, pin.member) == ("bundletool/bundletool.jar", "macos/aapt2") {
+                    compiled_bundletool_native().1.header
+                } else {
+                    (pin.kind == NativeResourceKind::Arm64).then_some(NativeHeader { prefix: THIN, commands: THIN })
+                } }
         ).collect()))
     }
     /// Deliberately synthetic comparison DATA; never a production supplier and
@@ -1846,6 +1968,112 @@ mod tests {
     }
 
 
+
+    pub(super) fn immutable_cache_lookup_never_initializes_or_waits_data() {
+        // Local cells exercise the SAME accessor as Registry's available().
+        // No global reset, native work, worker, mock inventory or capability.
+        let cache: OnceLock<[Option<CheckedReference>; 1]> = OnceLock::new();
+        let original = retained(fixture());
+        let calls = std::cell::Cell::new(0);
+        assert!(!catalogue_available(&cache));
+        assert!(cache.get().is_none());
+        cache.get_or_init(|| {
+            calls.set(calls.get() + 1);
+            // A recursive get during the initializer must return immediately;
+            // a query changed to get_or_init would wait on itself instead.
+            assert!(!catalogue_available(&cache));
+            [CheckedReference::new(original)]
+        });
+        assert!(catalogue_available(&cache));
+        cache.get_or_init(|| {
+            calls.set(calls.get() + 1);
+            [None]
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(cache.get().unwrap()[0].unwrap().digest, reference_digest(original).unwrap());
+
+        let invalid = retained(Reference { profile: "not-the-compiled-profile", ..*original });
+        let failed: OnceLock<[Option<CheckedReference>; 1]> = OnceLock::new();
+        failed.get_or_init(|| [CheckedReference::new(invalid)]);
+        assert!(!catalogue_available(&failed));
+        failed.get_or_init(|| panic!("an immutable failure must not be retried"));
+        assert!(failed.get().unwrap()[0].is_none());
+        let empty: OnceLock<[Option<CheckedReference>; 0]> = OnceLock::new();
+        empty.get_or_init(|| []);
+        assert!(!catalogue_available(&empty));
+
+        let interrupted: OnceLock<[Option<CheckedReference>; 1]> = OnceLock::new();
+        let result = std::panic::catch_unwind(|| {
+            interrupted.get_or_init(|| {
+                assert!(!catalogue_available(&interrupted));
+                panic!("bounded inert initializer interruption");
+            });
+        });
+        assert!(result.is_err() && interrupted.get().is_none() && !catalogue_available(&interrupted));
+        // Retry is explicit pure initialization, never a query or operation.
+        interrupted.get_or_init(|| [CheckedReference::new(original)]);
+        assert!(catalogue_available(&interrupted));
+        assert!(CACHE_STORAGE_BYTES > 0 && CACHE_STORAGE_BYTES <= CACHE_WORK_BYTES && CACHE_WORK_BYTES <= 4096);
+    }
+    #[test]
+    fn immutable_cache_lookup_never_initializes_or_waits() {
+        immutable_cache_lookup_never_initializes_or_waits_data();
+    }
+
+    pub(super) fn checked_ordinals_preserve_selection_failure_and_duplicate_semantics_data() {
+        let base = fixture();
+        let layout = SourceLayouts { jdk: JdkLayout::Bundle, jdk_vendor: base.observed_jdk_vendor,
+            jdk_version: base.observed_jdk_version };
+        let invalid = Reference { profile: "not-the-compiled-profile", ..base };
+        let unrelated = Reference { observed_jdk_vendor: "other", ..invalid };
+        let catalogue = static_slice(vec![base, unrelated]);
+        let entries = [CheckedReference::new(&catalogue[0]), CheckedReference::new(&catalogue[1])];
+        assert!(entries[0].is_some() && entries[1].is_none());
+        let selected = choose_checked(catalogue, &layout, |index, _| entries[index]).unwrap();
+        assert_eq!(selected.selected.digest, reference_digest(&catalogue[0]).unwrap());
+        assert!(matches!(checked_catalogue_budget(entries.iter().map(|entry|
+            entry.as_ref().map(|checked| checked.reference))), Err(Failure::Reference)));
+
+        for values in [[invalid, base], [base, invalid], [base, base]] {
+            let catalogue = static_slice(values.to_vec());
+            let entries = [CheckedReference::new(&catalogue[0]), CheckedReference::new(&catalogue[1])];
+            assert!(matches!(choose_checked(catalogue, &layout, |index, _| entries[index]), Err(Failure::Reference)));
+        }
+        // A copied/altered matching record is checked raw, not by shared selector,
+        // digest, memory address or a previously accepted compiled-cache slot.
+        assert!(matches!(choose(static_slice(vec![invalid]), &layout), Err(Failure::Reference)));
+        assert!(matches!(choose_checked(&[], &layout, |_, _| unreachable!()), Err(Failure::Unavailable)));
+        let missing = SourceLayouts { jdk: JdkLayout::Bundle, jdk_vendor: "absent", jdk_version: layout.jdk_version };
+        assert!(matches!(choose_checked(catalogue, &missing, |_, _|
+            panic!("nonmatching ordinals must not consult checked state")), Err(Failure::Unavailable)));
+
+        observed(selected.selected.reference, |observations| {
+            let instance = "a".repeat(32);
+            let proposal = selected.finalize_proposal(&instance, 501, observations, &os_files()).unwrap();
+            let documents = proposal.documents();
+            let selection = crate::android_build_protocol::MacToolchainSelection {
+                instance: instance.clone(), owner_uid: 501, catalog_generation: 1,
+                record_sha256: policy::digest(documents[1]), inventory_sha256: policy::digest(documents[0]),
+                os_provider_sha256: policy::digest(documents[2]),
+            };
+            let mut inventory = policy::parse_manifest(documents[0], &selection).unwrap();
+            let checked = selected.selected;
+            assert_eq!(admit_checked(&[Some(checked), None], &inventory, &checked.digest), Ok(()));
+            assert_eq!(admit_checked(&[Some(checked), Some(checked)], &inventory, &checked.digest),
+                Err(SupplierFailure::Unavailable));
+            assert_eq!(admit_checked(&[], &inventory, &checked.digest), Err(SupplierFailure::Unavailable));
+            inventory.data.versions.gradle_version.push('x');
+            assert_eq!(admit_checked(&[Some(checked)], &inventory, &checked.digest), Err(SupplierFailure::Unavailable));
+            inventory.data.versions.gradle_version.pop();
+            assert_eq!(admit_checked(&[Some(checked)], &inventory, &checked.digest), Ok(()));
+            assert_eq!(admit(&inventory, &checked.digest), Err(SupplierFailure::Unavailable));
+        });
+    }
+    #[test]
+    fn checked_ordinals_preserve_selection_failure_and_duplicate_semantics() {
+        checked_ordinals_preserve_selection_failure_and_duplicate_semantics_data();
+    }
+
     pub(super) fn canonical_fixture_roundtrips_but_never_enables_production_data() {
         let r = retained(fixture());
         assert!(r.structural());
@@ -1887,7 +2115,7 @@ mod tests {
     }
     pub(super) fn compiled_sdk_metadata_does_not_forge_picked_source_observations_data() {
         let base = fixture();
-        let recipe = Recipe { reference: retained(base), layout: JdkLayout::Bundle };
+        let recipe = Recipe { selected: CheckedReference::new(retained(base)).unwrap(), layout: JdkLayout::Bundle };
         assert!(std::ptr::eq(recipe.source_roster().optional_sdk_metadata, &sdk_metadata::OPTIONAL));
         observed(&base, |obs| {
             let doc = sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::Platform35Revision2);
@@ -1975,7 +2203,7 @@ mod tests {
     }
     pub(super) fn complete_observations_and_provider_budget_are_required_data() {
         let r = retained(fixture());
-        let recipe = Recipe { reference: r, layout: JdkLayout::HomeInSameBundle };
+        let recipe = Recipe { selected: CheckedReference::new(r).unwrap(), layout: JdkLayout::HomeInSameBundle };
         observed(r, |obs| {
             assert!(recipe.observations_match(obs));
             let missing = SourceObservations { members: &obs.members[1..], support: obs.support,
@@ -2018,7 +2246,7 @@ mod tests {
         let linked = retained(fixture_with_source_alias(Some(("java", "Contents/Home/bin/java"))));
         assert!(linked.structural());
         assert_eq!(linked.aliases.len(), 1);
-        let linked_recipe = Recipe { reference: linked, layout: JdkLayout::Bundle };
+        let linked_recipe = Recipe { selected: CheckedReference::new(linked).unwrap(), layout: JdkLayout::Bundle };
         observed(linked, |observations| {
             assert!(linked_recipe.observations_match(observations));
             assert!(linked_recipe.finalize_proposal(&"a".repeat(32), 501, observations, &os_files()).is_ok());
@@ -2135,8 +2363,8 @@ mod tests {
         else { FileClass::Data }).collect();
         classes[0] = FileClass::JvmArchive { native_members: &[] };
         assert!(!Reference { classes: static_slice(classes), ..r }.structural());
-        assert_eq!(max_working_reservation_bytes(), Err(Failure::Unavailable));
-        let recipe = Recipe { reference: retained(r), layout: JdkLayout::Bundle };
+        assert!(matches!(catalogue_budget(&[]), Err(Failure::Unavailable)));
+        let recipe = Recipe { selected: CheckedReference::new(retained(r)).unwrap(), layout: JdkLayout::Bundle };
         assert_eq!(recipe.source_versions(), ["17.0.1", "35.0.0", "8.14.5"]);
     }
 
@@ -2349,6 +2577,112 @@ mod tests {
             files, aliases: Vec::new(),
         }, &"a".repeat(32), HASH).unwrap()
     }
+    pub(super) fn fixed_manifest_embedded_native_requires_exact_role_and_original_header_data() {
+        let reference = &REFERENCES[0];
+        let (file, member) = compiled_bundletool_native();
+        let header = member.header.unwrap();
+        let commands = native_header(&header, member.bytes).unwrap();
+        let mut inventory = finite_jdk_inventory();
+        assert_eq!(commands.rpaths, ["@loader_path/../lib64", "@loader_path/lib64"]);
+        assert!(!commands.rpaths.iter().all(|p|
+            policy::OS_ROOTS.contains(&p.as_str()) || policy::system_load(p)));
+        assert!(reference.embedded_native_closure(file, &member, &commands, &inventory));
+
+        for changed in [
+            CanonicalFile { size: file.size + 1, ..*file },
+            CanonicalFile { sha256: HASH, ..*file },
+            CanonicalFile { mode: 0o555, ..*file },
+            CanonicalFile { path: policy::AAPT2, ..*file },
+            CanonicalFile { path: "other/bundletool.jar", ..*file },
+        ] {
+            assert!(!reference.embedded_native_closure(&changed, &member, &commands, &inventory));
+        }
+        let changed = Reference { profile: "unqualified-profile", ..*reference };
+        assert!(!changed.embedded_native_closure(file, &member, &commands, &inventory));
+        let changed = Reference { roles: RoleSpec { bundletool: policy::AAPT2, ..reference.roles }, ..*reference };
+        assert!(!changed.embedded_native_closure(file, &member, &commands, &inventory));
+        inventory.data.roles.bundletool = policy::AAPT2.into();
+        assert!(!reference.embedded_native_closure(file, &member, &commands, &inventory));
+        inventory.data.roles.bundletool = file.path.into();
+
+        // Preserve constructor-proven order while exercising selected-file joins.
+        let index = inventory.data.files.iter().position(|f| f.path == file.path).unwrap();
+        let selected = inventory.data.files.remove(index);
+        assert!(!reference.embedded_native_closure(file, &member, &commands, &inventory));
+        inventory.data.files.insert(index, selected.clone());
+        for mutation in 0..3 {
+            match mutation {
+                0 => inventory.data.files[index].size += 1,
+                1 => inventory.data.files[index].sha256 = HASH.into(),
+                _ => inventory.data.files[index].mode = 0o555,
+            }
+            assert!(!reference.embedded_native_closure(file, &member, &commands, &inventory));
+            inventory.data.files[index] = selected.clone();
+        }
+        for changed in [
+            NestedNative { member: "relocated/macos/aapt2", ..member },
+            NestedNative { bytes: member.bytes + 1, ..member },
+            NestedNative { sha256: HASH, ..member },
+            NestedNative { mode: 0o100644, ..member },
+            NestedNative { kind: NativeResourceKind::OtherPlatformElf, ..member },
+            NestedNative { header: None, ..member },
+        ] {
+            assert!(!reference.embedded_native_closure(file, &changed, &commands, &inventory));
+        }
+
+        // Parsed agreement alone cannot accept altered full-prefix or trailing
+        // command bytes that the bounded parser does not semantically consume.
+        let mut prefix = header.prefix.to_vec(); prefix[4095] ^= 1;
+        let mut trailing = header.commands.to_vec(); trailing.push(0);
+        for changed_header in [
+            NativeHeader { prefix: static_slice(prefix), ..header },
+            NativeHeader { commands: static_slice(trailing), ..header },
+        ] {
+            let changed_commands = native_header(&changed_header, member.bytes).unwrap();
+            assert!(BUNDLETOOL_MANIFEST_NATIVE.matches(&changed_commands));
+            let changed = NestedNative { header: Some(changed_header), ..member };
+            assert!(!reference.embedded_native_closure(file, &changed, &changed_commands, &inventory));
+        }
+        for mutation in 0..7 {
+            let mut changed_commands = commands.clone();
+            match mutation {
+                0 => changed_commands.architecture = policy::MachArchitecture::X86_64,
+                1 => changed_commands.file_type = 6,
+                2 => changed_commands.header_sha256 = HASH.into(),
+                3 => changed_commands.install_name = Some("/usr/lib/other.dylib".into()),
+                4 => changed_commands.loads[0] = "/usr/lib/other.dylib".into(),
+                5 => changed_commands.rpaths[0] = "/usr/lib".into(),
+                _ => changed_commands.rpaths.swap(0, 1),
+            }
+            assert!(!reference.embedded_native_closure(file, &member, &changed_commands, &inventory));
+        }
+        // This reserved pair would pass the generic system-only rule. It must
+        // still refuse when its exact retained header no longer matches.
+        let empty_header = NativeHeader { prefix: THIN, commands: THIN };
+        let empty_commands = native_header(&empty_header, member.bytes).unwrap();
+        assert!(empty_commands.loads.is_empty() && empty_commands.rpaths.is_empty());
+        let changed = NestedNative { header: Some(empty_header), ..member };
+        assert!(!reference.embedded_native_closure(file, &changed, &empty_commands, &inventory));
+
+        // The other four genuine non-JDK header-bearing resources retain their
+        // existing strict system-only result; no generic RPATH rule changed.
+        let mut other_natives = 0;
+        for (payload, class) in reference.payload.iter().zip(reference.classes) {
+            let FileClass::JvmArchive { native_members } = class else { continue; };
+            if native_profile::jdk_jvm_archive(payload.installed.path).is_some() { continue; }
+            for other in *native_members {
+                if (payload.installed.path, other.member) == (file.path, member.member) { continue; }
+                let Some(other_header) = &other.header else { continue; };
+                let parsed = native_header(other_header, other.bytes).unwrap();
+                assert!(parsed.loads.iter().all(|p| policy::system_load(p))
+                    && parsed.rpaths.iter().all(|p| policy::OS_ROOTS.contains(&p.as_str()) || policy::system_load(p)));
+                assert!(reference.embedded_native_closure(&payload.installed, other, &parsed, &inventory));
+                other_natives += 1;
+            }
+        }
+        assert_eq!(other_natives, 4);
+    }
+
     pub(super) fn genuine_jmod_header_and_installed_counterpart_context_are_joined_data() {
         let file = CanonicalFile {
             path: "jdk/Test.jdk/Contents/Home/jmods/jdk.management.agent.jmod", size: 102338,
@@ -2397,12 +2731,13 @@ mod tests {
         let mut inventory = finite_jdk_inventory();
         assert!(subject.native_closure(&inventory));
         let target = "jdk/Test.jdk/Contents/Home/lib/libmanagement_agent.dylib";
-        let saved = inventory.data.files.iter().find(|f| f.path == target).unwrap().clone();
-        inventory.data.files.retain(|f| f.path != target);
+        let at = inventory.data.files.iter().position(|f| f.path == target).unwrap();
+        let saved = inventory.data.files.remove(at);
         assert!(!subject.native_closure(&inventory));
-        inventory.data.files.push(FileSpec { mode: saved.mode ^ 0o111, ..saved.clone() });
+        // Restore at the original position, preserving constructor-proven order.
+        inventory.data.files.insert(at, FileSpec { mode: saved.mode ^ 0o111, ..saved.clone() });
         assert!(!subject.native_closure(&inventory));
-        *inventory.data.files.iter_mut().find(|f| f.path == target).unwrap() = saved;
+        inventory.data.files[at] = saved;
         assert!(subject.native_closure(&inventory));
         inventory.data.files.iter_mut().find(|f|
             f.path.ends_with("/lib/server/libjvm.dylib")).unwrap().sha256 = HASH.into();
@@ -2501,7 +2836,7 @@ mod tests {
         let catalogue = catalogue_budget(&[base, linked]).unwrap();
         assert_eq!(catalogue.storage, base.source_storage().unwrap().maximum(linked.source_storage().unwrap()));
         assert_eq!(catalogue.proposal_work, base.working_bytes().unwrap().max(linked.working_bytes().unwrap()));
-        assert_eq!(catalogue.reproof_work, 262144 + sdk_metadata::PARSER_WORK_BYTES + policy::NATIVE_WORK_BYTES);
+        assert_eq!(catalogue.reproof_work, 262144 + sdk_metadata::PARSER_WORK_BYTES + policy::NATIVE_WORK_BYTES + CACHE_WORK_BYTES);
         assert!(catalogue.proposal_work > catalogue.reproof_work);
         assert!(matches!(catalogue_budget(&[]), Err(Failure::Unavailable)));
         let invalid = Reference { profile: "not-the-compiled-profile", ..base };
@@ -2564,6 +2899,7 @@ mod tests {
         assert_eq!(r.gradle_distribution_url, "https://services.gradle.org/distributions/gradle-8.14.5-bin.zip");
         assert_eq!(r.gradle_distribution_sha256, r.archives[3].archive.sha256);
         assert!(r.structural() && r.source_directory_closure() && r.compiled_metadata_pair());
+        prepare_compiled_catalogue();
         assert!(support_manifest_matches(r) && available());
         let digest = reference_digest(r).expect("complete reference fits the bounded Rust commitment stream");
 
@@ -2582,15 +2918,16 @@ mod tests {
             jdk, jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" }).unwrap());
         for (selected, layout) in recipes.iter().zip(layouts) {
             assert_eq!(selected.jdk_layout(), layout);
-            assert_eq!(reference_digest(selected.reference), Some(digest));
+            assert_eq!(reference_digest(selected.selected.reference), Some(digest));
+            assert_eq!(selected.selected.digest, digest);
             assert_eq!(selected.source_versions(), ["17.0.20.1", "35.0.0", "8.14.5"]);
             assert_eq!(selected.source_storage().unwrap(), budget.storage);
             assert_eq!(selected.working_reservation_bytes().unwrap(), budget.proposal_work);
             let roster = selected.source_roster();
-            assert!(std::ptr::eq(roster.members, selected.reference.source_members));
-            assert!(std::ptr::eq(roster.trees, selected.reference.trees));
-            assert!(std::ptr::eq(roster.support, selected.reference.support));
-            assert!(std::ptr::eq(roster.archive_members, selected.reference.support_members));
+            assert!(std::ptr::eq(roster.members, selected.selected.reference.source_members));
+            assert!(std::ptr::eq(roster.trees, selected.selected.reference.trees));
+            assert!(std::ptr::eq(roster.support, selected.selected.reference.support));
+            assert!(std::ptr::eq(roster.archive_members, selected.selected.reference.support_members));
             assert!(std::ptr::eq(roster.optional_sdk_metadata, &sdk_metadata::OPTIONAL));
         }
         assert!(matches!(recipe(&SourceLayouts { jdk: JdkLayout::Bundle,
@@ -2651,7 +2988,7 @@ mod tests {
             assert_eq!(result.supplier_record(), &digest);
             assert_eq!(admit(&parsed, &digest), Ok(()));
             assert_eq!(result.payload_map(), r.payload);
-            assert!(std::ptr::eq(result.payload_map(), selected.reference.payload));
+            assert!(std::ptr::eq(result.payload_map(), selected.selected.reference.payload));
             assert_eq!(result.payload_bytes(), r.payload.iter().map(|p| p.installed.size).sum::<u64>());
             assert_eq!(result.metadata_bytes(), bytes.iter().map(|v| v.len() as u64).sum::<u64>());
             assert_eq!(result.directory_count() as usize, r.directories.len());
@@ -2681,6 +3018,98 @@ mod tests {
         compiled_six_component_catalogue_roundtrips_and_rejects_mismatches_data();
     }
 
+    // Opt-in DATA diagnostics, never acceptance/native-custody evidence. The
+    // owner explicitly selects these ignored methods with the same 30s limit.
+    fn catalogue_probe_phase<T>(test: &'static str, phase: &'static str, run: impl FnOnce() -> T) -> T {
+        eprintln!("MRK_CATALOGUE_TIMING_V1 test={test} phase={phase} event=begin");
+        let started = std::time::Instant::now();
+        let result = run();
+        let elapsed_us = started.elapsed().as_micros();
+        eprintln!("MRK_CATALOGUE_TIMING_V1 test={test} phase={phase} event=end elapsed_us={elapsed_us}");
+        result
+    }
+
+    #[test]
+    #[ignore = "Explicit catalogue timing diagnostic, not acceptance evidence"]
+    fn compiled_catalogue_primitives_timing_probe() {
+        // Count only successful forwarded writes, including the domain prefix.
+        // ReferenceDigest still enforces the unchanged byte cap and owns SHA.
+        struct CountWrites<'a> { inner: &'a mut ReferenceDigest, calls: usize }
+        impl std::io::Write for CountWrites<'_> {
+            fn write(&mut self, value: &[u8]) -> std::io::Result<usize> {
+                let next = self.calls.checked_add(1)
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                let written = std::io::Write::write(self.inner, value)?;
+                self.calls = next;
+                Ok(written)
+            }
+            fn flush(&mut self) -> std::io::Result<()> { std::io::Write::flush(self.inner) }
+        }
+        assert_eq!(REFERENCES.len(), 1, "genuine complete compiled catalogue is required");
+        let reference = &REFERENCES[0];
+        catalogue_probe_phase("primitives", "structural", || assert!(reference.structural()));
+        let digest = catalogue_probe_phase("primitives", "digest", ||
+            reference_digest(reference).expect("bounded actual canonical digest"));
+        // Separate instrumented pass: its counter overhead is NOT included in
+        // the preceding ordinary digest timing, and it retains no stream bytes.
+        eprintln!("MRK_CATALOGUE_TIMING_V1 test=primitives phase=counted_stream event=begin");
+        let started = std::time::Instant::now();
+        let mut inner = ReferenceDigest { count: 0, hash: Sha256::new() };
+        let write_calls = {
+            let mut writer = CountWrites { inner: &mut inner, calls: 0 };
+            emit_reference(reference, &mut writer).expect("bounded counted canonical digest");
+            writer.calls
+        };
+        let canonical_bytes = inner.count;
+        assert!(canonical_bytes > 0 && canonical_bytes <= REFERENCE_STREAM_BYTES && write_calls > 0);
+        assert_eq!(<[u8; 32]>::from(inner.hash.finalize()), digest);
+        let elapsed_us = started.elapsed().as_micros();
+        eprintln!("MRK_CATALOGUE_TIMING_V1 test=primitives phase=counted_stream event=end elapsed_us={elapsed_us} canonical_bytes={canonical_bytes} write_calls={write_calls}");
+    }
+
+    #[test]
+    #[ignore = "Explicit catalogue timing diagnostic, not acceptance evidence"]
+    fn compiled_catalogue_cold_operation_timing_probe() {
+        assert_eq!(REFERENCES.len(), 1, "genuine complete compiled catalogue is required");
+        let reference = &REFERENCES[0];
+        // A fresh test process includes immutable-cache initialization below;
+        // never label a warmed application cache as a cold-operation result.
+        assert!(COMPILED_CATALOGUE.get().is_none(), "cold timing requires a fresh test process");
+        // NOT an OS-cache/native-cold claim. Total includes all local data drops.
+        catalogue_probe_phase("cold_operation", "total", || {
+            let selected = catalogue_probe_phase("cold_operation", "recipe", || recipe(&SourceLayouts {
+                jdk: JdkLayout::Bundle, jdk_vendor: reference.observed_jdk_vendor,
+                jdk_version: reference.observed_jdk_version,
+            }).expect("actual compiled recipe"));
+            let instance = "a".repeat(32);
+            eprintln!("MRK_CATALOGUE_TIMING_V1 test=cold_operation phase=observations event=begin");
+            let started = std::time::Instant::now();
+            complete_compiled_observations(reference, |complete, provider| {
+                let elapsed_us = started.elapsed().as_micros();
+                eprintln!("MRK_CATALOGUE_TIMING_V1 test=cold_operation phase=observations event=end elapsed_us={elapsed_us}");
+                let proposal = catalogue_probe_phase("cold_operation", "finalize", ||
+                    selected.finalize_proposal(&instance, 501, &complete, provider)
+                        .expect("actual compiled proposal from synthetic DATA observations"));
+                let parsed = catalogue_probe_phase("cold_operation", "parse", || {
+                    let documents = proposal.documents();
+                    let selection = crate::android_build_protocol::MacToolchainSelection {
+                        instance: instance.clone(), owner_uid: 501, catalog_generation: 1,
+                        record_sha256: policy::digest(documents[1]),
+                        inventory_sha256: policy::digest(documents[0]),
+                        os_provider_sha256: policy::digest(documents[2]),
+                    };
+                    let inventory = policy::parse_manifest(documents[0], &selection).expect("strict proposal inventory");
+                    assert!(policy::Provider::parse(documents[2], &selection).is_some());
+                    assert!(policy::Registration::parse(documents[1], 501, &instance)
+                        .expect("strict proposal registration").matches(&selection));
+                    inventory
+                });
+                catalogue_probe_phase("cold_operation", "admit", ||
+                    assert_eq!(admit(&parsed, proposal.supplier_record()), Ok(())));
+            });
+        });
+    }
+
     pub(super) fn archive_only_vendor_metadata_never_grants_filesystem_policy_data() {
         assert!(archive_mode(Component::Jdk, JDK17_ARCHIVE_SHA, 0o042755, 0o040000));
         for (component, hash, mode, kind) in [
@@ -2704,6 +3133,10 @@ mod tests {
     #[test]
     fn archive_only_vendor_metadata_never_grants_filesystem_policy() { archive_only_vendor_metadata_never_grants_filesystem_policy_data(); }
 
+    #[test]
+    fn fixed_manifest_embedded_native_requires_exact_role_and_original_header() {
+        fixed_manifest_embedded_native_requires_exact_role_and_original_header_data();
+    }
     #[test]
     fn exact_native_resource_rosters_cannot_be_reclassified_or_omitted() { exact_native_resource_rosters_cannot_be_reclassified_or_omitted_data(); }
     #[test]
@@ -2729,6 +3162,8 @@ pub(crate) fn with_compiled_catalogue_data<T>(
 #[cfg(test)]
 pub(crate) fn assert_macos_supplier_builder_data_contract() {
     crate::android_supplier_macos_source::assert_source_storage_data_contract();
+    tests::immutable_cache_lookup_never_initializes_or_waits_data();
+    tests::checked_ordinals_preserve_selection_failure_and_duplicate_semantics_data();
     tests::catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data();
     tests::compiled_six_component_catalogue_roundtrips_and_rejects_mismatches_data();
     #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
@@ -2740,6 +3175,7 @@ pub(crate) fn assert_macos_supplier_builder_data_contract() {
     tests::canonical_fixture_roundtrips_but_never_enables_production_data();
     tests::complete_observations_and_provider_budget_are_required_data();
     tests::incomplete_reference_mapping_namespace_and_stream_bounds_refuse_data();
+    tests::fixed_manifest_embedded_native_requires_exact_role_and_original_header_data();
     tests::exact_native_resource_rosters_cannot_be_reclassified_or_omitted_data();
     tests::archive_only_vendor_metadata_never_grants_filesystem_policy_data();
     tests::compiled_sdk_metadata_does_not_forge_picked_source_observations_data();

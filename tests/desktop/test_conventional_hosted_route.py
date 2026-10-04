@@ -261,8 +261,15 @@ class DataContracts(unittest.TestCase):
 
     def test_current_roster_is_closed_not_historical_or_discovered_authority(self):
         admitted = data.records(helper.CONVENTIONAL_CURRENT_SOURCE_FILES, absolute=True)
-        self.assertEqual(len(admitted), 139)
-        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 127)
+        self.assertEqual(len(admitted), 141)
+        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 129)
+        # These two changed current rows are not H or full-preparation authority.
+        for leaf in ("owned_process.py", "_command_process.py"):
+            relative = "src/mobile_release/" + leaf
+            body = (SOURCE / relative).read_bytes()
+            path = "/work/inputs/core-source/" + relative
+            self.assertEqual(admitted[path], {"path": path, "size": len(body),
+                                             "sha256": hashlib.sha256(body).hexdigest()})
         variants = [CURRENT_CORE[:-1], HISTORICAL_CORE, list(reversed(CURRENT_CORE)), [*CURRENT_CORE, CURRENT_CORE[-1]],
             sorted([*CURRENT_CORE, record("/work/inputs/core-source/src/mobile_release/new.py")], key=lambda row: row["path"])]
         for key, wrong in (("sha256", "f" * 64), ("size", 6), ("size", True), ("path", "/other/core.py")):

@@ -44,8 +44,8 @@ def workflow_step(workflow, name):
 
 def normal_app_steps(workflow):
     return tuple(workflow_step(workflow, name) for name in (
-        "Build only the normal ARM64 bundled-asset shell",
-        "Assemble and ad-hoc sign the app only (never --deep or the runtime)",
+        "Build the ordinary ARM64 desktop image and embedded frontend",
+        "Assemble the ordinary image app and sign code inside-out (never --deep)",
         "Bind this completed signed app and current-source runtime into fresh Installer DATA"))
 
 
@@ -63,28 +63,26 @@ def entry_macho_fixture(*extra, library=b"/usr/lib/libSystem.B.dylib"):
                        sum(map(len, commands)), 0x200084, 0) + b"".join(commands)
 
 
+def image_macho_fixture(role="desktop", *extra, install_name=None, library=b"/usr/lib/libSystem.B.dylib", kind=6):
+    """Actual MH_DYLIB-shaped inert DATA, never a renamed executable/native pass."""
+    def named(command, value):
+        data = value + b"\0"
+        length = (24 + len(data) + 7) // 8 * 8
+        return struct.pack("<6I", command, length, 24, 0, 0, 0) + data + bytes(length - 24 - len(data))
+    identity = TOOL.IMAGE_INSTALL_NAMES[role].encode("ascii") if install_name is None else install_name
+    commands = (struct.pack("<6I", 0x32, 24, 1, 26 << 16, 26 << 16, 0),
+                named(0xD, identity), named(0xC, library), *extra)
+    return struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, kind, len(commands),
+                       sum(map(len, commands)), 0x84, 0) + b"".join(commands)
+
+
 @unittest.skipUnless(ANDROID_HELPER is not None, "POSIX inert packaging DATA only")
 class MacAndroidHelperPackagingData(unittest.TestCase):
     """No compiler/codesign/helper/owner execution; every child is a DATA double."""
 
     def cargo_rows(self, checkout, target):
-        module = ANDROID_HELPER
-        source = checkout / module.WORKSPACE
-        binary = target / "aarch64-apple-darwin/release" / module.HELPER
-        result = [{"reason": "compiler-artifact", "package_id": "path+" + source.as_uri() + "#mrk-android-register@0.1.0",
-                   "manifest_path": str(source / "Cargo.toml"), "features": [], "executable": str(binary),
-                   "filenames": [str(binary)], "target": {"name": module.HELPER, "kind": ["bin"], "crate_types": ["bin"],
-                       "src_path": str(source / "src/main.rs"), "edition": "2021"},
-                   "profile": {"test": False, "debug_assertions": False, "opt_level": "3"}}]
-        for directory, package, name, features in (
-            ("desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", ["macos-android-registration-helper"]),
-            ("desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", ["android-registration-helper", "default"]),
-        ):
-            result.append({"reason": "compiler-artifact", "package_id": "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0",
-                           "manifest_path": str(checkout / directory / "Cargo.toml"), "features": features,
-                           "target": {"name": name, "kind": ["lib"], "src_path": str(checkout / directory / "src/lib.rs")},
-                           "profile": {"test": False}})
-        return result + [{"reason": "build-finished", "success": True}]
+        return normal_cargo_fixture(target, role="resident", checkout=checkout)[2] + [
+            {"reason": "build-finished", "success": True}]
 
     def encoded(self, rows):
         return b"\n".join(json.dumps(row).encode("ascii") for row in rows) + b"\n"
@@ -104,22 +102,24 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         source = Path(__file__).absolute().parents[2]
         for name in ("desktop/native/macos-installed-entry/entry.c", "desktop/native/macos-installed-entry/gate.c",
                      "desktop/native/macos-installed-entry/gate.h", "desktop/native/macos-installed-entry/fixed_paths.h",
+                     "desktop/native/macos-installed-entry/image_abi.h", "desktop/native/macos-installed-entry/desktop_facade.c",
+                     "desktop/native/macos-installed-entry/resident_facade.c", "desktop/macos-installed-inputs/build-release.json",
                      "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs"):
             target = checkout / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes()); target.chmod(0o644)
-        _, _, _, body = normal_cargo_fixture()
+        body = image_macho_fixture("resident")
         observations = []
 
         def command(argv, **options):
             observations.append((tuple(argv), options))
             if argv[0] == "cargo":
                 target = work / "android-helper-target"
-                binary = target / "aarch64-apple-darwin/release" / module.HELPER
+                binary = target / "aarch64-apple-darwin/release" / module.RESIDENT_IMAGE
                 binary.parent.mkdir(parents=True)
                 binary.write_bytes(body); binary.chmod(0o700)
                 deps = binary.parent / "deps"; deps.mkdir()
-                alias = deps / "mrk_android_register-0123456789abcdef"
+                alias = deps / module.RESIDENT_IMAGE
                 if failure == "alias":
                     alias.write_bytes(body); alias.chmod(0o700)
                     os.link(binary, deps / "unexpected-alias")
@@ -129,6 +129,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     if owner_error is not None:
                         raise owner_error
                     raise RuntimeError("DATA double original result unavailable")
+                if failure == "image-binding-changed":
+                    (checkout / "desktop/macos-installed-inputs/build-release.json").write_bytes(
+                        TOOL.canonical({"schemaVersion": 1, "packageVersion": TOOL.PACKAGE_VERSION,
+                                        "release": "macos26-arm64-changed"}))
                 output = self.encoded(self.cargo_rows(checkout, target))
                 diagnostic = (b"error: synthetic helper build failed\n" if failure == "nonzero"
                               else b"warning: synthetic helper build diagnostic\n")
@@ -138,26 +142,34 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(argv[1:4], ["--sdk", "macosx", "clang"])
                 self.assertIn("-DMRK_ENTRY_METADATA_ONLY=1", argv)
                 self.assertEqual((options["timeout"], options["output_limit"]), (30, 65536))
-                if failure == "entry-owner":
-                    raise RuntimeError("DATA entry original result unavailable")
                 selected = Path(argv[-1])
+                role = ("entry" if selected.name == module.ENTRY else
+                        "desktop-facade" if selected.name == module.DESKTOP_FACADE else "resident-facade")
+                if role != "entry":
+                    self.assertIn('-DMRK_IMAGE_SOURCE_COMMIT="' + environment["GITHUB_SHA"] + '"', argv)
+                    self.assertIn('-DMRK_IMAGE_RELEASE_ID="' + TOOL.RELEASE + '"', argv)
+                if failure == role + "-owner":
+                    raise RuntimeError("DATA facade original result unavailable")
                 selected.write_bytes(entry_macho_fixture()); selected.chmod(0o700)
-                if failure == "entry-source-changed":
-                    (checkout / "desktop/native/macos-installed-entry/entry.c").write_bytes(b"changed DATA")
+                if failure == role + "-source-changed":
+                    name = "entry.c" if role == "entry" else role.replace("-facade", "_facade.c")
+                    (checkout / "desktop/native/macos-installed-entry" / name).write_bytes(b"changed DATA")
                 return CompletedProcess(argv, 0, b"", b"")
             self.assertEqual(argv[0], "/usr/bin/codesign")
             selected = Path(argv[-1])
             if "--sign" in argv:
-                original = work / "android-helper-target/aarch64-apple-darwin/release" / module.HELPER
-                self.assertEqual(original.read_bytes(), body)
-                self.assertEqual(original.stat().st_nlink, 2)
+                resident_image = selected.name == module.RESIDENT_IMAGE
+                original = (work / "android-helper-target/aarch64-apple-darwin/release" / module.RESIDENT_IMAGE
+                            if resident_image else work / "android-helper-target" / module.HELPER)
+                self.assertEqual(original.read_bytes(), body if resident_image else entry_macho_fixture())
+                self.assertEqual(original.stat().st_nlink, 2 if resident_image else 1)
                 self.assertEqual(selected.stat().st_nlink, 1)
                 self.assertNotEqual(selected.stat().st_ino, original.stat().st_ino)
-                self.assertEqual(argv[argv.index("--identifier") + 1], module.IDENTIFIER)
-                # Model native codesign's permitted inode replacement, not a
-                # signature or native-platform pass. This file is never run.
+                self.assertEqual(argv[argv.index("--identifier") + 1], module.IDENTIFIER + (".image" if resident_image else ""))
+                # Model permitted native signer inode replacement only; no
+                # synthetic bytes are executable signature/native evidence.
                 replacement = work / "synthetic-signer-output"
-                replacement.write_bytes(body + b"DATA signature bytes")
+                replacement.write_bytes(selected.read_bytes() + b"DATA signature bytes")
                 replacement.chmod(0o755)
                 replacement.replace(selected)
             elif failure == "changed":
@@ -165,6 +177,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             return CompletedProcess(argv, 0, b"", b"")
 
         environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                       "MRK_MACOS_INSTALL_SOURCE_COMMIT": "a" * 40, "MRK_MACOS_PACKAGE_ROLE": "ordinary-image",
                        "GITHUB_WORKFLOW_REF": "source-bound-DATA-fixture", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
                        "PATH": "/inert/fixed-tools", "HOME": str(root), "DEVELOPER_DIR": "/inert/clt", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
         owner = SimpleNamespace(run_owned=command)
@@ -174,8 +187,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         module = ANDROID_HELPER
         checkout, target = Path("/inert/source"), Path("/inert/work/android-helper-target")
         rows = self.cargo_rows(checkout, target)
-        self.assertEqual(module.artifact(self.encoded(rows), checkout, target), target / "aarch64-apple-darwin/release" / module.HELPER)
-        for failure in ("extra-executable", "manifest", "features", "native-role", "source", "test", "finish"):
+        self.assertEqual(module.artifact(self.encoded(rows), checkout, target), target / "aarch64-apple-darwin/release" / module.RESIDENT_IMAGE)
+        for failure in ("extra-executable", "manifest", "features", "native-role", "source", "test", "finish",
+                        "renamed-bin", "crate-type", "filenames", "after-finish", "missing-app", "missing-native"):
             changed = json.loads(json.dumps(rows))
             if failure == "extra-executable": changed.insert(0, changed[0].copy())
             elif failure == "manifest": changed[0]["manifest_path"] = "/unrelated/Cargo.toml"
@@ -184,6 +198,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             elif failure == "source": changed[0]["target"]["src_path"] = "/unrelated/main.rs"
             elif failure == "test": changed[0]["profile"]["test"] = True
             elif failure == "finish": changed[-1]["success"] = False
+            elif failure == "renamed-bin": changed[0]["target"]["kind"] = ["bin"]
+            elif failure == "crate-type": changed[0]["target"]["crate_types"] = ["rlib"]
+            elif failure == "filenames": changed[0]["filenames"] = None
+            elif failure == "after-finish": changed.append(changed[0].copy())
+            elif failure == "missing-app": del changed[1]
+            elif failure == "missing-native": del changed[2]
             with self.subTest(failure=failure), self.assertRaises(module.Refused):
                 module.artifact(self.encoded(changed), checkout, target)
 
@@ -197,11 +217,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(helper_manifest["workspace"], {})
         self.assertEqual(helper_manifest["dependencies"], {
             "mobile-release-kit-desktop": {"path": "../../src-tauri", "default-features": False,
-                                           "features": ["macos-android-registration-helper"]}})
+                                           "features": ["macos-installed-resident-image"]},
+            "mrk-macos-installed-native": {"path": "../../native/macos-installed-native", "features": ["resident-image"]}})
+        self.assertIs(helper_manifest["package"]["autobins"], False)
+        self.assertEqual(helper_manifest["lib"]["name"], "mrk_resident_image")
+        self.assertEqual(helper_manifest["lib"]["path"], "src/lib.rs")
+        self.assertEqual(helper_manifest["lib"]["crate-type"], ["cdylib"])
+        self.assertEqual(helper_manifest["profile"]["release"]["panic"], "unwind")
         helper_package = helper_manifest["package"]
         app_package = app_manifest["package"]
         self.assertEqual([package for package in helper_lock["package"] if package["name"] == helper_package["name"]], [{
-            "name": helper_package["name"], "version": helper_package["version"], "dependencies": [app_package["name"]]}])
+            "name": helper_package["name"], "version": helper_package["version"],
+            "dependencies": [app_package["name"], "mrk-macos-installed-native"]}])
         app_rows = [package for package in helper_lock["package"] if package["name"] == app_package["name"]]
         self.assertEqual(len(app_rows), 1)
         self.assertEqual(app_rows[0]["version"], app_package["version"])
@@ -225,7 +252,34 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             checkout, work, environment, owner, observations = self.fixture(Path(temporary))
             operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
-            expected = operation.execute()
+            registered_peaks, consumed = [], []
+            original_register, original_close = operation.register, operation.close
+
+            def register(*args, **kwargs):
+                entry = original_register(*args, **kwargs)
+                registered_peaks.append(sum(item["fd"] is not None for item in operation.entries))
+                return entry
+
+            def close(entry):
+                if entry["fd"] is not None:
+                    consumed.append(id(entry))
+                original_close(entry)
+
+            try:
+                with mock.patch.object(operation, "register", register), mock.patch.object(operation, "close", close):
+                    expected = operation.execute()
+            except module.Refused:
+                failure = json.loads((work / "android-helper-prepare.json").read_bytes()).get("failure", {})
+                self.fail("inert prepare failed: " + json.dumps({
+                    "stage": failure.get("stage"), "type": failure.get("type"),
+                    "reason": failure.get("reason"), "errno": failure.get("errno"),
+                    "peakRegisteredDescriptors": max(registered_peaks, default=0)}, sort_keys=True))
+            # This same complete path used to retain99 originals, exceeding the
+            # local owner's unchanged nofile64 even before runtime overhead.
+            self.assertLessEqual(max(registered_peaks), 41)
+            directories = [entry for entry in operation.entries if entry["kind"] == "directory"]
+            self.assertEqual(len(directories), 15)
+            self.assertTrue(all(consumed.count(id(entry)) == 1 for entry in directories))
             self.assertEqual(expected, module.digest((work / module.HELPER).read_bytes()))
             self.assertFalse((work / "android-helper-target").exists())
             receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
@@ -241,8 +295,19 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertEqual(receipt["originalCalls"][0]["stderrSha256"], module.digest(diagnostic))
             self.assertEqual((work / "android-helper-build.jsonl").read_bytes(),
                              self.encoded(self.cargo_rows(checkout, work / "android-helper-target")))
-            self.assertEqual(len(receipt["originalCalls"]), 4)
-            self.assertEqual(receipt["originalCalls"][-1]["role"], "entry-build")
+            self.assertEqual(tuple(call["role"] for call in receipt["originalCalls"]), module.PREPARE_ROLES)
+            self.assertEqual(len(receipt["originalCalls"]), 8)
+            self.assertEqual(receipt["originalCalls"][3]["role"], "entry-build")
+            self.assertIn("--lib", build_argv)
+            self.assertNotIn("--bin", build_argv)
+            self.assertEqual(build_options["environ"]["MRK_IMAGE_RELEASE_ID"], TOOL.RELEASE)
+            self.assertEqual(build_options["environ"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], environment["GITHUB_SHA"])
+            self.assertEqual((receipt["imageReleaseId"], receipt["packageRole"]), (TOOL.RELEASE, "ordinary-image"))
+            self.assertEqual(operation.resident_image_sha256, module.digest((work / module.RESIDENT_IMAGE).read_bytes()))
+            self.assertEqual(operation.desktop_facade_sha256, module.digest((work / module.DESKTOP_FACADE).read_bytes()))
+            self.assertEqual((work / module.DESKTOP_FACADE).read_bytes(), entry_macho_fixture())
+            self.assertEqual((len(receipt["desktopFacadeSources"]), len(receipt["residentFacadeSources"])), (7, 7))
+            self.assertLessEqual((work / "android-helper-prepare.json").stat().st_size, 16384)
             self.assertEqual(operation.entry_sha256, module.digest((work / module.ENTRY).read_bytes()))
             self.assertEqual(len(receipt["entrySources"]), 6)
             self.assertFalse(receipt["entryExecutionObserved"] or receipt["maintenanceQualified"])
@@ -252,6 +317,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             helpers = contents / "Helpers"; helpers.mkdir(parents=True)
             nested = helpers / module.HELPER
             nested.write_bytes((work / module.HELPER).read_bytes()); nested.chmod(0o555)
+            frameworks = contents / "Frameworks"; frameworks.mkdir()
+            resident = frameworks / module.RESIDENT_IMAGE
+            resident.write_bytes((work / module.RESIDENT_IMAGE).read_bytes()); resident.chmod(0o555)
+            environment["MRK_MACOS_RESIDENT_IMAGE_SHA256"] = operation.resident_image_sha256
             daemons = contents / "Library/LaunchDaemons"; daemons.mkdir(parents=True)
             (daemons / (module.IDENTIFIER + ".plist")).write_bytes(TOOL.android_service_plist())
             (daemons / (module.IDENTIFIER + ".plist")).chmod(0o644)
@@ -259,20 +328,108 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 actual = module.Operation(owner, checkout, work, phase, environment, TOOL)
                 self.assertEqual(actual.execute(expected), expected)
                 self.assertFalse((work / ("android-helper-" + phase)).exists())
-                self.assertTrue(json.loads((work / ("android-helper-" + phase + ".json")).read_bytes())["passed"])
+                verified = json.loads((work / ("android-helper-" + phase + ".json")).read_bytes())
+                self.assertTrue(verified["passed"])
+                self.assertEqual([call["role"] for call in verified["originalCalls"]], [phase, phase + "-resident-image"])
+                self.assertEqual(verified["residentImageSha256"], operation.resident_image_sha256)
             self.assertEqual([item[0][0] for item in observations], ["cargo"] + ["/usr/bin/codesign"] * 2
-                             + ["/usr/bin/xcrun"] + ["/usr/bin/codesign"] * 2)
+                             + ["/usr/bin/xcrun"] * 3 + ["/usr/bin/codesign"] * 6)
+
+    def test_directory_reuse_keeps_distinct_file_originals_and_rejects_replaced_ancestry(self):
+        module = ANDROID_HELPER
+        for replacement in (None, "child", "parent", "root"):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary))
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+                try:
+                    operation.open()
+                    first = operation.source_original(module.PROFILE, "first-profile", 1024)
+                    count = len(operation.entries)
+                    second = operation.source_original(module.PROFILE, "second-profile", 1024)
+                    self.assertEqual(len(operation.entries), count + 1)
+                    self.assertIsNot(first, second)
+                    self.assertNotEqual(first["fd"], second["fd"])
+                    parent = first["parent_entry"]
+                    self.assertIs(parent, second["parent_entry"])
+                    self.assertEqual(operation.read(first), operation.read(second))
+                    if replacement:
+                        selected = {"child": checkout / "desktop/packaging",
+                                    "parent": checkout / "desktop", "root": checkout}[replacement]
+                        selected.rename(selected.with_name(selected.name + "-original"))
+                        selected.mkdir(mode=0o700)
+                    with mock.patch.object(module.os, "open", side_effect=AssertionError("must reuse, not reopen")):
+                        if replacement:
+                            with self.assertRaisesRegex(module.Refused, "directory-original-changed"):
+                                operation.descend(operation.source_entry, ("desktop", "packaging"))
+                            with self.assertRaisesRegex(module.Refused, "directory-original-changed"):
+                                operation.read(first)
+                        else:
+                            self.assertIs(operation.descend(operation.source_entry, ("desktop", "packaging")), parent)
+                finally:
+                    operation.finish()
+                self.assertTrue(operation.receipt["originalClosesKnown"])
+                self.assertTrue(operation.receipt["targetRetired"])
+                self.assertFalse(observations)  # No child, compiler or native call.
+
+    def test_directory_reuse_never_reopens_consumed_or_unknown_originals(self):
+        module = ANDROID_HELPER
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary))
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+                try:
+                    operation.open()
+                    original = operation.source_original(module.PROFILE, "profile", 1024)
+                    cached = original["parent_entry"]
+                    real_close, attempts = os.close, []
+
+                    def close(fd):
+                        attempts.append(fd)
+                        real_close(fd)  # Actually discharge this DATA fixture original.
+                        if unknown:
+                            raise OSError("synthetic close result unavailable")
+
+                    with mock.patch.object(module.os, "close", close):
+                        operation.close(cached)
+                    self.assertEqual(cached["closed"], not unknown)
+                    self.assertIsNone(cached["fd"])
+                    with mock.patch.object(module.os, "open", side_effect=AssertionError("must not reopen")), \
+                         mock.patch.object(module.os, "close", side_effect=AssertionError("must not retry close")):
+                        with self.assertRaisesRegex(module.Refused, "directory-original-unavailable"):
+                            operation.descend(operation.source_entry, ("desktop", "packaging"))
+                        operation.close(cached)
+                    self.assertEqual(len(attempts), 1)
+                finally:
+                    operation.finish()
+                self.assertEqual(operation.receipt["originalClosesKnown"], not unknown)
+                self.assertEqual(operation.receipt["targetRetired"], not unknown)
+                self.assertFalse(observations)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary))
+            operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+            with mock.patch.object(operation, "prepare", side_effect=OSError(24, "PRIVATE error path")), \
+                 self.assertRaises(module.Refused):
+                operation.execute()
+            receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
+            self.assertEqual(receipt["failure"]["errno"], 24)
+            self.assertNotIn("PRIVATE", json.dumps(receipt))
+            self.assertFalse(receipt["passed"])
+            self.assertTrue(receipt["targetRetired"] and receipt["originalClosesKnown"])
 
     def test_alias_original_return_close_and_signature_failures_never_produce_success(self):
         module = ANDROID_HELPER
-        for failure in ("alias", "owner", "malformed", "close", "changed", "nonzero", "entry-owner", "entry-source-changed"):
+        for failure in ("alias", "owner", "malformed", "close", "changed", "nonzero", "entry-owner", "entry-source-changed",
+                        "image-close", "image-binding-changed", "desktop-facade-owner", "desktop-facade-source-changed",
+                        "resident-facade-owner", "resident-facade-source-changed"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 checkout, work, environment, owner, observations = self.fixture(Path(temporary), failure)
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
                 original_close, injected = os.close, []
 
                 def close(fd):
-                    if failure == "close" and not injected and any(entry["role"] == "signed-helper" and entry["fd"] is None
+                    selected_role = "signed-resident-image" if failure == "image-close" else "signed-helper"
+                    if failure in ("close", "image-close") and not injected and any(entry["role"] == selected_role and entry["fd"] is None
                             and not entry["closed"] for entry in operation.entries):
                         # Actually discharge the DATA fixture FD, then inject
                         # uncertainty. The production code must not retry it.
@@ -284,7 +441,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     operation.execute()
                 receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
                 self.assertFalse(receipt["passed"])
-                uncertain = failure in ("owner", "malformed", "close", "entry-owner")
+                uncertain = failure in ("owner", "malformed", "close", "image-close", "entry-owner",
+                                        "desktop-facade-owner", "resident-facade-owner")
                 self.assertEqual((work / "android-helper-target").exists(), uncertain)
                 if failure in ("alias", "owner", "malformed", "nonzero"):
                     self.assertEqual(len(observations), 1)
@@ -296,7 +454,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 if failure == "nonzero":
                     call = receipt["originalCalls"][0]
                     self.assertEqual((call["returned"], call["returncode"]), (True, 101))
-                    self.assertEqual(receipt["failure"], {"stage": "separate-helper-compiler",
+                    self.assertEqual(receipt["failure"], {"stage": "separate-resident-image-compiler",
                                      "type": "Refused", "reason": "original-nonzero-build"})
                     self.assertTrue(receipt["targetRetired"] and receipt["originalClosesKnown"])
                     self.assertFalse((work / module.HELPER).exists())
@@ -305,7 +463,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual((work / "android-helper-build.stderr").read_bytes(),
                                      b"error: synthetic helper build failed\n")
                     self.assertEqual((work / "android-helper-build.status").read_bytes(), b"101\n")
-                if failure == "close":
+                if failure.startswith(("desktop-facade-", "resident-facade-")):
+                    role = "desktop" if failure.startswith("desktop-") else "resident"
+                    self.assertEqual(len(observations), 5 if role == "desktop" else 6)
+                    self.assertEqual(receipt["originalCalls"][-1]["returned"], not failure.endswith("-owner"))
+                    self.assertEqual(receipt["failure"]["stage"], role + "-facade-compiler")
+                if failure == "image-binding-changed":
+                    self.assertEqual(len(observations), 8)
+                    self.assertEqual(receipt["failure"]["reason"], "file-original-changed")
+                if failure in ("close", "image-close"):
                     self.assertEqual(len(injected), 1)
                     self.assertFalse(receipt["originalClosesKnown"])
 
@@ -417,7 +583,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 operation.open()
                 with mock.patch.object(module, "original_failure", side_effect=KeyboardInterrupt("DATA diagnostic failed")):
                     with self.assertRaises(ProcessErrorData) as caught:
-                        operation.call("build", ["cargo", "build"], module.build_environment(environment, work),
+                        operation.call("build", ["cargo", "build"], module.build_environment(environment, work, TOOL.RELEASE),
                                        cwd=checkout, timeout=480, limit=4 * 1024 * 1024)
                 self.assertIs(caught.exception, error)
                 self.assertEqual(operation.calls[0]["originalFailure"], {"schemaVersion": 1, "available": False})
@@ -433,8 +599,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         module = ANDROID_HELPER
         with tempfile.TemporaryDirectory() as temporary:
             checkout, work, environment, owner, observations = self.fixture(Path(temporary), "profile")
-            environment.update(RUSTC_WRAPPER="unrelated", CARGO_ENCODED_RUSTFLAGS="unrelated", GITHUB_TOKEN="inert-DATA", MRK_ANDROID_TOOL_INSTANCE="unrelated")
-            selected = module.build_environment(environment, work)
+            environment.update(RUSTC_WRAPPER="unrelated", CARGO_ENCODED_RUSTFLAGS="unrelated", GITHUB_TOKEN="inert-DATA",
+                               MRK_ANDROID_TOOL_INSTANCE="unrelated", MRK_IMAGE_RELEASE_ID="untrusted-release")
+            selected = module.build_environment(environment, work, TOOL.RELEASE)
+            self.assertEqual(selected["MRK_IMAGE_RELEASE_ID"], TOOL.RELEASE)
+            for release in ("", "x" * 64, 'bad"macro', "nonascii-é"):
+                with self.subTest(release=release), self.assertRaises(module.Refused):
+                    module.build_environment(environment, work, release)
             self.assertEqual(selected["RUSTUP_TOOLCHAIN"], "1.98.1")
             self.assertFalse({"RUSTC_WRAPPER", "CARGO_ENCODED_RUSTFLAGS", "GITHUB_TOKEN", "MRK_ANDROID_TOOL_INSTANCE"} & selected.keys())
             with self.assertRaises(module.Refused):
@@ -461,7 +632,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "GITHUB_REF": ref, "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
             "RUSTUP_TOOLCHAIN": "1.98.1", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0",
             "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_WORK": str(work),
-            "MRK_MACOS_AQUA_SCOPE": "ios-recovery-pending",
+            "MRK_MACOS_AQUA_SCOPE": "ios-recovery-pending", "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation",
         }
         # Only observation doubles: admit() must keep its real scope/source/path checks.
         # This fixed work path is lexical DATA, never created, opened or executed.
@@ -478,6 +649,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             for key, value, reason in (
                 ("GITHUB_WORKFLOW_SHA", "b" * 40, "hosted-source-bindings"),
                 ("GITHUB_EVENT_NAME", "workflow_dispatch", "hosted-source-bindings"),
+                ("MRK_MACOS_PACKAGE_ROLE", "ordinary-image", "hosted-source-bindings"),
+                ("MRK_MACOS_PACKAGE_ROLE", "", "hosted-source-bindings"),
                 ("MRK_MACOS_WORK", str(module.WORK_PARENT / "mrk-macos-installed.AbC12345"), "owned-work-route"),
             ):
                 with self.subTest(binding=key), self.assertRaisesRegex(module.Refused, "^" + reason + "$"):
@@ -488,18 +661,30 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         root = Path(__file__).absolute().parents[2]
         for filename, assembly, binding in (
-            ("desktop-macos-installed.yml", "Assemble and ad-hoc sign the app only (never --deep or the runtime)",
+            ("desktop-macos-installed.yml", "Assemble the ordinary image app and sign code inside-out (never --deep)",
              "Bind this completed signed app and current-source runtime into fresh Installer DATA"),
             ("desktop-macos-aqua.yml", "Assemble the instrumented engineering app; ad-hoc sign only the app",
              "Bind this signed app and current-source runtime into fresh Installer DATA"),
         ):
             workflow = (root / ".github/workflows" / filename).read_text()
-            build = workflow_step(workflow, "Build and sign the separate fixed Android registration helper")
+            build = workflow_step(workflow, "Build and sign the fixed resident image and C facades")
             app, inputs = workflow_step(workflow, assembly), workflow_step(workflow, binding)
             self.assertIn("id: android_helper", build)
             self.assertIn('macos_android_helper_package.py prepare >> "$GITHUB_OUTPUT"', build)
             self.assertNotIn("cargo build", build)
+            role = "ordinary-image" if filename == "desktop-macos-installed.yml" else "installed-shell-observation"
+            self.assertIn("MRK_MACOS_PACKAGE_ROLE: " + role, workflow)
+            roles = ANDROID_HELPER.PREPARE_ROLES + ("verify-before", "verify-before-resident-image",
+                                                   "verify-after", "verify-after-resident-image")
+            for command_role in roles:
+                for suffix in (("jsonl", "stderr", "status") if command_role == "build" else ("stdout", "stderr", "status")):
+                    self.assertEqual(workflow.count("/android-helper-" + command_role + "." + suffix), 1)
+            for phase in ANDROID_HELPER.PHASES:
+                self.assertEqual(workflow.count("/android-helper-" + phase + ".json"), 1)
             for step in (app, inputs):
+                self.assertIn("--package-role " + role, step)
+                self.assertIn("MRK_MACOS_RESIDENT_IMAGE_SHA256: $" + "{{ steps.android_helper.outputs['resident-image-sha256'] }}", step)
+                self.assertIn('--expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256"', step)
                 self.assertIn("MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}", step)
                 self.assertIn('--expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256"', step)
             self.assertIn('--android-helper "$MRK_MACOS_WORK/mrk-android-register"', app)
@@ -515,7 +700,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 'macos_android_helper_package.py verify-after', 'entry_sha=$(')]
             self.assertEqual(sequence, sorted(sequence))
             self.assertNotIn("android-helper-*", workflow)
+            self.assertIn('--resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib"', app)
+            if filename == "desktop-macos-installed.yml":
+                self.assertIn('--expected-app-binary "$MRK_MACOS_DESKTOP_FACADE_SHA256"', app)
+                self.assertLess(app.index('--timestamp=none "$desktop_image"'), app.index('--timestamp=none "$payload"'))
+                self.assertEqual(app.count('/usr/bin/codesign --verify --strict "$desktop_image"'), 2)
+                self.assertIn('--expected-desktop-image "$MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256"', inputs)
             if filename == "desktop-macos-aqua.yml":
+                self.assertIn('--expected-app-binary "$MRK_MACOS_OBSERVER_SHA256"', app)
+                self.assertIn('--observer-cargo-messages "$MRK_MACOS_WORK/observer-build.jsonl"', app)
+                self.assertIn('--observer-cargo-target-dir "$CARGO_TARGET_DIR"', app)
+                self.assertNotIn("--desktop-image", app + inputs)
                 gates = lambda block: [line.strip() for line in block.splitlines() if line.startswith("        if:")]
                 self.assertEqual(gates(build), gates(app))
                 self.assertEqual(gates(build), gates(inputs))
@@ -1043,7 +1238,7 @@ class MacInstalledData(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
         marker = "      - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive"
         gate = workflow_step(workflow, "Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive")
-        self.assertLess(workflow.index(marker), workflow.index("      - name: Build only the normal ARM64 bundled-asset shell"))
+        self.assertLess(workflow.index(marker), workflow.index("      - name: Build the ordinary ARM64 desktop image and embedded frontend"))
         self.assertIn("desktop/native/macos-installed-native/src/native.m desktop/native/macos-installed-native/tests/acl_probe.m", gate)
         self.assertIn('/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$MRK_MACOS_WORK/acl-probe"', gate)
         self.assertIn('[[ "$(/usr/bin/id -u)" != 0', gate)
@@ -1540,46 +1735,66 @@ def installation_record_fixture():
 @unittest.skipUnless(TOOL is not None, "POSIX inert DATA definitions only")
 class MacInstallationMetadataData(unittest.TestCase):
     def test_optional_android_service_is_exact_nonexecutable_plist_and_bound_helper_pair(self):
-        _, _, _, helper = normal_cargo_fixture()
-        expected = TOOL.digest(helper)
+        helper, resident = entry_macho_fixture(), image_macho_fixture("resident")
+        expected, expected_image = TOOL.digest(helper), TOOL.digest(resident)
         plist = TOOL.plistlib.dumps({"Label": TOOL.ANDROID_SERVICE_LABEL, "BundleProgram": TOOL.ANDROID_HELPER_BUNDLE_PROGRAM,
                                     "MachServices": {TOOL.ANDROID_SERVICE_LABEL: True}})
-        helper_path = Path("/inert/android-helper")
-        args = SimpleNamespace(android_helper=helper_path, expected_android_helper=expected)
-        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: helper if path == helper_path else plist):
+        helper_path, image_path = Path("/inert/android-helper"), Path("/inert/resident-image")
+        args = SimpleNamespace(android_helper=helper_path, expected_android_helper=expected,
+                               resident_image=image_path, expected_resident_image=expected_image)
+        values = {helper_path: helper, image_path: resident}
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values.get(path, plist)):
             files = TOOL.android_service_files(args)
-            self.assertEqual(files, {TOOL.ANDROID_HELPER: (helper, 0o555), TOOL.ANDROID_SERVICE_PLIST: (plist, 0o644)})
-            TOOL.android_service_input(files, expected)
+            self.assertEqual(files, {TOOL.ANDROID_HELPER: (helper, 0o555), TOOL.RESIDENT_IMAGE: (resident, 0o555),
+                                     TOOL.ANDROID_SERVICE_PLIST: (plist, 0o644)})
+            TOOL.android_service_input(files, expected, expected_image)
+            # Empty common structural DATA is not actual app layout admission.
             self.assertEqual(TOOL.android_service_files(SimpleNamespace()), {})
             TOOL.android_service_input({}, None)
-            for source, digest in [({TOOL.ANDROID_HELPER: (helper, 0o555)}, expected),
-                                   ({TOOL.ANDROID_SERVICE_PLIST: (plist, 0o644)}, expected),
-                                   (files, None), ({}, expected),
-                                   ({**files, TOOL.ANDROID_HELPER: (helper + b"changed", 0o555)}, expected),
-                                   ({**files, TOOL.ANDROID_SERVICE_PLIST: (plist, 0o755)}, expected),
-                                   ({**files, TOOL.ANDROID_SERVICE_PLIST: (plist + b"changed", 0o644)}, expected)]:
+            refused = [({name: value for name, value in files.items() if name != missing}, expected, expected_image)
+                       for missing in files]
+            refused += [(files, None, expected_image), (files, expected, None), ({}, expected, expected_image),
+                        ({**files, TOOL.ANDROID_HELPER: (helper + b"changed", 0o555)}, expected, expected_image),
+                        ({**files, TOOL.RESIDENT_IMAGE: (resident + b"changed", 0o555)}, expected, expected_image),
+                        ({**files, TOOL.ANDROID_HELPER: (helper, 0o444)}, expected, expected_image),
+                        ({**files, TOOL.RESIDENT_IMAGE: (resident, 0o444)}, expected, expected_image),
+                        ({**files, TOOL.ANDROID_SERVICE_PLIST: (plist, 0o755)}, expected, expected_image),
+                        ({**files, TOOL.ANDROID_SERVICE_PLIST: (plist + b"changed", 0o644)}, expected, expected_image)]
+            for source, digest, image_digest in refused:
                 with self.subTest(source=sorted(source), expected=digest), self.assertRaises(TOOL.Refused):
-                    TOOL.android_service_input(source, digest)
-            for request in [SimpleNamespace(android_helper=helper_path), SimpleNamespace(expected_android_helper=expected),
-                            SimpleNamespace(android_helper=helper_path, expected_android_helper="f" * 64)]:
-                with self.assertRaises(TOOL.Refused):
+                    TOOL.android_service_input(source, digest, image_digest)
+            for key in vars(args):
+                request = SimpleNamespace(**{name: value for name, value in vars(args).items() if name != key})
+                with self.subTest(missing=key), self.assertRaises(TOOL.Refused):
                     TOOL.android_service_files(request)
-        # The installation inventory mirrors the same pair/mode boundary; it
-        # still describes DATA, not a signed/approved service or Ready receipt.
+            with self.assertRaises(TOOL.Refused):
+                TOOL.android_service_files(SimpleNamespace(**dict(vars(args), expected_android_helper="f" * 64)))
+            with self.assertRaises(TOOL.Refused):
+                TOOL.android_service_files(SimpleNamespace(**dict(vars(args), expected_resident_image="f" * 64)))
+        # Common inventory DATA preserves the JSON/Kind schema and accepts the
+        # resident-only observer group, never desktop -> missing resident.
         _, body, _, _ = installation_record_fixture()
-        for selected, accepted in [([], True), ([TOOL.ANDROID_HELPER], False),
-                                   ([TOOL.ANDROID_SERVICE_PLIST], False),
-                                   ([TOOL.ANDROID_HELPER, TOOL.ANDROID_SERVICE_PLIST], True)]:
+        group = (TOOL.ANDROID_HELPER, TOOL.ANDROID_SERVICE_PLIST, TOOL.RESIDENT_IMAGE, TOOL.DESKTOP_IMAGE)
+        for bits in range(16):
+            selected = [name for index, name in enumerate(group) if bits & (1 << index)]
+            accepted = bits in (0, 7, 15)
             value = TOOL.decode(body)
             value["files"].extend({"path": "app/" + name, "size": 1, "sha256": "b" * 64,
-                                   "executable": name == TOOL.ANDROID_HELPER} for name in selected)
+                                   "executable": name != TOOL.ANDROID_SERVICE_PLIST} for name in selected)
             value["files"].sort(key=lambda row: row["path"])
             changed = TOOL.canonical(value)
-            if accepted:
-                TOOL.observation_inventory_bytes(changed, TOOL.digest(changed), "c" * 64)
-            else:
-                with self.assertRaises(TOOL.Refused):
+            with self.subTest(group=bits):
+                if accepted:
                     TOOL.observation_inventory_bytes(changed, TOOL.digest(changed), "c" * 64)
+                else:
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.observation_inventory_bytes(changed, TOOL.digest(changed), "c" * 64)
+        for image in (TOOL.DESKTOP_IMAGE, TOOL.RESIDENT_IMAGE):
+            value = TOOL.decode(changed)
+            next(row for row in value["files"] if row["path"] == "app/" + image)["executable"] = False
+            encoded = TOOL.canonical(value)
+            with self.subTest(noncode=image), self.assertRaises(TOOL.Refused):
+                TOOL.observation_inventory_bytes(encoded, TOOL.digest(encoded), "c" * 64)
 
     def test_closed_record_matches_exact_inventory_tuple_and_full_integer_directory_identity(self):
         record, inventory, root, release = installation_record_fixture()
@@ -2043,13 +2258,17 @@ class MacCurrentRuntimeData(unittest.TestCase):
             historical.assert_called_once()
             current.assert_called_once()
             for current_profile, flags in ((False, []), (True, ["--current-runtime"])):
-                TOOL.main(["input", "--app", "/app", "--expected-entry", "a" * 64, "--expected-app-binary", "b" * 64, "--runtime", "/runtime", "--expected-manifest", "d" * 64,
-                           "--expected-vault-helper", "f" * 64, "--output", "/input", *flags])
+                TOOL.main(["input", "--package-role", "installed-shell-observation", "--app", "/app",
+                           "--expected-entry", "a" * 64, "--expected-app-binary", "b" * 64, "--runtime", "/runtime",
+                           "--expected-manifest", "d" * 64, "--expected-vault-helper", "f" * 64,
+                           "--expected-android-helper", "e" * 64, "--expected-resident-image", "9" * 64,
+                           "--output", "/input", *flags])
                 self.assertIs(inputs.call_args.args[0].current_runtime, current_profile)
                 self.assertEqual(inputs.call_args.args[0].expected_vault_helper, "f" * 64)
         for current_profile in (False, True):
             args = SimpleNamespace(runtime=Path("/inert-runtime"), expected_manifest="e" * 64,
-                                   current_runtime=current_profile)
+                                   current_runtime=current_profile, package_role="installed-shell-observation",
+                                   expected_android_helper="a" * 64, expected_resident_image="b" * 64)
             with mock.patch.object(TOOL, "runtime_tree", side_effect=RuntimeError("inert tree boundary")) as tree:
                 with self.assertRaisesRegex(RuntimeError, "inert tree boundary"):
                     TOOL.input_command(args)
@@ -2124,14 +2343,14 @@ class MacCurrentRuntimeData(unittest.TestCase):
         command = "desktop/tools/stage_macos_installed.py current-runtime"
         self.assertEqual(workflow.count(command), 1)
         runtime_name = "Reuse accepted Mac supplier and prepare only the current ordinary payload"
-        build_name = "Build only the normal ARM64 bundled-asset shell"
+        build_name = "Build the ordinary ARM64 desktop image and embedded frontend"
         block = workflow_step(workflow, runtime_name)
         build = workflow_step(workflow, build_name)
         self.assertEqual(block.count(command), 1)
         self.assertLess(workflow.index("      - name: " + runtime_name + "\n"),
                         workflow.index("      - name: " + build_name + "\n"))
         self.assertIn("npm ci --ignore-scripts", build)
-        self.assertIn("cargo build --locked --release --no-default-features --features desktop-shell,custom-protocol", build)
+        self.assertIn("cargo build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib", build)
         for fragment in ("timeout-minutes: 3", "set -o noclobber", "umask 077",
                          '--archive "$MRK_MACOS_WORK/accepted-native-evidence.zip"',
                          '--work "$MRK_MACOS_WORK/current-runtime-preparation"',
@@ -2178,28 +2397,43 @@ class MacCurrentRuntimeData(unittest.TestCase):
         data = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
         names = ast.literal_eval(TOOL.re.search(r"          names = (\[\n.*?\n          \])\n", data, TOOL.re.S).group(1))
         digest = lambda selected: TOOL.digest(TOOL.json.dumps(selected, separators=(",", ":")).encode())
-        self.assertEqual(len(names), 82)
-        self.assertEqual(len(set(names)), 82)
+        self.assertEqual(len(names), 84)
+        self.assertEqual(len(set(names)), 84)
         self.assertEqual(digest(names[:57]), "4a5c62f00838d17f54e0970c209fc44a2b5708314e39437dbb156a25ac42ffa6")
         self.assertEqual(digest(names[57:79]), "f14c3263aadbdaeb0e7d21c821784902289552eb431ce3448726c6631064bfd5")
         self.assertEqual(digest(names[:81]), "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4")
-        self.assertEqual(digest(names), "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65")
+        self.assertEqual(digest(names[:82]), "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65")
+        self.assertEqual(digest(names), "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94")
         self.assertEqual(data.count(digest(names)), 2)
         self.assertEqual(names[79:81], [
             'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
             'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result',
         ])
-        self.assertEqual(names[81:], ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'])
+        self.assertEqual(names[81:82], ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'])
+        self.assertEqual(names[82:], [
+            'test_android_build_tools.MacToolAdmissionDataTests.test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only',
+            'test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot',
+        ])
         sources = ast.literal_eval(TOOL.re.search(r"          source_names = (\(\n.*?\n          \))\n", data, TOOL.re.S).group(1))
-        self.assertEqual(len(sources), 69)
+        self.assertEqual(len(sources), 77)
         self.assertEqual(len(sources), len(set(sources)))
         self.assertEqual(digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
-        self.assertEqual(sources[64:], (
+        self.assertEqual(sources[64:69], (
             "desktop/macos-installed-inputs/build-release.json",
             "desktop/src-tauri/src/macos_build_release.rs",
             "desktop/src-tauri/src/macos_install_fixed_paths.rs",
             "desktop/src-tauri/src/macos_install_paths.rs",
             "desktop/src-tauri/tauri.conf.json",
+        ))
+        self.assertEqual(sources[69:], (
+            "tests/desktop/test_android_build_tools.py",
+            "src/mobile_release/android_build_tools.py",
+            "src/mobile_release/android_build_tools_macos.py",
+            "src/mobile_release/android_build_operation.py",
+            "src/mobile_release/_desktop_android_build_files.py",
+            "src/mobile_release/android.py",
+            "src/mobile_release/credentials.py",
+            "src/mobile_release/local_signing.py",
         ))
         for name in names[57:]:
             module, cls, method = name.split(".")
@@ -2208,13 +2442,15 @@ class MacCurrentRuntimeData(unittest.TestCase):
             definitions = ast.parse((root / path).read_text())
             owner = next(node for node in definitions.body if isinstance(node, ast.ClassDef) and node.name == cls)
             self.assertIn(method, [node.name for node in owner.body if isinstance(node, ast.FunctionDef)])
-        for fragment in ('len(names) != 82 or len(set(names)) != 82', 'suite.countTestCases() != 82',
-                         'facts["testsRun"] == 82', 'counts.get("testsRun") != 82', '"pythonExpectedCount": 82',
+        for fragment in ('len(names) != 84 or len(set(names)) != 84', 'suite.countTestCases() != 84',
+                         'facts["testsRun"] == 84', 'counts.get("testsRun") != 84', '"pythonExpectedCount": 84',
                          '"workflowFilesystemCount": 2', '"imageFilesystemCount": 18', '"evidenceReaderCount": 37',
                          '"githubActionCount": 22', '"test_github_preflight_frames", "test_github_preflight", "test_github_release"'):
             self.assertIn(fragment, data)
         self.assertIn('"normalDiagnosticsSourceCount": 3', data)
+        self.assertIn('"androidBuildToolsCallerCount": 2', data)
         self.assertIn('"test_macos_normal_diagnostics_source"', data)
+        self.assertIn('"test_android_build_tools"', data)
         for path in ("desktop/github_preflight_bootstrap.py", "desktop/github_release_bootstrap.py",
                      "src/mobile_release/github_preflight.py", "src/mobile_release/github_release.py",
                      "src/mobile_release/_github_action_family.py", "src/mobile_release/_desktop_github_preflight_engine.py"):
@@ -2223,12 +2459,17 @@ class MacCurrentRuntimeData(unittest.TestCase):
     def test_ordinary_current_route_preserves_separate_installer_and_aqua_obligations(self):
         root = Path(__file__).absolute().parents[2]
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
-        normal = "cargo build --locked --release --no-default-features --features desktop-shell,custom-protocol"
+        normal = "cargo build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib"
         build, assembly, inputs = normal_app_steps(workflow)
         self.assertEqual(workflow.count(normal), 1)
         self.assertEqual(build.count(normal + " \\\n"), 1)
-        self.assertIn('--binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop"', assembly)
-        self.assertIn('--normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', assembly)
+        self.assertIn('--binary "$MRK_MACOS_WORK/mobile-release-kit-desktop"', assembly)
+        self.assertIn('--expected-app-binary "$MRK_MACOS_DESKTOP_FACADE_SHA256"', assembly)
+        self.assertIn('--desktop-image "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/libmrk_desktop_image.dylib"', assembly)
+        self.assertIn('--expected-desktop-image "$MRK_MACOS_DESKTOP_IMAGE_SHA256"', assembly)
+        self.assertIn('--expected-desktop-image "$MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256"', inputs)
+        self.assertIn("MRK_IMAGE_RELEASE_ID: $" + "{{ steps.android_helper.outputs['image-release-id'] }}", build)
+        self.assertIn('--desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', assembly)
         self.assertIn('--app "$MRK_MACOS_WORK/app/Mobile Release Kit.app"', inputs)
         # The preview's separate debug DATA contract is not the shipped binary.
         data = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
@@ -2300,19 +2541,54 @@ def android_support_fixture(root=Path("/synthetic-mrk-support")):
                            bundletool_archive=archives[0], aapt2_archive=archives[1])
 
 
-def normal_cargo_fixture(target=None):
+def normal_cargo_fixture(target=None, *, role="desktop", checkout=None):
+    # Keep the existing ordinary fixture seam, but bind the real image graph.
     target = target or Path("/synthetic-mrk-preview/cargo-target")
-    binary = target / "aarch64-apple-darwin/release/mobile-release-kit-desktop"
-    cargo_root = TOOL.DESKTOP / "src-tauri"
-    artifact = {"reason": "compiler-artifact", "package_id": "path+" + cargo_root.as_uri() + "#mobile-release-kit-desktop@0.1.0",
-        "manifest_path": str(cargo_root / "Cargo.toml"),
-        "target": {"name": "mobile-release-kit-desktop", "kind": ["bin"], "crate_types": ["bin"],
-                   "src_path": str(cargo_root / "src/main.rs")},
-        "profile": {"opt_level": "3", "debug_assertions": False, "test": False},
-        "features": ["custom-protocol", "desktop-shell"], "filenames": [str(binary)],
-        "executable": str(binary), "fresh": False}
-    body = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 1, 24, 0, 0) + struct.pack("<6I", 0x32, 24, 1, 26 << 16, 26 << 16, 0)
-    return target, binary, artifact, body
+    desktop = checkout / "desktop" if checkout is not None else TOOL.DESKTOP
+    name = "mrk_desktop_image" if role == "desktop" else "mrk_resident_image"
+    package = "mrk-desktop-image" if role == "desktop" else "mrk-android-register"
+    root = desktop / "helpers" / ("macos-desktop-image" if role == "desktop" else "macos-android-register")
+    binary = target / "aarch64-apple-darwin/release" / ("lib" + name + ".dylib")
+    profile = {"opt_level": "3", "debug_assertions": False, "test": False}
+    artifact = {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#" + package + "@0.1.0",
+        "manifest_path": str(root / "Cargo.toml"), "target": {"name": name, "kind": ["cdylib"],
+            "crate_types": ["cdylib"], "src_path": str(root / "src/lib.rs"), "edition": "2021"},
+        "profile": dict(profile), "features": [], "filenames": [str(binary)], "executable": None, "fresh": False}
+    rows = [artifact]
+    app_features = (["custom-protocol", "desktop-shell", "macos-installed-desktop-image"] if role == "desktop"
+                    else ["macos-android-registration-helper", "macos-installed-resident-image"])
+    native_features = (["default", "desktop-image"] if role == "desktop"
+                       else ["android-registration-helper", "default", "resident-image"])
+    for directory, package, name, features in (
+        (desktop / "src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", app_features),
+        (desktop / "native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", native_features),
+    ):
+        rows.append({"reason": "compiler-artifact", "package_id": "path+" + directory.as_uri() + "#" + package + "@0.1.0",
+            "manifest_path": str(directory / "Cargo.toml"), "features": features,
+            "target": {"name": name, "kind": ["lib"], "crate_types": ["lib"],
+                       "src_path": str(directory / "src/lib.rs"), "edition": "2021"},
+            "profile": dict(profile), "filenames": [str(binary.parent / "deps" / ("lib" + name + "-0123456789abcdef.rlib"))],
+            "executable": None, "fresh": False})
+    return target, binary, rows, image_macho_fixture(role)
+
+
+def observer_cargo_fixture(target=None):
+    target, _image, rows, _body = normal_cargo_fixture(target)
+    root = TOOL.DESKTOP / "src-tauri"
+    binary = target / "aarch64-apple-darwin/debug/deps/installed_shell_observation-0123456789abcdef"
+    features = ["custom-protocol", "desktop-shell", "macos-installed-observation"]
+    rows[0] = {"reason": "compiler-artifact", "package_id": "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.0",
+        "manifest_path": str(root / "Cargo.toml"), "features": list(features),
+        "target": {"name": "installed-shell-observation", "kind": ["test"], "crate_types": ["bin"],
+                   "src_path": str(root / "tests/installed_shell_observation.rs"), "edition": "2021"},
+        "profile": {"opt_level": "0", "debug_assertions": True, "test": True},
+        "filenames": [str(binary)], "executable": str(binary), "fresh": False}
+    for row, selected in zip(rows[1:], (features, ["default", "installed-observation"])):
+        row["features"] = list(selected)
+        row["profile"] = {"opt_level": "0", "debug_assertions": True, "test": False}
+        name = row["target"]["name"]
+        row["filenames"] = [str(binary.parent / ("lib" + name + "-0123456789abcdef.rlib"))]
+    return target, binary, rows, entry_macho_fixture() + b"observer-only-inert-DATA"
 
 
 def cargo_lines(*items):
@@ -2387,11 +2663,21 @@ class MacAndroidSupportData(unittest.TestCase):
             first.update(size=len(archive_bytes), sha256=TOOL.digest(archive_bytes))
             fixture.values[fixture.bundletool_archive] = archive_bytes
             fixture.values[fixture.manifest_path] = TOOL.canonical(fixture.manifest)
-            _, binary, _, body = normal_cargo_fixture()
-            helper = Path("/synthetic-mrk-support/helper")
-            fixture.values.update({binary: body, helper: body, Path("/synthetic-mrk-support/entry"): entry_macho_fixture()})
-            args = SimpleNamespace(binary=binary, vault_helper=helper, expected_vault_helper=TOOL.digest(body),
-                entry_binary=Path("/synthetic-mrk-support/entry"), expected_entry=TOOL.digest(entry_macho_fixture()),
+            target, binary, rows, body = normal_cargo_fixture()
+            helper, facade = Path("/synthetic-mrk-support/helper"), Path("/synthetic-mrk-support/facade")
+            resident = Path("/synthetic-mrk-support/resident.dylib")
+            cargo = Path("/synthetic-mrk-support/desktop-image.jsonl")
+            code = entry_macho_fixture()
+            fixture.values.update({binary: body, helper: code, facade: code, resident: image_macho_fixture("resident"),
+                                   Path("/synthetic-mrk-support/entry"): code,
+                                   cargo: cargo_lines(*rows, {"reason": "build-finished", "success": True})})
+            args = SimpleNamespace(package_role="ordinary-image", binary=facade, expected_app_binary=TOOL.digest(code),
+                desktop_image=binary, expected_desktop_image=TOOL.digest(body),
+                desktop_image_cargo_messages=cargo, desktop_image_cargo_target_dir=target,
+                vault_helper=helper, expected_vault_helper=TOOL.digest(code),
+                android_helper=helper, expected_android_helper=TOOL.digest(code),
+                resident_image=resident, expected_resident_image=TOOL.digest(fixture.values[resident]),
+                entry_binary=Path("/synthetic-mrk-support/entry"), expected_entry=TOOL.digest(code),
                 output=Path("/synthetic-mrk-support/app"), bundletool_archive=fixture.bundletool_archive,
                 aapt2_archive=fixture.aapt2_archive)
             original_read = TOOL.read
@@ -2402,9 +2688,11 @@ class MacAndroidSupportData(unittest.TestCase):
             output.assert_not_called()
 
     def test_both_explicit_archive_arguments_are_required_and_never_discovered(self):
-        for command, rest in (("android-support", []), ("app", ["--binary", "/a",
-                "--entry-binary", "/inert/entry", "--expected-entry", "b" * 64, "--vault-helper", "/h",
-                "--expected-vault-helper", "a" * 64, "--output", "/out"])):
+        for command, rest in (("android-support", []), ("app", ["--package-role", "ordinary-image", "--binary", "/a",
+                "--expected-app-binary", "b" * 64, "--entry-binary", "/inert/entry", "--expected-entry", "b" * 64,
+                "--vault-helper", "/h", "--expected-vault-helper", "a" * 64,
+                "--android-helper", "/resident-facade", "--expected-android-helper", "c" * 64,
+                "--resident-image", "/resident.dylib", "--expected-resident-image", "d" * 64, "--output", "/out"])):
             for absent in ("--bundletool-archive", "--aapt2-archive"):
                 flags = ["--aapt2-archive", "/aapt2"] if absent == "--bundletool-archive" else ["--bundletool-archive", "/bundletool"]
                 stderr = io.StringIO()
@@ -2421,7 +2709,7 @@ class MacAndroidSupportData(unittest.TestCase):
         root = Path(__file__).absolute().parents[2]
         _, rows = TOOL.android_support_manifest()
         name = "Acquire and verify the two fixed Android support archives as DATA"
-        for filename, assembly in (("desktop-macos-installed.yml", "Assemble and ad-hoc sign the app only (never --deep or the runtime)"),
+        for filename, assembly in (("desktop-macos-installed.yml", "Assemble the ordinary image app and sign code inside-out (never --deep)"),
                                    ("desktop-macos-aqua.yml", "Assemble the instrumented engineering app; ad-hoc sign only the app")):
             workflow = (root / ".github/workflows" / filename).read_text()
             block = workflow_step(workflow, name)
@@ -2451,51 +2739,81 @@ class MacAndroidSupportData(unittest.TestCase):
 @unittest.skipUnless(TOOL is not None, "POSIX DATA definitions only")
 class MacNormalPreviewData(unittest.TestCase):
     def test_real_app_copy_preserves_signed_helper_mode_bytes_and_normal_binding(self):
-        # Real isolated filesystem copy; the bounded synthetic Mach-O is DATA,
-        # never executable signing/launch/Keychain qualification.
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary).resolve(strict=True)
-            target, binary, item, body = normal_cargo_fixture(work / "cargo-target")
-            binary.parent.mkdir(parents=True, mode=0o700)
-            binary.write_bytes(body)
-            helper = work / "signed-helper-data"
-            helper.write_bytes(body)
-            helper.chmod(0o555)
-            entry = work / "entry-data"
-            entry.write_bytes(entry_macho_fixture())
-            messages = cargo_lines(item, {"reason": "build-finished", "success": True})
-            cargo = work / "cargo.jsonl"
-            cargo.write_bytes(messages)
-            support = android_support_fixture(work)
-            for path, data in support.values.items():
-                path.write_bytes(data)
-            originals = {path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
-                         for path in (binary, helper, entry, cargo, *support.values)}
-            output = work / "Mobile Release Kit.app"
-            with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
-                result = TOOL.app_command(SimpleNamespace(binary=binary, output=output,
+        # Real isolated copy of synthetic DATA for BOTH explicit layouts. No
+        # native signature, executable launch or observation-to-image relabeling.
+        for role in TOOL.PACKAGE_ROLES:
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary).resolve(strict=True)
+                fixture = normal_cargo_fixture if role == "ordinary-image" else observer_cargo_fixture
+                target, artifact, rows, artifact_body = fixture(work / "cargo-target")
+                artifact.parent.mkdir(parents=True, mode=0o700)
+                artifact.write_bytes(artifact_body)
+                facade = work / "desktop-facade-data" if role == "ordinary-image" else artifact
+                body = entry_macho_fixture() if role == "ordinary-image" else artifact_body
+                if role == "ordinary-image": facade.write_bytes(body)
+                helper, entry = work / "signed-vault-helper-data", work / "entry-data"
+                helper_body = entry_macho_fixture() + b"vault-signature-DATA"
+                helper.write_bytes(helper_body); helper.chmod(0o555)
+                entry.write_bytes(entry_macho_fixture())
+                resident_facade, resident = work / "signed-resident-facade-data", work / "signed-resident-image-data"
+                resident_facade_body = entry_macho_fixture() + b"resident-signature-DATA"
+                resident_body = image_macho_fixture("resident") + b"resident-image-signature-DATA"
+                resident_facade.write_bytes(resident_facade_body); resident_facade.chmod(0o555)
+                resident.write_bytes(resident_body); resident.chmod(0o555)
+                messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
+                cargo = work / "cargo.jsonl"; cargo.write_bytes(messages)
+                support = android_support_fixture(work)
+                for path, data in support.values.items(): path.write_bytes(data)
+                originals = {path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                             for path in (artifact, facade, helper, entry, resident_facade, resident, cargo, *support.values)}
+                output = work / "Mobile Release Kit.app"
+                args = SimpleNamespace(package_role=role, binary=facade, expected_app_binary=TOOL.digest(body), output=output,
                     entry_binary=entry, expected_entry=TOOL.digest(entry_macho_fixture()),
-                    normal_cargo_messages=cargo, normal_cargo_target_dir=target,
                     bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
-                    vault_helper=helper, expected_vault_helper=TOOL.digest(body)))
-            icon = (TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes()
-            expected = {TOOL.ENTRY_BINARY: (entry_macho_fixture(), 0o755), TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
-                        "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist").read_bytes(), 0o644),
-                        TOOL.PAYLOAD_INFO: ((TOOL.DESKTOP / "macos-installed-inputs/Info.plist").read_bytes(), 0o644),
-                        "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
-                        "Contents/Resources/icon.png": (icon, 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
-            expected.update({TOOL.PAYLOAD_RELATIVE + "/" + name: value for name, value in support.files.items()})
-            self.assertEqual(TOOL.tree(output), expected)
-            self.assertEqual(result["vaultHelperSha256"], TOOL.digest(body))
-            self.assertEqual(result["normalCargoArtifact"], TOOL.normal_cargo_artifact(messages, binary, target, body))
-            for path, original in originals.items():
-                self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), original)
-            for path in (output, output / "Contents", output / "Contents/Helpers", output / "Contents/MacOS"):
-                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+                    vault_helper=helper, expected_vault_helper=TOOL.digest(helper_body),
+                    android_helper=resident_facade, expected_android_helper=TOOL.digest(resident_facade_body),
+                    resident_image=resident, expected_resident_image=TOOL.digest(resident_body))
+                if role == "ordinary-image":
+                    args.desktop_image, args.expected_desktop_image = artifact, TOOL.digest(artifact_body)
+                    args.desktop_image_cargo_messages, args.desktop_image_cargo_target_dir = cargo, target
+                else:
+                    args.observer_cargo_messages, args.observer_cargo_target_dir = cargo, target
+                with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                    result = TOOL.app_command(args)
+                icon = (TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes()
+                expected = {TOOL.ENTRY_BINARY: (entry_macho_fixture(), 0o755), TOOL.APP_BINARY: (body, 0o755),
+                    TOOL.VAULT_HELPER: (helper_body, 0o555), TOOL.ANDROID_HELPER: (resident_facade_body, 0o555),
+                    TOOL.RESIDENT_IMAGE: (resident_body, 0o555), TOOL.ANDROID_SERVICE_PLIST: (TOOL.android_service_plist(), 0o644),
+                    "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist").read_bytes(), 0o644),
+                    TOOL.PAYLOAD_INFO: ((TOOL.DESKTOP / "macos-installed-inputs/Info.plist").read_bytes(), 0o644),
+                    "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
+                    "Contents/Resources/icon.png": (icon, 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
+                expected.update({TOOL.PAYLOAD_RELATIVE + "/" + name: value for name, value in support.files.items()})
+                if role == "ordinary-image":
+                    expected[TOOL.DESKTOP_IMAGE] = (artifact_body, 0o755)
+                    self.assertEqual(result["desktopImageCargoArtifact"],
+                                     TOOL.image_cargo_artifact(messages, artifact, target, artifact_body, "desktop"))
+                    self.assertNotIn("observerCargoArtifact", result)
+                else:
+                    self.assertEqual(result["observerCargoArtifact"],
+                                     TOOL.observer_cargo_artifact(messages, artifact, target, artifact_body))
+                    self.assertNotIn("desktopImageCargoArtifact", result)
+                self.assertEqual(TOOL.tree(output), expected)
+                self.assertEqual(result["packageRole"], role)
+                self.assertEqual(result["appBinarySha256BeforeSigning"], TOOL.digest(body))
+                self.assertEqual(result["vaultHelperSha256"], TOOL.digest(helper_body))
+                self.assertEqual(result["residentImageSha256"], TOOL.digest(resident_body))
+                self.assertNotIn("normalCargoArtifact", result)
+                for path, original in originals.items():
+                    self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), original)
+                for path in (output, output / "Contents", output / "Contents/Helpers", output / "Contents/MacOS"):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
 
     def test_app_copy_mode_exception_is_only_the_fixed_readonly_helper(self):
-        cases = ((TOOL.VAULT_HELPER, 0o755), (TOOL.VAULT_HELPER, 0o644),
-                 (TOOL.VAULT_HELPER, 0o444), ("Contents/Helpers/other", 0o555))
+        cases = tuple((path, mode) for path in (TOOL.VAULT_HELPER, TOOL.ANDROID_HELPER, TOOL.RESIDENT_IMAGE)
+                      for mode in (0o755, 0o644, 0o444)) + (
+                      (TOOL.DESKTOP_IMAGE, 0o555), (TOOL.DESKTOP_IMAGE, 0o644),
+                      (TOOL.DESKTOP_IMAGE, 0o444), ("Contents/Helpers/other", 0o555))
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary).resolve(strict=True)
             for number, (name, mode) in enumerate(cases):
@@ -2505,97 +2823,148 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertFalse((output / name).exists())
 
     def test_only_complete_normal_main_bin_receives_original_byte_binding(self):
-        target, binary, item, body = normal_cargo_fixture()
-        messages = cargo_lines(item, {"reason": "build-finished", "success": True})
-        result = TOOL.normal_cargo_artifact(messages, binary, target, body)
-        self.assertEqual(result["binarySha256"], TOOL.digest(body))
+        # Historical selector retained; ordinary authority is now the actual
+        # cdylib, while appBinary remains its distinct fixed C facade.
+        target, binary, rows, image_body = normal_cargo_fixture()
+        body, resident = entry_macho_fixture(), image_macho_fixture("resident")
+        messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
+        result = TOOL.image_cargo_artifact(messages, binary, target, image_body, "desktop")
+        self.assertEqual(result["binarySha256"], TOOL.digest(image_body))
         self.assertEqual(result["cargoMessagesSha256"], TOOL.digest(messages))
-        self.assertEqual(result["entrypoint"], "src/main.rs")
-        self.assertFalse(result["profileTest"])
-        self.assertFalse(result["instrumented"])
-        self.assertEqual(result["qualification"], "ordinary-bin-data-not-launched")
-        info = TOOL.plistlib.dumps({"CFBundleExecutable": binary.name, "LSMinimumSystemVersion": "26.0",
-                                   "CFBundleIdentifier": TOOL.BUNDLE_ID, "CFBundleShortVersionString": TOOL.PACKAGE_VERSION,
-                                   "CFBundleVersion": TOOL.PACKAGE_VERSION})
-        entry_info = TOOL.plistlib.dumps(dict(TOOL.plistlib.loads(info), CFBundleIdentifier=TOOL.ENTRY_BUNDLE_ID, CFBundleExecutable="mrk-macos-entry"))
-        values = {binary: body, Path("/synthetic-mrk-preview/helper"): body,
-                  Path("/synthetic-mrk-preview/entry"): entry_macho_fixture(),
+        self.assertEqual((result["entrypoint"], result["targetKind"], result["imageRole"]), ("src/lib.rs", "cdylib", "desktop"))
+        self.assertFalse(result["profileTest"] or result["instrumented"])
+        self.assertEqual(result["qualification"], "actual-cdylib-data-not-launched")
+        info = TOOL.source_app_info()
+        entry_info = TOOL.source_entry_info()
+        base = Path("/synthetic-mrk-preview")
+        values = {binary: image_body, base / "facade": body, base / "helper": body, base / "entry": body,
+                  base / "resident-image": resident, base / "resident-facade": body,
                   TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist": entry_info,
-                  Path("/synthetic-mrk-preview/cargo.jsonl"): messages,
-                  TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
+                  base / "cargo.jsonl": messages, TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
+                  TOOL.DESKTOP / "macos-installed-inputs" / Path(TOOL.ANDROID_SERVICE_PLIST).name: TOOL.android_service_plist(),
                   TOOL.DESKTOP / "src-tauri/icons/icon.png": b"synthetic-icon"}
-        support = android_support_fixture()
-        values.update(support.values)
-        args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
-            entry_binary=Path("/synthetic-mrk-preview/entry"), expected_entry=TOOL.digest(entry_macho_fixture()),
-            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=target,
+        support = android_support_fixture(); values.update(support.values)
+        args = SimpleNamespace(package_role="ordinary-image", binary=base / "facade", expected_app_binary=TOOL.digest(body),
+            output=base / "app", entry_binary=base / "entry", expected_entry=TOOL.digest(body),
+            desktop_image=binary, expected_desktop_image=TOOL.digest(image_body),
+            desktop_image_cargo_messages=base / "cargo.jsonl", desktop_image_cargo_target_dir=target,
             bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
-            vault_helper=Path("/synthetic-mrk-preview/helper"), expected_vault_helper=TOOL.digest(body))
+            vault_helper=base / "helper", expected_vault_helper=TOOL.digest(body),
+            android_helper=base / "resident-facade", expected_android_helper=TOOL.digest(body),
+            resident_image=base / "resident-image", expected_resident_image=TOOL.digest(resident))
         with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
                 mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path), \
                 mock.patch.object(TOOL, "write_tree") as output:
             staged = TOOL.app_command(args)
-        self.assertEqual(staged["normalCargoArtifact"], result)
+        self.assertEqual(staged["desktopImageCargoArtifact"], result)
         self.assertEqual(output.call_args.args[1][TOOL.APP_BINARY], (body, 0o755))
+        self.assertEqual(output.call_args.args[1][TOOL.DESKTOP_IMAGE], (image_body, 0o755))
+        self.assertEqual(output.call_args.args[1][TOOL.RESIDENT_IMAGE], (resident, 0o555))
         self.assertEqual(output.call_args.args[1][TOOL.VAULT_HELPER], (body, 0o555))
         self.assertEqual(staged["vaultHelperSha256"], TOOL.digest(body))
+        self.assertNotEqual(staged["appBinarySha256BeforeSigning"], result["binarySha256"])
 
     def test_test_targets_feature_drift_and_foreign_artifacts_never_stage(self):
         target, binary, original, body = normal_cargo_fixture()
         mutations = [
-            ("target", "kind", ["test"]), ("target", "crate_types", ["lib"]),
+            ("target", "kind", ["test"]), ("target", "kind", ["bin"]), ("target", "crate_types", ["lib"]),
+            ("target", "name", "mobile-release-kit-desktop"), ("target", "edition", "2018"),
             ("target", "src_path", str(TOOL.DESKTOP / "src-tauri/tests/installed_shell_observation.rs")),
             ("profile", "test", True), ("profile", "test", 0), ("profile", "debug_assertions", True),
             ("profile", "opt_level", "0"), (None, "features", ["desktop-shell"]),
             (None, "features", ["desktop-shell", "custom-protocol", "macos-installed-observation"]),
             (None, "features", ["custom-protocol", "desktop-shell", "desktop-shell"]),
-            (None, "executable", str(target / "debug/mobile-release-kit-desktop")),
-            (None, "filenames", [str(binary), str(target / "foreign")]),
-            (None, "manifest_path", "/foreign/Cargo.toml"), (None, "package_id", "registry+foreign"),
-            (None, "fresh", 1),
+            (None, "executable", str(binary)), (None, "filenames", [str(binary), str(target / "foreign")]),
+            (None, "filenames", None), (None, "manifest_path", "/foreign/Cargo.toml"),
+            (None, "package_id", "registry+foreign"), (None, "fresh", 1), (None, "profile", None),
         ]
         for section, field, value in mutations:
-            item = TOOL.decode(TOOL.canonical(original))
-            (item if section is None else item[section])[field] = value
-            messages = cargo_lines(item, {"reason": "build-finished", "success": True})
-            with self.subTest(section=section, field=field, value=value), \
-                    self.assertRaises(TOOL.Refused):
-                TOOL.normal_cargo_artifact(messages, binary, target, body)
+            rows = TOOL.decode(TOOL.canonical(original))
+            (rows[0] if section is None else rows[0][section])[field] = value
+            messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
+            with self.subTest(section=section, field=field, value=value), self.assertRaises(TOOL.Refused):
+                TOOL.image_cargo_artifact(messages, binary, target, body, "desktop")
+        for position in (1, 2):
+            for field, value in (("features", []), ("features", ["default", "installed-observation"]),
+                                 ("manifest_path", "/foreign/Cargo.toml"), ("executable", str(binary))):
+                rows = TOOL.decode(TOOL.canonical(original)); rows[position][field] = value
+                with self.subTest(library=position, field=field), self.assertRaises(TOOL.Refused):
+                    TOOL.image_cargo_artifact(cargo_lines(*rows, {"reason": "build-finished", "success": True}),
+                                             binary, target, body, "desktop")
+        # A second image role, even with another filename/name, is not a
+        # legitimate dependency of the isolated desktop image root.
+        other = normal_cargo_fixture(target, role="resident")[2][0]
+        with self.assertRaises(TOOL.Refused):
+            TOOL.image_cargo_artifact(cargo_lines(*original, other, {"reason": "build-finished", "success": True}),
+                                     binary, target, body, "desktop")
+        observer_target, observer, rows, executable = observer_cargo_fixture()
+        TOOL.observer_cargo_artifact(cargo_lines(*rows, {"reason": "build-finished", "success": True}),
+                                    observer, observer_target, executable)
+        for index, section, field, value in (
+            (0, "target", "kind", ["cdylib"]), (0, "profile", "test", False),
+            (0, None, "features", ["custom-protocol", "desktop-shell", "macos-installed-desktop-image"]),
+            (1, None, "profile", None), (1, "profile", "test", True),
+            (2, None, "features", ["default", "resident-image"]),
+        ):
+            changed = TOOL.decode(TOOL.canonical(rows))
+            (changed[index] if section is None else changed[index][section])[field] = value
+            with self.subTest(observer=(index, section, field)), self.assertRaises(TOOL.Refused):
+                TOOL.observer_cargo_artifact(cargo_lines(*changed, {"reason": "build-finished", "success": True}),
+                                            observer, observer_target, executable)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.observer_cargo_artifact(cargo_lines(*rows, {"reason": "build-finished", "success": True}),
+                                        observer, observer_target, image_macho_fixture())
 
     def test_original_terminal_success_is_unique_and_not_a_log_hint(self):
-        target, binary, item, body = normal_cargo_fixture()
+        target, binary, rows, body = normal_cargo_fixture()
         end = {"reason": "build-finished", "success": True}
-        bad = [cargo_lines(item), cargo_lines(item, {"reason": "build-finished", "success": False}),
-               cargo_lines(item, end, end), cargo_lines(item, item, end), cargo_lines(end),
-               cargo_lines(item, end) + b"trailing\n", cargo_lines(item, end) + b"\n",
-               cargo_lines(item) + b'{"reason":"build-finished","success":false,"success":true}\n',
-               cargo_lines(item, {"reason": "build-finished", "success": 1})]
+        bad = [cargo_lines(*rows), cargo_lines(*rows, {"reason": "build-finished", "success": False}),
+               cargo_lines(*rows, end, end), cargo_lines(*rows, rows[0], end), cargo_lines(end),
+               cargo_lines(*rows, end) + b"trailing\n", cargo_lines(*rows, end) + b"\n",
+               cargo_lines(*rows) + b'{"reason":"build-finished","success":false,"success":true}\n',
+               cargo_lines(*rows, {"reason": "build-finished", "success": 1}),
+               cargo_lines(rows[0], end), cargo_lines(rows[0], rows[1], end), cargo_lines(rows[0], rows[2], end)]
         for messages in bad:
             with self.subTest(messages=messages[-80:]), self.assertRaises((TOOL.Refused, ValueError)):
-                TOOL.normal_cargo_artifact(messages, binary, target, body)
+                TOOL.image_cargo_artifact(messages, binary, target, body, "desktop")
         with self.assertRaises(TOOL.Refused):
-            TOOL.normal_cargo_artifact(cargo_lines(item, end), target / "debug" / binary.name, target, body)
+            TOOL.image_cargo_artifact(cargo_lines(*rows, end), target / "debug" / binary.name, target, body, "desktop")
         with self.assertRaises(TOOL.Refused):
-            TOOL.normal_cargo_artifact(cargo_lines(item, end), binary, Path("relative"), body)
+            TOOL.image_cargo_artifact(cargo_lines(*rows, end), binary, Path("relative"), body, "desktop")
+        observer_target, observer, observer_rows, observer_body = observer_cargo_fixture()
+        for selected in (observer_rows[:1], observer_rows[:2], observer_rows + [observer_rows[0]]):
+            with self.subTest(observer_graph=len(selected)), self.assertRaises(TOOL.Refused):
+                TOOL.observer_cargo_artifact(cargo_lines(*selected, end), observer, observer_target, observer_body)
 
     def test_optional_gate_is_paired_and_failure_precedes_any_app_write(self):
-        target, binary, item, body = normal_cargo_fixture()
-        args = SimpleNamespace(binary=binary, output=Path("/synthetic-mrk-preview/app"),
-            normal_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), normal_cargo_target_dir=None,
-            vault_helper=Path("/synthetic-mrk-preview/helper"), expected_vault_helper=TOOL.digest(body))
-        with mock.patch.object(TOOL, "read", return_value=body), mock.patch.object(TOOL, "write_tree") as output:
-            with self.assertRaises(TOOL.Refused):
-                TOOL.app_command(args)
-            output.assert_not_called()
-        args.normal_cargo_target_dir = target
-        item["profile"]["test"] = True
-        messages = cargo_lines(item, {"reason": "build-finished", "success": True})
-        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: body if path in (binary, args.vault_helper) else messages), \
+        # Historical selector; the gate is mandatory now and has no old-bin,
+        # implicit observer, partial image, or mixed-profile fallback.
+        target, binary, rows, body = normal_cargo_fixture()
+        args = SimpleNamespace(package_role="ordinary-image", binary=Path("/synthetic-mrk-preview/facade"),
+            expected_app_binary=TOOL.digest(entry_macho_fixture()), output=Path("/synthetic-mrk-preview/app"),
+            desktop_image=binary, expected_desktop_image=TOOL.digest(body),
+            desktop_image_cargo_messages=Path("/synthetic-mrk-preview/cargo.jsonl"), desktop_image_cargo_target_dir=target,
+            android_helper=Path("/synthetic-mrk-preview/resident-facade"), resident_image=Path("/synthetic-mrk-preview/resident-image"))
+        requests = [SimpleNamespace(**{name: value for name, value in vars(args).items() if name != key})
+                    for key in ("package_role", "desktop_image", "expected_desktop_image", "desktop_image_cargo_messages",
+                                "desktop_image_cargo_target_dir", "android_helper", "resident_image")]
+        requests += [SimpleNamespace(**dict(vars(args), package_role="ordinary")),
+                     SimpleNamespace(**dict(vars(args), package_role="installed-shell-observation")),
+                     SimpleNamespace(**dict(vars(args), observer_cargo_messages=Path("/inert/observer.jsonl"),
+                                             observer_cargo_target_dir=target))]
+        for request in requests:
+            with self.subTest(keys=sorted(vars(request))), mock.patch.object(TOOL, "read") as reader, \
+                    mock.patch.object(TOOL, "write_tree") as output, self.assertRaises(TOOL.Refused):
+                TOOL.app_command(request)
+            reader.assert_not_called(); output.assert_not_called()
+        rows[0]["profile"]["test"] = True
+        messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
+        values = {args.binary: entry_macho_fixture(), binary: body, args.desktop_image_cargo_messages: messages}
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
                 mock.patch.object(TOOL, "write_tree") as output:
             with self.assertRaises(TOOL.Refused):
                 TOOL.app_command(args)
             output.assert_not_called()
-
 
     def test_helper_loader_paths_are_closed_to_apple_systems_without_environment_or_rpath(self):
         # Bounded Mach-O DATA. This neither signs code nor substitutes for a
@@ -2644,25 +3013,58 @@ class MacNormalPreviewData(unittest.TestCase):
         for body in bad_entry:
             with self.subTest(entry=TOOL.digest(body)), self.assertRaises(TOOL.Refused):
                 TOOL.entry_macho(body)
+        # The product dylib may initialize ONLY after the facade's fixed gate.
+        # It has a distinct actual file kind, fixed ID and closed Apple closure.
+        for role in ("desktop", "resident"):
+            TOOL.image_macho(image_macho_fixture(role), role)
+            TOOL.image_macho(image_macho_fixture(role, named(0xC,
+                b"/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation")), role)
+            TOOL.image_macho(image_macho_fixture(role, *segments), role)
+            bad = [entry_macho_fixture(), image_macho_fixture(role, kind=2),
+                   image_macho_fixture(role, install_name=b"@rpath/renamed-executable.dylib"),
+                   image_macho_fixture("resident" if role == "desktop" else "desktop"),
+                   image_macho_fixture(role, named(0xD, TOOL.IMAGE_INSTALL_NAMES[role].encode("ascii"))),
+                   image_macho_fixture(role, good),
+                   image_macho_fixture(role, struct.pack("<II", 0x1A, 8)),
+                   image_macho_fixture(role, struct.pack("<IIQQ", 0x80000028, 24, 0, 0))]
+            bad += [image_macho_fixture(role, command) for command in refused]
+            bad += [image_macho_fixture(role, named(command, b"/usr/lib/libSystem.B.dylib"))
+                    for command in (0x80000018, 0x8000001F, 0x20, 0x80000023)]
+            for offset, value in ((4, 0x01000007), (8, 2), (24, 0x84 | 0x20000), (28, 1)):
+                changed = bytearray(image_macho_fixture(role)); struct.pack_into("<I", changed, offset, value)
+                bad.append(bytes(changed))
+            for body in bad:
+                with self.subTest(role=role, image=TOOL.digest(body)), self.assertRaises(TOOL.Refused):
+                    TOOL.image_macho(body, role)
 
     def test_changed_signed_helper_fails_before_any_app_write(self):
-        target, binary, item, body = normal_cargo_fixture()
-        args = SimpleNamespace(binary=binary, vault_helper=Path("/inert/helper"),
-            expected_vault_helper="f" * 64, output=Path("/inert/output"))
-        with mock.patch.object(TOOL, "read", return_value=body), mock.patch.object(TOOL, "write_tree") as output:
+        target, binary, rows, body = normal_cargo_fixture()
+        args = SimpleNamespace(package_role="ordinary-image", binary=Path("/inert/facade"),
+            expected_app_binary=TOOL.digest(entry_macho_fixture()),
+            desktop_image=binary, expected_desktop_image=TOOL.digest(body),
+            desktop_image_cargo_messages=Path("/inert/cargo.jsonl"), desktop_image_cargo_target_dir=target,
+            android_helper=Path("/inert/resident-facade"), resident_image=Path("/inert/resident-image"),
+            vault_helper=Path("/inert/helper"), expected_vault_helper="f" * 64, output=Path("/inert/output"))
+        values = {args.binary: entry_macho_fixture(), binary: body, args.vault_helper: entry_macho_fixture(),
+                  args.desktop_image_cargo_messages: cargo_lines(*rows, {"reason": "build-finished", "success": True})}
+        with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), mock.patch.object(TOOL, "write_tree") as output:
             with self.assertRaisesRegex(TOOL.Refused, "helper-final-signed-digest"):
                 TOOL.app_command(args)
             output.assert_not_called()
 
     def test_installer_input_requires_the_same_helper_and_rejects_other_executables(self):
-        _, _, _, body = normal_cargo_fixture()
-        entry = entry_macho_fixture()
-        info = TOOL.source_app_info()
-        entry_info = TOOL.source_entry_info()
-        args = SimpleNamespace(runtime=Path("/inert/runtime"), expected_manifest="c" * 64,
+        body = entry_macho_fixture()
+        entry = entry_macho_fixture() + b"outer-entry-DATA"
+        desktop, resident = image_macho_fixture(), image_macho_fixture("resident")
+        info, entry_info, plist = TOOL.source_app_info(), TOOL.source_entry_info(), TOOL.android_service_plist()
+        args = SimpleNamespace(package_role="ordinary-image", runtime=Path("/inert/runtime"), expected_manifest="c" * 64,
             current_runtime=True, app=Path("/inert/app"), expected_vault_helper=TOOL.digest(body),
-            expected_entry=TOOL.digest(entry), expected_app_binary=TOOL.digest(body), output=Path("/inert/output"))
+            expected_entry=TOOL.digest(entry), expected_app_binary=TOOL.digest(body), output=Path("/inert/output"),
+            expected_android_helper=TOOL.digest(body), expected_resident_image=TOOL.digest(resident),
+            expected_desktop_image=TOOL.digest(desktop))
         app = {TOOL.ENTRY_BINARY: (entry, 0o755), TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555),
+               TOOL.ANDROID_HELPER: (body, 0o555), TOOL.RESIDENT_IMAGE: (resident, 0o555),
+               TOOL.DESKTOP_IMAGE: (desktop, 0o755), TOOL.ANDROID_SERVICE_PLIST: (plist, 0o644),
                "Contents/Info.plist": (entry_info, 0o644), TOOL.PAYLOAD_INFO: (info, 0o644),
                "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
                "Contents/Resources/icon.png": (b"icon-data", 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (b"icon-data", 0o644),
@@ -2675,35 +3077,72 @@ class MacNormalPreviewData(unittest.TestCase):
         runtime = {"python/bin/python3": (b"interpreter-data", 0o755)}
         source = {support.manifest_path: support.values[support.manifest_path],
                   TOOL.DESKTOP / "macos-installed-inputs/Info.plist": info,
-                  TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist": entry_info}
+                  TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist": entry_info,
+                  TOOL.DESKTOP / "macos-installed-inputs" / Path(TOOL.ANDROID_SERVICE_PLIST).name: plist}
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime),
               mock.patch.object(TOOL, "tree", return_value=app) as tree,
               mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path),
               mock.patch.object(TOOL, "read", side_effect=lambda path, *_: source[path]),
               mock.patch.object(TOOL, "write_tree") as output):
-            TOOL.input_command(args)
+            result = TOOL.input_command(args)
             files = output.call_args.args[1]
-            self.assertEqual(files["app/" + TOOL.VAULT_HELPER], (body, 0o555))
+            self.assertEqual(result["packageRole"], "ordinary-image")
+            for name, data in ((TOOL.VAULT_HELPER, body), (TOOL.ANDROID_HELPER, body),
+                               (TOOL.DESKTOP_IMAGE, desktop), (TOOL.RESIDENT_IMAGE, resident)):
+                self.assertEqual(files["app/" + name], (data, 0o555))
+            inventory = TOOL.decode(files["install-inventory.json"][0])
+            self.assertEqual(set(inventory), {"schemaVersion", "release", "runtimeManifestSha256", "files"})
             for path, (data, _) in support.files.items():
                 self.assertEqual(files["app/" + TOOL.PAYLOAD_RELATIVE + "/" + path], (data, 0o444))
-            for mutation, reason in (
-                ({name: value for name, value in app.items() if name != TOOL.VAULT_HELPER}, "signed-app-roster"),
+            missing = [({name: value for name, value in app.items() if name != required}, "signed-app-roster")
+                       for required in (TOOL.VAULT_HELPER, TOOL.DESKTOP_IMAGE, TOOL.RESIDENT_IMAGE,
+                                        TOOL.ANDROID_HELPER, TOOL.ANDROID_SERVICE_PLIST)]
+            mutations = missing + [
                 ({**app, TOOL.VAULT_HELPER: (body + b"changed", 0o555)}, "nested-helper-signature-bytes-changed"),
                 ({**app, TOOL.APP_BINARY: (body + b"changed", 0o755)}, "final-entry-payload-signature-bytes-changed"),
                 ({**app, TOOL.ENTRY_BINARY: (entry + b"changed", 0o755)}, "final-entry-payload-signature-bytes-changed"),
+                ({**app, TOOL.DESKTOP_IMAGE: (desktop + b"changed", 0o755)}, "desktop-image-signature-bytes-changed"),
+                ({**app, TOOL.RESIDENT_IMAGE: (resident + b"changed", 0o555)}, "android-helper-signature-bytes-changed"),
+                ({**app, TOOL.ANDROID_HELPER: (body + b"changed", 0o555)}, "android-helper-signature-bytes-changed"),
+                ({**app, TOOL.DESKTOP_IMAGE: (desktop, 0o644)}, "input-executable-scope"),
+                ({**app, TOOL.RESIDENT_IMAGE: (resident, 0o444)}, "android-service-plist"),
+                ({**app, TOOL.ANDROID_SERVICE_PLIST: (plist, 0o755)}, "android-service-plist"),
                 ({**app, "Contents/Helpers/foreign": (body, 0o555)}, "signed-app-roster"),
+                ({**app, TOOL.PAYLOAD_CONTENTS + "Frameworks/plugin.dylib": (desktop, 0o555)}, "signed-app-roster"),
                 ({name: value for name, value in app.items() if name != support_path}, "signed-app-roster"),
                 ({**app, TOOL.PAYLOAD_RELATIVE + "/" + TOOL.ANDROID_SUPPORT_PREFIX + "extra": (b"extra", 0o644)}, "signed-app-roster"),
                 ({**app, support_path: (b"changed", 0o644)}, "android-support-resource"),
                 ({**app, support_path: (support.files[support_name][0], 0o755)}, "android-support-resource"),
                 ({name: value for name, value in app.items() if name != TOOL.PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"}, "signed-app-roster"),
-            ):
+            ]
+            for mutation, reason in mutations:
                 output.reset_mock(); tree.return_value = mutation
                 with self.subTest(reason=reason), self.assertRaisesRegex(TOOL.Refused, reason):
                     TOOL.input_command(args)
                 output.assert_not_called()
-            tree.return_value = app
-            output.reset_mock()
+            # Matching new hashes cannot disguise MH_EXECUTE as either image.
+            for path, field in ((TOOL.DESKTOP_IMAGE, "expected_desktop_image"), (TOOL.RESIDENT_IMAGE, "expected_resident_image")):
+                tree.return_value = {**app, path: (body, 0o555)}
+                changed_args = SimpleNamespace(**dict(vars(args), **{field: TOOL.digest(body)}))
+                output.reset_mock()
+                with self.subTest(renamed_executable=path), self.assertRaisesRegex(TOOL.Refused, "image-dylib-target"):
+                    TOOL.input_command(changed_args)
+                output.assert_not_called()
+            observer_body = observer_cargo_fixture()[3]
+            observer_app = {name: value for name, value in app.items() if name != TOOL.DESKTOP_IMAGE}
+            observer_app[TOOL.APP_BINARY] = (observer_body, 0o755)
+            observer_args = SimpleNamespace(**dict(vars(args), package_role="installed-shell-observation",
+                                                   expected_desktop_image=None, expected_app_binary=TOOL.digest(observer_body)))
+            tree.return_value = observer_app
+            TOOL.input_command(observer_args)
+            self.assertNotIn("app/" + TOOL.DESKTOP_IMAGE, output.call_args.args[1])
+            self.assertEqual(output.call_args.args[1]["app/" + TOOL.RESIDENT_IMAGE], (resident, 0o555))
+            for selected_args, selected_tree in ((args, observer_app), (observer_args, app)):
+                tree.return_value = selected_tree; output.reset_mock()
+                with self.assertRaisesRegex(TOOL.Refused, "signed-app-roster"):
+                    TOOL.input_command(selected_args)
+                output.assert_not_called()
+            tree.return_value = app; output.reset_mock()
             with mock.patch.object(TOOL, "PACKAGE_VERSION", "99.0.0"), self.assertRaisesRegex(TOOL.Refused, "app-info-binding"):
                 TOOL.input_command(args)
             output.assert_not_called()
@@ -2729,8 +3168,9 @@ class MacNormalPreviewData(unittest.TestCase):
             self.assertLess(build, helper_sign); self.assertLess(helper_sign, digest)
             self.assertLess(digest, stage); self.assertLess(stage, app_sign)
             self.assertIn('RUSTUP_TOOLCHAIN: "1.98.1"', workflow)
-            self.assertEqual(workflow.count("--options runtime"), 3)
-            self.assertEqual(workflow.count("--entitlements desktop/packaging/macos-empty-entitlements.plist"), 3)
+            expected_signers = 4 if name == "desktop-macos-installed.yml" else 3
+            self.assertEqual(workflow.count("--options runtime"), expected_signers)
+            self.assertEqual(workflow.count("--entitlements desktop/packaging/macos-empty-entitlements.plist"), expected_signers)
             self.assertEqual(workflow.count('--expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256"'), 2)
             # Prohibition text may mention --deep. Inspect only the real shell
             #signing commands, folding their continued arguments without execution.
@@ -2745,27 +3185,34 @@ class MacNormalPreviewData(unittest.TestCase):
 
     def preview_fixture(self):
         work = Path("/synthetic-mrk-preview")
-        target, binary, item, body = normal_cargo_fixture(work / "cargo-target")
-        messages = cargo_lines(item, {"reason": "build-finished", "success": True})
-        normal = TOOL.normal_cargo_artifact(messages, binary, target, body)
+        target, binary, rows, body = normal_cargo_fixture(work / "cargo-target")
+        messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
+        normal = TOOL.image_cargo_artifact(messages, binary, target, body, "desktop")
+        facade = entry_macho_fixture()
         binding = {"source": "a" * 40, "workflowSource": "a" * 40, "tree": "b" * 40,
-            "scope": "normal-macos-early-preview", "instrumented": False, "runId": "123", "runAttempt": "1",
-            "runtimeManifestSha256": "c" * 64}
+            "scope": "normal-macos-early-preview", "packageRole": "ordinary-image",
+            "instrumented": False, "runId": "123", "runAttempt": "1", "runtimeManifestSha256": "c" * 64}
+        expected = {"app/" + TOOL.APP_BINARY: {"sha256": "e" * 64}, "app/" + TOOL.ENTRY_BINARY: {"sha256": "f" * 64},
+                    "app/" + TOOL.DESKTOP_IMAGE: {"sha256": "9" * 64}, "app/" + TOOL.RESIDENT_IMAGE: {"sha256": "7" * 64},
+                    "app/" + TOOL.ANDROID_HELPER: {"sha256": "8" * 64}, "app/" + TOOL.VAULT_HELPER: {"sha256": "6" * 64},
+                    "app/" + TOOL.ANDROID_SERVICE_PLIST: {"sha256": "5" * 64}}
         observed = {"sourceCommit": "a" * 40, "installerDeadlineMetAfterFinalCloses": True,
             "installerReportedOriginalsSettled": True, "applicationLaunched": False, "guiSaveQualified": False,
-            "runtimeManifestSha256": "c" * 64, "inventorySha256": "d" * 64, "nonrootReadbackFileCount": 2,
+            "runtimeManifestSha256": "c" * 64, "inventorySha256": "d" * 64, "nonrootReadbackFileCount": len(expected),
             "maintenanceGate": {"state": "protected-permanent-gate-data-correspondence", "bytes": 30,
                                 "exclusionObserved": False, "workerFinalityEstablished": False},
              "originalInstallerResult": original_result((None, "confirmed", "confirmed", "installed", True, 0)),
             "installationMetadata": {"state": "recorded-current-data-correspondence", "instance": "d" * 32,
                 "inventoryBytes": 6, "descriptorBytes": 4, "originalFinality": "separate-Installer-status"}}
         package = b"synthetic-package-DATA-not-native-Installer-evidence"
-        values = {work / "normal-build.jsonl": messages, binary: body,
+        values = {work / "normal-build.jsonl": messages, binary: body, work / "mobile-release-kit-desktop": facade,
             work / "normal-build.status": b"0\n", work / "installer-output.status": b"0\n",
             work / "package-final/MobileReleaseKit.pkg": package,
             TOOL.DESKTOP / "packaging/macos-preview.md": b"# Synthetic preview guide\n"}
         documents = {"source-binding.json": binding, "source-inventory.json": {"source": "a" * 40, "tree": "b" * 40},
-            "app-result.json": {"normalCargoArtifact": normal, "appBinarySha256BeforeSigning": TOOL.digest(body),
+            "app-result.json": {"packageRole": "ordinary-image", "desktopImageCargoArtifact": normal,
+                                "desktopImageSha256BeforeSigning": TOOL.digest(body), "appBinarySha256BeforeSigning": TOOL.digest(facade),
+                                "residentImageSha256": "7" * 64, "androidHelperSha256": "8" * 64,
                                 "entryBinarySha256BeforeSigning": "f" * 64, "entryBundleIdentifier": TOOL.ENTRY_BUNDLE_ID,
                                 "payloadBundleIdentifier": TOOL.BUNDLE_ID},
             "installation-observation.json": observed,
@@ -2773,7 +3220,6 @@ class MacNormalPreviewData(unittest.TestCase):
                 "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
                 "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}}
         values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
-        expected = {"app/" + TOOL.APP_BINARY: {"sha256": "e" * 64}, "app/" + TOOL.ENTRY_BINARY: {"sha256": "f" * 64}}
         return work, values, documents, expected
 
     def test_preview_roster_has_no_raw_evidence_and_keeps_open_and_quit_unexecuted(self):
@@ -2797,6 +3243,11 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertEqual(summary["ordinaryEntryRoute"], "unexecuted")
         self.assertEqual(summary["directPayloadPreMain"], "unqualified")
         self.assertEqual(summary["signedEntryBinarySha256"], "f" * 64)
+        self.assertEqual(summary["packageRole"], "ordinary-image")
+        self.assertEqual(summary["normalBinaryBeforeSigningSha256"], documents["app-result.json"]["appBinarySha256BeforeSigning"])
+        self.assertEqual(summary["desktopImageBeforeSigningSha256"], documents["app-result.json"]["desktopImageSha256BeforeSigning"])
+        self.assertNotEqual(summary["normalBinaryBeforeSigningSha256"], summary["desktopImageBeforeSigningSha256"])
+        self.assertEqual((summary["signedDesktopImageSha256"], summary["signedResidentImageSha256"]), ("9" * 64, "7" * 64))
         self.assertFalse(summary["fullUIQualified"])
         self.assertFalse(summary["distributionQualified"])
         self.assertFalse(summary["productReady"])
@@ -2807,6 +3258,15 @@ class MacNormalPreviewData(unittest.TestCase):
             ("normal-build.status", None, b"1\n"), ("installer-output.status", None, b"20\n"),
             ("source-binding.json", "instrumented", True), ("source-inventory.json", "tree", "f" * 40),
             ("app-result.json", "appBinarySha256BeforeSigning", "f" * 64),
+            ("source-binding.json", "packageRole", "installed-shell-observation"),
+            ("source-binding.json", "packageRole", None),
+            ("app-result.json", "packageRole", "installed-shell-observation"),
+            ("app-result.json", "desktopImageSha256BeforeSigning", "f" * 64),
+            ("app-result.json", "desktopImageCargoArtifact", {}),
+            ("app-result.json", "normalCargoArtifact", {}),
+            ("app-result.json", "residentImageSha256", "4" * 64),
+            ("app-result.json", "androidHelperSha256", "4" * 64),
+            ("mobile-release-kit-desktop", None, b"not-a-C-facade"),
             ("installation-observation.json", "installerDeadlineMetAfterFinalCloses", False),
             ("installation-observation.json", "installationMetadata", None),
             ("installation-observation.json", "installationMetadata", {"state": "incomplete"}),
@@ -2845,8 +3305,8 @@ class MacNormalPreviewData(unittest.TestCase):
             "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)"})
         self.assertIn("      - verify/desktop-macos-preview\n", workflow)
         self.assertIn("--message-format=json", workflow)
-        self.assertIn('--normal-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', workflow)
-        self.assertIn('--normal-cargo-target-dir "$CARGO_TARGET_DIR"', workflow)
+        self.assertIn('--desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', workflow)
+        self.assertIn('--desktop-image-cargo-target-dir "$CARGO_TARGET_DIR"', workflow)
         for name in ("Fail fast on native Scripts ownership and package format (never Installer)",
                      "Build the separate fixed eight-case Installer package from the same completed input",
                      "Standard Installer runs the one fixed fixture, never root libtest or a scenario selector",

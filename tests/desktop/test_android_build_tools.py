@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import inspect
 import json
 import os
 import shlex
@@ -1229,7 +1230,19 @@ class MacToolAdmissionDataTests(unittest.TestCase):
             self.assertEqual(startup, build_jvm)
             self.assertEqual(startup.count(f"-Dorg.gradle.native.dir={WORK}"), 1)
             self.assertFalse(any(value.startswith(("-Dos.arch=", "-Dos.name=")) for value in startup))
-            self.assertEqual(tools.bundletool_command(snapshot)[0], f"{home}/bin/java")
+            self.assertEqual(tools.bundletool_command(snapshot), (
+                f"{home}/bin/java", "-Xms64m", "-Xmx1024m", "-XX:MaxMetaspaceSize=512m",
+                "-Dfile.encoding=UTF-8", f"-Duser.home={WORK}", f"-Djava.io.tmpdir={WORK}",
+                "-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+                f"-Djna.tmpdir={WORK}", "-jar", f"{tools.binding.root}/bundletool/bundletool.jar",
+                "dump", "manifest", f"--bundle={snapshot}", "--module=base",
+            ))
+            self.assertEqual(tuple((parameter.name, parameter.kind, parameter.default)
+                                   for parameter in inspect.signature(
+                                       subject.AndroidValidationTools.bundletool_command).parameters.values()), (
+                ("self", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+                ("snapshot_path", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+            ))
             self.assertEqual(tools.jarsigner_command(snapshot)[0], f"{home}/bin/jarsigner")
             self.assertEqual(tools.keytool_command(snapshot)[0], f"{home}/bin/keytool")
         chosen = selection_data()

@@ -33,6 +33,7 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.98.1"
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
       # Exact independently accepted current-payload DATA; not native qualification.
       MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0
@@ -2886,7 +2887,7 @@ jobs:
             --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
-      - name: Build and sign the separate fixed Android registration helper
+      - name: Build and sign the fixed resident image and C facades
         id: android_helper
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending')
         timeout-minutes: 10
@@ -2897,8 +2898,8 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          # Fixed separate graph, original compiler/signature owners, and
-          # immediate target retirement. This never registers/runs the helper.
+          # The same original owner builds the real resident dylib and fixed C
+          # facades, then retires its target. No helper registration or execution.
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare >> "$GITHUB_OUTPUT"
       - name: Build and sign the separate fixed vault helper before binding the app
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending')
@@ -2976,7 +2977,7 @@ jobs:
             exit "$status"
           fi
           "$MRK_PYTHON" -I -S -B - <<'PY_BUILD'
-          import json, os, pathlib, re, stat
+          import hashlib, json, os, pathlib, re, stat
           root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
           path = root / "observer-build.jsonl"
           if path.stat().st_size > 4 * 1024 * 1024: raise ValueError("compiler record bound")
@@ -2989,8 +2990,24 @@ jobs:
           if binary.parent != expected or not re.fullmatch(r"installed_shell_observation-[0-9a-f]+", binary.name): raise ValueError("fixed observation target path")
           m = binary.lstat()
           if not stat.S_ISREG(m.st_mode) or m.st_nlink != 1 or m.st_mode & 0o111 == 0: raise ValueError("original compiler artifact type")
+          identity = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+          try:
+              before = os.fstat(fd)
+              if identity(before) != identity(m) or not 0 < before.st_size <= 512 * 1024 * 1024:
+                  raise ValueError("original observer artifact changed or oversized")
+              h = hashlib.sha256()
+              for offset in range(0, before.st_size, 65536):
+                  block = os.read(fd, min(65536, before.st_size - offset))
+                  if len(block) != min(65536, before.st_size - offset): raise ValueError("short original artifact read")
+                  h.update(block)
+              if (os.read(fd, 1) or identity(before) != identity(os.fstat(fd))
+                      or identity(before) != identity(os.stat(binary, follow_symlinks=False))):
+                  raise ValueError("original observer artifact changed")
+          finally: os.close(fd)
           with open(os.environ["GITHUB_ENV"], "a") as stream:
               stream.write("MRK_MACOS_OBSERVER_BINARY=" + str(binary) + "\n")
+              stream.write("MRK_MACOS_OBSERVER_SHA256=" + h.hexdigest() + "\n")
           PY_BUILD
       - name: Assemble the instrumented engineering app; ad-hoc sign only the app
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending')
@@ -2999,25 +3016,31 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
+          MRK_MACOS_RESIDENT_IMAGE_SHA256: ${{ steps.android_helper.outputs['resident-image-sha256'] }}
           MRK_MACOS_ENTRY_SHA256: ${{ steps.android_helper.outputs['entry-sha256'] }}
         run: |
           set -euo pipefail
           set -o noclobber
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
+            --package-role installed-shell-observation \
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
             --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
+            --resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib" \
+            --expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256" \
             --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \
             --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \
-            --binary "$MRK_MACOS_OBSERVER_BINARY" \
+            --binary "$MRK_MACOS_OBSERVER_BINARY" --expected-app-binary "$MRK_MACOS_OBSERVER_SHA256" \
+            --observer-cargo-messages "$MRK_MACOS_WORK/observer-build.jsonl" \
+            --observer-cargo-target-dir "$CARGO_TARGET_DIR" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before
           payload="$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app"
-          # Existing independent helpers were signed first. Sign the original
-          # Rust payload, then its C entry container; never --deep repair.
+          # Explicit non-image observer fixture: real resident image/helper,
+          # actual observer executable, no dummy desktop image or role fallback.
           /usr/bin/codesign --force --sign - --options runtime \
             --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$payload"
           /usr/bin/codesign --verify --strict "$payload"
@@ -3040,14 +3063,17 @@ jobs:
         shell: bash
         env:
           MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
+          MRK_MACOS_RESIDENT_IMAGE_SHA256: ${{ steps.android_helper.outputs['resident-image-sha256'] }}
           MRK_MACOS_ENTRY_SHA256: ${{ steps.android_helper.outputs['entry-sha256'] }}
         run: |
           set -euo pipefail
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
+            --package-role installed-shell-observation \
             --expected-entry "$MRK_MACOS_SIGNED_ENTRY_SHA256" --expected-app-binary "$MRK_MACOS_SIGNED_PAYLOAD_SHA256" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
+            --expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256" \
             --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
             --current-runtime \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
@@ -3524,6 +3550,27 @@ jobs:
             ${{ steps.work.outputs.root }}/android-helper-build.jsonl
             ${{ steps.work.outputs.root }}/android-helper-build.stderr
             ${{ steps.work.outputs.root }}/android-helper-build.status
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stdout
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stderr
+            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.status
+            ${{ steps.work.outputs.root }}/android-helper-entry-build.stdout
+            ${{ steps.work.outputs.root }}/android-helper-entry-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-entry-build.status
+            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stdout
+            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.status
+            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stdout
+            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.status
+            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stdout
+            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stderr
+            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.status
             ${{ steps.work.outputs.root }}/android-helper-sign.stdout
             ${{ steps.work.outputs.root }}/android-helper-sign.stderr
             ${{ steps.work.outputs.root }}/android-helper-sign.status

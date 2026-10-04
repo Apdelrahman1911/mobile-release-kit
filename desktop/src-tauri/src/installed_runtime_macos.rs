@@ -116,16 +116,24 @@ impl AndroidServiceIdentitySlots {
             runtime_manifest:manifest,install_root:identity(install)?,release_directory:identity(release)?};
         data::Record::parse_data(&descriptor,&inventory_bytes,&expected).map_err(|_|AdmissionFailure::Inventory)?;
         let inventory=data::Inventory::parse(&inventory_bytes,manifest).map_err(|_|AdmissionFailure::Inventory)?;
-        // Full inventory/rosters were checked by the SAME original inspector.
-        // Rebind these exact three retained files to the same source-bound
-        // protected record before Security/framework service entry.
+        let layout=installed_code_layout()?;
+        let index=inventory.index().map_err(|_|AdmissionFailure::Inventory)?;
+        index.require_layout(layout).map_err(|_|AdmissionFailure::Inventory)?;
+        // Rebind the complete SAME-live fixed facade/image/plist group to the
+        // source-bound protected record before Security/framework service entry.
+        // The only omission is selected by the compiled observer role above,
+        // never inferred from this untrusted inventory.
         for (path,names,mode) in [
+            (data::ENTRY_BINARY,&["Contents","MacOS","mrk-macos-entry"][..],0o555),
             (data::APP_BINARY,&["MacOS","mobile-release-kit-desktop"][..],0o555),
             (data::ANDROID_HELPER,&["Helpers","mrk-android-register"][..],0o555),
+            (data::DESKTOP_IMAGE,&["Frameworks","libmrk_desktop_image.dylib"][..],0o555),
+            (data::RESIDENT_IMAGE,&["Frameworks","libmrk_resident_image.dylib"][..],0o555),
             (data::ANDROID_SERVICE_PLIST,&["Library","LaunchDaemons","dev.mobile-release-kit.desktop.android-register.plist"][..],0o444),
         ] {
-            let row=inventory.files.iter().find(|row|row.path==path).ok_or(AdmissionFailure::Inventory)?;
-            let mut parent=contents;
+            if path==data::DESKTOP_IMAGE && layout==data::CodeLayout::ObserverExecutable {continue;}
+            let row=index.files.get(path).ok_or(AdmissionFailure::Inventory)?;
+            let mut parent=if path==data::ENTRY_BINARY {roles.entry}else{contents};
             for (position,name) in names.iter().enumerate() {
                 let directory=position+1<names.len();
                 parent=self.attempt(|book|book.open(Some(parent),name,directory,end,stop))?;
@@ -206,6 +214,14 @@ impl AndroidServiceIdentitySlots {
 
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
 struct ProtectedApp { install: usize, entry: usize, payload: usize, contents: usize }
+fn installed_code_layout() -> Result<crate::macos_install_record::CodeLayout> {
+    use crate::macos_install_record::CodeLayout;
+    match (cfg!(feature = "macos-installed-desktop-image"), cfg!(feature = "macos-installed-observation")) {
+        (true, false) => Ok(CodeLayout::OrdinaryImage),
+        (false, true) => Ok(CodeLayout::ObserverExecutable),
+        _ => Err(AdmissionFailure::Inventory),
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionFailure { Stopped, Deadline, Bounds, Native, Ownership, Inventory, Identity, AlreadyUsed, Unknown }
 type Result<T> = std::result::Result<T, AdmissionFailure>;
@@ -528,10 +544,74 @@ impl Book {
         }
         self.check_name(parent, end, stop)
     }
+    fn fixed_code_mode(&self, index: usize, mode: u16, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.point(end, stop)?;
+        let id=self.records.get(index).and_then(|record|record.identity).ok_or(AdmissionFailure::Identity)?;
+        if id.uid!=0 || id.gid!=0 || id.flags!=0 || id.mode&0o7777!=mode {return Err(AdmissionFailure::Ownership);}
+        native::no_xattrs(self.fd(index)?.as_fd()).map_err(native_error)?;
+        self.check_name(index,end,stop)
+    }
+    fn fixed_code_group(&mut self, outer_contents: usize, contents: usize,
+        layout: crate::macos_install_record::CodeLayout, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        // Fixed names, the same retained Book and the same original clock/ACL
+        // budget. This is roster/identity admission, not another lifecycle.
+        for (root,names,mode) in [
+            (outer_contents,&["MacOS","mrk-macos-entry"][..],0o555),
+            (contents,&["Helpers","mrk-android-register"][..],0o555),
+            (contents,&["Library","LaunchDaemons","dev.mobile-release-kit.desktop.android-register.plist"][..],0o444),
+        ] {
+            let mut parent=root;
+            for (position,name) in names.iter().enumerate() {
+                let directory=position+1<names.len();
+                parent=self.open(Some(parent),name,directory,end,stop)?;
+                self.fixed_code_mode(parent,if directory{0o555}else{mode},end,stop)?;
+            }
+            if mode==0o444 {
+                let expected=include_bytes!("../../macos-installed-inputs/dev.mobile-release-kit.desktop.android-register.plist");
+                let (_,body)=self.read(parent,expected.len() as u64,true,end,stop)?;
+                if body!=expected {return Err(AdmissionFailure::Inventory);}
+            }
+        }
+        let frameworks=self.open(Some(contents),"Frameworks",true,end,stop)?;
+        self.fixed_code_mode(frameworks,0o555,end,stop)?;
+        let names: &[&str]=match layout {
+            crate::macos_install_record::CodeLayout::OrdinaryImage =>
+                &["libmrk_desktop_image.dylib","libmrk_resident_image.dylib"],
+            crate::macos_install_record::CodeLayout::ObserverExecutable => &["libmrk_resident_image.dylib"],
+        };
+        let mut seen=0u8;let mut buffer=[0u8;65536];
+        loop {
+            self.point(end,stop)?;
+            let used=native::directory_block(self.fd(frameworks)?.as_fd(),&mut buffer).map_err(native_error)?;
+            if used==0 {break;}
+            if used>buffer.len() {return Err(AdmissionFailure::Bounds);}
+            let mut offset=0;
+            while offset<used {
+                if used-offset<11 {return Err(AdmissionFailure::Inventory);}
+                let inode=u64::from_ne_bytes(buffer[offset..offset+8].try_into().map_err(native_error)?);
+                let kind=buffer[offset+8];
+                let length=usize::from(u16::from_ne_bytes([buffer[offset+9],buffer[offset+10]]));
+                let next=offset.checked_add(11+length).filter(|n|*n<=used).ok_or(AdmissionFailure::Inventory)?;
+                let name=std::str::from_utf8(&buffer[offset+11..next]).map_err(native_error)?;
+                offset=next;
+                if name=="." || name==".." {continue;}
+                let position=names.iter().position(|expected|*expected==name).ok_or(AdmissionFailure::Inventory)?;
+                let bit=1u8<<position;
+                if inode==0 || kind!=nix::libc::DT_REG || seen&bit!=0 {return Err(AdmissionFailure::Inventory);}
+                seen|=bit;
+                let image=self.open(Some(frameworks),name,false,end,stop)?;
+                self.fixed_code_mode(image,0o555,end,stop)?;
+                if self.records[image].identity.is_none_or(|id|id.ino!=inode) {return Err(AdmissionFailure::Identity);}
+            }
+        }
+        if seen!=(1u8<<names.len())-1 {return Err(AdmissionFailure::Inventory);}
+        self.check_name(frameworks,end,stop)
+    }
     // Private factoring of the existing installed-app proof, not a Resources
     // capability. FixedSupport uses the SAME retained Contents ancestor.
     fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
         if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
+        let layout=installed_code_layout()?;
         self.records.try_reserve_exact(8256).map_err(native_error)?; self.started = true;
         self.point(end, stop)?; native::real_user().map_err(native_error)?; self.point(end, stop)?;
         // A user-writable drag-copy or checkout app cannot select this runtime.
@@ -549,6 +629,7 @@ impl Book {
         let id = self.records[binary].identity.ok_or(AdmissionFailure::Identity)?;
         if id.gid != 0 || id.mode & 0o7777 != 0o555 { return Err(AdmissionFailure::Ownership); }
         native::no_xattrs(self.fd(binary)?.as_fd()).map_err(native_error)?;
+        self.fixed_code_group(outer_contents,contents,layout,end,stop)?;
         Ok(ProtectedApp { install, entry, payload, contents })
     }
     fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {

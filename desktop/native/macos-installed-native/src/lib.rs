@@ -3,6 +3,20 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
+// The fixture requires its paired native build and one isolated image graph.
+// A Cargo feature or synthetic receipt alone never qualifies fixture identity.
+#[cfg(any(
+    all(feature = "e2-native-fixture", not(mrk_e2_native_fixture_native)),
+    all(mrk_e2_native_fixture_native, not(feature = "e2-native-fixture")),
+    all(feature = "e2-native-fixture", any(
+        not(any(feature = "desktop-image", feature = "resident-image")),
+        all(feature = "desktop-image", feature = "resident-image"),
+        feature = "vault-helper", feature = "installed-observation", mrk_wrapping_keychain_qualification
+    ))
+))]
+compile_error!("E2 fixture requires its isolated matching native desktop or resident image role");
+#[cfg(all(feature = "e2-native-fixture", feature = "desktop-image", mrk_e2_native_fixture_native))]
+pub mod e2_native_fixture;
 // Unwired wrapping-key primitive; no availability or execution authority.
 pub mod wrapping_keychain;
 pub mod vault_filesystem;
@@ -10,10 +24,16 @@ pub mod vault_helper_wire;
 pub mod vault_helper_filesystem;
 #[cfg(not(any(feature = "vault-helper", feature = "android-registration-helper")))]
 pub mod vault_helper_launch;
-#[cfg(not(any(feature = "installed-observation", feature = "vault-helper", feature = "android-registration-helper")))]
+#[cfg(not(any(feature = "installed-observation", feature = "vault-helper", feature = "android-registration-helper",
+    feature = "desktop-image")))]
 pub mod installed_entry;
 pub mod android_lease;
 pub mod android_registration;
+pub mod android_maintenance_wire;
+#[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
+pub mod android_maintenance_client;
+#[cfg(feature = "android-registration-helper")]
+pub mod installed_image;
 pub mod android_catalog_query;
 pub mod android_catalog_query_wire;
 pub mod android_service_prepare;
@@ -26,6 +46,15 @@ pub mod android_service_budget;
 pub mod android_service_management;
 mod android_service_lease;
 mod android_service_client_data;
+pub const DESKTOP_IMAGE_BUILD: bool = cfg!(feature = "desktop-image");
+pub const RESIDENT_IMAGE_BUILD: bool = cfg!(feature = "resident-image");
+#[cfg(all(feature = "resident-image", any(not(feature = "android-registration-helper"),
+    feature = "desktop-image", feature = "vault-helper", feature = "installed-observation",
+    mrk_wrapping_keychain_qualification)))]
+compile_error!("resident image requires its isolated native helper graph");
+#[cfg(all(feature = "desktop-image", any(feature = "installed-observation", feature = "vault-helper",
+    feature = "android-registration-helper", mrk_wrapping_keychain_qualification)))]
+compile_error!("ordinary product image requires its isolated native role");
 pub const ANDROID_REGISTRATION_HELPER_BUILD: bool = cfg!(feature = "android-registration-helper");
 #[cfg(any(
     all(feature = "android-registration-helper", not(mrk_android_registration_helper_native)),
@@ -393,7 +422,7 @@ impl Panel {
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
-    OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, AxFailure, CompletionSelection, CompletionReturn, installed_prompt_button,
+    OpenInputReturn, OpenPressTiming, OpenRecheckReturn, ControlContainerButtonProof, AxFailure, CompletionSelection, CompletionReturn, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
     OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, VersionSourceNamePreparation, VersionSourceParentReady, VersionSourceSelectionReady, VersionSourceSelection, SelectionLimit, SelectionProjectionSummary, ContentReadiness, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
@@ -1633,13 +1662,44 @@ mod observation {
         Some(r)
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct OpenInputReturn { pub entered: bool, pub report: Option<OpenReport>, pub custody_known: bool }
+    pub struct OpenPressTiming {
+        pub installed_allowance_ns: u64,
+        pub last_permit_to_return_admission_ns: Option<u64>,
+    }
+    #[derive(Default)]
+    struct OpenPressCapture {
+        permit: Option<(u64, Instant)>, after_attempted: bool, returned_at: Option<Instant>,
+    }
+    impl OpenPressCapture {
+        fn first_return_attempt(&mut self, after: c_int) -> bool {
+            let first = after == 1 && !self.after_attempted;
+            if after == 1 { self.after_attempted = true; }
+            first
+        }
+        fn duration_ns(duration: Duration) -> Option<u64> { u64::try_from(duration.as_nanos()).ok() }
+        fn timing(&self, report: Option<OpenReport>) -> Option<OpenPressTiming> {
+            let report = report?;
+            if !report.attempted || !report.press_returned || report.triggered != Some(false)
+                || report.button.ax_error != -25204
+                || report.button.ax_failure != Some(AxFailure { operation: "perform-action", attribute: None }) { return None; }
+            let (installed_allowance_ns, permitted_at) = self.permit?;
+            // The valid attempted/returned report binds the last positive permit
+            // to the final Press. A missing first return clock stays unknown.
+            let elapsed = self.returned_at.and_then(|at| at.checked_duration_since(permitted_at))
+                .and_then(Self::duration_ns);
+            Some(OpenPressTiming { installed_allowance_ns, last_permit_to_return_admission_ns: elapsed })
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OpenInputReturn {
+        pub entered: bool, pub report: Option<OpenReport>, pub custody_known: bool, pub press_timing: Option<OpenPressTiming>,
+    }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct OpenTimeout { seconds: f32, required_ns: u64 }
     struct OpenAdmission<'a, F, G> {
         end: Instant, admit: &'a mut F, recheck: &'a mut G,
-        rechecks: [Option<OpenRecheckReturn>; 3], next_recheck: usize, custody_known: bool,
+        rechecks: [Option<OpenRecheckReturn>; 3], next_recheck: usize, custody_known: bool, press: OpenPressCapture,
     }
     fn timeout_for(remaining: Duration) -> Option<OpenTimeout> {
         let allowance = remaining.as_nanos().min(100_000_000);
@@ -1659,16 +1719,24 @@ mod observation {
     where F: FnMut(bool) -> Option<bool>, G: FnMut(u32) -> Result<(OpenRecheckReturn, bool), u32> {
         let context = unsafe { &mut *opaque.cast::<OpenAdmission<'_, F, G>>() };
         let checked = catch_unwind(AssertUnwindSafe(|| {
+            // Spend even a refused/unwound first return admission. A later
+            // CF-cleanup callback must never substitute its clock for Press.
+            let first_after = context.press.first_return_attempt(after);
             if !matches!(after, 0 | 1) || required_ns > 100_000_000 || !timeout.is_null() && required_ns != 0 {
                 context.custody_known = false; return 9;
             }
             let Some(allowed) = (context.admit)(after == 1) else { context.custody_known = false; return 9; };
-            let remaining = context.end.saturating_duration_since(Instant::now());
+            let now = Instant::now();
+            if first_after { context.press.returned_at = Some(now); }
+            let remaining = context.end.saturating_duration_since(now);
             if remaining.is_zero() || remaining.as_nanos() < u128::from(required_ns) { return 8; }
             if !allowed { return 3; }
             if !timeout.is_null() {
                 let Some(value) = timeout_for(remaining) else { return 8; };
                 unsafe { *timeout = value; }
+            }
+            if after == 0 && required_ns > 0 && !context.press.after_attempted {
+                context.press.permit = Some((required_ns, now));
             }
             0
         }));
@@ -1702,10 +1770,10 @@ mod observation {
     /// callbacks cross this boundary; Panel/NSWindow/CF owners are never Send.
     pub fn installed_prompt_button<F, G>(identity: OpenIdentity, end: Instant, mut admit: F, mut recheck: G) -> OpenInputReturn
     where F: FnMut(bool) -> Option<bool>, G: FnMut(u32) -> Result<(OpenRecheckReturn, bool), u32> {
-        let mut returned = OpenInputReturn { entered: false, report: None, custody_known: false };
+        let mut returned = OpenInputReturn { entered: false, report: None, custody_known: false, press_timing: None };
         if main_thread() || !identity.valid() { return returned; }
         let mut context = OpenAdmission { end, admit: &mut admit, recheck: &mut recheck,
-            rechecks: [None; 3], next_recheck: if identity.selection { 0 } else { 1 }, custody_known: true };
+            rechecks: [None; 3], next_recheck: if identity.selection { 0 } else { 1 }, custody_known: true, press: OpenPressCapture::default() };
         let mut wire = OpenWire::default(); returned.entered = true;
         // SAFETY: bounded copied input lives through the single synchronous
         // call; callbacks borrow this worker stack only while C is active.
@@ -1713,6 +1781,7 @@ mod observation {
             identity.parent.len(), identity.target.as_ptr(), identity.target.len(), u32::from(identity.selection), open_admission::<F, G>, open_recheck::<F, G>,
             (&mut context as *mut OpenAdmission<'_, F, G>).cast(), &mut wire); }
         returned.report = open_return(wire, context.rechecks, context.custody_known, identity.selection);
+        returned.press_timing = context.press.timing(returned.report);
         returned.custody_known = context.custody_known && returned.report.is_some_and(|r| r.custody_known);
         returned
     }
@@ -2084,6 +2153,79 @@ mod observation {
         }
         admitted_pairs == 24 && ax_failure_return(OpenWire::default()) == Some(None)
     }
+    fn press_timing_data_check(failed: OpenReport) -> bool {
+        // Inert callback/clock DATA only. No C, AX, native receipt or sleep.
+        // The unwind regression must refuse rather than abort on an abort profile.
+        if !cfg!(panic = "unwind") { return false; }
+        fn invoke<F, G>(context: &mut OpenAdmission<'_, F, G>, required: u64, after: c_int) -> c_int
+        where F: FnMut(bool) -> Option<bool>, G: FnMut(u32) -> Result<(OpenRecheckReturn, bool), u32> {
+            unsafe { open_admission::<F, G>((context as *mut OpenAdmission<'_, F, G>).cast(),
+                required, after, std::ptr::null_mut()) }
+        }
+        let mode = std::cell::Cell::new(0);
+        let mut admit = |_: bool| match mode.get() {
+            0 => Some(true), 1 => Some(false), 2 => None,
+            // Exercise the existing unwind catcher without invoking a panic hook.
+            _ => std::panic::resume_unwind(Box::new(())),
+        };
+        let mut recheck = |_: u32| -> Result<(OpenRecheckReturn, bool), u32> { Err(9) };
+        let now = Instant::now(); let Some(end) = now.checked_add(Duration::from_secs(60)) else { return false; };
+        let mut context = OpenAdmission { end, admit: &mut admit, recheck: &mut recheck,
+            rechecks: [None; 3], next_recheck: 1, custody_known: true, press: OpenPressCapture::default() };
+        if std::mem::size_of::<OpenPressCapture>() > 96 || std::mem::size_of::<OpenPressTiming>() > 32
+            || invoke(&mut context, 10, 0) != 0 || invoke(&mut context, 20, 0) != 0 { return false; }
+        let permit = context.press.permit;
+        if permit.map(|p| p.0) != Some(20) { return false; }
+        mode.set(1);
+        if invoke(&mut context, 30, 0) != 3 || context.press.permit != permit { return false; }
+        mode.set(0);
+        if invoke(&mut context, 0, 0) != 0 || context.press.permit != permit
+            || invoke(&mut context, 0, 1) != 0 { return false; }
+        let first = context.press.returned_at;
+        if first.is_none() || invoke(&mut context, 0, 1) != 0 || context.press.returned_at != first
+            || invoke(&mut context, 40, 0) != 0 || context.press.permit != permit
+            || !context.press.timing(Some(failed)).is_some_and(|t| t.installed_allowance_ns == 20
+                && t.last_permit_to_return_admission_ns.is_some()) { return false; }
+        for refusal in [2, 3, 4] {
+            context.press = OpenPressCapture::default(); context.custody_known = true; mode.set(0);
+            if invoke(&mut context, 50, 0) != 0 { return false; }
+            let permit = context.press.permit;
+            mode.set(if refusal == 4 { 0 } else { refusal });
+            if invoke(&mut context, if refusal == 4 { 100_000_001 } else { 0 }, 1) != 9
+                || !context.press.after_attempted || context.press.returned_at.is_some() || context.custody_known { return false; }
+            mode.set(0);
+            if invoke(&mut context, 0, 1) != 0 || context.press.returned_at.is_some() || context.press.permit != permit
+                || context.press.timing(Some(failed)) != Some(OpenPressTiming {
+                    installed_allowance_ns: 50, last_permit_to_return_admission_ns: None }) { return false; }
+        }
+        // Reaching the existing return clock records DATA even on ineligibility
+        // or deadline. Neither return code nor any owner permission is changed.
+        for late in [false, true] {
+            context.press = OpenPressCapture::default(); context.custody_known = true; context.end = end; mode.set(0);
+            if invoke(&mut context, 60, 0) != 0 { return false; }
+            if late { context.end = now; } else { mode.set(1); }
+            if invoke(&mut context, 0, 1) != (if late { 8 } else { 3 })
+                || !context.press.timing(Some(failed)).is_some_and(|t| t.last_permit_to_return_admission_ns.is_some()) { return false; }
+        }
+        let mut exact = OpenPressCapture { permit: Some((1, now)), after_attempted: true, returned_at: Some(now) };
+        if exact.timing(Some(failed)) != Some(OpenPressTiming {
+            installed_allowance_ns: 1, last_permit_to_return_admission_ns: Some(0) }) { return false; }
+        let Some(later) = now.checked_add(Duration::from_nanos(1)) else { return false; };
+        exact.permit = Some((1, later));
+        if exact.timing(Some(failed)).and_then(|t| t.last_permit_to_return_admission_ns).is_some()
+            || OpenPressCapture::duration_ns(Duration::from_nanos(u64::MAX)) != Some(u64::MAX)
+            || OpenPressCapture::duration_ns(Duration::from_nanos(u64::MAX) + Duration::from_nanos(1)).is_some()
+            || OpenPressCapture::default().timing(Some(failed)).is_some() || exact.timing(None).is_some() { return false; }
+        for invalid in [OpenReport { attempted: false, ..failed }, OpenReport { press_returned: false, ..failed },
+            OpenReport { triggered: Some(true), ..failed },
+            OpenReport { button: ControlContainerButtonProof { ax_error: -25202, ..failed.button }, ..failed },
+            OpenReport { button: ControlContainerButtonProof { ax_failure: None, ..failed.button }, ..failed },
+            OpenReport { button: ControlContainerButtonProof {
+                ax_failure: Some(AxFailure { operation: "set-messaging-timeout", attribute: None }), ..failed.button }, ..failed }] {
+            if exact.timing(Some(invalid)).is_some() { return false; }
+        }
+        true
+    }
     fn semantic_data_check() -> bool {
         // Inert decoder/timeout DATA only: never manufacture a native return.
         let ordinary_return = |w, r: [Option<OpenRecheckReturn>; 2], known|
@@ -2246,6 +2388,9 @@ mod observation {
             if t.required_ns > ns.min(100_000_000) || t.required_ns == 0
                 || t.required_ns != (f64::from(t.seconds) * 1_000_000_000.0).ceil() as u64 { return false; }
         }
+        let Some(failed_press) = ordinary_return(OpenWire { flags: 11, error: 11, ax_error: -25204,
+            ax_failure_operation: 8, ax_failure_attribute: 0, ..full }, rechecks, true) else { return false; };
+        if !press_timing_data_check(failed_press) { return false; }
         timeout_for(Duration::ZERO).is_none()
             && ordinary_return(OpenWire { flags: 11, error: 11, ax_error: -25204,
                 ax_failure_operation: 8, ax_failure_attribute: 0, ..full }, rechecks, true)

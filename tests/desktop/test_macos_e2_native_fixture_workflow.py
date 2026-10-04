@@ -1,0 +1,235 @@
+"""Fixed E2 workflow source contracts; never YAML/heredoc or native execution."""
+from pathlib import Path
+import re
+import unittest
+
+ROOT = Path(__file__).absolute().parents[2]
+WORKFLOW = ROOT / ".github/workflows/desktop-macos-maintenance-fixture.yml"
+OWNER = ROOT / "desktop/tools/macos_e2_native_fixture.py"
+STEP_NAMES = (
+    "Admit only this fixed fresh hosted route",
+    "Check out the exact reviewed source without retained credentials",
+    "Select fixed isolated preparation Python",
+    "Prepare only the locked fixture graphs through the original command owner",
+    "Run the one reviewed fixture owner and its three native cases",
+    "Publish only the closed source-bound fixture summary",
+    "Preserve only the bounded reviewed summary",
+    "Require actual complete acceptance",
+)
+# Frozen active source, not values derived from the subject during a test.
+EXPECTED_HEADER = "name: Desktop macOS fixed maintenance fixture\n\non:\n  push:\n    branches:\n      - verify/desktop-macos-maintenance-fixture\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: desktop-macos-maintenance-fixture-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  e2_fixture:\n    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'\n    runs-on: macos-26\n    timeout-minutes: 75\n    env:\n      # No shell startup file, inherited compiler switch or credential reaches\n      # a preparation/native child. Child environments below are reconstructed.\n      BASH_ENV: ''\n      ENV: ''\n"
+EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 55\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # This original owner alone compiles/signs/installs/observes the fixed\n          # fixture. Its 990s/993s native call covers ALL THREE cases, with one\n          # distinct aggregate 60s auxiliary ledger. Step timeout is no receipt.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py\n\n"
+EXPECTED_IF_LINES = (
+    "    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'",
+    "        if: always() && !cancelled() && steps.prepare.outcome == 'success'",
+    "        if: always() && steps.publication.outcome == 'success'",
+    "        if: always() && !cancelled()",
+)
+
+
+
+def active(text):
+    return "\n".join(line.rstrip() for line in text.splitlines()
+                     if line.strip() and not line.lstrip().startswith("#"))
+
+
+def flat(text):
+    return " ".join(active(text).split())
+
+
+def section(text, start, end):
+    """Only unique literal boundaries in this fixed reviewed source shape."""
+    if text.count(start) != 1:
+        raise AssertionError("fixed source start must be unique: " + start)
+    rest = text.split(start, 1)[1]
+    if end not in rest:
+        raise AssertionError("fixed source end missing: " + end)
+    return start + rest.split(end, 1)[0]
+
+
+def references_github_secrets(text):
+    """Inspect fixed-source Actions expressions, not Python entropy calls."""
+    cursor = 0
+    while True:
+        start = text.find("${{", cursor)
+        if start < 0:
+            return False
+        cursor, quoted, code = start + 3, False, []
+        while cursor < len(text):
+            if quoted and text.startswith("''", cursor):
+                cursor += 2
+                continue
+            char = text[cursor]
+            if char == "'":
+                quoted = not quoted
+                code.append(" ")
+            elif not quoted and text.startswith("}}", cursor):
+                cursor += 2
+                break
+            elif not quoted:
+                code.append(char)
+            cursor += 1
+        else:
+            raise AssertionError("unterminated GitHub expression in fixed source")
+        if re.search(r"\bsecrets\b", "".join(code), re.IGNORECASE):
+            return True
+
+
+class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = WORKFLOW.read_text(encoding="utf-8")
+        cls.owner = OWNER.read_text(encoding="utf-8")
+        chunks = cls.workflow.split("    steps:\n")
+        if len(chunks) != 2:
+            raise AssertionError("exactly one fixed steps block is required")
+        cls.header, body = chunks
+        chunks = body.split("      - name: ")
+        if chunks[0]:
+            raise AssertionError("unexpected source before first fixed step")
+        cls.steps = {}
+        for chunk in chunks[1:]:
+            name, newline, content = chunk.partition("\n")
+            if not newline or name in cls.steps:
+                raise AssertionError("missing or duplicate named step")
+            cls.steps[name] = content
+
+    def test_fixed_hosted_source_route_and_readonly_actions(self):
+        self.assertEqual(active(self.header), active(EXPECTED_HEADER))
+        self.assertEqual(tuple(self.steps), STEP_NAMES)
+        actions = [line.strip().split(" #", 1)[0]
+                   for line in self.workflow.splitlines()
+                   if line.startswith("        uses: ")]
+        self.assertEqual(actions, [
+            "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        ])
+        admit, checkout, python = (self.steps[name] for name in STEP_NAMES[:3])
+        for required in (
+            'set -euo pipefail',
+            '[[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]',
+            '[[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]]',
+            '[[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-maintenance-fixture && "$GITHUB_JOB" == e2_fixture ]]',
+            '[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]',
+            '[[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-maintenance-fixture.yml@$GITHUB_REF" ]]',
+        ):
+            with self.subTest(admission=required):
+                self.assertIn(required, active(admit))
+        self.assertIn("ref: ${{ github.sha }}", active(checkout))
+        self.assertIn("persist-credentials: false", active(checkout))
+        self.assertIn("python-version: '3.14.7'", active(python))
+        # Only GitHub expressions consume credential contexts. Python's secrets
+        # module remains the unchanged cryptographic work-name entropy source.
+        for allowed in (
+            "import secrets\nwork = secrets.token_hex(4)",
+            "${{ github.sha }} ${{ steps.prepare.outputs.root }}",
+            "${{ format('secrets. and }} are text; it''s literal', github.sha) }}",
+        ):
+            self.assertFalse(references_github_secrets(allowed))
+        for forbidden_expression in (
+            "${{ secrets.EXAMPLE }}",
+            "${{SECRETS['EXAMPLE']}}",
+            "${{ SeCrEtS \n . EXAMPLE }}",
+            "${{ secrets }}",
+            "${{ toJSON(secrets) }}",
+            "${{ secrets.* }}",
+            "${{ github.sha || secrets['EXAMPLE'] }}",
+            "${{ format('}} and it''s quoted {0}', secrets['EXAMPLE']) }}",
+        ):
+            self.assertTrue(references_github_secrets(forbidden_expression))
+        for unfinished in ("${{ github.sha", "${{ format('unfinished }}"):
+            with self.assertRaisesRegex(AssertionError, "unterminated GitHub expression"):
+                references_github_secrets(unfinished)
+        self.assertFalse(references_github_secrets(self.workflow))
+        # Actions also evaluates unwrapped if predicates. Freeze the complete
+        # occurrence roster: additions, quoted keys, multiline or moved forms fail.
+        self.assertEqual(
+            tuple(line for line in self.workflow.splitlines()
+                  if re.match(r"""^\s*(?:if|['"]if['"])\s*:""", line)),
+            EXPECTED_IF_LINES,
+        )
+        for forbidden in ("contents: write", "id-token:", "pull_request_target:",
+                          "workflow_dispatch:", "repository_dispatch:", "matrix:", "services:"):
+            with self.subTest(expanded_authority=forbidden):
+                self.assertNotIn(forbidden, active(self.workflow))
+
+    def test_reviewed_original_owner_is_the_only_native_route(self):
+        prepare, native = (self.steps[name] for name in STEP_NAMES[3:5])
+        # Exact active entry prevents an extra native command or inherited env.
+        self.assertEqual(active(native), active(EXPECTED_NATIVE))
+        self.assertEqual(active(native).count("exec /usr/bin/env -i"), 1)
+        self.assertIn("owner = qualification.load_owner(CHECKOUT)", active(prepare))
+        self.assertEqual(active(prepare).count("owner.run_owned("), 1)
+        for required in (
+            "result = owner.run_owned(argv, environ=environment, cwd=cwd, timeout=timeout, capture=True, text=False, output_limit=limit)",
+            "fixture.completed(result, argv, limit)",
+            'need(result.returncode == 0, "preparation-original-command-failed")',
+            'manifests = ("desktop/native/macos-installed-native", "desktop/helpers/macos-android-register")',
+            'call("fetch-" + str(index), [str(bin_directory / "cargo"), "fetch", "--manifest-path", str(CHECKOUT / directory / "Cargo.toml"), "--locked", "--target", TARGET], fetch_environment, 240, 262144)',
+            "fixture.source_names(by_name)",
+            "fixture.binding_data(os.environ, binding, inventory, rust, sig(work_info))",
+            'for row in rows: source_file(row["path"], row)',
+            'book.publish(work / name, body, 0o600)',
+        ):
+            with self.subTest(preparation=required):
+                self.assertIn(flat(required), flat(prepare))
+        self.assertIn('CARGO_NET_OFFLINE="true"', active(self.owner))
+        build = section(self.owner, "    def build_images(self):", "    def write_payload(")
+        self.assertIn('"--locked", "--offline", "--release", "--jobs", "1", "--target", TARGET', flat(build))
+        self.assertIn('result = self.command(role + "-build", argv, environment, cwd=CHECKOUT, timeout=480, limit=4 * 1024 * 1024)', flat(build))
+        for raw_path in ("subprocess.", "os.system(", "os.posix_spawn(", "os.fork(",
+                         "/usr/sbin/installer", "/bin/launchctl"):
+            with self.subTest(unowned_workflow_path=raw_path):
+                self.assertNotIn(raw_path, active(self.workflow))
+
+    def test_acceptance_requires_actual_outcome_and_bounded_closed_summary(self):
+        publish, upload, final = (self.steps[name] for name in STEP_NAMES[5:])
+        self.assertIn("MRK_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}", active(publish))
+        self.assertIn('outcome = os.environ["MRK_NATIVE_STEP_OUTCOME"]', active(publish))
+        gates = section(publish, "              known_pass = (", "              summary.update(")
+        self.assertEqual(flat(gates), flat("""known_pass = (
+            outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
+            and result["failure"] is None and all(result[key] for key in flags)
+            and result["cleanupErrors"] == [] and calls
+            and all(call["returned"] and call["returncode"] == 0 for call in calls)
+            and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
+        )"""))
+        flags = section(publish, "              flags = (", "              fixture.need(all(type(result[key])")
+        self.assertEqual(flat(flags), flat("""flags = ("installerEntered", "installationReturnedSuccess", "nativeEntered", "nativeOwnerReturned",
+            "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired",
+            "protectedRetentionRequired")"""))
+        self.assertIn('accepted=bool(known_pass)', active(publish))
+        acceptance_assignments = [line.strip() for line in active(publish).splitlines()
+                                  if 'summary["accepted"] =' in line]
+        self.assertEqual(acceptance_assignments, [
+            'summary["accepted"] = False', 'summary["accepted"] = False'])
+        for required in (
+            'if not book.finish(): summary["accepted"] = False',
+            'fixture.need(len(body) <= 49152, "summary-output-bound")',
+            'publisher.publish(work / "e2-workflow-result.json", body, 0o600)',
+            'fixture.need(publisher.finish(), "summary-output-close")',
+            '"syntheticIdentity": True, "productionIdentityQualified": False',
+            '"actualAppIntegrationQualified": False, "distributionQualified": False',
+            '"rawOutputIncluded": False, "environmentValuesIncluded": False',
+        ):
+            with self.subTest(publication=required):
+                self.assertIn(flat(required), flat(publish))
+        self.assertEqual([line.strip() for line in upload.splitlines() if line.strip().startswith("path:")],
+                         ["path: ${{ steps.prepare.outputs.root }}/e2-workflow-result.json"])
+        self.assertIn("if-no-files-found: error", active(upload))
+        self.assertNotIn("*", active(upload))
+        for required in (
+            "ACCEPTED: ${{ steps.publication.outputs.accepted }}",
+            "PREPARATION_OUTCOME: ${{ steps.prepare.outcome }}",
+            "NATIVE_OUTCOME: ${{ steps.native.outcome }}",
+            "PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}",
+            'set -euo pipefail',
+            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == true ]]',
+        ):
+            with self.subTest(finality=required):
+                self.assertIn(required, active(final))
+
+
+if __name__ == "__main__":
+    unittest.main()

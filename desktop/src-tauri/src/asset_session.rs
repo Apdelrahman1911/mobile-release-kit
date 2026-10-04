@@ -20,6 +20,8 @@ use saved_observation::{SavedObservationLane, SavedInputBinding};
 pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput};
 #[path = "asset_session_android_registration.rs"]
 mod android_registration;
+#[path = "asset_session_macos_maintenance.rs"]
+mod macos_maintenance;
 use crate::saved_command_owner::{AndroidRegistrationPublisher as RegistrationPublisher,
     AndroidRegistrationPublisherKind as RegistrationPublisherKind};
 fn finish_registration_publisher(publisher: RegistrationPublisher) {
@@ -70,6 +72,8 @@ mod installation;
 #[path = "asset_session_installation_memory.rs"]
 mod installation_memory;
 pub(crate) use installation_memory::{AndroidRegistrationCensus,AndroidServiceSetupCensus};
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(crate) use installation_memory::MacosMaintenanceCensus;
 #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 pub(crate) use installation_memory::catalogue_census_data;
 
@@ -668,6 +672,7 @@ struct DocumentState {
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     compatibility_picker_pending: bool,
+    maintenance: macos_maintenance::Closure,
     saved_observation: Option<Arc<SavedObservationLane>>, saved_input: Option<SavedInputBinding>,
     session_owner_reason: Option<Reason>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1753,6 +1758,7 @@ fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
     Ok(())
 }
 fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
+    if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
     // Existing passive services do not require editing/crash-hook qualification.
     // The caller still holds this same document mutex through Supervisor claim.
     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
@@ -1774,6 +1780,7 @@ fn installation_reveal_document_gate(state: &DocumentState) -> Result<(), Bridge
     Ok(())
 }
 fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl FnOnce() -> Result<(), AssetError>) -> Result<(), AssetError> {
+    if state.maintenance.closed() { return Err(AssetError::new(Reason::Busy)); }
     // Shared native lifecycle/state checks only. The caller retains the real
     // document mutex; each route must still apply its own qualification gate.
     if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
@@ -1913,7 +1920,7 @@ impl DocumentBinding {
             github_fixture: None,
             state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -2227,7 +2234,7 @@ impl DocumentBinding {
             || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping())) { return Availability::Shutdown; }
         if !state.lifetime.original_bound() || state.lost_observed
             || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.preflight.busy()
@@ -2252,7 +2259,7 @@ impl DocumentBinding {
         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -2310,7 +2317,7 @@ impl DocumentBinding {
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -2446,7 +2453,7 @@ impl DocumentBinding {
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -2506,7 +2513,7 @@ impl DocumentBinding {
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -2530,7 +2537,7 @@ impl DocumentBinding {
         let gate = self.ios_archive_gate(&state);
         if gate != crate::ios_archive_protocol::Availability::Available {
             return Err(if gate == crate::ios_archive_protocol::Availability::Busy {
-                BridgeError::new("ios_archive_busy", "Finish or cancel the original operation before reviewing a saved unsigned iOS archive.")
+                BridgeError::new("ios_archive_busy", "Finish or cancel the original operation before reviewing the selected local iOS action.")
             } else { crate::ios_archive_owner::unavailable() });
         }
         // Only the existing native root identity/generation, never a renderer
@@ -2687,7 +2694,7 @@ impl DocumentBinding {
         if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
         if !state.lifetime.original_bound() || state.lost_observed { return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain.")); }
         if state.stopping { return Err(BridgeError::shutdown()); }
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending { return Err(BridgeError::new("busy", "Finish the original native operation first.")); }
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() { return Err(BridgeError::new("busy", "Finish the original native operation first.")); }
         if state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
             && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(evidence_wire::refused(EvidenceProblem::Busy)); }
         if project_path_pending(&state) || images::pending(&state) { return Err(BridgeError::new("busy", "Finish the original native file selection first.")); }
@@ -2709,6 +2716,7 @@ impl DocumentBinding {
         let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
         let result = (|| {
         let mut state = self.lock();
+        if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
         publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
         state.saved_input = None;
         self.inner.bridge.diagnostics.context_changed();
@@ -2867,6 +2875,7 @@ impl DocumentBinding {
         Ok(())
     }
     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
+        if state.maintenance.closed() { return GitHubReason::Busy; }
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
             || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
             || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled())) { return GitHubReason::CleanupUnknown; }
@@ -3141,6 +3150,7 @@ impl DocumentBinding {
             | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages)
             || selected_images.is_some() && domain != crate::edit_protocol::EditDomain::MetadataImages { return Err(BridgeError::invalid()); }
         self.expire(state, Instant::now());
+        if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
         if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
         if !state.lifetime.original_bound() || state.lost_observed {
             return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain."));
@@ -3379,6 +3389,7 @@ impl DocumentBinding {
             .map_err(|error|AssetError::new(if error.code=="busy"{Reason::Busy}else{Reason::CleanupUnknown}))?;
         let result=(|| {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if state.maintenance.closed() { return Err(AssetError::new(Reason::Busy)); }
         lookup_allocation_gate(&state)?; // Before draft/project/field backing copies.
         publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?;
         state.saved_input=None;
@@ -3928,7 +3939,9 @@ impl DocumentBinding {
         self.reconcile_checked_published(evidence_family,installation_id,publisher.as_mut());
         if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
         if evidence_family.is_none() && installation_id.is_none(){
-            let state=self.lock();self.reconcile_android_registration_locked(&state);
+            let mut state=self.lock();self.reconcile_android_registration_locked(&state);
+            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            self.reconcile_macos_maintenance_locked(&mut state);
         }
     }
     fn reconcile_checked_published(&self,evidence_family:Option<bool>,installation_id:Option<u32>,
@@ -4510,6 +4523,11 @@ impl DocumentBinding {
         let retired_cleanup = matches!(&job, Job::Vault(vault::Job::Release)) && vault::late_cleanup_install(state, &slot);
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let retired_cleanup = false;
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        let cleanup_only = matches!(&job, Job::Vault(vault::Job::Release));
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        let cleanup_only = false;
+        if state.maintenance.closed() && !cleanup_only { return Err(AssetError::new(Reason::Busy)); }
         // An already-late-settled unrelated path remains Unknown. Only the
         // revoked vault lease's finite Release may retain/retire that old slot;
         // this is never permission to replace a live path or start new work.
@@ -5027,6 +5045,7 @@ impl DocumentBinding {
             .map_err(|error|AssetError::new(if error.code=="busy"{Reason::Busy}else{Reason::CleanupUnknown}))?;
         let result=(|| {
         self.reconcile_checked_published(None, None, Some(&mut publisher)); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if state.maintenance.closed() { return Err(AssetError::new(Reason::Busy)); }
         if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?; }
         state.saved_input=None;
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
@@ -5198,6 +5217,7 @@ impl DocumentBinding {
 
     pub(crate) fn not_quitting(&self) -> Result<(), BridgeError> {
         let state = self.lock();
+        if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
         if state.unknown { return Err(BridgeError::cleanup_unknown()); }
         if state.stopping { return Err(BridgeError::shutdown()); }
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
@@ -5232,6 +5252,7 @@ impl DocumentBinding {
             let state = self.lock();
             (state.stopping && state.quit_accepted && assets_can_exit_locked(&state) && state.github.material_settled()
                 && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
+                && state.maintenance.can_exit()
                 && self.inner.android_registration_control.can_exit(), state.quit.clone())
         };
         // The app's data-only observer does not run general session publication.
@@ -6793,7 +6814,7 @@ pub(crate) fn assert_project_path_document_contracts() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
@@ -6926,7 +6947,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             vault: None,
@@ -7022,7 +7043,7 @@ mod tests {
     pub(super) fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            compatibility_picker_pending: false, saved_observation: None, saved_input: None, session_owner_reason: None,
+            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]

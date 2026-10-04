@@ -4,7 +4,7 @@
 import type { ApiError } from './types.ts';
 import type { IOSArchiveActivity, IOSArchiveAvailability, IOSArchiveCheckId, IOSArchiveCommandObservation,
   IOSArchiveBuildContext, IOSArchiveBuildOperation, IOSArchiveContext, IOSArchiveCoreStatus, IOSArchiveDisposition, IOSArchiveIdentity, IOSArchiveLimitation,
-  IOSArchiveOperation, IOSArchiveOutcome, IOSArchivePhase, IOSArchiveReason, IOSArchiveResult,
+  IOSArchiveMode, IOSArchiveOperation, IOSArchiveOutcome, IOSArchivePhase, IOSArchiveReason, IOSArchiveResult,
   IOSArchiveSavedConfig, IOSArchiveSavedPair, IOSArchiveSavedVersion, IOSArchiveSelection, IOSArchiveStage,
   IOSArchiveStatus, IOSRecoveryContext, IOSRecoveryIntent, IOSRecoveryOperation, IOSRecoveryReport, IOSRecoveryRow, IOSRecoveryStage,
   IOSSigningPolicy, PrepareIOSArchive, StartIOSArchive } from './iosArchiveTypes.ts';
@@ -20,6 +20,7 @@ export const IOS_SIGNED_ARCHIVE_SCOPE = 'local-signed-ios-artifact-validation';
 export const IOS_ARCHIVE_COUNTER_MAX = 0xffff_fffe;
 export const IOS_ARCHIVE_IPC_LIMIT = 8192;
 export const IOS_ARCHIVE_STATUS_LIMIT = 65536;
+export const IOS_ARCHIVE_STATUS_VERSION = 2;
 export const IOS_ARCHIVE_CONSENT_MS = 300_000;
 export const IOS_ARCHIVE_CORE_STATUSES: readonly IOSArchiveCoreStatus[] = Object.freeze([
   'PASS', 'FAIL', 'MISSING', 'BLOCKED', 'INVALID', 'SKIP', 'MANUAL', 'CONFIGURED', 'NOT_APPLICABLE',
@@ -368,8 +369,11 @@ function operation(value: unknown): value is IOSArchiveOperation {
 export function parseIOSArchiveStatus(value: unknown): IOSArchiveStatus | null {
   try {
     const safe = copyData(value, IOS_ARCHIVE_STATUS_LIMIT);
-    if (!keys(safe, ['schemaVersion', 'statusRevision', 'availability', 'operation']) || safe.schemaVersion !== 1 ||
+    if (!keys(safe, ['schemaVersion', 'statusRevision', 'availability', 'modeCapabilities', 'operation']) || safe.schemaVersion !== IOS_ARCHIVE_STATUS_VERSION ||
         !iosArchiveCounter(safe.statusRevision) || !oneOf(safe.availability, Object.keys(iosArchiveAvailabilityText)) ||
+        !keys(safe.modeCapabilities, ['unsigned', 'signed', 'recovery']) ||
+        typeof safe.modeCapabilities.unsigned !== 'boolean' || typeof safe.modeCapabilities.signed !== 'boolean' ||
+        typeof safe.modeCapabilities.recovery !== 'boolean' ||
         !(safe.operation === null || operation(safe.operation))) return null;
     return safe as unknown as IOSArchiveStatus;
   } catch { return null; }
@@ -395,6 +399,16 @@ export function iosArchiveOperationProgress(a: IOSArchiveOperation, b: IOSArchiv
   return phases.indexOf(b.phase) >= phases.indexOf(a.phase) && stageIndex(b.stage) >= stageIndex(a.stage);
 }
 
+const iosArchiveModeByOperation: Record<IOSArchiveContext['operation'], IOSArchiveMode> = {
+  'ios-unsigned-archive': 'unsigned', 'ios-signed-export': 'signed', 'ios-local-recovery': 'recovery',
+};
+// Only validated Status DATA reaches this projection. Status/Cancel never use
+// it as permission to observe or settle an already-owned operation.
+export function iosArchiveModeAvailability(status: IOSArchiveStatus, operation: IOSArchiveContext['operation']): IOSArchiveAvailability {
+  if (status.availability !== 'available' && status.availability !== 'busy') return status.availability;
+  const mode = iosArchiveModeByOperation[operation];
+  return mode !== undefined && status.modeCapabilities[mode] ? status.availability : 'runtime-unqualified';
+}
 export const iosArchiveAvailabilityText: Record<IOSArchiveAvailability, string> = {
   available: 'The native iOS owner is available. Each selected mode still needs its own admission, saved inputs and explicit one-use consent.',
   busy: 'An original operation owns the native slot. Keep its Status and Cancel until original cleanup settles.',

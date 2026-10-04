@@ -368,12 +368,14 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                    "if packagedRequireDiagnosticActive && originalFailureAbsent && !packagedRequireDiagnosticEmitted",
                    "&& line >= 1 && line <= 65535", "packagedRequireDiagnosticEmitted = true",
                    'print("MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\\(line);check=\\(check.rawValue)")',
-                   "throw refusal")
+                   "if let (sample, waiter) = dashboard, (1...4).contains(sample.ordinal), waiter != .completed",
+                   "MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;", "throw refusal")
         positions = [false_guard.index(item) for item in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(source.count("MRK_MACOS_PACKAGED_REQUIRE_FAILURE="), 1)
         self.assertEqual(require.count("caseClock?.fail(reason) ?? Refusal.condition(reason)"), 1)
-        for forbidden in ("XCTFail", "recordIssue", "waitFor", "remaining(", "systemUptime", "owner.", "checkOriginalOwners(", "catch", "try?"):
+        for forbidden in ("XCTFail", "recordIssue", "waitFor", "remaining(", "systemUptime", "owner.", "checkOriginalOwners(",
+                          "catch", "try?", "isEnabled", "isHittable", "renderer.", "firstMatch", "XCUIElement"):
             self.assertNotIn(forbidden, false_guard)
         self.assertEqual(require.count("try checkOriginalOwners()"), 1)
         # A false guard still throws; true values retain BOTH original gates.
@@ -387,6 +389,165 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn("try require(element.isEnabled && element.isHittable, reason, line: line, check: .actionable)", click)
         self.assertLess(click.index("try unique(query, reason, line: line)"), click.index("try require("))
         self.assertLess(click.index("try require("), click.index("element.click()"))
+        self.assertEqual(source.count("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE="), 1)
+        self.assertIn("dashboard: (DashboardSnapshot, DashboardWaiter)? = nil", require)
+        self.assertIn(";sample=pre-wait;nonAtomic=1", false_guard)
+        snapshot_type = source.split("private struct DashboardSnapshot {", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(snapshot_type.count("let "), 4)
+        self.assertNotIn("var ", snapshot_type)
+        dashboard = source.split("private func dashboard(", 1)[1].split("private func quitSheet(", 1)[0]
+        self.assertIn("diagnosticOrdinal: UInt8? = nil", dashboard)
+        sample = dashboard.split("let snapshot: DashboardSnapshot?", 1)[1].split("        let ready =", 1)[0]
+        order = ("if packagedRequireDiagnosticActive, let ordinal = diagnosticOrdinal, (1...4).contains(ordinal)",
+                 "try checkOriginalOwners()", "_ = try remaining(5)",
+                 "let enabled = open.isEnabled", "let hittable = open.isHittable",
+                 "if !enabled || !hittable {", "for (titles, reason) in reasons")
+        self.assertEqual([sample.index(item) for item in order], sorted(sample.index(item) for item in order))
+        # Entry, each group, and exit use the original owner/case end; no new wait or lease.
+        self.assertEqual(sample.count("try checkOriginalOwners()"), 3)
+        self.assertEqual(sample.count("try remaining(5)"), 3)
+        self.assertEqual(sample.count("open.isEnabled"), 1)
+        self.assertEqual(sample.count("open.isHittable"), 1)
+        self.assertNotIn(".firstMatch", sample)
+        self.assertEqual(sample.count("let reasons: [([String], DashboardReason)] = ["), 1)
+        self.assertEqual(sample.count("                ([\n"), 15)
+        self.assertEqual(sample.count("for (titles, reason) in reasons"), 1)
+        self.assertEqual(sample.count("renderer.staticTexts."), 1)
+        self.assertEqual(sample.count(".count"), 1)
+        self.assertEqual(source.count("private enum DashboardReason: String {"), 1)
+        self.assertIn("    private enum DashboardReason: String {\n        case loading, notLoaded = \"not-loaded\", bridgeUnavailable = \"bridge-unavailable\"\n        case selectionUnavailable = \"selection-unavailable\", selectionInProgress = \"selection-in-progress\"\n        case shuttingDown = \"shutting-down\"\n        case ownerOfflinePreflight = \"owner-offline-preflight\", ownerAndroidBuild = \"owner-android-build\"\n        case ownerIOSArchive = \"owner-ios-archive\", ownerProjectRecovery = \"owner-project-recovery\"\n        case ownerGitHubPreflight = \"owner-github-preflight\", ownerGitHubRelease = \"owner-github-release\"\n        case ownerProjectPath = \"owner-project-path\", ownerSavedVersionEdit = \"owner-saved-version-edit\"\n        case ownerMetadataImages = \"owner-metadata-images\"\n        case otherOrUnobserved = \"other-or-unobserved\", ambiguous\n    }\n", source)
+        groups = (
+            ("loading", "loading", (
+                "Application capabilities are being loaded.",
+            )),
+            ("notLoaded", "not-loaded", (
+                "Application capabilities have not been loaded.",
+            )),
+            ("bridgeUnavailable", "bridge-unavailable", (
+                "The native desktop bridge is unavailable.",
+            )),
+            ("selectionUnavailable", "selection-unavailable", (
+                "Project selection is not available in the current desktop runtime profile.",
+            )),
+            ("selectionInProgress", "selection-in-progress", (
+                "Finish the original project selection first.",
+            )),
+            ("shuttingDown", "shutting-down", (
+                "The application is shutting down.",
+            )),
+            ("ownerOfflinePreflight", "owner-offline-preflight", (
+                "Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                "Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original offline-check status is unverified. Check retained status before conflicting work.",
+            )),
+            ("ownerAndroidBuild", "owner-android-build", (
+                "Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                "The original Android service action is active or unconfirmed. Keep its Status and Cancel; do not repeat registration.",
+                "The original Android source inspection or protected registration is active or unconfirmed. Keep its Status and Cancel; do not repeat copy.",
+                "An original source review is retained. Register that exact review or explicitly discard it before conflicting work.",
+                "The original Android tool picker or folder check is active or unconfirmed. Keep tool-selection Status and Cancel before conflicting work.",
+                "The original Android tool catalog is still reading, stopping or unconfirmed. Keep catalog Status and Cancel before conflicting work.",
+                "The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original Android-build status is unverified. Check retained Status before conflicting work.",
+            )),
+            ("ownerIOSArchive", "owner-ios-archive", (
+                "iOS-archive ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                "The iOS archive holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original iOS-archive status is unverified. Check retained Status before conflicting work.",
+            )),
+            ("ownerProjectRecovery", "owner-project-recovery", (
+                "Project-recovery ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                "Project build-input recovery holds the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original project-recovery status is unverified. Check retained status before conflicting work.",
+            )),
+            ("ownerGitHubPreflight", "owner-github-preflight", (
+                "The original GitHub preflight action is running or unverified. Read its local Status before starting another operation.",
+            )),
+            ("ownerGitHubRelease", "owner-github-release", (
+                "The original protected release workflow action is running or unverified. Read its local Status before starting another operation.",
+            )),
+            ("ownerProjectPath", "owner-project-path", (
+                "The original project-path outcome or cleanup is unverified. Conflicting native operations remain blocked.",
+                "Finish the original project-path selection. Changing drafts or projects does not cancel it.",
+            )),
+            ("ownerSavedVersionEdit", "owner-saved-version-edit", (
+                "Saved-version edit ownership is unverified. Keep its original operation and do not retry.",
+                "A saved-version edit is still owned. Close or finish that original session before another operation.",
+                "This project needs separately authorized saved-version recovery. No other edit can clear that journal.",
+            )),
+            ("ownerMetadataImages", "owner-metadata-images", (
+                "Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one.",
+                "An original image selection or local-copy review is retained. Finish or stop that operation first.",
+                "This project needs a separate image recovery inspection. Another edit cannot bypass its journal.",
+            )),
+        )
+        self.assertEqual(len(groups), 15)
+        literals = [title for _, _, titles in groups for title in titles]
+        self.assertEqual(len(literals), 33)
+        self.assertEqual(len(set(literals)), 33)
+        self.assertEqual(len({label for _, label, _ in groups}), 15)
+        expected_table = "            let reasons: [([String], DashboardReason)] = [\n"
+        for name, _, titles in groups:
+            expected_table += "                ([\n"
+            expected_table += "".join("                    " + json.dumps(title) + ",\n" for title in titles)
+            expected_table += "                ], ." + name + "),\n"
+        expected_table += "            ]\n"
+        self.assertIn(expected_table, sample)
+        expected_scan = "            var selected: DashboardReason?\n            var ambiguous = false\n            // Already-ready samples need no refusal queries; the real wait below is still required.\n            if !enabled || !hittable {\n                for (titles, reason) in reasons {\n                    try checkOriginalOwners()\n                    _ = try remaining(5)\n                    let matches = renderer.staticTexts.matching(NSPredicate(\n                        format: \"identifier IN %@ OR label IN %@ OR title IN %@\",\n                        argumentArray: [titles, titles, titles])).count\n                    if matches > 1 || (matches == 1 && selected != nil) {\n                        ambiguous = true\n                        break // No further diagnostic observation can repair ambiguity.\n                    }\n                    if matches == 1 { selected = reason }\n                }\n            }\n            try checkOriginalOwners()\n            _ = try remaining(5)\n"
+        self.assertIn(expected_scan, sample)
+        # Inert count DATA only, paired with the exact Swift reducer above.
+        # This does not execute XCTest queries or prove native AX exposure.
+        def reduce_counts(counts, *, enabled=False, hittable=False):
+            self.assertEqual(len(counts), 15)
+            selected, ambiguous, observations = None, False, 0
+            if not enabled or not hittable:
+                for index, matches in enumerate(counts):
+                    observations += 1
+                    if matches > 1 or (matches == 1 and selected is not None):
+                        ambiguous = True
+                        break
+                    if matches == 1:
+                        selected = groups[index][1]
+            return ("ambiguous" if ambiguous else selected or "other-or-unobserved"), observations
+
+        # Both mixed samples still classify. Ready samples consume no queries,
+        # even when the unused count data contains matching or ambiguous reasons.
+        for enabled, hittable in ((False, False), (False, True), (True, False), (True, True)):
+            for counts, not_ready in (
+                    ([0] * 15, ("other-or-unobserved", 15)),
+                    ([1] + [0] * 14, ("loading", 15)),
+                    ([2] + [0] * 14, ("ambiguous", 1)),
+                    ([1, 1] + [0] * 13, ("ambiguous", 2))):
+                with self.subTest(enabled=enabled, hittable=hittable, counts=counts):
+                    self.assertEqual(
+                        reduce_counts(counts, enabled=enabled, hittable=hittable),
+                        ("other-or-unobserved", 0) if enabled and hittable else not_ready)
+
+        self.assertEqual(reduce_counts([0] * 15), ("other-or-unobserved", 15))
+        for index, (_, label, _) in enumerate(groups):
+            counts = [0] * 15
+            counts[index] = 1
+            self.assertEqual(reduce_counts(counts), (label, 15))
+            for duplicate_count in (2, 5):
+                counts[index] = duplicate_count
+                self.assertEqual(reduce_counts(counts), ("ambiguous", index + 1))
+            for second in range(index + 1, 15):
+                conflicting = [0] * 15
+                conflicting[index] = conflicting[second] = 1
+                self.assertEqual(reduce_counts(conflicting), ("ambiguous", second + 1))
+        self.assertIn("reason: ambiguous ? .ambiguous : selected ?? .otherOrUnobserved)", sample)
+        for forbidden in ("print(", ".label", ".value", "debugDescription", "screenshot",
+                          "while ", "sleep(", "waitFor", "XCTWaiter", "catch", "try?", "Date(", "systemUptime"):
+            self.assertNotIn(forbidden, sample)
+        self.assertEqual(dashboard.count('NSPredicate(format: "enabled == true AND hittable == true"), object: open'), 1)
+        self.assertEqual(dashboard.count("XCTWaiter.wait(for: [ready], timeout: try remaining(5))"), 1)
+        self.assertIn("let returned = XCTWaiter.wait(for: [ready], timeout: try remaining(5))\n"
+                      "        let readiness = snapshot.map { ($0, DashboardWaiter(returned)) }\n"
+                      '        try require(returned == .completed, "ordinary project control is not usable", dashboard: readiness)', dashboard)
+        self.assertEqual(source.count("diagnosticOrdinal:"), 5)  # Default plus only four shared-case callers.
+        case_body = shared.split("    // Finite synthetic files only.", 1)[0]
+        for ordinal in range(1, 5):
+            self.assertEqual(case_body.count(f"try dashboard(renderer, diagnosticOrdinal: {ordinal})"), 1)
         clock = source.split("func fail(_ reason: String) -> Refusal {", 1)[1].split("private func now()", 1)[0]
         self.assertIn("if firstFailure == nil { firstFailure = reason }\n            return .condition(firstFailure!)", clock)
 
@@ -1038,6 +1199,126 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertEqual(published[0][0].name, "toolchain.failure-diagnostics.json")
                     self.assertEqual(output.getvalue(), b"")
                 if fault == "publication": self.assertIn(b"normal-failure-diagnostic-publication-failed\n", errors.getvalue())
+
+    def test_dashboard_failure_diagnostics_preserve_finite_prewait_data(self):
+        reasons = (
+            "loading", "not-loaded", "bridge-unavailable", "selection-unavailable",
+            "selection-in-progress", "shutting-down", "owner-offline-preflight",
+            "owner-android-build", "owner-ios-archive", "owner-project-recovery",
+            "owner-github-preflight", "owner-github-release", "owner-project-path",
+            "owner-saved-version-edit", "owner-metadata-images", "other-or-unobserved", "ambiguous",
+        )
+        waiters = ("timed-out", "incorrect-order", "inverted-fulfillment", "interrupted", "unknown")
+        self.assertEqual(len(set(reasons)), 17)
+        for index, reason in enumerate(reasons):
+            ordinal, line = index % 4 + 1, 1 if index % 2 == 0 else 65535
+            waiter, enabled, hittable = waiters[index % 5], bool(index % 2), bool(index // 2 % 2)
+            ending = b"\n" if index % 2 == 0 else b"\r\n"
+            require = f"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line={line};check=condition".encode()
+            row = (f"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line={line};ordinal={ordinal};waiter={waiter}"
+                   f";enabled={int(enabled)};hittable={int(hittable)};reason={reason};sample=pre-wait;nonAtomic=1").encode()
+            with self.subTest(reason=reason, ordinal=ordinal, waiter=waiter):
+                value = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+                    subprocess.CompletedProcess([], 65, require + ending + row + ending, b""))
+                self.assertEqual(value["requireObservations"],
+                    [{"source": "NormalAppUITests.swift", "line": line, "check": "condition"}])
+                self.assertEqual(value["dashboardReadiness"], {
+                    "stream": "stdout", "line": line, "ordinal": ordinal, "waiter": waiter,
+                    "enabled": enabled, "hittable": hittable, "reason": reason,
+                    "sample": "pre-wait", "nonAtomic": True})
+                self.assertEqual(value["originalReturncode"], 65)
+                self.assertEqual(value["status"], "classified")
+                self.assertFalse(any(value["markers"].values()))  # Not a XCTest outcome or final UI state.
+
+        require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=65535;check=condition\n"
+        row = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=65535;ordinal=4;waiter=inverted-fulfillment;"
+               b"enabled=0;hittable=0;reason=owner-saved-version-edit;sample=pre-wait;nonAtomic=1\n")
+        for phase, selection in (
+                ("build", None), ("query", None), ("summary", "test.xcresult"),
+                *(("test", name) for name in MODULE.NORMAL_SELECTIONS if name != "test.xcresult")):
+            with self.subTest(phase=phase, selection=selection):
+                value = MODULE.normal_failure_diagnostics(phase, selection,
+                    subprocess.CompletedProcess([], 65, require + row, b""))
+                self.assertIsNone(value["dashboardReadiness"])
+                self.assertEqual(value["requireObservations"], [])
+                self.assertEqual(value["originalReturncode"], 65)
+        stderr_only = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+            subprocess.CompletedProcess([], 65, b"", require + row))
+        self.assertIsNone(stderr_only["dashboardReadiness"])  # Existing normal REQUIRE remains stdout-only.
+        self.assertEqual(stderr_only["requireObservations"], [])
+
+        # Fill every existing retained category with widest public scalar values.
+        query = (b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=containingSameStaticText;"
+                 b"matches=4;exceedsFour=0;nonAtomic=1\n")
+        codes = b"".join(f"Error Domain=IDETestOperationsObserverErrorDomain Code={-2147483648 + i}\n".encode()
+                         for i in range(8))
+        sites = b"".join(b"NormalAppUITests.swift:" + str(line).encode() + b":4096: error: "
+            b"-[MRKNormalAppUITests.NormalAppUITests testLaunchCancelAndQuit] : fixture-secret\n"
+            for line in range(65532, 65536))
+        value = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+            subprocess.CompletedProcess([], 65, require + row + codes + sites + query * 4, b""))
+        self.assertEqual([len(value[key]) for key in ("errorCodes", "sourceFailures", "queryObservations")],
+                         [8, 4, 4])
+        self.assertEqual(value["dashboardReadiness"]["waiter"], "inverted-fulfillment")
+        self.assertEqual(value["dashboardReadiness"]["reason"], "owner-saved-version-edit")
+        self.assertFalse(value["findingsTruncated"])
+        self.assertEqual(value["originalReturncode"], 65)
+        self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+        self.assertNotIn(b"fixture-secret", MODULE.encoded(value))
+
+    def test_dashboard_failure_diagnostics_reject_ambiguous_or_malformed_data(self):
+        require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=508;check=condition\n"
+        row = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=508;ordinal=1;waiter=timed-out;"
+               b"enabled=0;hittable=0;reason=loading;sample=pre-wait;nonAtomic=1\n")
+        site = {"source": "NormalAppUITests.swift", "line": 508, "check": "condition"}
+        for stdout, stderr, expected in (
+                (row, b"", []), (require, b"", [site]), (require, row, [site]), (row, require, []),
+                (require.replace(b"line=508", b"line=509") + row, b"", [dict(site, line=509)]),
+                (require.replace(b"condition", b"singleton") + row, b"", [dict(site, check="singleton")]),
+                (require + require + row, b"", []), (require + row, require, [site]),
+                (require + row + row, b"", [site]), (require + row, row, [site]),
+                (require + row + row.replace(b"ordinal=1", b"ordinal=2"), b"", [site]),
+                (require + row + require[:-1] + b";private=MRK_MACOS_PACKAGED_DASHBOARD_FAILURE\n", b"", [])):
+            with self.subTest(stdout_bytes=len(stdout), stderr_bytes=len(stderr), expected=expected):
+                value = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+                    subprocess.CompletedProcess([], 65, stdout, stderr))
+                self.assertIsNone(value["dashboardReadiness"])
+                self.assertEqual(value["requireObservations"], expected)
+                self.assertEqual(value["originalReturncode"], 65)
+                self.assertNotIn(b"private", MODULE.encoded(value))
+
+        namespace = b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE"
+        malformed = [row.replace(old, new, 1) for old, new in (
+            (b"v1;", b"v2;"), (b"line=508", b"line=0"), (b"line=508", b"line=0508"),
+            (b"line=508", b"line=65536"), (b"ordinal=1", b"ordinal=0"), (b"ordinal=1", b"ordinal=5"),
+            (b"ordinal=1", b"ordinal=01"), (b"timed-out", b"completed"), (b"timed-out", b"fixture-secret"),
+            (b"enabled=0", b"enabled=true"), (b"hittable=0", b"hittable=2"),
+            (b"reason=loading", b"reason=fixture-secret"), (b"sample=pre-wait", b"sample=post-wait"),
+            (b"reason=loading", b"reason=owner-native"), (b"reason=loading", b"reason=owner-Android-build"),
+            (b"reason=loading", b"reason=owner-offline-preflight-extra"),
+            (b"reason=loading", b"reason=owner-metadata-images;detail=fixture-secret"),
+            (b"nonAtomic=1", b"nonAtomic=0"))]
+        malformed += [row[:-1], namespace[:-1], b"fixture-secret " + namespace[:-1],
+                      b"fixture-secret " + row, row[:-1] + b";extra=fixture-secret\n",
+                      row[:-1] + b"\r\r\n", row.replace(namespace, namespace + b"_EXTRA")]
+        for bad in malformed:
+            for observations in (bad, row + bad, bad + row):
+                with self.subTest(bad_bytes=len(bad), observations=len(observations)):
+                    value = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+                        subprocess.CompletedProcess([], 65, require + observations, b""))
+                    self.assertIsNone(value["dashboardReadiness"])
+                    self.assertEqual(value["requireObservations"], [site])
+                    self.assertEqual(value["status"], "classified")
+                    self.assertEqual(value["originalReturncode"], 65)
+                    self.assertNotIn(b"fixture-secret", MODULE.encoded(value))
+        for bad in (namespace[:-1], row[:-1] + b";extra=fixture-secret\n"):
+            value = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+                subprocess.CompletedProcess([], 65, require + row, bad))
+            self.assertIsNone(value["dashboardReadiness"])
+            self.assertEqual(value["requireObservations"], [site])
+            self.assertEqual(value["status"], "classified")
+            self.assertEqual(value["originalReturncode"], 65)
+            self.assertNotIn(b"fixture-secret", MODULE.encoded(value))
 
     def test_acl_complete_source_inventory_reads_originals_at_current_native_size(self):
         workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()

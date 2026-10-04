@@ -5,11 +5,26 @@ edition = "2021"
 rust-version = "1.98"
 license = "MIT"
 publish = false
+autobins = false
 
-# Separate headless Cargo graph. Never select this feature in the app graph.
+# Isolated resident image graph. Historical src/main.rs remains inert SOURCE.
 [workspace]
+[lib]
+name = "mrk_resident_image"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+bench = false
+
+# No named default feature: preserve the ordinary compiler-artifact features [].
+[features]
+e2-native-fixture = ["mrk-macos-installed-native/e2-native-fixture"]
+
 [dependencies]
-mobile-release-kit-desktop = { path = "../../src-tauri", default-features = false, features = ["macos-android-registration-helper"] }
+mobile-release-kit-desktop = { path = "../../src-tauri", default-features = false, features = ["macos-installed-resident-image"] }
+
+mrk-macos-installed-native = { path = "../../native/macos-installed-native", features = ["resident-image"] }
 
 # Same reviewed first-party supplier binding as the core; transitive manifest
 # patches are not inherited by a new workspace root.
@@ -18,3 +33,6 @@ zbus = { path = "../../vendor/zbus-5.19.0" }
 
 [profile.release]
 panic = "unwind"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

@@ -14,7 +14,8 @@ import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { IOS_ARCHIVE_CONSENT, IOS_ARCHIVE_COUNTER_MAX, IOS_ARCHIVE_EVENT, IOS_ARCHIVE_LIMITATIONS, IOS_ARCHIVE_SCOPE,
   IOS_SIGNED_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_SCOPE, IOS_SIGNED_ARCHIVE_LIMITATIONS, IOS_RECOVERY_CONSENT,
   IOS_ACCOUNT_RECOVERY_CONFIRMATION, IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_RECOVERY_LIMITATIONS,
-  copyIOSArchiveRequest, encodeIOSArchiveRequest, parseIOSArchiveStatus, parseIOSSigningPolicy, iosArchiveOperationProgress, iosArchiveError } from '../src/iosArchiveProtocol.ts';
+  copyIOSArchiveRequest, encodeIOSArchiveRequest, parseIOSArchiveStatus, parseIOSSigningPolicy, iosArchiveOperationProgress,
+  iosArchiveError, iosArchiveModeAvailability, IOS_ARCHIVE_STATUS_VERSION } from '../src/iosArchiveProtocol.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
 const CONFIG = { bytes: 512, sha256: 'd'.repeat(64) }, NEW_CONFIG = { bytes: 524, sha256: 'e'.repeat(64) };
@@ -54,7 +55,14 @@ const context = (input) => ({ ...clone(input), platform: 'ios', operation: input
 const operation = (input = request(), patch = {}) => ({ operationId: OP, ownerGeneration: OWNER, context: context(input), phase: 'awaiting-consent',
   intentUsable: true, outcome: null, reason: 'none', stage: null, activity: null,
   ...(input.recovery ? { report: null } : { disposition: null, result: null }), ...patch });
-const status = (revision = 0, op = null, availability = 'available') => ({ schemaVersion: 1, statusRevision: revision, availability, operation: op });
+// Explicit invented controller inputs, never derived from an operation or used
+// as native/macOS qualification evidence.
+const ALL_TEST_MODES = Object.freeze({ unsigned: true, signed: true, recovery: true });
+const UNSIGNED_ONLY = Object.freeze({ unsigned: true, signed: false, recovery: false });
+const NO_MODES = Object.freeze({ unsigned: false, signed: false, recovery: false });
+const status = (revision = 0, op = null, availability = 'available', modes = ALL_TEST_MODES) => ({
+  schemaVersion: IOS_ARCHIVE_STATUS_VERSION, statusRevision: revision, availability, modeCapabilities: { ...modes }, operation: op,
+});
 const running = (op, stage = 'archiving') => ({ ...clone(op), phase: 'running', intentUsable: false, stage });
 const terminal = (op, outcome = 'cancelled', reason = outcome) => ({ ...clone(op), phase: 'terminal', intentUsable: false, outcome, reason });
 function completed(op, selected = selection()) {
@@ -188,6 +196,80 @@ async function inspectedRecovery(h, patch = {}) {
   h.reply(sent.call, status(2, complete)); await sent.done;
   assert.equal(h.state.historical, false); assert.equal(h.state.status.operation.outcome, complete.outcome); return complete;
 }
+
+test('native Status requires closed per-mode data; capability observations cannot enter requests', () => {
+  const good = status(1, null, 'available', UNSIGNED_ONLY);
+  assert.deepEqual(clone(parseIOSArchiveStatus(good)), good);
+  for (const modes of [null, {}, [], { unsigned: true, signed: false }, { ...UNSIGNED_ONLY, signed: 1 },
+    { ...UNSIGNED_ONLY, recovery: 'false' }, { ...UNSIGNED_ONLY, all: true }])
+    assert.equal(parseIOSArchiveStatus({ ...good, modeCapabilities: modes }), null);
+  const missing = clone(good); delete missing.modeCapabilities;
+  assert.equal(parseIOSArchiveStatus(missing), null);
+  assert.equal(parseIOSArchiveStatus({ ...good, schemaVersion: 1 }), null);
+  assert.equal(copyIOSArchiveRequest('prepare_ios_archive', { ...request(), modeCapabilities: ALL_TEST_MODES }), null);
+  assert.equal(iosArchiveModeAvailability(good, 'ios-unsigned-archive'), 'available');
+  assert.equal(iosArchiveModeAvailability(good, 'ios-signed-export'), 'runtime-unqualified');
+  assert.equal(iosArchiveModeAvailability(good, 'ios-local-recovery'), 'runtime-unqualified');
+  for (const availability of ['shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform'])
+    assert.equal(iosArchiveModeAvailability(status(1, null, availability, ALL_TEST_MODES), 'ios-signed-export'), availability);
+});
+
+test('unsigned availability never offers signed Review or recovery Inspect; explicit modes remain separate', async (t) => {
+  const h = harness(t, { initial: status(0, null, 'available', UNSIGNED_ONLY), savedSnapshot: signedSnapshot(), assets: assetState() });
+  await h.ready;
+  assert.equal(h.controller.prepareReason(), null);
+  h.controller.setArchiveMode('signed'); assert.equal(h.state.signing.issue, null);
+  assert.match(h.controller.prepareReason(), /disabled.*native qualification/);
+  await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  h.controller.setVisible(false); h.controller.setRecoveryVisible(true);
+  assert.match(h.controller.recoveryReason(), /disabled.*native qualification/);
+  await h.controller.prepareRecovery(); assert.equal(h.calls.length, 0);
+  h.emit(status(1, null, 'available', { unsigned: false, signed: false, recovery: true }));
+  assert.equal(h.controller.recoveryReason(), null);
+  h.controller.setRecoveryVisible(false); h.controller.setVisible(true);
+  assert.ok(h.controller.prepareReason());
+  h.emit(status(2, null, 'available', { unsigned: false, signed: true, recovery: false }));
+  assert.equal(h.controller.prepareReason(), null);
+  h.controller.setArchiveMode('unsigned'); assert.ok(h.controller.prepareReason());
+  h.controller.setArchiveMode('signed');
+  const preparing = h.controller.prepare(), call = h.calls.at(-1), op = operation(call.input);
+  assert.equal(call.kind, 'prepare'); assert.equal(op.context.operation, 'ios-signed-export');
+  h.reply(call, status(3, op, 'busy', { unsigned: false, signed: true, recovery: false })); await preparing;
+  assert.ok(h.state.consent);
+  h.controller.cancel(); h.reply(h.calls.at(-1), status(4, terminal(op), 'available', NO_MODES)); await flush();
+});
+
+test('mode loss blocks unstarted consent without rearming from stale or same-revision data', async (t) => {
+  const h = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() }); await h.ready;
+  h.controller.setArchiveMode('signed'); const op = await reviewed(h);
+  h.controller.setAcknowledged(OP, OWNER, true);
+  h.emit(status(2, op, 'busy', UNSIGNED_ONLY));
+  assert.match(h.controller.startReason(), /disabled.*native qualification/);
+  await h.controller.start(OP, OWNER); assert.equal(h.calls.filter((call) => call.kind === 'start').length, 0);
+  h.emit(status(1, op, 'busy', ALL_TEST_MODES));
+  assert.equal(h.state.status.statusRevision, 2); assert.equal(h.state.status.modeCapabilities.signed, false);
+  assert.equal(h.state.integrityFailed, false); assert.ok(h.controller.canCancel());
+  h.controller.cancel(); h.reply(h.calls.at(-1), status(3, terminal(op), 'available', NO_MODES)); await flush();
+  const conflict = harness(t); await conflict.ready;
+  conflict.emit(status(0, null, 'available', UNSIGNED_ONLY));
+  assert.ok(conflict.state.integrityFailed); assert.equal(conflict.calls.length, 0);
+});
+
+test('mode loss never hides a running original Status or Cancel or invents its finality', async (t) => {
+  const h = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() }); await h.ready;
+  h.controller.setArchiveMode('signed'); const op = await reviewed(h), sent = start(h, op);
+  const active = running(op, 'validating-signing');
+  h.reply(sent.call, status(2, active, 'busy')); await sent.done;
+  h.emit(status(3, active, 'busy', NO_MODES)); await h.controller.checkStatus();
+  assert.equal(h.state.integrityFailed, false); assert.equal(h.state.nativeBlocked, false);
+  assert.equal(h.state.status.operation.phase, 'running'); assert.equal(h.state.status.operation.outcome, null);
+  assert.ok(h.controller.canCheckStatus()); assert.ok(h.controller.canCancel()); assert.ok(iosArchiveOwnerReason(h.state));
+  h.controller.setVisible(false); assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 0);
+  assert.equal(h.controller.cancel(), true);
+  assert.deepEqual(h.calls.at(-1).input, { operationId: OP, ownerGeneration: OWNER });
+  h.reply(h.calls.at(-1), status(4, terminal(active), 'available', NO_MODES)); await flush();
+  assert.equal(h.state.status.operation.outcome, 'cancelled'); assert.equal(iosArchiveOwnerReason(h.state), null);
+});
 
 test('four raw requests stay closed and domain-local; no tools, malformed signing or deadline may be supplied', () => {
   const input = request(), copied = copyIOSArchiveRequest('prepare_ios_archive', input);
@@ -665,6 +747,8 @@ test('actual app shares status/cancel and retirement; each important archive cho
   for (const help of [iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp])
     for (const field of ['label', 'requiredness', 'requiredWhen', 'what', 'why', 'where', 'format', 'failure']) assert.ok(help[field]?.length, `${help.label}: ${field}`);
   assert.ok(component.includes('controller.prepareRecovery(')); assert.ok(component.includes('controller.setArchiveMode('));
+  assert.ok(component.includes("iosArchiveModeAvailability(state.status, signed ? 'ios-signed-export' : 'ios-unsigned-archive')"));
+  assert.ok(component.includes("iosArchiveModeAvailability(state.status, 'ios-local-recovery')"));
   assert.match(iosSigningHelp.format, /ios.teamId.*ios.distributionCertificateSha256.*password write-only/);
   assert.match(iosRecoveryHelp.failure, /live Unknown stays owned.*manual recheck is not supported/);
 });
