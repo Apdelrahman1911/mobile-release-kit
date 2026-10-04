@@ -33,6 +33,8 @@ JDK_ROOT = "jdk-17.0.20.1+1"
 JDK_HOME = "Contents/Home/"
 INSTALLED_JDK = "jdk/temurin-17.jdk/"
 AAPT2_PATH = "gradle/native/aapt2/aapt2"
+# Project wrapper selection is canonical; ARCHIVES keeps acquisition provenance.
+GRADLE_WRAPPER_URL = "https://services.gradle.org/distributions/gradle-8.14.5-bin.zip"
 ARCHIVES = {
     "jdk": (185851019, "196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8",
             "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz", "jdk-17.0.20.1+1"),
@@ -1653,7 +1655,7 @@ def render(projection, sink):
     put('        sdk_platform: "android-35", sdk_platform_revision: "2", sdk_build_tools_version: "35.0.0" },\n')
     put("    roles: RoleSpec { java: " + rust_string(INSTALLED_JDK + "Contents/Home/bin/java") + ", javac: " + rust_string(INSTALLED_JDK + "Contents/Home/bin/javac")
         + ', gradle: "gradle/bin/gradle", bundletool: "bundletool/bundletool.jar", sdk: "sdk" },\n')
-    put("    gradle_distribution_url: " + rust_string(ARCHIVES["gradle"][2]) + ", gradle_distribution_sha256: " + rust_string(ARCHIVES["gradle"][1]) + ",\n")
+    put("    gradle_distribution_url: " + rust_string(GRADLE_WRAPPER_URL) + ", gradle_distribution_sha256: " + rust_string(ARCHIVES["gradle"][1]) + ",\n")
     put("    archives: CAT_ARCHIVES, trees: CAT_TREES, source_members: CAT_SOURCES, source_bindings: CAT_BINDINGS,\n")
     put("    support: CAT_SUPPORT, support_members: CAT_SUPPORT_MEMBERS, payload: CAT_PAYLOAD, classes: CAT_CLASSES,\n")
     put("    aliases: CAT_ALIASES, directories: CAT_DIRECTORIES,\n}];\n")

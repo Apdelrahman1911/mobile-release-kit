@@ -75,6 +75,7 @@ class InertFixtures:
         self.case = self.stage = None
         self.app_returncode = self.inner_failure_step = self.inner_failure_reason = None
         self.inner_failure_context = self.inner_diagnostic_source = None
+        self.inner_bootstrap_diagnostic = None
         self.before, self.reads = [], []
 
     def before_call(self, case):
@@ -918,15 +919,36 @@ class AquaDataTests(unittest.TestCase):
         latch = observer.split("fn latch_bootstrap(", 1)[1].split("// Original appInfo predicates", 1)[0]
         self.assertIn("if latch_failure(first, failed, reason) && bootstrap_failure_reason(reason) { *detail = Some(sample); }", latch)
         self.assertNotIn("compare_exchange", latch)
+        classifier = observer.split("fn bootstrap_app_info_failure(", 1)[1].split("fn bootstrap_catalog_failure(", 1)[0]
+        order = ("bootstrap-info-runtime-state", "bootstrap-info-runtime-mode", "bootstrap-info-runtime-reason",
+                 "bootstrap-info-methods-shape", "bootstrap-info-actions-shape", "bootstrap-info-app-name",
+                 "bootstrap-info-app-version", "bootstrap-info-project-selection", "bootstrap-info-project-reason",
+                 "bootstrap-info-project-fields", "bootstrap-info-method-count", "bootstrap-info-action-count",
+                 "bootstrap-info-available-count", "bootstrap-info-required-method",
+                 "bootstrap-info-method-availability", "bootstrap-info-action-availability", "Ok(methods.len())")
+        self.assertEqual([classifier.index(v) for v in order], sorted(classifier.index(v) for v in order))
+        self.assertIn("project_fields: bool) -> Result<usize, BootstrapAppInfoFailure>", classifier)
+        self.assertNotIn("methods: &[Value]", classifier)
+        self.assertNotIn("actions: &[Value]", classifier)
+        self.assertEqual(classifier.count("info.capabilities.as_ref()"), 2)
+        for shape in ("methods", "actions"):
+            self.assertIn('Err(Shape("bootstrap-info-' + shape + '-shape"))', classifier)
+        for runtime in ("state", "mode", "reason"):
+            self.assertIn('Err(Record("bootstrap-info-runtime-' + runtime + '"))', classifier)
         callback = observer.split("pub(super) fn app_info(", 1)[1].split("pub(super) fn catalog(", 1)[0]
-        order = ("bootstrap-info-methods-shape", "bootstrap-info-actions-shape", "let failure = bootstrap_app_info_failure(",
-                 "self.record()", "if let Some(reason) = failure", "bootstrap-info-duplicate", "bootstrap-info-reload", "r.info = true;")
+        order = ("let classified = match bootstrap_app_info_failure(", "Err(BootstrapAppInfoFailure::Shape(reason))",
+                 "self.fail_with(reason); return;", "Err(BootstrapAppInfoFailure::Record(reason)) => Err(reason)",
+                 "self.record()", "let methods = match classified", "self.fail_bootstrap(&mut r, reason); return;",
+                 "bootstrap-info-duplicate", "bootstrap-info-reload", "r.info = true; r.methods = methods;")
         self.assertEqual([callback.index(v) for v in order], sorted(callback.index(v) for v in order))
+        self.assertEqual(callback.count("bootstrap_app_info_failure("), 1)
+        self.assertEqual(callback.count("self.record()"), 1)
+        self.assertNotIn("info.capabilities", callback)
         catalog = observer.split("pub(super) fn catalog(", 1)[1].split("pub(super) fn project_result(", 1)[0]
         order = ("let failure = bootstrap_catalog_failure(", "self.record()", "bootstrap-catalog-info-order",
                  "bootstrap-catalog-duplicate", "if let Some(reason) = failure", "bootstrap-catalog-reload", "r.catalog = true;")
         self.assertEqual([catalog.index(v) for v in order], sorted(catalog.index(v) for v in order))
-        for body in (latch, callback, catalog):
+        for body in (latch, classifier, callback, catalog):
             for forbidden in ("try_lock", "thread::spawn", "Instant::now", "run_on_main_thread", "ns_window(", "observe_panel("):
                 self.assertNotIn(forbidden, body)
         snapshot = observer.split("struct FailureSnapshot", 1)[1].split("fn failure_context(", 1)[0]
@@ -936,6 +958,18 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('edit::bounded(&failure_context(&self), 8192)', snapshot)
         self.assertIn('(frame.len() <= 8448).then_some(frame)', snapshot)
         self.assertIn("if !bootstrap_diagnostic_data_checks() { return false; }", observer)
+        bridge = (PATH.parents[1] / "src-tauri" / "src" / "bridge.rs").read_text(encoding="utf-8")
+        origin_classifier = bridge.split("fn capabilities_failure_line(", 1)[1].split("fn capabilities_cause_line(", 1)[0]
+        rows = M.re.findall(r'=> b"(MRKDBG_DESKTOP_BOOTSTRAP=capabilities-(admission|query-wait)-([a-z_]+))\\n"', origin_classifier)
+        expected = {(line + "\n").encode("ascii"): (origin, code) for line, origin, code in rows}
+        self.assertEqual((len(rows), len(expected)), (30, 30))
+        self.assertEqual(M._BOOTSTRAP_DIAGNOSTIC_LINES, expected)
+        self.assertEqual(M._BOOTSTRAP_DIAGNOSTIC_ORIGINS, ("admission", "query-wait"))
+        self.assertEqual(M._BOOTSTRAP_DIAGNOSTIC_CODES, (
+            "runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+            "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+            "protocol_error", "engine_failed", "io_error", "output_limit", "other",
+        ))
 
     def test_failure_context_is_closed_nullable_and_not_a_receipt(self):
         good = context_data()
@@ -2132,25 +2166,35 @@ class AquaDataTests(unittest.TestCase):
         self.assertLessEqual(len(context_row(largest).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
 
     def test_original_exception_buffers_do_not_change_error_or_finality(self):
-        for duplicate in (False, True):
-            with self.subTest(repeated_identical_frame=duplicate), inert_exception_owner(duplicate=duplicate) as call:
-                fixtures = InertFixtures()
-                with patch.object(M, "parse_result", side_effect=AssertionError("must not parse success")), \
-                        self.assertRaises(RuntimeError) as caught:
-                    M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
-                self.assertIs(caught.exception, call.original)
-                self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
-                self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
-                report = M.diagnostic(caught.exception, None, fixtures)
-                self.assertEqual((report["innerFailureStep"], report["innerFailureReason"], report["innerFailureContext"]),
-                                 ("CancelProject", "observer-deadline", context_data()))
-                self.assertEqual(report["innerDiagnosticSource"], "original-exception-buffer")
-                self.assertEqual((report["innerDiagnosticCompleteness"], report["invocationFinality"]), ("unknown", "unknown"))
-                self.assertIsNone(report["appReturncode"])
-                self.assertFalse(report["originalCallReturned"])
-                output = io.StringIO(); M.emit_record(report, output)
-                self.assertNotIn("PRIVATE", output.getvalue())
-                self.assertNotIn(M.EXECUTABLE, output.getvalue())
+        diagnostics = ((None, None),) + tuple((origin, code) for origin in M._BOOTSTRAP_DIAGNOSTIC_ORIGINS
+                                              for code in M._BOOTSTRAP_DIAGNOSTIC_CODES)
+        for origin, code in diagnostics:
+            expected = {"origin": origin, "code": code} if origin is not None else None
+            for duplicate in (False, True):
+                with self.subTest(origin=origin, code=code, repeated_identical_frame=duplicate), \
+                        inert_exception_owner(duplicate=duplicate) as call:
+                    if expected is not None:
+                        call.engine.outputs[1].extend(
+                            ("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-" + origin + "-" + code + "\n").encode("ascii"))
+                    fixtures = InertFixtures()
+                    with patch.object(M, "parse_result", side_effect=AssertionError("must not parse success")), \
+                            self.assertRaises(RuntimeError) as caught:
+                        M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+                    self.assertIs(caught.exception, call.original)
+                    self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
+                    self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
+                    report = M.diagnostic(caught.exception, None, fixtures)
+                    self.assertEqual((report["innerFailureStep"], report["innerFailureReason"], report["innerFailureContext"]),
+                                     ("CancelProject", "observer-deadline", context_data()))
+                    self.assertEqual(report["innerBootstrapDiagnostic"], expected)
+                    self.assertEqual(report["innerDiagnosticSource"], "original-exception-buffer")
+                    self.assertEqual((report["innerDiagnosticCompleteness"], report["invocationFinality"]), ("unknown", "unknown"))
+                    self.assertEqual(report["innerOutput"], "unavailable")
+                    self.assertIsNone(report["appReturncode"])
+                    self.assertFalse(report["originalCallReturned"])
+                    output = io.StringIO(); M.emit_record(report, output)
+                    for private in ("PRIVATE", M.EXECUTABLE, "MRKDBG_DESKTOP_BOOTSTRAP", "capabilities-"):
+                        self.assertNotIn(private, output.getvalue())
 
     def test_native_action_closed_sites_cover_three_remaining_original_actions(self):
         self.assertEqual(set(M.NATIVE_ACTION_STEPS), {"CancelProject", "QuitCancel", "Quit"})
@@ -2259,8 +2303,10 @@ class AquaDataTests(unittest.TestCase):
             lambda f: setattr(f.engine, "outputs", [b"", f.engine.outputs[1]]),
             lambda f: setattr(f.engine, "outputs", [bytearray(M.OUTPUT_LIMIT), f.engine.outputs[1]]),
         )
+        marker = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-runtime_unavailable\n"
         for index, mutation in enumerate(mutations):
             with self.subTest(index=index), inert_exception_owner() as call:
+                call.engine.outputs[1].extend(marker)
                 mutation(call)
                 fixtures = InertFixtures()
                 with self.assertRaises(RuntimeError) as caught:
@@ -2268,23 +2314,98 @@ class AquaDataTests(unittest.TestCase):
                 self.assertIs(caught.exception, call.original)
                 self.assertIsNone(fixtures.inner_diagnostic_source)
                 self.assertIsNone(fixtures.inner_failure_step)
+                self.assertIsNone(fixtures.inner_bootstrap_diagnostic)
+                self.assertIsNone(M.diagnostic(caught.exception, None, fixtures)["innerBootstrapDiagnostic"])
                 self.assertEqual((fixtures.before, fixtures.reads, fixtures.inflight, fixtures.last_returned),
                                  (["first-save"], [], True, False))
         with inert_exception_owner() as call, patch.object(M, "TRACEBACK_LIMIT", 1):
+            call.engine.outputs[1].extend(marker)
             fixtures = InertFixtures()
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(RuntimeError) as caught:
                 M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
             self.assertIsNone(fixtures.inner_diagnostic_source)
+            self.assertIsNone(fixtures.inner_bootstrap_diagnostic)
+            self.assertIs(caught.exception, call.original)
 
     def test_exception_partial_absent_or_parser_failure_stays_unavailable(self):
-        for stderr in (b"", b"PRIVATE ONLY", b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject",
-                       b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\nMRK_MACOS_AQUA_FAILURE_REASON"):
-            with inert_exception_owner(stderr=stderr) as call:
+        good = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-admission-runtime_unavailable\n"
+        other = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-cleanup_unknown\n"
+        prefix = b"MRKDBG_DESKTOP_BOOTSTRAP"
+        malformed = (
+            good[:-1], prefix, prefix + b"=capabilities-admission-",
+            b"PRIVATE " + good, b" " + good, good.replace(b"=", b"= "),
+            good.replace(b"\n", b"\r\n"), good.replace(b"\n", b" \n"),
+            good.replace(b"\n", b"-PRIVATE\n"), good.replace(b"runtime_unavailable", b"unknown_code"),
+            good.replace(b"runtime_unavailable", b"RUNTIME_UNAVAILABLE"),
+            good.replace(b"runtime_unavailable", b"\xff"), good.replace(b"=", b"?"),
+            prefix + b"=capabilities-cause-selection-profile-closed\n", prefix + b"=PRIVATE\n",
+            b"PRIVATE " + prefix[:-1],
+        )
+        malformed += tuple(prefix[:length] for length in range(1, len(prefix)))
+        absent = (b"", b"PRIVATE ONLY", b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject",
+                  b"MRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\nMRK_MACOS_AQUA_FAILURE_REASON")
+        ambiguous = malformed + (good + good, good + other, other + good)
+        ambiguous += tuple(good + bad for bad in malformed) + tuple(bad + good for bad in malformed)
+        for stderr in absent + ambiguous:
+            with self.subTest(stderr=stderr), inert_exception_owner(stderr=stderr) as call:
                 fixtures = InertFixtures()
+                # No stale prior case's closed marker may cross this original.
+                fixtures.inner_bootstrap_diagnostic = {"origin": "query-wait", "code": "busy"}
                 with self.assertRaises(RuntimeError) as caught:
                     M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
                 self.assertIs(caught.exception, call.original)
                 self.assertIsNone(fixtures.inner_diagnostic_source)
+                report = M.diagnostic(caught.exception, None, fixtures)
+                self.assertIsNone(report["innerBootstrapDiagnostic"])
+                self.assertEqual((report["innerDiagnosticCompleteness"], report["invocationFinality"]), ("unknown", "unknown"))
+                self.assertFalse(report["originalCallReturned"])
+                self.assertIsNone(report["appReturncode"])
+                self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
+                output = io.StringIO(); M.emit_record(report, output)
+                for private in ("PRIVATE", "unknown_code", "MRKDBG_DESKTOP_BOOTSTRAP"):
+                    self.assertNotIn(private, output.getvalue())
+        with inert_exception_owner(stderr=b"PRIVATE ONLY") as call:
+            call.engine.outputs[0].extend(good)  # stderr is the only admitted origin.
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIs(caught.exception, call.original)
+            self.assertIsNone(fixtures.inner_diagnostic_source)
+            self.assertIsNone(fixtures.inner_bootstrap_diagnostic)
+        # A complete closed marker alone is useful even if unrelated stderr is
+        # partial. The informational rows and private tail never leave here.
+        informative = (b"PRIVATE START\nMRKDBG_DESKTOP_BOOTSTRAP=app-info-enter\n"
+                       b"MRK_DESKTOP_CAPABILITIES=PRIVATE\n" + good + b"PRIVATE INCOMPLETE TAIL")
+        with inert_exception_owner(stderr=informative) as call:
+            fixtures = InertFixtures()
+            with self.assertRaises(RuntimeError) as caught:
+                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+            self.assertIs(caught.exception, call.original)
+            report = M.diagnostic(caught.exception, None, fixtures)
+            self.assertEqual(report["innerBootstrapDiagnostic"], {"origin": "admission", "code": "runtime_unavailable"})
+            self.assertEqual((report["innerFailureStep"], report["innerFailureReason"], report["innerFailureContext"]),
+                             (None, None, None))
+            self.assertEqual(report["innerDiagnosticSource"], "original-exception-buffer")
+            self.assertEqual((report["innerDiagnosticCompleteness"], report["invocationFinality"]), ("unknown", "unknown"))
+            self.assertFalse(report["originalCallReturned"])
+            self.assertIsNone(report["appReturncode"])
+            self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
+            output = io.StringIO(); M.emit_record(report, output)
+            self.assertNotIn("PRIVATE", output.getvalue())
+            self.assertNotIn("MRKDBG", output.getvalue())
+        for stdout, stderr in ((good, b""), (bytearray(), good), (b"", bytearray(good)),
+                               ("", good), (b"", None), (b"x" * M.OUTPUT_LIMIT, good)):
+            self.assertIsNone(M._inner_bootstrap_diagnostic(stdout, stderr))
+        bounded = b"x" * (M.OUTPUT_LIMIT - len(good) - 1) + b"\n" + good
+        self.assertEqual(len(bounded), M.OUTPUT_LIMIT)
+        self.assertEqual(M._inner_bootstrap_diagnostic(b"", bounded), {"origin": "admission", "code": "runtime_unavailable"})
+        self.assertIsNone(M._inner_bootstrap_diagnostic(b"x", bounded))
+        # Scan all available stderr; do not truncate away an ambiguous tail.
+        bounded = good + b"x" * (M.OUTPUT_LIMIT - len(good) - len(prefix) - 1) + b"\n" + prefix
+        self.assertEqual(len(bounded), M.OUTPUT_LIMIT)
+        self.assertIsNone(M._inner_bootstrap_diagnostic(b"", bounded))
+        with patch.object(M, "_BOOTSTRAP_DIAGNOSTIC_LINES", None):
+            self.assertIsNone(M._inner_bootstrap_diagnostic(b"", good))
         # A complete closed field remains diagnostic even if a separate field
         # is absent/partial. The partial field and capture completeness do not.
         with inert_exception_owner(stderr=(b"MRK_MACOS_AQUA_FAILURE_STEP=CancelProject\n"
@@ -2295,53 +2416,89 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(fixtures.inner_failure_step, "CancelProject")
             self.assertIsNone(fixtures.inner_failure_reason)
             self.assertIsNone(fixtures.inner_failure_context)
+            self.assertIsNone(fixtures.inner_bootstrap_diagnostic)
             self.assertEqual(fixtures.inner_diagnostic_source, "original-exception-buffer")
-        with inert_exception_owner() as call, patch.object(M, "failure_step", side_effect=ValueError("PRIVATE PARSER ERROR")):
-            fixtures = InertFixtures()
-            with self.assertRaises(RuntimeError) as caught:
-                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
-            self.assertIs(caught.exception, call.original)
-            self.assertIsNone(fixtures.inner_diagnostic_source)
-            self.assertTrue(fixtures.inflight)
-        with inert_exception_owner() as call, patch.object(M, "_original_exception_diagnostics", side_effect=ValueError("PRIVATE SNAPSHOT ERROR")):
-            fixtures = InertFixtures()
-            with self.assertRaises(RuntimeError) as caught:
-                M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
-            self.assertIs(caught.exception, call.original)
-            self.assertIsNone(fixtures.inner_diagnostic_source)
+        for reducer, message in (("failure_step", "PRIVATE PARSER ERROR"),
+                                 ("_inner_bootstrap_diagnostic", "PRIVATE BOOTSTRAP PARSER ERROR"),
+                                 ("_original_exception_diagnostics", "PRIVATE SNAPSHOT ERROR")):
+            with inert_exception_owner() as call, patch.object(M, reducer, side_effect=ValueError(message)):
+                call.engine.outputs[1].extend(good)
+                fixtures = InertFixtures()
+                with self.assertRaises(RuntimeError) as caught:
+                    M.run_cases(BINDING, fixtures, call.owner.run_owned, UID, "runner", self.fail)
+                self.assertIs(caught.exception, call.original)
+                self.assertIsNone(fixtures.inner_diagnostic_source)
+                self.assertIsNone(fixtures.inner_bootstrap_diagnostic)
+                self.assertTrue(fixtures.inflight)
+                self.assertFalse(fixtures.last_returned)
+                self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
 
     def test_failure_reason_diagnostic_does_not_promote_nonzero(self):
         cases = [("CancelProject", "asset_source_refused")] + [("ProjectSettled", reason) for reason in (
             "project-result-path", "project-result-path-app-child", "project-result-path-descendant",
             "project-result-path-ancestor", "project-result-path-sibling", "project-result-path-tmp-spelling",
             "project-result-path-data-spelling")]
+        bootstrap = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-runtime_unavailable\n"
+        expected = {"origin": "query-wait", "code": "runtime_unavailable"}
         for step, reason in cases:
-            with self.subTest(step=step, reason=reason):
-                fixtures, emitted = InertFixtures(), []
-                marker = (f"MRK_MACOS_AQUA_FAILURE_STEP={step}\n"
-                          f"MRK_MACOS_AQUA_FAILURE_REASON={reason}\n").encode("ascii")
-                detail = None
-                if reason in M.PROJECT_SELECTION_BOUND_LOCATIONS:
-                    detail = project_selection_context_data(location=sorted(M.PROJECT_SELECTION_BOUND_LOCATIONS[reason])[0])
-                    marker += context_row(detail)
-                def runner(argv, **_):
-                    return CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=marker)
-                with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
-                    M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append)
-                report = M.diagnostic(caught.exception, None, fixtures)
-                self.assertEqual((report["status"], report["innerFailureStep"], report["innerFailureReason"]),
-                                 ("failed", step, reason))
-                self.assertEqual(report["appReturncode"], 1)
-                self.assertIs(report["originalCallReturned"], True)
-                self.assertEqual(report["invocationFinality"], "no-pending-invocation")
-                self.assertFalse(fixtures.inflight)
-                self.assertEqual(report["innerDiagnosticSource"], "completed-output")
-                self.assertEqual(report["innerDiagnosticCompleteness"], "complete")
-                self.assertEqual(report["typedLifetimeFacts"], [])
-                self.assertEqual(report["innerFailureContext"], detail)
-                self.assertEqual(fixtures.before, ["first-save"])
-                self.assertEqual((fixtures.reads, emitted), ([], []))
-        self.assertIsNone(M.diagnostic(M.Refused("fixture-refused"), None, None)["innerFailureReason"])
+            for marker_present in (False, True):
+                with self.subTest(step=step, reason=reason, marker_present=marker_present):
+                    fixtures, emitted = InertFixtures(), []
+                    fixtures.inner_bootstrap_diagnostic = {"origin": "admission", "code": "busy"}
+                    marker = (f"MRK_MACOS_AQUA_FAILURE_STEP={step}\n"
+                              f"MRK_MACOS_AQUA_FAILURE_REASON={reason}\n").encode("ascii")
+                    detail = None
+                    if reason in M.PROJECT_SELECTION_BOUND_LOCATIONS:
+                        detail = project_selection_context_data(location=sorted(M.PROJECT_SELECTION_BOUND_LOCATIONS[reason])[0])
+                        marker += context_row(detail)
+                    if marker_present:
+                        marker += bootstrap
+                    def runner(argv, **_):
+                        return CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=marker)
+                    with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
+                        M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append)
+                    report = M.diagnostic(caught.exception, None, fixtures)
+                    self.assertEqual((report["status"], report["innerFailureStep"], report["innerFailureReason"]),
+                                     ("failed", step, reason))
+                    self.assertEqual(report["appReturncode"], 1)
+                    self.assertIs(report["originalCallReturned"], True)
+                    self.assertEqual(report["invocationFinality"], "no-pending-invocation")
+                    self.assertFalse(fixtures.inflight)
+                    self.assertEqual(report["innerDiagnosticSource"], "completed-output")
+                    self.assertEqual(report["innerDiagnosticCompleteness"], "complete")
+                    self.assertEqual(report["typedLifetimeFacts"], [])
+                    self.assertEqual(report["innerFailureContext"], detail)
+                    self.assertEqual(report["innerBootstrapDiagnostic"], expected if marker_present else None)
+                    self.assertEqual(fixtures.before, ["first-save"])
+                    self.assertEqual((fixtures.reads, emitted), ([], []))
+                    output = io.StringIO(); M.emit_record(report, output)
+                    self.assertNotIn("MRKDBG_DESKTOP_BOOTSTRAP", output.getvalue())
+        for parser_fault in (False, True):
+            fixtures, emitted = InertFixtures(), []
+            def runner(argv, **_):
+                return CompletedProcess(args=argv, returncode=17, stdout=b"PRIVATE", stderr=bootstrap)
+            reducer = ValueError("PRIVATE PARSER ERROR") if parser_fault else M._inner_bootstrap_diagnostic
+            with patch.object(M, "_inner_bootstrap_diagnostic", side_effect=reducer), \
+                    self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
+                M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append)
+            report = M.diagnostic(caught.exception, None, fixtures)
+            self.assertEqual(report["innerBootstrapDiagnostic"], None if parser_fault else expected)
+            self.assertEqual((report["innerFailureStep"], report["innerFailureReason"], report["innerFailureContext"]),
+                             (None, None, None))
+            self.assertEqual(report["appReturncode"], 17)
+            self.assertIs(report["originalCallReturned"], True)
+            self.assertFalse(fixtures.inflight)
+            self.assertEqual((report["innerDiagnosticSource"], report["innerDiagnosticCompleteness"]),
+                             ("completed-output", "complete"))
+            self.assertEqual((report["invocationFinality"], report["innerOutput"]), ("no-pending-invocation", "not-exported"))
+            self.assertEqual(report["typedLifetimeFacts"], [])
+            self.assertEqual((fixtures.before, fixtures.reads, emitted), (["first-save"], [], []))
+            output = io.StringIO(); M.emit_record(report, output)
+            self.assertNotIn("PRIVATE", output.getvalue())
+            self.assertNotIn("MRKDBG_DESKTOP_BOOTSTRAP", output.getvalue())
+        empty = M.diagnostic(M.Refused("fixture-refused"), None, None)
+        self.assertIsNone(empty["innerFailureReason"])
+        self.assertIsNone(empty["innerBootstrapDiagnostic"])
 
     def test_original_window_source_is_borrowed_passive_and_same_endpoint_only(self):
         source_root = PATH.parents[1] / "src-tauri" / "src"

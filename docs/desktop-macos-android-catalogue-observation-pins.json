@@ -1,8 +1,8 @@
 {
   "generatedSource": {
-    "bytes": 20409772,
+    "bytes": 20409741,
     "path": "desktop/src-tauri/src/android_supplier_macos_catalogue.rs",
-    "sha256": "364bf1438d5e3801aec40bc3136f377c34c317439999edaa4a3f794a7bc69204"
+    "sha256": "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"
   },
   "generation": {
     "deterministicOutputVerifiedTwice": true,
@@ -11,9 +11,9 @@
     "sourcePrePostMatched": true
   },
   "generator": {
-    "bytes": 139123,
+    "bytes": 139288,
     "path": "desktop/tools/macos_android_supplier_catalogue.py",
-    "sha256": "4294528812c53def9b05cc189da16a3419557160324df2933da187447fc8ddd5"
+    "sha256": "87d7264e384182e8495bfd46899fb8896e6f47d2c0be0523242dee4a1d19d97a"
   },
   "inputBytes": 7338029,
   "inputCommitmentSha256": "58a9f1ba78b19be5788717812c47070c2444d93bf0092966eda77fe2fe4fd931",

@@ -243,6 +243,13 @@ class CatalogueProjectionDataTests(unittest.TestCase):
         self.assertIn(b"Component::Aapt2", raw)
         self.assertLess(raw.index(b"Component::Aapt2"), raw.index(b"Component::Bundletool"))
         self.assertNotIn(b"reference_digest", raw)
+        # Preserve distinct wrapper-selection and acquisition-provenance roles.
+        self.assertIn(
+            b'gradle_distribution_url: "https://services.gradle.org/distributions/gradle-8.14.5-bin.zip", '
+            b'gradle_distribution_sha256: "6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854"', raw)
+        self.assertIn(
+            b'OfficialArchive { component: Component::Gradle, official_source: '
+            b'"https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip"', raw)
         with mock.patch.object(M, "OUTPUT_LIMIT", 8), self.assertRaises(M.Refused):
             M.render(projection, lambda _: None)
         class SinkFailure(Exception):

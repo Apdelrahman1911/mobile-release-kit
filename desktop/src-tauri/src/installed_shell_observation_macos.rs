@@ -111,28 +111,38 @@ fn latch_bootstrap(first: &AtomicU8, failed: &AtomicBool, detail: &mut Option<Bo
     if latch_failure(first, failed, reason) && bootstrap_failure_reason(reason) { *detail = Some(sample); }
 }
 
-// Original appInfo predicates, in their original short-circuit order. Only
-// closed site labels leave here, never values from the supplied capability DATA.
-fn bootstrap_app_info_failure(info: &AppInfo, methods: &[Value], actions: &[Value], expected_methods: usize,
-    project_fields: bool) -> Option<&'static str> {
-    if info.runtime.state != "available" { return Some("bootstrap-info-runtime-state"); }
-    if info.runtime.mode != "bundled" { return Some("bootstrap-info-runtime-mode"); }
-    if info.runtime.reason.is_some() { return Some("bootstrap-info-runtime-reason"); }
-    if info.app_name != "Mobile Release Kit" { return Some("bootstrap-info-app-name"); }
-    if info.app_version != env!("CARGO_PKG_VERSION") { return Some("bootstrap-info-app-version"); }
-    if !info.project_selection.available { return Some("bootstrap-info-project-selection"); }
-    if info.project_selection.reason.is_some() { return Some("bootstrap-info-project-reason"); }
-    if info.project_path_selection.available != project_fields { return Some("bootstrap-info-project-fields"); }
-    if !(METHODS.len()..=64).contains(&methods.len()) { return Some("bootstrap-info-method-count"); }
-    if !(1..=64).contains(&actions.len()) { return Some("bootstrap-info-action-count"); }
+// Original appInfo predicates: runtime status precedes nullable capability
+// shape. Shape failures retain their no-Record route; other closed labels
+// require the existing guarded first-failure snapshot, never capability DATA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BootstrapAppInfoFailure { Shape(&'static str), Record(&'static str) }
+fn bootstrap_app_info_failure(info: &AppInfo, expected_methods: usize,
+    project_fields: bool) -> Result<usize, BootstrapAppInfoFailure> {
+    use BootstrapAppInfoFailure::{Record, Shape};
+    if info.runtime.state != "available" { return Err(Record("bootstrap-info-runtime-state")); }
+    if info.runtime.mode != "bundled" { return Err(Record("bootstrap-info-runtime-mode")); }
+    if info.runtime.reason.is_some() { return Err(Record("bootstrap-info-runtime-reason")); }
+    let Some(methods) = info.capabilities.as_ref().and_then(|v| v["methods"].as_array()) else {
+        return Err(Shape("bootstrap-info-methods-shape"));
+    };
+    let Some(actions) = info.capabilities.as_ref().and_then(|v| v["actions"].as_array()) else {
+        return Err(Shape("bootstrap-info-actions-shape"));
+    };
+    if info.app_name != "Mobile Release Kit" { return Err(Record("bootstrap-info-app-name")); }
+    if info.app_version != env!("CARGO_PKG_VERSION") { return Err(Record("bootstrap-info-app-version")); }
+    if !info.project_selection.available { return Err(Record("bootstrap-info-project-selection")); }
+    if info.project_selection.reason.is_some() { return Err(Record("bootstrap-info-project-reason")); }
+    if info.project_path_selection.available != project_fields { return Err(Record("bootstrap-info-project-fields")); }
+    if !(METHODS.len()..=64).contains(&methods.len()) { return Err(Record("bootstrap-info-method-count")); }
+    if !(1..=64).contains(&actions.len()) { return Err(Record("bootstrap-info-action-count")); }
     let available = |m: &&Value| m["available"].as_bool() == Some(true);
-    if methods.iter().filter(available).count() != expected_methods { return Some("bootstrap-info-available-count"); }
+    if methods.iter().filter(available).count() != expected_methods { return Err(Record("bootstrap-info-available-count")); }
     if !METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m["method"].as_str() == Some(*name)).count() == 1) {
-        return Some("bootstrap-info-required-method");
+        return Err(Record("bootstrap-info-required-method"));
     }
-    if !methods.iter().all(|m| m["available"].is_boolean()) { return Some("bootstrap-info-method-availability"); }
-    if !actions.iter().all(|a| a["available"].as_bool() == Some(false)) { return Some("bootstrap-info-action-availability"); }
-    None
+    if !methods.iter().all(|m| m["available"].is_boolean()) { return Err(Record("bootstrap-info-method-availability")); }
+    if !actions.iter().all(|a| a["available"].as_bool() == Some(false)) { return Err(Record("bootstrap-info-action-availability")); }
+    Ok(methods.len())
 }
 fn bootstrap_catalog_failure(result: &Result<Value, BridgeError>) -> Option<&'static str> {
     let Ok(value) = result else { return Some("bootstrap-catalog-result"); };
@@ -1452,21 +1462,22 @@ impl Observation {
         if finished { r.loaded = true; } else { r.started = true; }
     }
     pub(super) fn app_info(&self, info: &AppInfo) {
-        // These two shape failures originally occur without a Record guard.
-        // Preserve that route; the closed reason has no first-failure flags.
-        let Some(methods) = info.capabilities.as_ref().and_then(|v| v["methods"].as_array()) else {
-            self.fail_with("bootstrap-info-methods-shape"); return;
+        // Classify the actual complete AppInfo before taking the Record guard.
+        // Only healthy-runtime shape failures retain the original no-Record path.
+        let classified = match bootstrap_app_info_failure(info, self.case.methods(), self.case == Case::ProjectFields
+            || crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED) {
+            Err(BootstrapAppInfoFailure::Shape(reason)) => { self.fail_with(reason); return; },
+            Err(BootstrapAppInfoFailure::Record(reason)) => Err(reason),
+            Ok(methods) => Ok(methods),
         };
-        let Some(actions) = info.capabilities.as_ref().and_then(|v| v["actions"].as_array()) else {
-            self.fail_with("bootstrap-info-actions-shape"); return;
-        };
-        let failure = bootstrap_app_info_failure(info, methods, actions, self.case.methods(), self.case == Case::ProjectFields
-            || crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED);
         let Some(mut r) = self.record() else { return; };
-        if let Some(reason) = failure { self.fail_bootstrap(&mut r, reason); return; }
+        let methods = match classified {
+            Ok(methods) => methods,
+            Err(reason) => { self.fail_bootstrap(&mut r, reason); return; },
+        };
         if r.info { self.fail_bootstrap(&mut r, "bootstrap-info-duplicate"); return; }
         if r.reload_requested { self.fail_bootstrap(&mut r, "bootstrap-info-reload"); return; }
-        r.info = true; r.methods = methods.len();
+        r.info = true; r.methods = methods;
     }
     pub(super) fn catalog(&self, result: &Result<Value, BridgeError>) {
         let failure = bootstrap_catalog_failure(result);
@@ -3825,16 +3836,40 @@ fn bootstrap_diagnostic_data_checks() -> bool {
     let expired = snapshot.at_expiry(OpenProgress { state: "unknown", requested: false, dispatched: false, entered: false,
         returned: false, joined: false, retired: false, expired: true });
     if expired.bootstrap.is_some() || expired.dom.is_some() || failure_context(&expired).get("bootstrap").is_some() { return false; }
-    let info = || AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"),
-        runtime: crate::runtime::RuntimeStatus { state: "available", reason: None, mode: "bundled" }, capabilities: None,
+    // The classifier receives actual AppInfo capability DATA, not detached
+    // arrays that could hide runtime-unavailable's legitimate None response.
+    let info = |methods: &[Value], actions: &[Value]| AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"),
+        runtime: crate::runtime::RuntimeStatus { state: "available", reason: None, mode: "bundled" },
+        capabilities: Some(json!({"methods":methods,"actions":actions})),
         project_selection: crate::bridge::ProjectSelectionAvailability { available: true, reason: None },
         project_path_selection: crate::bridge::ProjectPathSelectionAvailability { available: false, reason: None }, installation: None };
     let methods: Vec<Value> = METHODS.iter().map(|name| json!({"method":name,"available":true})).collect();
     let actions = [json!({"available":false})];
-    let classify = |value: &AppInfo, methods: &[Value], actions: &[Value]| bootstrap_app_info_failure(value, methods, actions, METHODS.len(), false);
-    if classify(&info(), &methods, &actions).is_some() { return false; }
+    let classify = |value: &AppInfo| bootstrap_app_info_failure(value, METHODS.len(), false);
+    if classify(&info(&methods, &actions)) != Ok(METHODS.len()) { return false; }
+    for (capabilities, shape) in [
+        (None, "bootstrap-info-methods-shape"),
+        (Some(Value::Null), "bootstrap-info-methods-shape"),
+        (Some(json!({"methods":false,"actions":[{"available":false}]})), "bootstrap-info-methods-shape"),
+        (Some(json!({"methods":methods.clone()})), "bootstrap-info-actions-shape"),
+        (Some(json!({"methods":methods.clone(),"actions":false})), "bootstrap-info-actions-shape"),
+    ] {
+        for state in ["unavailable", "disabled"] {
+            let mut value = info(&methods, &actions);
+            value.runtime.state = state; value.runtime.mode = "other"; value.runtime.reason = Some("inert".into());
+            value.capabilities = capabilities.clone();
+            if classify(&value) != Err(BootstrapAppInfoFailure::Record("bootstrap-info-runtime-state")) { return false; }
+        }
+        let mut value = info(&methods, &actions); value.capabilities = capabilities.clone();
+        value.runtime.mode = "other"; value.runtime.reason = Some("inert".into());
+        if classify(&value) != Err(BootstrapAppInfoFailure::Record("bootstrap-info-runtime-mode")) { return false; }
+        value.runtime.mode = "bundled";
+        if classify(&value) != Err(BootstrapAppInfoFailure::Record("bootstrap-info-runtime-reason")) { return false; }
+        value.runtime.reason = None;
+        if classify(&value) != Err(BootstrapAppInfoFailure::Shape(shape)) { return false; }
+    }
     for change in 0..8 {
-        let mut value = info();
+        let mut value = info(&methods, &actions);
         let reason = match change {
             0 => { value.runtime.state = "unavailable"; value.runtime.mode = "other"; "bootstrap-info-runtime-state" },
             1 => { value.runtime.mode = "other"; value.runtime.reason = Some("inert".into()); "bootstrap-info-runtime-mode" },
@@ -3845,37 +3880,40 @@ fn bootstrap_diagnostic_data_checks() -> bool {
             6 => { value.project_selection.reason = Some("inert"); "bootstrap-info-project-reason" },
             _ => { value.project_path_selection.available = true; "bootstrap-info-project-fields" },
         };
-        if classify(&value, &methods, &actions) != Some(reason) { return false; }
+        if classify(&value) != Err(BootstrapAppInfoFailure::Record(reason)) { return false; }
     }
     for count in [0, METHODS.len() - 1, 65] {
-        if classify(&info(), &vec![methods[0].clone(); count], &[]) != Some("bootstrap-info-method-count") { return false; }
+        if classify(&info(&vec![methods[0].clone(); count], &[]))
+            != Err(BootstrapAppInfoFailure::Record("bootstrap-info-method-count")) { return false; }
     }
     for count in [0, 65] {
-        if classify(&info(), &methods, &vec![actions[0].clone(); count]) != Some("bootstrap-info-action-count") { return false; }
+        if classify(&info(&methods, &vec![actions[0].clone(); count]))
+            != Err(BootstrapAppInfoFailure::Record("bootstrap-info-action-count")) { return false; }
     }
     let mut unavailable = methods.clone(); unavailable[0]["available"] = Value::Bool(false);
     let mut duplicate = methods.clone(); duplicate[0] = duplicate[1].clone();
     let mut malformed = methods.clone(); malformed.push(json!({"method":"inert","available":null}));
     for (values, reason) in [(&unavailable, "bootstrap-info-available-count"), (&duplicate, "bootstrap-info-required-method"),
         (&malformed, "bootstrap-info-method-availability")] {
-        if classify(&info(), values, &actions) != Some(reason) { return false; }
+        if classify(&info(values, &actions)) != Err(BootstrapAppInfoFailure::Record(reason)) { return false; }
     }
     for name in ["metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"] {
         let Some(index) = METHODS.iter().position(|expected| *expected == name) else { return false; };
         let mut missing = methods.clone(); missing[index]["available"] = Value::Bool(false);
-        if classify(&info(), &missing, &actions) != Some("bootstrap-info-available-count") { return false; }
+        if classify(&info(&missing, &actions)) != Err(BootstrapAppInfoFailure::Record("bootstrap-info-available-count")) { return false; }
         for replacement in ["unexpected.method", METHODS[0]] {
             let mut changed = methods.clone(); changed[index]["method"] = json!(replacement);
-            if classify(&info(), &changed, &actions) != Some("bootstrap-info-required-method") { return false; }
+            if classify(&info(&changed, &actions)) != Err(BootstrapAppInfoFailure::Record("bootstrap-info-required-method")) { return false; }
         }
     }
     let mut extra_available = methods.clone(); extra_available.push(json!({"method":"unexpected.method","available":true}));
-    if classify(&info(), &extra_available, &actions) != Some("bootstrap-info-available-count") { return false; }
+    if classify(&info(&extra_available, &actions)) != Err(BootstrapAppInfoFailure::Record("bootstrap-info-available-count")) { return false; }
     for available in [Value::Bool(true), Value::Null] {
-        if classify(&info(), &methods, &[json!({"available":available})]) != Some("bootstrap-info-action-availability") { return false; }
+        if classify(&info(&methods, &[json!({"available":available})]))
+            != Err(BootstrapAppInfoFailure::Record("bootstrap-info-action-availability")) { return false; }
     }
     let mut extended = methods.clone(); extended.resize(64, json!({"method":"inert","available":false}));
-    if classify(&info(), &extended, &actions).is_some() { return false; }
+    if classify(&info(&extended, &actions)) != Ok(64) { return false; }
     let field = json!({"path":"version.source","label":"inert","requiredness":"inert","what":"inert",
         "why":"inert","where":"inert","format":"inert","requiredWhen":"inert","failure":"inert"});
     if bootstrap_catalog_failure(&Ok(json!({"fields":[field.clone()]}))).is_some()

@@ -630,12 +630,12 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor
     func testPackagedEntryLaunchCancelAndQuit() throws {
-        packagedRequireDiagnosticActive = true
-        defer { packagedRequireDiagnosticActive = false }
         try launchCancelAndQuit(profile: .packagedEntry)
     }
 
     @MainActor private func launchCancelAndQuit(profile: SourceProfile) throws {
+        packagedRequireDiagnosticActive = true
+        defer { packagedRequireDiagnosticActive = false }
         continueAfterFailure = false
         // XCTest's whole-minute allowance remains exactly sixty seconds.
         executionTimeAllowance = 60

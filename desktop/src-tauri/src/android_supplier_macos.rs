@@ -2560,7 +2560,9 @@ mod tests {
         assert_eq!((r.roles.java, r.roles.javac, r.roles.gradle, r.roles.bundletool, r.roles.sdk),
             ("jdk/temurin-17.jdk/Contents/Home/bin/java", "jdk/temurin-17.jdk/Contents/Home/bin/javac",
              "gradle/bin/gradle", "bundletool/bundletool.jar", "sdk"));
-        assert_eq!(r.gradle_distribution_url, r.archives[3].official_source);
+        // Wrapper selection and acquisition provenance have distinct URL roles.
+        assert_eq!(r.gradle_distribution_url, "https://services.gradle.org/distributions/gradle-8.14.5-bin.zip");
+        assert_eq!(r.gradle_distribution_sha256, r.archives[3].archive.sha256);
         assert!(r.structural() && r.source_directory_closure() && r.compiled_metadata_pair());
         assert!(support_manifest_matches(r) && available());
         let digest = reference_digest(r).expect("complete reference fits the bounded Rust commitment stream");

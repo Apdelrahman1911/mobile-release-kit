@@ -3790,6 +3790,55 @@ def failure_context(stdout, stderr, case=None):
         return None
 
 
+_BOOTSTRAP_DIAGNOSTIC_ORIGINS = ("admission", "query-wait")
+_BOOTSTRAP_DIAGNOSTIC_CODES = (
+    "runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+    "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+    "protocol_error", "engine_failed", "io_error", "output_limit", "other",
+)
+_BOOTSTRAP_DIAGNOSTIC_LINES = {
+    ("MRKDBG_DESKTOP_BOOTSTRAP=capabilities-" + origin + "-" + code + "\n").encode("ascii"): (origin, code)
+    for origin in _BOOTSTRAP_DIAGNOSTIC_ORIGINS for code in _BOOTSTRAP_DIAGNOSTIC_CODES
+}
+_BOOTSTRAP_DIAGNOSTIC_LINE_LIMIT = max(len(line) for line in _BOOTSTRAP_DIAGNOSTIC_LINES)
+
+
+def _inner_bootstrap_diagnostic(stdout, stderr):
+    """One finite stderr fact, never raw output, first-CAS, EOF or finality."""
+    try:
+        if (type(stdout) is not bytes or type(stderr) is not bytes
+                or len(stdout) + len(stderr) > OUTPUT_LIMIT):
+            return None
+        namespace = b"MRKDBG_DESKTOP_BOOTSTRAP"
+        # A truncated namespace at the available tail is still ambiguous,
+        # even when embedded/prefixed. Do not salvage a preceding valid row.
+        if any(stderr.endswith(namespace[:length]) for length in range(1, len(namespace))):
+            return None
+        cursor, selected = 0, None
+        while cursor < len(stderr):
+            start = stderr.find(namespace, cursor)
+            if start < 0:
+                break
+            # Even an embedded/malformed occurrence makes the candidate
+            # ambiguous. Do not salvage a valid row beside a partial one.
+            if start and stderr[start - 1] != 10:
+                return None
+            end = stderr.find(b"\n", start, min(len(stderr), start + _BOOTSTRAP_DIAGNOSTIC_LINE_LIMIT))
+            if end < 0:
+                return None
+            line = stderr[start:end + 1]
+            cursor = end + 1
+            if line == b"MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter\n":
+                continue
+            found = _BOOTSTRAP_DIAGNOSTIC_LINES.get(line)
+            if found is None or selected is not None:
+                return None  # Unknown, duplicate-identical, or conflicting.
+            selected = found
+        return {"origin": selected[0], "code": selected[1]} if selected is not None else None
+    except BaseException:
+        return None  # Optional diagnostic loss cannot replace the original.
+
+
 def _original_exception_diagnostics(error, run_owned, case, cwd):
     """Private CI/source-pin seam: reduce only the original call's buffers.
 
@@ -3863,7 +3912,8 @@ def _original_exception_diagnostics(error, run_owned, case, cwd):
         stdout, stderr = bytes(outputs[0]), bytes(outputs[1])
         # The copies are immediately reduced; none is retained/exported by the
         # caller. Buffer availability never means EOF or original finality.
-        reduced = (failure_step(stdout, stderr), failure_reason(stdout, stderr), failure_context(stdout, stderr, case))
+        reduced = (failure_step(stdout, stderr), failure_reason(stdout, stderr), failure_context(stdout, stderr, case),
+                   _inner_bootstrap_diagnostic(stdout, stderr))
         return reduced if any(part is not None for part in reduced) else None
     except BaseException:
         return None  # Extraction must never mask the original invocation error.
@@ -4047,6 +4097,7 @@ class Fixtures:
         self.last_returned = False
         self.app_returncode = self.inner_failure_step = self.inner_failure_reason = None
         self.inner_failure_context = self.inner_diagnostic_source = None
+        self.inner_bootstrap_diagnostic = None
         self.precursor_diagnostic = None
         self.case = None
         self.stage = "prepare"
@@ -5029,6 +5080,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
         fixtures.inner_failure_context = fixtures.inner_diagnostic_source = None
+        fixtures.inner_bootstrap_diagnostic = None
         fixtures.precursor_diagnostic = None
         # Only the original public return contract clears this flag. An
         # exception/interruption or foreign/malformed result leaves finality
@@ -5042,7 +5094,8 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
             try:
                 reduced = _original_exception_diagnostics(error, run_owned, case, state)
                 if reduced is not None:
-                    fixtures.inner_failure_step, fixtures.inner_failure_reason, fixtures.inner_failure_context = reduced
+                    (fixtures.inner_failure_step, fixtures.inner_failure_reason, fixtures.inner_failure_context,
+                     fixtures.inner_bootstrap_diagnostic) = reduced
                     fixtures.inner_diagnostic_source = "original-exception-buffer"
             except BaseException:
                 pass  # Even an unexpected diagnostic fault cannot replace this error.
@@ -5057,6 +5110,10 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         fixtures.inner_failure_reason = failure_reason(result.stdout, result.stderr)
         fixtures.inner_failure_context = failure_context(result.stdout, result.stderr, case)
         fixtures.inner_diagnostic_source = "completed-output"
+        try:
+            fixtures.inner_bootstrap_diagnostic = _inner_bootstrap_diagnostic(result.stdout, result.stderr)
+        except BaseException:
+            fixtures.inner_bootstrap_diagnostic = None  # Even a replaced reducer cannot mask app-return.
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
         if case == IOS_ACCOUNT_CASE:
@@ -5828,6 +5885,7 @@ def diagnostic(error, owner, fixtures):
             "innerFailureStep": fixtures.inner_failure_step if fixtures else None,
             "innerFailureReason": fixtures.inner_failure_reason if fixtures else None,
             "innerFailureContext": fixtures.inner_failure_context if fixtures else None,
+            "innerBootstrapDiagnostic": getattr(fixtures, "inner_bootstrap_diagnostic", None),
             "innerDiagnosticSource": fixtures.inner_diagnostic_source if fixtures else None,
             "innerDiagnosticCompleteness": "complete" if fixtures and fixtures.last_returned else "unknown",
             "invocationFinality": "unknown" if fixtures and fixtures.inflight else "no-pending-invocation",

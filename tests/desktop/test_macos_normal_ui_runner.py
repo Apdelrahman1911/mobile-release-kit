@@ -339,6 +339,8 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 self.assertEqual(cleanup_receivers, [first])
 
     def test_source_packaged_require_site_is_forwarded_and_first_failure_only(self):
+        self.assertEqual(MODULE.LOADER_SHA,
+                         hashlib.sha256((ROOT / "desktop/tools/macos_aqua_qualification.py").read_bytes()).hexdigest())
         source = SWIFT.read_text()
         self.assertEqual(source.count("line: UInt = #line"), 3)
         self.assertIn("private enum RequireCheck: String { case condition, singleton, actionable }", source)
@@ -348,10 +350,17 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(source.count("packagedRequireDiagnosticEmitted = true"), 1)
         selected = source.split("func testPackagedEntryLaunchCancelAndQuit() throws {", 1)[1].split(
             "\n    @MainActor private func launchCancelAndQuit", 1)[0]
-        self.assertLess(selected.index("packagedRequireDiagnosticActive = true"),
-                        selected.index("defer { packagedRequireDiagnosticActive = false }"))
-        self.assertLess(selected.index("defer { packagedRequireDiagnosticActive = false }"),
-                        selected.index("try launchCancelAndQuit(profile: .packagedEntry)"))
+        self.assertIn("try launchCancelAndQuit(profile: .packagedEntry)", selected)
+        self.assertNotIn("packagedRequireDiagnosticActive", selected)
+        shared = source.split("@MainActor private func launchCancelAndQuit(profile: SourceProfile) throws {", 1)[1]
+        order = ("packagedRequireDiagnosticActive = true", "defer { packagedRequireDiagnosticActive = false }",
+                 "try beginCase(seconds: 60)", "try admittedJourneyApplication(profile: profile)")
+        self.assertEqual([shared.index(item) for item in order], sorted(shared.index(item) for item in order))
+        self.assertEqual(source.count("try launchCancelAndQuit(profile: .sameBuild)"), 1)
+        self.assertEqual(source.count("try launchCancelAndQuit(profile: .packagedEntry)"), 1)
+        self.assertEqual(MODULE.NORMAL_SELECTIONS["test.xcresult"][0], ("testLaunchCancelAndQuit",))
+        self.assertFalse(any("testPackagedEntryLaunchCancelAndQuit" in methods
+                             for methods, _, _ in MODULE.NORMAL_SELECTIONS.values()))
         require = source.split("private func require(", 1)[1].split("private func unique(", 1)[0]
         false_guard = require.split("guard value else {", 1)[1].split("\n        try checkOriginalOwners()", 1)[0]
         ordered = ("let originalFailureAbsent = caseClock?.firstFailure == nil",
@@ -929,6 +938,44 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(value["errorCodes"], [{"stream": "stdout", "domain": "NSCocoaErrorDomain", "code": -4}])
         self.assertEqual(value["sourceFailures"], [{"stream": "stdout", "source": "NormalAppUITests.swift", "method": selected, "line": 123, "column": 9}])
         self.assertEqual(len(value["queryObservations"]), 2)  # Preserve repeats, never substitute the last as authority.
+        self.assertEqual(value["requireObservations"], [])
+        # Same-original diagnostic DATA, never a new test selection or success.
+        marker = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=123;check=condition\n"
+        for line, check, ending in ((1, "condition", b"\n"), (123, "singleton", b"\n"),
+                                    (65535, "actionable", b"\r\n")):
+            fixed = f"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line={line};check={check}".encode() + ending
+            observed = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+                subprocess.CompletedProcess([], 65, fixed, b""))
+            self.assertEqual(observed["requireObservations"],
+                [{"source": "NormalAppUITests.swift", "line": line, "check": check}])
+            self.assertEqual(observed["status"], "classified")
+            self.assertEqual(observed["originalReturncode"], 65)
+        malformed = (marker[:-1], marker.replace(b"123", b"0"), marker.replace(b"123", b"01"),
+            marker.replace(b"123", b"+1"), marker.replace(b"123", b"-1"), marker.replace(b"123", b"65536"),
+            marker.replace(b"v1", b"v2"), marker.replace(b"condition", b"PRIVATE"),
+            b"prefix " + marker, marker[:-1] + b";private=" + secret + b"\n", marker + marker,
+            marker + marker.replace(b"123", b"124"), marker + marker[:-1],
+            marker + marker.replace(b"condition", b"PRIVATE"))
+        for raw in malformed:
+            with self.subTest(require_marker=raw[:100]):
+                observed = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+                    subprocess.CompletedProcess([], 65, query + raw, b""))
+                self.assertEqual(observed["requireObservations"], [])
+                self.assertEqual(observed["status"], "unavailable")
+                self.assertEqual(len(observed["queryObservations"]), 1)  # Retain unrelated finite observations.
+                self.assertEqual(observed["originalReturncode"], 65)
+                self.assertNotIn(secret, MODULE.encoded(observed))
+                self.assertNotIn(b"PRIVATE", MODULE.encoded(observed))
+        other = next(name for name in MODULE.NORMAL_SELECTIONS if name != "test.xcresult")
+        for phase, selection, stdout, stderr in (("test", "test.xcresult", b"", marker),
+                ("test", other, marker, b""), ("summary", "test.xcresult", marker, b""),
+                ("build", None, marker, b""), ("query", None, marker, b"")):
+            observed = MODULE.normal_failure_diagnostics(phase, selection,
+                subprocess.CompletedProcess([], 65, stdout, stderr))
+            self.assertEqual(observed["requireObservations"], [])
+        with self.assertRaises(MODULE.Refused):
+            MODULE.normal_failure_diagnostics("test", "packaged-entry.xcresult",
+                subprocess.CompletedProcess([], 65, marker, b""))
         self.assertTrue(value["markers"]["selectedCaseStarted"] and value["markers"]["testExecuteFailed"])
         self.assertEqual(value["stdoutSha256"], hashlib.sha256(body).hexdigest())
         for private in (secret, b"/Users/private", b"private reason", b"description="):

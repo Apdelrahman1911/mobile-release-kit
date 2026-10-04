@@ -7,6 +7,11 @@ Gradle8.14.5, AGP8.9.2, Android platform35 revision2, build-tools35.0.0,
 Aapt2 8.9.2-12782657-osx and Bundletool1.18.3. It adds no supported platform
 or tool version.
 
+The Gradle wrapper-selection URL is the canonical
+`https://services.gradle.org/distributions/gradle-8.14.5-bin.zip`. It is
+separate from the authenticated archive acquisition URL; the selected archive
+bytes, digest and original acquisition provenance are unchanged.
+
 ## Exact source and observation bindings
 
 The complete [public observation-pin inventory](desktop-macos-android-catalogue-observation-pins.json)
@@ -18,10 +23,10 @@ are intentionally not published here.
 
 | Binding | SHA256 |
 |---|---|
-| [Generator](../desktop/tools/macos_android_supplier_catalogue.py),139,123 bytes | `4294528812c53def9b05cc189da16a3419557160324df2933da187447fc8ddd5` |
-| [Generated include](../desktop/src-tauri/src/android_supplier_macos_catalogue.rs),20,409,772 bytes | `364bf1438d5e3801aec40bc3136f377c34c317439999edaa4a3f794a7bc69204` |
+| [Generator](../desktop/tools/macos_android_supplier_catalogue.py),139,288 bytes | `87d7264e384182e8495bfd46899fb8896e6f47d2c0be0523242dee4a1d19d97a` |
+| [Generated include](../desktop/src-tauri/src/android_supplier_macos_catalogue.rs),20,409,741 bytes | `1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203` |
 | Complete217-input commitment | `58a9f1ba78b19be5788717812c47070c2444d93bf0092966eda77fe2fe4fd931` |
-| Public observation-pin inventory,36,730 bytes | `a91b96b82216bfc6b6895a07932a4c9020373fa5ac1bfc1df6439a0e8cb97865` |
+| Public observation-pin inventory,36,730 bytes | `6d7d641ef39d0ac5cc83ea0f065c46da47c1b4592eccea25c2bc6f8c9f1bb563` |
 
 The recorded generation evidence reports original exit0, unchanged input and
 source pins before/after execution, and two byte-identical complete outputs.

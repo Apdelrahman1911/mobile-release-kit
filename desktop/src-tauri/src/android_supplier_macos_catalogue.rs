@@ -102557,7 +102557,7 @@ const REFERENCES: &[Reference] = &[Reference {
     versions: VersionSpec { jdk_vendor: "temurin", jdk_version: "17.0.20.1", gradle_version: "8.14.5", agp_version: "8.9.2",
         sdk_platform: "android-35", sdk_platform_revision: "2", sdk_build_tools_version: "35.0.0" },
     roles: RoleSpec { java: "jdk/temurin-17.jdk/Contents/Home/bin/java", javac: "jdk/temurin-17.jdk/Contents/Home/bin/javac", gradle: "gradle/bin/gradle", bundletool: "bundletool/bundletool.jar", sdk: "sdk" },
-    gradle_distribution_url: "https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip", gradle_distribution_sha256: "6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854",
+    gradle_distribution_url: "https://services.gradle.org/distributions/gradle-8.14.5-bin.zip", gradle_distribution_sha256: "6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854",
     archives: CAT_ARCHIVES, trees: CAT_TREES, source_members: CAT_SOURCES, source_bindings: CAT_BINDINGS,
     support: CAT_SUPPORT, support_members: CAT_SUPPORT_MEMBERS, payload: CAT_PAYLOAD, classes: CAT_CLASSES,
     aliases: CAT_ALIASES, directories: CAT_DIRECTORIES,

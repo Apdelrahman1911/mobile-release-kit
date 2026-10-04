@@ -24,7 +24,7 @@ import time
 DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "ac3aee089c168b16d6c00363cf3894fec540165c4205fc1a67c4de5b14368e1a"
+LOADER_SHA = "e8e9d13cfa3946f39711459de01aeb89c0d9808339ac63447875948f6f7d4af7"
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -705,7 +705,7 @@ def failure_base(phase, selection, original):
         "stdoutBytes": len(original.stdout), "stdoutSha256": sha(original.stdout),
         "stderrBytes": len(original.stderr), "stderrSha256": sha(original.stderr),
         "status": "unavailable", "findingsTruncated": False, "errorCodes": [], "sourceFailures": [],
-        "queryObservations": [], "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
+        "queryObservations": [], "requireObservations": [], "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
             "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
 
 
@@ -734,6 +734,24 @@ def normal_failure_diagnostics(phase, selection, original):
     query = (rb"MRK_MACOS_NORMAL_(RENDERER|DASHBOARD)_QUERY=observation="
              rb"(initial|identifier|title|label|value|placeholderValue|containingSameStaticText)"
              rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
+
+    # The existing ordinary basic case alone owns this diagnostic grammar.
+    # The packaged-entry route has separate admission and is not added here.
+    require_invalid = False
+    if phase == "test" and selection == "test.xcresult" and methods == ("testLaunchCancelAndQuit",):
+        prefix = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE"
+        attempted = original.stdout.count(prefix)
+        if attempted:
+            pattern = (rb"(?m)^MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=([1-9][0-9]{0,4});"
+                       rb"check=(condition|singleton|actionable)\r?\n")
+            matches = list(re.finditer(pattern, original.stdout))
+            # Do not salvage a valid marker next to a malformed/duplicate one,
+            # or promote an incomplete record/substring to the first failure.
+            if attempted == 1 and len(matches) == 1 and int(matches[0].group(1)) <= 65535:
+                value["requireObservations"].append({"source": "NormalAppUITests.swift",
+                    "line": int(matches[0].group(1)), "check": matches[0].group(2).decode("ascii")})
+            else:
+                require_invalid = True
 
     def retain(key, finding, maximum, distinct=True):
         if not distinct or finding not in value[key]:
@@ -775,7 +793,8 @@ def normal_failure_diagnostics(phase, selection, original):
             if exceeds == (count == 5):
                 retain("queryObservations", {"stream": stream, "kind": kind, "observation": observation,
                     "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 4, distinct=False)
-    value["status"] = "classified" if any(value[key] for key in ("errorCodes", "sourceFailures", "queryObservations")) else "unclassified"
+    value["status"] = ("unavailable" if require_invalid else "classified" if any(value[key]
+        for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations")) else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 
