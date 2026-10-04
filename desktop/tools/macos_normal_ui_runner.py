@@ -25,6 +25,7 @@ DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
 LOADER_SHA = "ac3aee089c168b16d6c00363cf3894fec540165c4205fc1a67c4de5b14368e1a"
+LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
 PACKAGED_METHOD = CLASS + "testPackagedEntryLaunchCancelAndQuit"
@@ -803,20 +804,134 @@ def publish_failure_diagnostics(request, original, *, query=False):
 
 
 def load_normal_owner(root):
+    # Real dataclasses with postponed annotations need their original defining
+    # module registered before execution (the documented importlib lifecycle).
+    need(LOADER_MODULE not in sys.modules, "normal-owner-loader-collision")
     loader_fd = os.open(root / LOADER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    loader = owner = failure = None
+    registered = False
     try:
         _, loader_identity, loader_digest = original_body(loader_fd, 1024 * 1024)
         need(loader_digest == LOADER_SHA, "normal-owner-loader-pin")
-        spec = importlib.util.spec_from_file_location("mrk_normal_ui_owner_loader", root / LOADER)
+
+        def unchanged():
+            need(full9(os.stat(root / LOADER, follow_symlinks=False)) == loader_identity
+                 and original_body(loader_fd, 1024 * 1024)[1:] == (loader_identity, loader_digest),
+                 "normal-owner-loader-changed")
+
+        unchanged()
+        spec = importlib.util.spec_from_file_location(LOADER_MODULE, root / LOADER)
         need(spec is not None and spec.loader is not None, "normal-owner-loader")
         loader = importlib.util.module_from_spec(spec)
+        need(LOADER_MODULE not in sys.modules, "normal-owner-loader-collision")
+        sys.modules[LOADER_MODULE] = loader
+        registered = True
         spec.loader.exec_module(loader)
+        need(sys.modules.get(LOADER_MODULE) is loader, "normal-owner-loader-registry-changed")
+        unchanged()  # Do not enter core loading after a changed helper/registry.
         owner = loader.load_owner(root)
-        need(full9(os.stat(root / LOADER, follow_symlinks=False)) == loader_identity
-             and original_body(loader_fd, 1024 * 1024)[1:] == (loader_identity, loader_digest), "normal-owner-loader-changed")
-        return owner
+        need(sys.modules.get(LOADER_MODULE) is loader, "normal-owner-loader-registry-changed")
+        unchanged()
+    except BaseException as error:
+        failure = error
     finally:
-        os.close(loader_fd)
+        try:
+            os.close(loader_fd)  # One original attempt, including failure paths.
+        except BaseException as error:
+            if failure is None:
+                failure = error
+    if failure is not None:
+        if registered and sys.modules.get(LOADER_MODULE) is loader:
+            del sys.modules[LOADER_MODULE]  # Never delete a replacement's entry.
+        raise failure
+    return owner
+
+
+ADMISSION_STAGES = ("request", "context", "loader", "phase", "execute", "diagnostic", "publication", "finalize")
+ADMISSION_EXCEPTION_TYPES = (Refused, AttributeError, TypeError, ValueError, ImportError,
+    ModuleNotFoundError, OSError, FileNotFoundError, PermissionError, RuntimeError,
+    KeyError, AssertionError, KeyboardInterrupt, SystemExit)
+ADMISSION_EXCEPTION_LABELS = tuple(kind.__name__ for kind in ADMISSION_EXCEPTION_TYPES) + (
+    "ProcessError", "ProcessInterrupted", "other")
+ADMISSION_SOURCE_FILES = ("desktop/tools/macos_normal_ui_runner.py", LOADER,
+                          "src/mobile_release/owned_process.py")
+ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
+    "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test",
+    *("normal-toolchain-" + key for key, _, _ in TOOLCHAIN_QUERIES))
+
+
+def normal_admission_failure(stage, error, owner, records):
+    """Closed exception facts only: no messages, locals, paths or native output."""
+    label = next((kind.__name__ for kind in ADMISSION_EXCEPTION_TYPES if type(error) is kind), "other")
+    owner_failure = dict(dispatched=None, contained=None, cleanupComplete=None)
+    if owner is not None and isinstance(error, (owner.ProcessError, owner.ProcessInterrupted)):
+        label = "ProcessInterrupted" if isinstance(error, owner.ProcessInterrupted) else "ProcessError"
+        owner_failure = {name: value if type(value := getattr(error, attribute, None)) is bool else None
+            for name, attribute in (("dispatched", "dispatched"), ("contained", "contained"),
+                                    ("cleanupComplete", "cleanup_complete"))}
+    root = Path(__file__).absolute().parents[2]
+    allowed = {str(root / name): Path(name).name for name in ADMISSION_SOURCE_FILES}
+    frames = []
+    current = error.__traceback__
+    for _ in range(64):
+        if current is None or len(frames) == 4:
+            break
+        filename, line = current.tb_frame.f_code.co_filename, current.tb_lineno
+        if filename in allowed and type(line) is int and 1 <= line <= 1_000_000:
+            frames.append({"source": allowed[filename], "line": line})
+        current = current.tb_next
+    return {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
+        "error": "runner-admission-or-owner-error", "stage": stage, "exceptionClass": label,
+        "sourceFrames": frames, "commands": records, "ownerFailure": owner_failure, "unknownStateRetained": True}
+
+
+def classify_normal_admission_failure(body):
+    """A whole exception-only JSON record, never a search of private native logs."""
+    unavailable = {"schemaVersion": 1, "scope": "normal-macos-ui-admission-diagnostic-only",
+        "status": "unavailable", "nativeSuccessInferred": False, "productReady": False,
+        "unknownStateRetained": True}
+    try:
+        value = document(body)
+        need(set(value) == {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
+             "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"}, "admission-fields")
+        need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+             and value["scope"] == "generated-ui-runner-refused" and value["productReady"] is False
+             and value["error"] == "runner-admission-or-owner-error" and value["unknownStateRetained"] is True
+             and value["stage"] in ADMISSION_STAGES and value["exceptionClass"] in ADMISSION_EXCEPTION_LABELS,
+             "admission-values")
+        frames = value["sourceFrames"]
+        need(type(frames) is list and len(frames) <= 4, "admission-frames")
+        for frame in frames:
+            need(type(frame) is dict and set(frame) == {"source", "line"}
+                 and frame["source"] in tuple(Path(name).name for name in ADMISSION_SOURCE_FILES)
+                 and type(frame["line"]) is int and 1 <= frame["line"] <= 1_000_000, "admission-frame")
+        owner = value["ownerFailure"]
+        need(type(owner) is dict and set(owner) == {"dispatched", "contained", "cleanupComplete"}
+             and all(item is None or type(item) is bool for item in owner.values()), "admission-owner")
+        commands = value["commands"]
+        need(type(commands) is list and len(commands) <= 16, "admission-commands")
+        projected = []
+        for command in commands:
+            need(type(command) is dict and set(command) == {"role", "returncode", "timeoutSeconds", "roleCapSeconds",
+                 "outputLimitBytes", "argvSha256", "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256"},
+                 "admission-command")
+            need(command["role"] in ADMISSION_COMMAND_ROLES
+                 and all(type(command[key]) is int for key in ("returncode", "timeoutSeconds", "roleCapSeconds",
+                         "outputLimitBytes", "stdoutBytes", "stderrBytes"))
+                 and 0 <= command["returncode"] <= 255
+                 and 1 <= command["timeoutSeconds"] <= command["roleCapSeconds"] <= 720
+                 and 1 <= command["outputLimitBytes"] <= 1024 * 1024
+                 and 0 <= command["stdoutBytes"] <= command["outputLimitBytes"]
+                 and 0 <= command["stderrBytes"] <= command["outputLimitBytes"] - command["stdoutBytes"]
+                 and all(type(command[key]) is str and re.fullmatch(r"[0-9a-f]{64}", command[key])
+                         for key in ("argvSha256", "stdoutSha256", "stderrSha256")), "admission-command-values")
+            projected.append({key: command[key] for key in ("role", "returncode", "stdoutBytes", "stderrBytes")})
+        result = dict(unavailable, status="observed-exception-only", stage=value["stage"],
+            exceptionClass=value["exceptionClass"], sourceFrames=frames, ownerFailure=owner, commands=projected)
+        need(len(encoded(result)) + 1 <= 4096, "admission-projection-bound")
+        return result
+    except Exception:
+        return unavailable
 
 
 def normal_context(request):
@@ -853,38 +968,43 @@ def main():
     owner = None
     phase = None
     records = []
+    stage = "request"
     try:
         started = time.monotonic_ns()  # Includes CLI/context/loader admission in this one phase.
         request = normal_request(sys.argv[1:], os.environ.get("TMPDIR", ""))
         clock = PhaseClock(request["phaseSeconds"], started=started)
+        stage = "context"
         root, source, environment, file_limit = normal_context(request)
+        stage = "loader"
         owner = load_normal_owner(root)
+        stage = "phase"
         phase = NormalPhase(owner, environment, root, clock)
         records = phase.records
         try:
+            stage = "execute"
             original = execute_normal_phase(phase, request, source, file_limit)
         except NativeQueryFailure as failure:
             # No subsequent query/build/source command after the original failed query.
+            stage = "diagnostic"
             publish_failure_diagnostics(request, failure.original, query=True)
+            stage = "finalize"
             clock.finish()
             return failure.original.returncode
         if original.returncode != 0:
+            stage = "diagnostic"
             publish_failure_diagnostics(request, original)
+        stage = "publication"
         sys.stdout.buffer.write(original.stdout)  # Workflow keeps these full originals PRIVATE.
         sys.stderr.buffer.write(original.stderr)
         sys.stdout.buffer.flush()
         sys.stderr.buffer.flush()
+        stage = "finalize"
         clock.finish()
         return original.returncode
     except BaseException as error:
         if phase is not None:
             phase.clock.failed = True
-        failure = {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
-            "error": str(error) if type(error) is Refused else "runner-admission-or-owner-error",
-            "commands": records, "unknownStateRetained": True}
-        if owner is not None and isinstance(error, (owner.ProcessError, owner.ProcessInterrupted)):
-            failure["ownerFailure"] = {name: value if type(value := getattr(error, attribute, None)) is bool else None
-                for name, attribute in (("dispatched", "dispatched"), ("contained", "contained"), ("cleanupComplete", "cleanup_complete"))}
+        failure = normal_admission_failure(stage, error, owner, records)
         sys.stderr.write(encoded(failure).decode("ascii") + "\n")
         return 1
 

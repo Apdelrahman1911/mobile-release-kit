@@ -1288,6 +1288,131 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
 
 
 class CICoordinatorFilesystemTests(unittest.TestCase):
+    def test_source_envelope_has_exact_finite_typed_bounds(self):
+        controller = controller_module()
+        self.assertEqual((controller.SOURCE_MAX_FILES, controller.SOURCE_MAX_FILE_BYTES,
+                          controller.SOURCE_MAX_TOTAL_BYTES), (2048, 32 * 1024**2, 128 * 1024**2))
+        self.assertEqual(controller.read_regular.__kwdefaults__["maximum"], 8 * 1024**2)
+        self.assertEqual(controller.DISK_RESERVE, 4 * 1024**3 + 512 * 1024**2)
+        empty_leaves = {str(i): {"bytes": 0} for i in range(2048)}
+        self.assertEqual(controller.source_inventory_bytes(empty_leaves), 0)
+        full = {str(i): {"bytes": 32 * 1024**2} for i in range(4)}
+        self.assertEqual(controller.source_inventory_bytes(full), 128 * 1024**2)
+        invalid = [(None, "INVENTORY"), ({}, "INVENTORY"),
+            (dict(empty_leaves, extra={"bytes": 0}), "INVENTORY"),
+            (dict(full, extra={"bytes": 1}), "TOTAL")]
+        invalid.extend(({"leaf": {"bytes": size}}, "FILE") for size in (-1, True, "1", None, 32 * 1024**2 + 1))
+        invalid.extend((value, "FILE") for value in ({"leaf": {}}, {"leaf": []}))
+        for value, reason in invalid:
+            with self.subTest(reason=reason), self.assertRaisesRegex(controller.VerificationError, "SOURCE_" + reason + "_BOUND"):
+                controller.source_inventory_bytes(value)
+
+    def test_source_snapshot_over_512_preserves_reservation_and_refuses_overflow_before_publication(self):
+        controller = controller_module()
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-source-envelope-") as temporary:
+            root = Path(temporary).resolve()
+            checkout = root / "checkout"
+            checkout.mkdir()
+            body = b"inert source fixture\n"
+            blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+            for i in range(513):
+                (checkout / str(i)).write_bytes(body)
+            rows = b"".join(f"100644 blob {blob}\t{i}\0".encode() for i in range(513))
+            commit, tree = "a" * 40, "b" * 40
+            def git(argv, **_kwargs):
+                if argv[-2:] == ("rev-parse", "HEAD"): return commit.encode() + b"\n"
+                if argv[-2:] == ("rev-parse", "HEAD^{tree}"): return tree.encode() + b"\n"
+                if "status" in argv: return b""
+                if "ls-tree" in argv: return rows
+                raise AssertionError("unexpected synthetic Git request")
+            destinations = []
+            def capacity(parent, required):
+                self.assertEqual(parent, root)
+                self.assertEqual(required, controller.SOURCE_MAX_TOTAL_BYTES)
+                self.assertFalse(destinations[-1].exists())
+            facade = SimpleNamespace(**vars(os))
+            facade.chown = Mock()  # Never a real privileged ownership change.
+            with patch.object(controller, "trusted_command", side_effect=git), \
+                    patch.object(controller, "check_capacity", side_effect=capacity) as reserve, \
+                    patch.object(controller, "freeze_tree") as freeze, \
+                    patch.object(controller, "os", facade), \
+                    patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 1.0)):
+                destination = root / "snapshot"
+                destinations.append(destination)
+                inventory, binding = controller.snapshot_source(checkout, destination, commit, deadline=2.0)
+                self.assertEqual(binding, {"commit": commit, "tree": tree, "files": 513})
+                self.assertEqual(len(inventory), 513)
+                freeze.assert_called_once_with(destination, deadline=2.0)
+                controller.verify_source(destination, inventory, deadline=2.0)
+                copied = root / "copy"
+                destinations.append(copied)
+                controller.copy_build(destination, copied, inventory, 123, 456, deadline=2.0)
+                controller.verify_source(copied, inventory, deadline=2.0)
+                self.assertEqual(reserve.call_count, 2)
+                self.assertEqual(facade.chown.call_count, 514)
+                # Same original routing, tiny aggregate fixture; second leaf never published.
+                rows = b"".join(f"100644 blob {blob}\t{i}\0".encode() for i in range(2))
+                overflow = root / "overflow"
+                destinations.append(overflow)
+                with patch.object(controller, "SOURCE_MAX_TOTAL_BYTES", len(body) * 2 - 1):
+                    with self.assertRaisesRegex(controller.VerificationError, "SOURCE_TOTAL_BOUND"):
+                        controller.snapshot_source(checkout, overflow, commit, deadline=2.0)
+                self.assertEqual([path.name for path in overflow.iterdir()], ["0"])
+                # Count is rejected before source reads, reservation or destination allocation.
+                rows = b"".join(f"100644 blob {blob}\t{i}\0".encode() for i in range(2049))
+                too_many = root / "too-many"
+                calls = reserve.call_count
+                with patch.object(controller, "read_regular", side_effect=AssertionError("must refuse before reading")):
+                    with self.assertRaisesRegex(controller.VerificationError, "SOURCE_INVENTORY_BOUND"):
+                        controller.snapshot_source(checkout, too_many, commit, deadline=2.0)
+                self.assertFalse(too_many.exists())
+                self.assertEqual(reserve.call_count, calls)
+
+    def test_source_large_leaf_routes_explicit_bound_and_rejects_drift_before_copy(self):
+        controller = controller_module()
+        # One >8MiB inert byte string, never an executable or on-disk large fixture.
+        body = b"x" * (8 * 1024**2 + 1)
+        blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+        expected = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(), "git_mode": "100644"}
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-source-large-") as temporary:
+            root = Path(temporary).resolve()
+            source = root / "source"
+            source.mkdir()
+            (source / "large").write_bytes(b"tiny stand-in; reader provides inert bytes")
+            facade = SimpleNamespace(**vars(os)); facade.chown = Mock()
+            def git(argv, **_kwargs):
+                if argv[-2:] == ("rev-parse", "HEAD"): return b"a" * 40
+                if argv[-2:] == ("rev-parse", "HEAD^{tree}"): return b"b" * 40
+                if "status" in argv: return b""
+                if "ls-tree" in argv: return f"100644 blob {blob}\tlarge\0".encode()
+                raise AssertionError("unexpected synthetic Git request")
+            with patch.object(controller, "trusted_command", side_effect=git), \
+                    patch.object(controller, "read_regular", return_value=body) as reader, \
+                    patch.object(controller, "create_file") as publish, \
+                    patch.object(controller, "check_capacity") as capacity, \
+                    patch.object(controller, "freeze_tree"), patch.object(controller, "os", facade), \
+                    patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 1.0)):
+                inventory, _ = controller.snapshot_source(source, root / "snapshot", "a" * 40, deadline=2.0)
+                self.assertEqual(inventory, {"large": expected})
+                controller.verify_source(source, inventory, deadline=2.0)
+                controller.copy_build(source, root / "copy", inventory, 123, 456, deadline=2.0)
+                self.assertEqual(reader.call_count, 3)
+                for call in reader.call_args_list:
+                    self.assertEqual(call.kwargs, {"deadline": 2.0, "maximum": 32 * 1024**2})
+                self.assertEqual(publish.call_count, 2)
+                for i, changes in enumerate(({"bytes": len(body) - 1}, {"sha256": "0" * 64})):
+                    bad = {"large": dict(expected, **changes)}
+                    with self.assertRaisesRegex(controller.VerificationError, "SOURCE_CONTENT_DRIFT"):
+                        controller.verify_source(source, bad, deadline=2.0)
+                    with self.assertRaisesRegex(controller.VerificationError, "BUILD_COPY_SOURCE_CHANGED"):
+                        controller.copy_build(source, root / f"drift-{i}", bad, 123, 456, deadline=2.0)
+                self.assertEqual(publish.call_count, 2)
+                capacity.side_effect = controller.VerificationError("DISK_CAPACITY")
+                with self.assertRaisesRegex(controller.VerificationError, "DISK_CAPACITY"):
+                    controller.copy_build(source, root / "no-space", inventory, 123, 456, deadline=2.0)
+                self.assertFalse((root / "no-space").exists())
+                self.assertEqual(publish.call_count, 2)
+
     def test_regular_reader_rejects_aliases_and_multiple_links_without_reading_the_target(self):
         controller = controller_module()
         with tempfile.TemporaryDirectory(prefix="mrk-ci-reader-") as temporary:

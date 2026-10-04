@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import dataclasses
 import hashlib
 import io
 import json
@@ -534,6 +535,190 @@ class GeneratedProductOriginalTests(unittest.TestCase):
 
 @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and hasattr(os, "pread"), "POSIX inert normal-phase DATA")
 class NormalPhaseDataTests(unittest.TestCase):
+    def test_normal_loader_registers_real_dataclasses_and_preserves_original_custody(self):
+        name = MODULE.LOADER_MODULE
+        self.assertNotIn(name, sys.modules)
+        for collision in (None, object()):
+            sys.modules[name] = collision
+            try:
+                with patch.object(MODULE.os, "open", side_effect=AssertionError("collision must precede open")):
+                    with self.assertRaisesRegex(MODULE.Refused, "loader-collision"):
+                        MODULE.load_normal_owner(ROOT)
+                self.assertIs(sys.modules[name], collision)
+            finally:
+                if name in sys.modules and sys.modules[name] is collision:
+                    del sys.modules[name]
+        original_spec = MODULE.importlib.util.spec_from_file_location
+        original_open, original_close, original_body = os.open, os.close, MODULE.original_body
+        for fault in (None, "execution", "registry-before-core", "registry-after-core",
+                      "source-before-core", "source-after-core", "close", "primary-and-close"):
+            with self.subTest(fault=fault), ExitStack() as stack:
+                opened, closed, modules, calls = [], [], [], []
+                foreign, sentinel = object(), object()
+                first_failure = ValueError("private synthetic loader failure")
+                close_failure = OSError("private synthetic close failure")
+                reads = 0
+
+                def opening(path, flags, *args, **kwargs):
+                    fd = original_open(path, flags, *args, **kwargs)
+                    if Path(path) == ROOT / MODULE.LOADER:
+                        opened.append(fd)
+                    return fd
+
+                def closing(fd):
+                    if fd in opened:
+                        closed.append(fd)
+                    original_close(fd)
+                    if fd in opened and fault in ("close", "primary-and-close"):
+                        raise close_failure
+
+                def reading(fd, limit, collect=False):
+                    nonlocal reads
+                    value = original_body(fd, limit, collect)
+                    reads += 1
+                    if (fault == "source-before-core" and reads == 3
+                            or fault == "source-after-core" and reads == 4):
+                        return value[:2] + ("0" * 64,)
+                    return value
+
+                def spec_for(module_name, path):
+                    self.assertEqual((module_name, Path(path)), (name, ROOT / MODULE.LOADER))
+                    spec = original_spec(module_name, path)
+                    actual = spec.loader
+
+                    class DefinitionLoader:
+                        def create_module(self, _spec):
+                            return None
+
+                        def exec_module(self, module):
+                            modules.append(module)
+                            self_registered = sys.modules.get(name)
+                            if self_registered is not module:
+                                raise AssertionError("real definitions require original registration")
+                            actual.exec_module(module)  # Actual helper/dataclasses, NOT core/native execution.
+                            if not dataclasses.is_dataclass(module.Binding):
+                                raise AssertionError("real Binding dataclass was not loaded")
+
+                            def no_core(root):
+                                calls.append(root)
+                                if fault == "registry-after-core":
+                                    sys.modules[name] = foreign
+                                return sentinel
+
+                            module.load_owner = no_core  # Stub only before the first possible core entry.
+                            if fault in ("execution", "primary-and-close"):
+                                raise first_failure
+                            if fault == "registry-before-core":
+                                sys.modules[name] = foreign
+
+                    spec.loader = DefinitionLoader()
+                    return spec
+
+                stack.enter_context(patch.object(MODULE.importlib.util, "spec_from_file_location", spec_for))
+                stack.enter_context(patch.object(MODULE.os, "open", opening))
+                stack.enter_context(patch.object(MODULE.os, "close", closing))
+                stack.enter_context(patch.object(MODULE, "original_body", reading))
+                try:
+                    if fault is None:
+                        self.assertIs(MODULE.load_normal_owner(ROOT), sentinel)
+                        self.assertIs(sys.modules[name], modules[0])
+                    else:
+                        with self.assertRaises((MODULE.Refused, ValueError, OSError)) as raised:
+                            MODULE.load_normal_owner(ROOT)
+                        if fault in ("execution", "primary-and-close"):
+                            self.assertIs(raised.exception, first_failure)
+                        elif fault == "close":
+                            self.assertIs(raised.exception, close_failure)
+                        if fault.startswith("registry-"):
+                            self.assertIs(sys.modules[name], foreign)
+                        else:
+                            self.assertNotIn(name, sys.modules)
+                    self.assertEqual(len(opened), 1)
+                    self.assertEqual(closed, opened)
+                    self.assertEqual(len(calls), 0 if fault in (
+                        "execution", "primary-and-close", "registry-before-core", "source-before-core") else 1)
+                finally:
+                    # Only these fixture-owned entries are retired; no blanket registry restore.
+                    if name in sys.modules and (sys.modules[name] is foreign
+                            or any(sys.modules[name] is item for item in modules)):
+                        del sys.modules[name]
+
+    def test_admission_exception_projection_is_closed_and_preserves_main_failure(self):
+        private = "private-synthetic-credential-or-path"
+        try:
+            MODULE.need(False, private)
+        except MODULE.Refused as error:
+            value = MODULE.normal_admission_failure("loader", error, None, [])
+        self.assertEqual(value["exceptionClass"], "Refused")
+        self.assertEqual(value["sourceFrames"][0]["source"], "macos_normal_ui_runner.py")
+        self.assertNotIn(private.encode(), MODULE.encoded(value))
+        projected = MODULE.classify_normal_admission_failure(MODULE.encoded(value) + b"\n")
+        self.assertEqual(projected["status"], "observed-exception-only")
+        self.assertFalse(projected["nativeSuccessInferred"])
+        self.assertIs(projected["ownerFailure"]["cleanupComplete"], None)
+        foreign_frame = SimpleNamespace(tb_frame=SimpleNamespace(f_code=SimpleNamespace(
+            co_filename="/private/macos_normal_ui_runner.py")), tb_lineno=12, tb_next=None)
+        fake_error = SimpleNamespace(__traceback__=foreign_frame)
+        self.assertEqual(MODULE.normal_admission_failure("loader", fake_error, None, [])["sourceFrames"], [])
+        command = {"role": "normal-ui-build", "returncode": 65, "timeoutSeconds": 120, "roleCapSeconds": 240,
+            "outputLimitBytes": 1048576, "stdoutBytes": 32, "stderrBytes": 12,
+            "argvSha256": "a" * 64, "stdoutSha256": "b" * 64, "stderrSha256": "c" * 64}
+        with_commands = dict(value, commands=[command])
+        selected = MODULE.classify_normal_admission_failure(MODULE.encoded(with_commands))
+        self.assertEqual(selected["commands"], [{"role": "normal-ui-build", "returncode": 65, "stdoutBytes": 32, "stderrBytes": 12}])
+        mutations = []
+        for key, bad in (("schemaVersion", True), ("productReady", True), ("stage", "private-stage"),
+                         ("exceptionClass", private), ("sourceFrames", [{"source": "/private/macos_normal_ui_runner.py", "line": 1}]),
+                         ("sourceFrames", [{"source": "macos_normal_ui_runner.py", "line": True}]),
+                         ("ownerFailure", {"dispatched": 1, "contained": True, "cleanupComplete": None}),
+                         ("commands", [{"private": private}])):
+            mutations.append(MODULE.encoded(dict(value, **{key: bad})))
+        mutations += [b"", b"x" * 65537, MODULE.encoded(value) + b"\nprivate native output\n",
+            MODULE.encoded(value) + MODULE.encoded(value), b'{"schemaVersion":1,"schemaVersion":1}',
+            b'{"schemaVersion":NaN}', MODULE.encoded(dict(value, extra=private))]
+        mutations += [MODULE.encoded(dict(value, commands=[dict(command, **{key: bad})]))
+                      for key, bad in (("role", private), ("returncode", True), ("stderrBytes", 1048576),
+                                       ("argvSha256", private), ("timeoutSeconds", 241))]
+        for body in mutations:
+            self.assertEqual(MODULE.classify_normal_admission_failure(body)["status"], "unavailable")
+        # Main returns1 even for an early loader exception; no owner/native call.
+        normal = "/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/tmp/"
+        with patch.object(MODULE.sys, "argv", ["helper", "--normal-build"]), \
+                patch.object(MODULE.os, "environ", {"TMPDIR": normal}), \
+                patch.object(MODULE.time, "monotonic_ns", return_value=0), \
+                patch.object(MODULE, "normal_context", return_value=(ROOT, "a" * 40, {}, (32 * 1024**3,) * 2)), \
+                patch.object(MODULE, "load_normal_owner", side_effect=AttributeError(private)), \
+                patch.object(MODULE, "execute_normal_phase", side_effect=AssertionError("must not execute")), \
+                patch.object(MODULE.sys, "stderr", io.StringIO()) as errors:
+            self.assertEqual(MODULE.main(), 1)
+        classified = MODULE.classify_normal_admission_failure(errors.getvalue().encode())
+        self.assertEqual((classified["stage"], classified["exceptionClass"]), ("loader", "AttributeError"))
+        self.assertNotIn(private, errors.getvalue())
+
+    def test_normal_runner_build_is_early_but_ui_stays_after_installation(self):
+        workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
+        label = "      - name: Build only the external normal-app XCTest runner, not an instrumented app\n"
+        self.assertEqual(workflow.count(label), 1)
+        source_end = workflow.index("          PY_SOURCE\n")
+        start = workflow.index(label)
+        self.assertEqual(workflow[source_end + len("          PY_SOURCE\n"):start], "")
+        self.assertLess(start, workflow.index("      - name: Acquire and verify the two fixed Android support archives as DATA"))
+        build = workflow.split(label, 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: github.ref == 'refs/heads/verify/desktop-macos-preview'", build)
+        self.assertNotIn("steps.preview_upload", build)
+        self.assertEqual(build.count(" --normal-build "), 1)
+        self.assertIn("classify_normal_admission_failure", build)
+        self.assertIn('exit "$build_status"', build)
+        self.assertIn('original_body(fd, 65536, collect=True)', build)
+        self.assertIn('exclusive_output(normal / "build.admission-diagnostics.json"', build)
+        action = workflow.split("      - name: Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'", action)
+        self.assertLess(workflow.index("      - name: Nonroot byte/mode readback, not a headless GUI substitute"),
+                        workflow.index("      - name: Launch the exact ordinary app,"))
+        artifact = workflow.split("        id: evidence\n", 1)[1]
+        self.assertIn("/normal-ui/build.admission-diagnostics.json", artifact)
+        self.assertNotIn("/normal-ui/build.log", artifact.split("      # Do not start", 1)[0])
+
     """Only fake original owners and private synthetic files, never Apple tools."""
 
     def test_fixed_normal_modes_environment_and_returned_original_contract(self):

@@ -184,6 +184,105 @@ jobs:
               stream.flush()
               os.fsync(stream.fileno())
           PY_SOURCE
+      - name: Build only the external normal-app XCTest runner, not an instrumented app
+        id: normal_ui_build
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        timeout-minutes: 9
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]] || exit 1
+          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/normal-ui" && ! -L "$MRK_MACOS_WORK/normal-ui" ]] || exit 1
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui"
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui/tmp"
+          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
+          set +e
+          ulimit -f 33554432
+          file_limit_status=$?
+          set -e
+          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/build-file-limit.status" || exit $?
+          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
+          set +e
+          "$MRK_PYTHON" -I -S -B - <<'PY_UI_FILE_BUDGET'
+          import json, os, resource
+          expected = 32 * 1024 * 1024 * 1024
+          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
+          source = os.environ["GITHUB_SHA"]
+          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
+              raise ValueError("ordinary XCTest file-budget source binding differs")
+          admitted = actual == (expected, expected)
+          value = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
+                   "sourceCommit": source, "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                   "phase": "build", "expectedBytes": expected, "softBytes": actual[0], "hardBytes": actual[1],
+                   "admitted": admitted, "nativeSuccessInferred": False, "serviceLimitsObserved": False,
+                   "productQualified": False}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 4096: raise ValueError("ordinary XCTest file-budget fact bound")
+          fd = os.open(os.path.join(os.environ["MRK_MACOS_WORK"], "normal-ui/build-file-budget.json"),
+                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as output:
+                  output.write(data); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          if not admitted:
+              raise ValueError("actual ordinary XCTest file allowance differs from the finite reviewed budget")
+          PY_UI_FILE_BUDGET
+          file_budget_status=$?
+          set -e
+          printf '%s\n' "$file_budget_status" > "$MRK_MACOS_WORK/normal-ui/build-file-budget.status" || exit $?
+          [[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # Fixed original owner admits four bounded queries and the external runner build.
+          # The installed normal Cargo app is not rebuilt or instrumented here.
+          set +e
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-build \
+            > "$MRK_MACOS_WORK/normal-ui/build.log" 2>&1
+          build_status=$?
+          set -e
+          printf '%s\n' "$build_status" > "$MRK_MACOS_WORK/normal-ui/build.status"
+          if [[ "$build_status" != 0 ]]; then
+            # Only a complete closed exception record may leave the PRIVATE log.
+            # Diagnostic/import/publication failure never replaces the original status.
+            "$MRK_PYTHON" -I -S -B - <<'PY_ADMISSION_DIAGNOSTIC' > /dev/null 2>&1 || :
+          import importlib.util, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("mrk_normal_admission_projection", "desktop/tools/macos_normal_ui_runner.py")
+          if spec is None or spec.loader is None or spec.name in sys.modules:
+              raise ValueError("fixed diagnostic module unavailable")
+          module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)  # Inert classifier definitions, never native main.
+          normal = Path(os.environ["MRK_MACOS_WORK"]) / "normal-ui"
+          body = None
+          try:
+              fd = os.open(normal / "build.log", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  candidate, identity, _ = module.original_body(fd, 65536, collect=True)
+                  module.need(module.full9(os.stat(normal / "build.log", follow_symlinks=False)) == identity,
+                              "diagnostic-original-changed")
+                  body = candidate
+              finally:
+                  os.close(fd)
+          except Exception:
+              body = None  # Unknown read/close is unavailable; never use a partial record.
+          value = module.classify_normal_admission_failure(body)
+          module.exclusive_output(normal / "build.admission-diagnostics.json", module.encoded(value) + b"\n", 4096)
+          PY_ADMISSION_DIAGNOSTIC
+            exit "$build_status"
+          fi
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         timeout-minutes: 2
         shell: bash
@@ -1477,79 +1576,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-      - name: Build only the external normal-app XCTest runner, not an instrumented app
-        id: normal_ui_build
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.preview_upload.outcome == 'success'
-        timeout-minutes: 9
-        shell: bash
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]] || exit 1
-          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner && -d "$DEVELOPER_DIR" ]] || exit 1
-          [[ ! -e "$MRK_MACOS_WORK/normal-ui" && ! -L "$MRK_MACOS_WORK/normal-ui" ]] || exit 1
-          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui"
-          /bin/mkdir -m 700 "$MRK_MACOS_WORK/normal-ui/tmp"
-          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
-          set +e
-          ulimit -f 33554432
-          file_limit_status=$?
-          set -e
-          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/build-file-limit.status" || exit $?
-          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
-          set +e
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_FILE_BUDGET'
-          import json, os, resource
-          expected = 32 * 1024 * 1024 * 1024
-          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
-          source = os.environ["GITHUB_SHA"]
-          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
-              raise ValueError("ordinary XCTest file-budget source binding differs")
-          admitted = actual == (expected, expected)
-          value = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
-                   "sourceCommit": source, "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
-                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                   "phase": "build", "expectedBytes": expected, "softBytes": actual[0], "hardBytes": actual[1],
-                   "admitted": admitted, "nativeSuccessInferred": False, "serviceLimitsObserved": False,
-                   "productQualified": False}
-          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          if len(data) > 4096: raise ValueError("ordinary XCTest file-budget fact bound")
-          fd = os.open(os.path.join(os.environ["MRK_MACOS_WORK"], "normal-ui/build-file-budget.json"),
-                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "wb", closefd=False) as output:
-                  output.write(data); output.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          if not admitted:
-              raise ValueError("actual ordinary XCTest file allowance differs from the finite reviewed budget")
-          PY_UI_FILE_BUDGET
-          file_budget_status=$?
-          set -e
-          printf '%s\n' "$file_budget_status" > "$MRK_MACOS_WORK/normal-ui/build-file-budget.status" || exit $?
-          [[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"
-          clean() {
-            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
-              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
-              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
-              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
-          }
-          # Fixed original owner admits four bounded queries and the external runner build.
-          # The installed normal Cargo app is not rebuilt or instrumented here.
-          set +e
-          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-build \
-            > "$MRK_MACOS_WORK/normal-ui/build.log" 2>&1
-          build_status=$?
-          set -e
-          printf '%s\n' "$build_status" > "$MRK_MACOS_WORK/normal-ui/build.status"
-          [[ "$build_status" == 0 ]] || exit "$build_status"
       - name: Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally
         id: normal_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'
         timeout-minutes: 7
         shell: bash
         env:
@@ -3077,6 +3106,7 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/persistence-test-file-budget.json
             ${{ steps.work.outputs.root }}/normal-ui/toolchain.failure-diagnostics.json
             ${{ steps.work.outputs.root }}/normal-ui/build.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/build.admission-diagnostics.json
             ${{ steps.work.outputs.root }}/normal-ui/build.command-admission.json
             ${{ steps.work.outputs.root }}/normal-ui/test.failure-diagnostics.json
             ${{ steps.work.outputs.root }}/normal-ui/summary.failure-diagnostics.json

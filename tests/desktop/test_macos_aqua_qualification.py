@@ -481,8 +481,16 @@ class AquaDataTests(unittest.TestCase):
                          'binary.parent != expected', 're.fullmatch(re.escape(library) + r"-[0-9a-f]+", binary.name)',
                          "for binary, test_names, count, prefix, record in admitted:"):
             self.assertIn(required, headless)
-        self.assertLess(headless.index("admitted.append("), headless.index("result = owner.run_owned("))
-        self.assertEqual(headless.count("owner.run_owned("), 2)
+        execution_label = "\n              for binary, test_names, count, prefix, record in admitted:\n"
+        settlement_label = "\n          finally:\n"
+        self.assertEqual(headless.count(execution_label), 1)
+        self.assertEqual(headless.count(settlement_label), 1)
+        self.assertLess(headless.index("admitted.append("), headless.index(execution_label))
+        # The catalogue helper and compiler have their own reviewed original
+        # calls; neither is the later, fully admitted library-test execution.
+        self.assertEqual(headless.count("owner.run_owned("), 3)
+        execution = headless.split(execution_label, 1)[1].split(settlement_label, 1)[0]
+        self.assertEqual(execution.count("owner.run_owned("), 1)
         for required in ('[str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *test_names]',
                          "cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024",
                          "type(result) is not subprocess.CompletedProcess", "type(result.stdout) is not bytes",
@@ -491,22 +499,22 @@ class AquaDataTests(unittest.TestCase):
                          'heading = f"running {count} " + ("test" if count == 1 else "tests")', 'lines[0] != heading',
                          "len(set(lines[1:-1])) != count", "set(lines[1:-1]) != expected_rows",
                          "{count} passed; 0 failed; 0 ignored; 0 measured;"):
-            self.assertIn(required, headless)
-        reject = headless.index('if result.returncode != 0 or result.stderr:')
+            self.assertIn(required, execution)
+        reject = execution.index('if result.returncode != 0 or result.stderr:')
         for output in ("stdout", "stderr", "status"):
-            self.assertLess(headless.index('publish(prefix + "-tests.' + output + '"'), reject)
-        self.assertLess(headless.index("originals.append(original)"), headless.index("before = os.fstat(binary_fd)"))
-        self.assertIn('os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)', headless)
+            self.assertLess(execution.index('publish(prefix + "-tests.' + output + '"'), reject)
+        self.assertLess(execution.index("originals.append(original)"), execution.index("before = os.fstat(binary_fd)"))
+        self.assertIn('os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)', execution)
         for required in ('sig(before) != sig(os.fstat(binary_fd))', 'sig(before) != sig(binary.lstat())',
                          'os.pread(binary_fd, min(before.st_size - offset, 1024 * 1024), offset)',
                          'os.pread(binary_fd, 1, before.st_size)', 'return digest.hexdigest()'):
-            self.assertIn(required, headless)
-        digest_checks = [item.start() for item in M.re.finditer(M.re.escape('if original_digest() != digest:'), headless)]
+            self.assertIn(required, execution)
+        digest_checks = [item.start() for item in M.re.finditer(M.re.escape('if original_digest() != digest:'), execution)]
         self.assertEqual(len(digest_checks), 2)
-        self.assertLess(digest_checks[0], headless.index("result = owner.run_owned("))
-        self.assertGreater(digest_checks[1], headless.index('publish(prefix + "-tests.status"'))
-        self.assertLess(headless.index('raise ValueError("headless-original-return-contract")'), headless.index("home.rmdir()"))
-        settlement = headless.split("          finally:\n", 1)[1]
+        self.assertLess(digest_checks[0], execution.index("result = owner.run_owned("))
+        self.assertGreater(digest_checks[1], execution.index('publish(prefix + "-tests.status"'))
+        self.assertLess(execution.index('raise ValueError("headless-original-return-contract")'), execution.index("home.rmdir()"))
+        settlement = headless.split(settlement_label, 1)[1]
         self.assertNotIn(".rmdir()", settlement)
         for required in ('descriptor, original["fd"] = original["fd"], None',
                          'original["record"]["artifactOriginalClosed"] = True',
