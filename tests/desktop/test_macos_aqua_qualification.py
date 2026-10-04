@@ -10764,5 +10764,391 @@ class ShippingCapacityDataWiringTests(unittest.TestCase):
             self.assertEqual(emit.call_count, 1)
             self.assertFalse(emit.call_args.args[0]['passed'])
             self.assertNotIn('private exception text', json.dumps(emit.call_args.args[0]))
+
+class CatalogueHeadlessControlDataTests(unittest.TestCase):
+    """Synthetic closed-parser/batch controls, not compiler or native evidence.
+
+    The existing module imports qualification M under its admitted DATA closure.
+    This class never calls M; only its one pinned public workflow SOURCE read is
+    real I/O; every batch owner, clock, digest, directory, publisher and FD is inert.
+    """
+
+    _WORKFLOW_BYTES = 284835
+    _WORKFLOW_SHA256 = "c0f64f39240d926135262491bd969f5d6b9f3e2f5add31ccacdad4a0ac95e8b5"
+    _HELPER_SHA256 = "9a25cbc411843de619678e9db1739762e5dd4a1c7415a29d39f6575d5992763c"
+
+    @classmethod
+    def setUpClass(cls):
+        import hashlib
+        import os
+        import re
+
+        source = Path(__file__).absolute().parents[2] / ".github" / "workflows" / "desktop-macos-aqua.yml"
+        def identity(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                    value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        fds = []
+        try:
+            directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fds.append(directory)
+            for component in source.parts[1:-1]:
+                directory = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+                fds.append(directory)
+            descriptor = os.open(source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            fds.append(descriptor)
+            info = os.fstat(descriptor)
+            before = identity(info)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != cls._WORKFLOW_BYTES
+                    or before != identity(os.stat(source.name, dir_fd=directory, follow_symlinks=False))):
+                raise AssertionError("catalogue-control-source-original")
+            parts = []
+            for offset in range(0, cls._WORKFLOW_BYTES, 65536):
+                length = min(65536, cls._WORKFLOW_BYTES - offset)
+                block = os.pread(descriptor, length, offset)
+                if len(block) != length:
+                    raise AssertionError("catalogue-control-source-short-read")
+                parts.append(block)
+            raw = b"".join(parts)
+            if (len(raw) != cls._WORKFLOW_BYTES or os.pread(descriptor, 1, len(raw)) != b""
+                    or hashlib.sha256(raw).hexdigest() != cls._WORKFLOW_SHA256
+                    or before != identity(os.fstat(descriptor))
+                    or before != identity(os.stat(source.name, dir_fd=directory, follow_symlinks=False))):
+                raise AssertionError("catalogue-control-source-binding")
+        finally:
+            for descriptor in reversed(fds):
+                os.close(descriptor)
+        text = raw.decode("utf-8", "strict")
+        begin = "          # BEGIN_CATALOGUE_HEADLESS_CONTROL\n"
+        end = "          # END_CATALOGUE_HEADLESS_CONTROL\n"
+        if text.count(begin) != 1 or text.count(end) != 1:
+            raise AssertionError("catalogue-control-literal-markers")
+        first, last = text.index(begin), text.index(end)
+        if last <= first:
+            raise AssertionError("catalogue-control-literal-boundaries")
+        lines = text[first:last + len(end)].splitlines(keepends=True)
+        if any(not line.startswith("          ") and line != "\n" for line in lines):
+            raise AssertionError("catalogue-control-literal-indent")
+        block = "".join(line[10:] if line.startswith("          ") else line for line in lines)
+        functions = tuple(line.split("(", 1)[0][4:] for line in block.splitlines() if line.startswith("def "))
+        if (functions != ("catalogue_u64_sum", "parse_catalogue_budget", "check_catalogue_budget",
+                          "exact_headless_result", "run_catalogue_batch")
+                or hashlib.sha256(block.encode("utf-8")).hexdigest() != cls._HELPER_SHA256):
+            raise AssertionError("catalogue-control-fixed-definition-binding")
+        cls._helper_source = block
+        cls._sha256 = staticmethod(hashlib.sha256)
+        cls._regex = SimpleNamespace(fullmatch=re.fullmatch, escape=re.escape)
+
+    def _namespace(self):
+        safe = {name: getattr(builtins, name) for name in (
+            "BaseException", "ValueError", "type", "int", "str", "bytes", "tuple",
+            "len", "any", "all", "set", "list", "dict", "zip", "enumerate", "min", "max")}
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("no-real-batch-operation")
+        namespace = {"__builtins__": safe, "re": self._regex,
+            "hashlib": SimpleNamespace(sha256=self._sha256),
+            "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess),
+            "os": SimpleNamespace(close=forbidden), "time": SimpleNamespace(monotonic_ns=forbidden),
+            "publish": forbidden, "work": "/inert/work", "calls_entered": 0,
+            "calls_returned": 0, "stage": "inert-not-entered"}
+        # Only the fixed SOURCE definitions above, never parsed result/output.
+        # No M, import/open, real os/subprocess module, owner or producer is exposed.
+        exec(self._helper_source, namespace, namespace)
+        return namespace
+
+    @staticmethod
+    def _budget(over_cap=False):
+        # Explicit small synthetic integers, independent of the implementation's
+        # arithmetic; neither these bytes nor the over-cap variant are Mac totals.
+        rows = [
+            b'catalogue_budget document_rows=[("document_cells", 1), ("saved_fields", 1), ("records", 1), ("assignments", 1), ("context", 1), ("slot_projection", 1), ("picker_originals", 1), ("other_registries", 0)]',
+            b"catalogue_budget common document=7 owner_cells=2 runtime_heap=3 sources_heap=4 catalog_heap=5 service_heap=6 dispatcher=7 observation_identity=8",
+            b"catalogue_budget source inspection=20 proposal_work=10 reproof=20 reproof_work=6 old_source=5 old_operation=4 source_review=7 proposal_heap=8 old_review=9 source_task=2 coordinator=3 inspection_tasks=11",
+            b"catalogue_budget register client=6 preparation=31 settled=12 phase=44 tasks=3 task_reserved=4",
+            b"catalogue_budget case=fresh_inspect previous=47 control_slot=2 checked=3 retained_review=0 phase=30 new_owner=4 final_tasks=11 total=92 limit=67108864 headroom=67108772 over=0",
+            b"catalogue_budget case=inspect_retained_review previous=59 control_slot=5 checked=3 retained_review=9 phase=30 new_owner=4 final_tasks=11 total=104 limit=67108864 headroom=67108760 over=0",
+            b"catalogue_budget case=register_retained_review previous=63 control_slot=5 checked=7 retained_review=9 phase=44 new_owner=6 final_tasks=0 total=113 limit=67108864 headroom=67108751 over=0",
+        ]
+        if over_cap:
+            rows[1] = rows[1].replace(b"owner_cells=2 ", b"owner_cells=67108864 ")
+            rows[4] = b"catalogue_budget case=fresh_inspect previous=67108909 control_slot=2 checked=3 retained_review=0 phase=30 new_owner=4 final_tasks=11 total=67108954 limit=67108864 headroom=0 over=90"
+            rows[5] = b"catalogue_budget case=inspect_retained_review previous=67108921 control_slot=5 checked=3 retained_review=9 phase=30 new_owner=4 final_tasks=11 total=67108966 limit=67108864 headroom=0 over=102"
+            rows[6] = b"catalogue_budget case=register_retained_review previous=67108925 control_slot=5 checked=7 retained_review=9 phase=44 new_owner=6 final_tasks=0 total=67108975 limit=67108864 headroom=0 over=111"
+        return b"\n".join(rows) + b"\n"
+
+    @staticmethod
+    def _pretty(names, filtered):
+        count = len(names)
+        heading = f"running {count} " + ("test" if count == 1 else "tests")
+        rows = [heading, *("test " + name + " ... ok" for name in names),
+                f"test result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out; finished in 0.01s"]
+        return ("\n" + "\n".join(rows) + "\n\n").encode("utf-8")
+
+    def _drive(self, first="pass", second="pass", *, ticks=None, close_error=False,
+               retire_error=None, digest_bad_at=None):
+        namespace = self._namespace()
+        names = tuple(f"inert::ordinary_{index:02d}" for index in range(25)) + (
+            namespace["CATALOGUE_ROUNDTRIP_TEST"], namespace["CATALOGUE_BUDGET_TEST"])
+        record = {"role": "main", "names": names, "testsPassed": False,
+                  "originalReturned": False, "artifactOriginalUnchanged": False, "artifactOriginalClosed": False}
+        original = {"fd": 31337, "record": record}
+        calls, returned, closed, retired, publications, events, clock_reads, digest_reads = [], [], [], [], {}, [], [], []
+        schedule = iter(ticks if ticks is not None else (
+            0, 100_000_000, 200_000_000, 3_000_000_000, 3_100_000_000,
+            4_000_000_000, 4_100_000_000, 4_200_000_000))
+        def clock():
+            value = next(schedule)
+            clock_reads.append(value)
+            return value
+        def original_digest():
+            digest_reads.append(None)
+            return "f" * 64 if digest_bad_at is not None and len(digest_reads) >= digest_bad_at else "e" * 64
+        def close(descriptor):
+            closed.append(descriptor)
+            events.append(("close", descriptor))
+            if close_error:
+                raise OSError("inert-consuming-close")
+        class Directory:
+            def __init__(self, name):
+                self.name = name
+            def __str__(self):
+                return "/inert/" + self.name
+            def rmdir(self):
+                retired.append(self.name)
+                events.append(("retire", self.name))
+                if retire_error == self.name:
+                    raise OSError("inert-retirement")
+        def publish(name, body):
+            if name in publications or type(body) is not bytes:
+                raise AssertionError("inert-original-publication")
+            publications[name] = body
+        actions = (first, second)
+        def run_owned(argv, **kwargs):
+            index = len(calls)
+            calls.append((tuple(argv), dict(kwargs)))
+            events.append(("owner", index))
+            action = actions[index]
+            if action == "owner-exception":
+                raise RuntimeError("inert-unknown-original")
+            selected, filtered = (names[:-1], 101) if index == 0 else (names[-1:], 202)
+            stdout = self._pretty(selected, filtered)
+            stderr = b"" if index == 0 else self._budget(action == "over-cap")
+            returncode = 0
+            if action == "nonzero":
+                returncode = 1
+            elif action == "bad-stdout":
+                stdout = b"unrecognized synthetic stdout\n"
+            elif action == "unexpected-stderr":
+                stderr = b"unrecognized synthetic stderr\n"
+            elif action == "panic":
+                stderr += b"synthetic panic trailer\n"
+            elif action in ("exhaust", "oversize"):
+                size = 65536 if action == "exhaust" else 65537
+                stdout += b"\n" * (size - len(stdout))
+            result = CompletedProcess(list(argv), returncode, stdout, stderr)
+            if action == "foreign-return":
+                result = SimpleNamespace(args=list(argv), returncode=0, stdout=stdout, stderr=stderr)
+            elif action == "bool-returncode":
+                result.returncode = True
+            elif action == "text-output":
+                result.stdout = stdout.decode("utf-8")
+            elif action == "tuple-args":
+                result.args = tuple(argv)
+            elif action == "wrong-args":
+                result.args = ["inert-other"]
+            elif action == "mutated-argv":
+                argv[-1] = "inert-mutated"
+            returned.append(result)
+            return result
+        namespace.update(os=SimpleNamespace(close=close), publish=publish)
+        error = None
+        try:
+            namespace["run_catalogue_batch"](SimpleNamespace(run_owned=run_owned), "/inert/main", names,
+                27, "headless", record, original, original_digest, "e" * 64, Directory("home"),
+                Directory("tmp"), clock=clock)
+        except BaseException as caught:
+            error = caught
+        return SimpleNamespace(namespace=namespace, names=names, record=record, original=original,
+            calls=calls, returned=returned, closed=closed, retired=retired, publications=publications,
+            events=events, clock_reads=clock_reads, digest_reads=digest_reads, error=error)
+
+    def test_canonical_closed_rows_retain_all_typed_totals_and_u64_boundaries(self):
+        namespace = self._namespace()
+        value = namespace["parse_catalogue_budget"](self._budget())
+        self.assertIsNone(namespace["check_catalogue_budget"](value))
+        rows = [value[key] for key in ("documentRows", "common", "source", "register")]
+        numbers = [number for row in rows for number in row.values()]
+        numbers += [number for row in value["cases"] for key, number in row.items() if key != "name"]
+        self.assertEqual(len(numbers), 67)
+        self.assertTrue(all(type(number) is int for number in numbers))
+        self.assertEqual([row["total"] for row in value["cases"]], [92, 104, 113])
+        self.assertEqual([row["name"] for row in value["cases"]], list(namespace["CATALOGUE_CASE_NAMES"]))
+        maximum = (1 << 64) - 1
+        self.assertEqual(namespace["catalogue_u64_sum"](maximum, 0), maximum)
+        for values in ((True,), (-1,), (maximum + 1,), (maximum, 1)):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                namespace["catalogue_u64_sum"](*values)
+
+    def test_closed_parser_refuses_malformed_order_prefixes_and_noncanonical_numbers(self):
+        parse = self._namespace()["parse_catalogue_budget"]
+        raw = self._budget()
+        rows = raw[:-1].split(b"\n")
+        malformed = [
+            b"", raw[:-1], b"prefix\n" + raw, raw + b"synthetic panic trailer\n",
+            raw.replace(b"\n", b"\r\n"), raw.replace(b"document=7", b"document=07"),
+            raw.replace(b"document=7", b"document=+7"), raw.replace(b"document=7", b"document=-7"),
+            raw.replace(b"owner_cells=2", b"owner_cells=18446744073709551616"),
+            raw.replace(b"owner_cells=2 runtime_heap=3", b"runtime_heap=3 owner_cells=2"),
+            raw.replace(b'("document_cells", 1)', b'("document_cells",1)'),
+            b"\n".join([rows[0], rows[2], rows[1], *rows[3:]]) + b"\n",
+            b"\n".join([*rows[:4], rows[5], rows[4], rows[6]]) + b"\n",
+            raw.replace(b"fresh_inspect", b"fresh_unknown"), raw.replace(b"document=7", b"document=\xff"),
+            b"x" * 2406, bytearray(raw), True,
+        ]
+        for index, body in enumerate(malformed):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                parse(body)
+
+    def test_numeric_checks_refuse_arithmetic_overflow_and_unchanged_cap(self):
+        namespace = self._namespace()
+        value = namespace["parse_catalogue_budget"](self._budget())
+        mutations = [
+            ("common", "document", 8), ("common", "owner_cells", (1 << 64) - 1),
+            ("source", "reproof", 19), ("register", "phase", 43),
+            ("register", "tasks", 5), ("cases", "previous", 48),
+            ("cases", "total", 93), ("cases", "headroom", 67108773),
+            ("cases", "limit", 67108865),
+        ]
+        for section, key, number in mutations:
+            with self.subTest(section=section, key=key):
+                broken = deepcopy(value)
+                (broken[section][0] if section == "cases" else broken[section])[key] = number
+                with self.assertRaises(ValueError):
+                    namespace["check_catalogue_budget"](broken)
+        over = namespace["parse_catalogue_budget"](self._budget(True))
+        self.assertEqual([row["over"] for row in over["cases"]], [90, 102, 111])
+        with self.assertRaisesRegex(ValueError, "unchanged-whole-owner-cap"):
+            namespace["check_catalogue_budget"](over)
+
+    def test_two_original_calls_share_deadline_bytes_and_consuming_main_close(self):
+        run = self._drive()
+        self.assertIsNone(run.error)
+        self.assertEqual((run.namespace["calls_entered"], run.namespace["calls_returned"]), (2, 2))
+        self.assertEqual(len(run.calls), 2)
+        first, second = run.calls
+        common = ("/inert/main", "--exact", "--test-threads=1", "--color=never", "--format=pretty")
+        self.assertEqual(first[0], common + run.names[:-1])
+        self.assertEqual(second[0], common + ("--nocapture", run.names[-1]))
+        self.assertEqual((first[1]["timeout"], second[1]["timeout"]), (30, 26))
+        for _, options in run.calls:
+            self.assertEqual(set(options), {"environ", "cwd", "timeout", "capture", "text", "output_limit"})
+            self.assertIs(options["capture"], True)
+            self.assertIs(options["text"], False)
+            self.assertEqual(options["cwd"], "/inert/work")
+            self.assertEqual(options["environ"], {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "HOME": "/inert/home", "TMPDIR": "/inert/tmp", "LANG": "C", "LC_ALL": "C", "TZ": "UTC"})
+        first_bytes = len(run.returned[0].stdout) + len(run.returned[0].stderr)
+        self.assertEqual((first[1]["output_limit"], second[1]["output_limit"]), (65536, 65536 - first_bytes))
+        self.assertEqual(run.record["batchOutputBytes"], sum(len(row.stdout) + len(row.stderr) for row in run.returned))
+        self.assertEqual([row["filtered"] for row in run.record["invocations"]], [101, 202])
+        self.assertNotIn("returncode", run.record)
+        self.assertNotIn("filtered", run.record)
+        self.assertEqual(run.closed, [31337])
+        self.assertEqual(run.retired, ["home", "tmp"])
+        self.assertIsNone(run.original["fd"])
+        self.assertEqual(run.record["artifactCloseAttempts"], 1)
+        self.assertEqual(run.record["finalElapsedNanoseconds"], "4200000000")
+        self.assertTrue(run.record["testsPassed"])
+        self.assertTrue(run.record["deadlineMetAfterFinalCloses"])
+        self.assertEqual(set(run.publications), {prefix + suffix for prefix in ("headless", "headless-catalogue")
+                                               for suffix in ("-tests.stdout", "-tests.stderr", "-tests.status")})
+        for index, prefix in enumerate(("headless", "headless-catalogue")):
+            self.assertEqual(run.publications[prefix + "-tests.stdout"], run.returned[index].stdout)
+            self.assertEqual(run.publications[prefix + "-tests.stderr"], run.returned[index].stderr)
+            self.assertEqual(run.publications[prefix + "-tests.status"], b"0\n")
+
+    def test_known_first_failure_late_return_or_exhaustion_stops_second_call(self):
+        scenarios = [
+            ("nonzero", {}), ("bad-stdout", {}), ("unexpected-stderr", {}), ("exhaust", {}),
+            ("pass", {"ticks": (0, 30_000_000_000, 30_000_000_000)}),
+            ("pass", {"ticks": (0, 100_000_000, 200_000_000, 30_000_000_000, 30_000_000_000)}),
+            ("pass", {"digest_bad_at": 2}),
+        ]
+        for first, options in scenarios:
+            with self.subTest(first=first, options=options):
+                run = self._drive(first, **options)
+                self.assertIsInstance(run.error, ValueError)
+                self.assertEqual((len(run.calls), run.namespace["calls_entered"], run.namespace["calls_returned"]), (1, 1, 1))
+                self.assertFalse(run.record["testsPassed"])
+                self.assertFalse(run.record["headlessCustodyRetained"])
+                self.assertEqual(run.closed, [31337])
+                self.assertEqual(run.retired, ["home", "tmp"])
+                self.assertIsNone(run.original["fd"])
+                if first == "exhaust":
+                    self.assertEqual(run.record["batchOutputBytes"], 65536)
+                    self.assertTrue(run.record["invocations"][0]["testsPassed"])
+
+    def test_unknown_original_returns_never_authorize_another_call_or_close(self):
+        unknown = ("owner-exception", "foreign-return", "bool-returncode", "text-output",
+                   "tuple-args", "wrong-args", "mutated-argv", "oversize")
+        for action in unknown:
+            with self.subTest(first=action):
+                run = self._drive(action)
+                self.assertIsNotNone(run.error)
+                self.assertEqual((len(run.calls), run.namespace["calls_entered"], run.namespace["calls_returned"]), (1, 1, 0))
+                self.assertEqual((len(run.digest_reads), len(run.clock_reads)), (1, 1))
+                self.assertEqual(run.publications, {})
+                self.assertEqual((run.closed, run.retired), ([], []))
+                self.assertEqual(run.original["fd"], 31337)
+                self.assertTrue(run.record["headlessCustodyRetained"])
+                self.assertFalse(run.record["testsPassed"])
+        second = self._drive(second="owner-exception")
+        self.assertIsNotNone(second.error)
+        self.assertEqual((len(second.calls), second.namespace["calls_entered"], second.namespace["calls_returned"]), (2, 2, 1))
+        self.assertEqual((second.closed, second.retired), ([], []))
+        self.assertEqual(second.original["fd"], 31337)
+        self.assertTrue(second.record["headlessCustodyRetained"])
+
+    def test_aggregate_failure_preserves_original_raw_and_typed_overcap_observation(self):
+        for action in ("over-cap", "panic"):
+            with self.subTest(action=action):
+                run = self._drive(second=action)
+                self.assertIsInstance(run.error, ValueError)
+                self.assertEqual((len(run.calls), run.namespace["calls_returned"]), (2, 2))
+                observed = run.record["invocations"][1]
+                self.assertTrue(observed["originalReturned"])
+                self.assertFalse(observed["testsPassed"])
+                self.assertEqual(run.publications["headless-catalogue-tests.stderr"], run.returned[1].stderr)
+                self.assertEqual(observed["stderrSha256"], self._sha256(run.returned[1].stderr).hexdigest())
+                if action == "over-cap":
+                    self.assertIn("unchanged-whole-owner-cap", str(run.error))
+                    self.assertEqual([row["total"] for row in observed["catalogueBudget"]["cases"]],
+                                     [67108954, 67108966, 67108975])
+                    self.assertEqual([row["over"] for row in observed["catalogueBudget"]["cases"]], [90, 102, 111])
+                else:
+                    self.assertNotIn("catalogueBudget", observed)
+                    self.assertTrue(run.returned[1].stderr.endswith(b"synthetic panic trailer\n"))
+                self.assertEqual(run.closed, [31337])
+                self.assertIsNone(run.original["fd"])
+                self.assertFalse(run.record["testsPassed"])
+
+    def test_known_finality_errors_still_close_once_without_promoting_success(self):
+        ordinary = (0, 100_000_000, 200_000_000, 3_000_000_000, 3_100_000_000, 4_000_000_000, 4_100_000_000)
+        for options in ({"close_error": True}, {"retire_error": "home"},
+                        {"ticks": ordinary + (30_000_000_000,)}, {"ticks": ordinary + (4_000_000_000,)}):
+            with self.subTest(options=options):
+                run = self._drive(**options)
+                self.assertIsInstance(run.error, ValueError)
+                self.assertEqual((run.namespace["calls_entered"], run.namespace["calls_returned"]), (2, 2))
+                self.assertTrue(all(row["testsPassed"] for row in run.record["invocations"]))
+                self.assertEqual(run.closed, [31337])
+                self.assertEqual(run.retired, ["home", "tmp"])
+                self.assertEqual(run.record["artifactCloseAttempts"], 1)
+                self.assertIsNone(run.original["fd"])
+                self.assertTrue(run.record["cleanupErrors"])
+                self.assertFalse(run.record["testsPassed"])
+                self.assertFalse(run.record["deadlineMetAfterFinalCloses"])
+                if options.get("close_error"):
+                    self.assertFalse(run.record["artifactOriginalClosed"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,132 @@
+name: Desktop macOS changed local-signing verification
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-signing
+
+permissions:
+  contents: read
+
+env:
+  PYTHONSAFEPATH: '1'
+
+concurrency:
+  group: desktop-macos-local-signing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-signing-matrix:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-signing'
+    name: test-signing-matrix (macos-26, ${{ matrix.shard }})
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        # Current source-owned assignment: five changed obligations, 27 neighbors.
+        # Canonical output SHA256 71a9a29feb08c2d057ae88cee0f1130fc47ee2180e49d7a7c5ce48328af65d1c.
+        # Whole shards are the existing owner's smallest supported selector.
+        shard: [5, 9, 10, 28, 38]
+    env:
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Admit only the exact disposable-hosted macOS verification route
+        env:
+          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
+          [[ "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]]
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-signing ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-local-signing.yml@$GITHUB_REF" ]]
+          actual_machine="$(/usr/bin/uname -m)"
+          actual_osversion="$(/usr/bin/sw_vers -productVersion)"
+          actual_uid="$(/usr/bin/id -u)"
+          [[ "$actual_machine" == arm64 && "$actual_osversion" == 26.* ]]
+          [[ "$actual_uid" =~ ^[1-9][0-9]*$ ]]
+      - name: Check out exact reviewed source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Set up the fixed Python 3.12 compatibility runtime
+        id: python312
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up the fixed Python 3.13 compatibility runtime
+        id: python313
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Set up the fixed Python 3.14 compatibility runtime
+        id: python314
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Set up pinned Ruby without project installation
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler: none
+          bundler-cache: false
+      - name: Require the original source and installed-wheel matrix pair
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
+          MRK_SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$MRK_SHARD" in 5|9|10|28|38) ;; *) exit 1 ;; esac
+          [[ "$GITHUB_JOB" == test-signing-matrix ]]
+          observed_head="$(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-optional-locks -c core.fsmonitor=false -C "$GITHUB_WORKSPACE" rev-parse --verify HEAD)"
+          observed_status="$(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-optional-locks -c core.fsmonitor=false -C "$GITHUB_WORKSPACE" status --porcelain=v1 --untracked-files=all)"
+          [[ "$observed_head" == "$GITHUB_SHA" && -z "$observed_status" ]]
+          # Preserve current selection/owner authority; catalogue edits need a new assignment.
+          /usr/bin/shasum -a 256 -c <<'PINS'
+          eb2d3cecff298e1dd1faf38fd3abe081189395c044b0ed2162b404046d83a4b7  .github/scripts/verify_ci.py
+          8315644d4f402a1f99114aae1b16ee7bd59431b82870916c8b48bc007db810de  tests/workflow/local_signing_layered_catalog.py
+          c0466d2a6342bf91758037fd477bf32812898b2956d2906b6fb44bdd0705a19c  tests/workflow/local_signing_semantic_catalog.py
+          5e5ddda912664da2ef4438532f5b484e3aaa2eb4a774fd9f89ad4cf387160c78  tests/workflow/local_signing_regression_catalog.py
+          PINS
+          ruby_executable="$(command -v ruby)"
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
+          verifier_args=("$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
+            --platform macos --source "$GITHUB_WORKSPACE" \
+            --python "$MRK_PYTHON" --ruby "$ruby_executable" \
+            --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
+            --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
+            --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --scope signing-matrix --repository "$GITHUB_REPOSITORY" \
+            --job "$GITHUB_JOB" --shard "$MRK_SHARD")
+          sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 "${verifier_args[@]}"
+      - name: Preserve only the successful compact pair proof
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: local-signing-matrix-proof-macos-26-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signing-matrix-proof/proof.json
+          if-no-files-found: error
+          retention-days: 90

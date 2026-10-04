@@ -383,12 +383,271 @@ jobs:
             [[ $status == 0 ]] || exit "$status"
           fi
           "$MRK_PYTHON" -I -S -B - <<'PY_HEADLESS'
-          import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess, sys
+          import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess, sys, time
           work = pathlib.Path(os.environ["MRK_MACOS_WORK"])
           checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
           android_lifecycle = os.environ["MRK_MACOS_AQUA_SCOPE"] == "android-registration-lifecycle"
           shipping_gate = os.environ["MRK_MACOS_AQUA_SCOPE"] in ("vault-helper-shipping", "vault-helper-shipping-installation-inspection")
           owned_headless = android_lifecycle or shipping_gate
+          catalogue_gate = os.environ["MRK_MACOS_AQUA_SCOPE"] == "project-fields"
+          # BEGIN_CATALOGUE_HEADLESS_CONTROL
+          CATALOGUE_ROUNDTRIP_TEST = "android_supplier_macos::tests::compiled_six_component_catalogue_roundtrips_and_rejects_mismatches"
+          CATALOGUE_BUDGET_TEST = "saved_command_owner::android_registration::catalogue_budget_tests::genuine_catalogue_fits_fresh_inspect_retained_review_and_register"
+          CATALOGUE_DOCUMENT_KEYS = ("document_cells", "saved_fields", "records", "assignments",
+              "context", "slot_projection", "picker_originals", "other_registries")
+          CATALOGUE_COMMON_KEYS = ("document", "owner_cells", "runtime_heap", "sources_heap",
+              "catalog_heap", "service_heap", "dispatcher", "observation_identity")
+          CATALOGUE_SOURCE_KEYS = ("inspection", "proposal_work", "reproof", "reproof_work",
+              "old_source", "old_operation", "source_review", "proposal_heap", "old_review",
+              "source_task", "coordinator", "inspection_tasks")
+          CATALOGUE_REGISTER_KEYS = ("client", "preparation", "settled", "phase", "tasks", "task_reserved")
+          CATALOGUE_CASE_KEYS = ("previous", "control_slot", "checked", "retained_review",
+              "phase", "new_owner", "final_tasks", "total", "limit", "headroom", "over")
+          CATALOGUE_CASE_NAMES = ("fresh_inspect", "inspect_retained_review", "register_retained_review")
+          CATALOGUE_U64 = (1 << 64) - 1
+
+          def catalogue_u64_sum(*values):
+              total = 0
+              for value in values:
+                  if type(value) is not int or not 0 <= value <= CATALOGUE_U64 or total > CATALOGUE_U64 - value:
+                      raise ValueError("headless-catalogue-u64-sum")
+                  total += value
+              return total
+
+          def parse_catalogue_budget(raw):
+              # Exactly67 canonical usize64 tokens, seven LF rows, at most2405B.
+              # A panic trailer remains raw failure evidence, never a good-prefix parse.
+              if type(raw) is not bytes or not 0 < len(raw) <= 2405 or not raw.endswith(b"\n"):
+                  raise ValueError("headless-catalogue-closed-output-bound")
+              lines = raw[:-1].decode("ascii", "strict").split("\n")
+              if len(lines) != 7:
+                  raise ValueError("headless-catalogue-seven-rows")
+              number = r"(0|[1-9][0-9]{0,19})"
+              def matched(pattern, line, keys):
+                  match = re.fullmatch(pattern, line)
+                  if match is None or len(match.groups()) != len(keys):
+                      raise ValueError("headless-catalogue-closed-row")
+                  values = [catalogue_u64_sum(int(value)) for value in match.groups()]
+                  return dict(zip(keys, values))
+              document_pattern = re.escape("catalogue_budget document_rows=[") + ", ".join(
+                  re.escape('("' + key + '", ') + number + re.escape(")") for key in CATALOGUE_DOCUMENT_KEYS) + re.escape("]")
+              document = matched(document_pattern, lines[0], CATALOGUE_DOCUMENT_KEYS)
+              def fields(line, prefix, keys):
+                  return matched(re.escape(prefix) + " ".join(re.escape(key) + "=" + number for key in keys), line, keys)
+              return {"schemaVersion": 1, "documentRows": document,
+                  "common": fields(lines[1], "catalogue_budget common ", CATALOGUE_COMMON_KEYS),
+                  "source": fields(lines[2], "catalogue_budget source ", CATALOGUE_SOURCE_KEYS),
+                  "register": fields(lines[3], "catalogue_budget register ", CATALOGUE_REGISTER_KEYS),
+                  "cases": [{"name": name, **fields(line, "catalogue_budget case=" + name + " ", CATALOGUE_CASE_KEYS)}
+                            for name, line in zip(CATALOGUE_CASE_NAMES, lines[4:])]}
+
+          def check_catalogue_budget(value):
+              document, common = value["documentRows"], value["common"]
+              source, register = value["source"], value["register"]
+              fresh, inspect, registration = value["cases"]
+              if (common["document"] != catalogue_u64_sum(*document.values())
+                      or any(document[key] <= 0 for key in CATALOGUE_DOCUMENT_KEYS[:7])):
+                  raise ValueError("headless-catalogue-document-census")
+              previous_common = catalogue_u64_sum(*common.values())
+              for case in value["cases"]:
+                  if (case["previous"] != catalogue_u64_sum(previous_common, case["control_slot"], case["checked"], case["retained_review"])
+                          or case["total"] != catalogue_u64_sum(case["previous"], case["new_owner"], case["phase"], case["final_tasks"])
+                          or case["limit"] != 64 * 1024 * 1024):
+                      raise ValueError("headless-catalogue-case-arithmetic")
+                  headroom = case["limit"] - case["total"] if case["total"] <= case["limit"] else 0
+                  over = case["total"] - case["limit"] if case["total"] >= case["limit"] else 0
+                  if case["headroom"] != headroom or case["over"] != over:
+                      raise ValueError("headless-catalogue-headroom")
+              inspection = catalogue_u64_sum(source["inspection"], source["proposal_work"])
+              reproof = catalogue_u64_sum(source["reproof"], source["reproof_work"])
+              if (fresh["retained_review"] != 0
+                      or inspect["retained_review"] != source["old_review"]
+                      or registration["retained_review"] != source["old_review"]
+                      or any(fresh[key] != inspect[key] for key in ("checked", "new_owner", "phase", "final_tasks"))
+                      or inspect["control_slot"] != registration["control_slot"]
+                      or fresh["phase"] != inspection
+                      or source["inspection"] != source["reproof"]
+                      or catalogue_u64_sum(source["old_source"], source["source_review"]) > inspection):
+                  raise ValueError("headless-catalogue-inspection-overlap")
+              phase = catalogue_u64_sum(max(catalogue_u64_sum(reproof, register["settled"]), register["preparation"]), register["client"])
+              if (register["phase"] != phase or registration["phase"] != phase
+                      or fresh["final_tasks"] != source["inspection_tasks"]
+                      or registration["final_tasks"] != 0 or register["tasks"] > register["task_reserved"]):
+                  raise ValueError("headless-catalogue-register-phase")
+              if any(case["total"] > case["limit"] or case["over"] != 0 for case in value["cases"]):
+                  raise ValueError("headless-catalogue-unchanged-whole-owner-cap")
+
+          def exact_headless_result(stdout, returncode, test_names):
+              if (type(test_names) is not tuple or len(test_names) not in (1, 26)
+                      or any(type(name) is not str for name in test_names)):
+                  raise ValueError("headless-catalogue-fixed-invocation-count")
+              if type(stdout) is not bytes or type(returncode) is not int or returncode != 0:
+                  raise ValueError("headless-tests-returned-failure")
+              count = len(test_names)
+              lines = [line for line in stdout.decode("utf-8", "strict").splitlines() if line]
+              expected_rows = {"test " + name + " ... ok" for name in test_names}
+              heading = f"running {count} " + ("test" if count == 1 else "tests")
+              if (len(expected_rows) != count or len(lines) != count + 2 or lines[0] != heading
+                      or len(set(lines[1:-1])) != count or set(lines[1:-1]) != expected_rows):
+                  raise ValueError("headless-exact-named-results-required")
+              summary = re.fullmatch(rf"test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; ([0-9]+) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
+              if summary is None:
+                  raise ValueError("headless-exact-test-summary")
+              return int(summary[1])
+
+          def run_catalogue_batch(owner, binary, test_names, count, prefix, record, original,
+                                  original_digest, digest, home, tmp, *, clock=None):
+              # Existing original owner/FD only. Tests may supply inert callables/clock;
+              # the sole live callsite supplies the admitted owner and its actual FD.
+              global calls_entered, calls_returned, stage
+              if clock is None:
+                  clock = time.monotonic_ns
+              invocations = [
+                  {"names": test_names[:-1], "outputPrefix": prefix, "libtestCapture": True,
+                   "originalReturned": False, "testsPassed": False},
+                  {"names": (CATALOGUE_BUDGET_TEST,), "outputPrefix": prefix + "-catalogue", "libtestCapture": False,
+                   "originalReturned": False, "testsPassed": False},
+              ]
+              record.update(invocations=invocations, ownerCallsEntered=0, ownerCallsReturned=0,
+                  batchOutputBytes=0, finalElapsedNanoseconds=None, deadlineMetAfterFinalCloses=False,
+                  homeOriginalRetired=False, tmpOriginalRetired=False, artifactCloseAttempts=0,
+                  headlessCustodyRetained=False)
+              batch_errors, start, end, last_clock, clock_unconfirmed = [], None, None, None, False
+              def observe_clock():
+                  nonlocal last_clock, clock_unconfirmed
+                  try:
+                      now = clock()
+                      if type(now) is not int or now < 0 or last_clock is not None and now < last_clock:
+                          raise ValueError("headless-catalogue-original-clock")
+                      last_clock = now
+                      return now
+                  except BaseException:
+                      clock_unconfirmed = True
+                      raise
+              def timely(now):
+                  if end is None or now >= end:
+                      raise ValueError("headless-catalogue-original-deadline")
+              try:
+                  stage = prefix + "-catalogue-batch-admission"
+                  if (prefix != "headless" or count != 27 or type(test_names) is not tuple or len(test_names) != 27
+                          or test_names[-2:] != (CATALOGUE_ROUNDTRIP_TEST, CATALOGUE_BUDGET_TEST)
+                          or any(type(name) is not str for name in test_names) or len(set(test_names)) != 27
+                          or record["role"] != "main" or record["names"] != test_names
+                          or original["record"] is not record or type(original["fd"]) is not int
+                          or calls_entered != 0 or calls_returned != 0):
+                      raise ValueError("headless-catalogue-fixed-main-batch")
+                  if original_digest() != digest:
+                      raise ValueError("headless-original-artifact-hash")
+                  # One origin: neither the second call nor cleanup can renew it.
+                  start = observe_clock()
+                  end = start + 30_000_000_000
+                  remaining = 64 * 1024
+                  for index, invocation in enumerate(invocations):
+                      if index:
+                          timely(observe_clock())
+                          if original_digest() != digest:
+                              raise ValueError("headless-original-artifact-hash")
+                      now = start if index == 0 else observe_clock()
+                      timely(now)
+                      timeout = min(30, (end - now) // 1_000_000_000)
+                      if not 1 <= timeout <= 30 or not 0 < remaining <= 64 * 1024:
+                          raise ValueError("headless-catalogue-remaining-allowance")
+                      argv = [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty"]
+                      if not invocation["libtestCapture"]:
+                          argv.append("--nocapture")
+                      argv.extend(invocation["names"])
+                      expected_argv = tuple(argv)
+                      invocation.update(timeoutSeconds=timeout, outputLimitBytes=remaining)
+                      stage = invocation["outputPrefix"] + "-original-test-invocation"
+                      calls_entered += 1
+                      record["ownerCallsEntered"] += 1
+                      result = owner.run_owned(argv,
+                          environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(tmp),
+                                   "LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
+                          cwd=work, timeout=timeout, capture=True, text=False, output_limit=remaining)
+                      if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int
+                              or type(result.args) is not list or any(type(arg) is not str for arg in result.args)
+                              or result.args != list(expected_argv) or argv != list(expected_argv)
+                              or type(result.stdout) is not bytes or type(result.stderr) is not bytes
+                              or len(result.stdout) + len(result.stderr) > remaining):
+                          raise ValueError("headless-original-return-contract")
+                      calls_returned += 1
+                      record["ownerCallsReturned"] += 1
+                      charged = len(result.stdout) + len(result.stderr)
+                      remaining -= charged
+                      record["batchOutputBytes"] += charged
+                      invocation.update(originalReturned=True, returncode=result.returncode,
+                          stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr),
+                          stdoutSha256=hashlib.sha256(result.stdout).hexdigest(),
+                          stderrSha256=hashlib.sha256(result.stderr).hexdigest())
+                      record["originalReturned"] = all(row["originalReturned"] for row in invocations)
+                      # Preserve THIS actual return, not a synthetic merged result.
+                      publish(invocation["outputPrefix"] + "-tests.stdout", result.stdout)
+                      publish(invocation["outputPrefix"] + "-tests.stderr", result.stderr)
+                      publish(invocation["outputPrefix"] + "-tests.status", (str(result.returncode) + "\n").encode("ascii"))
+                      if original_digest() != digest:
+                          raise ValueError("headless-original-artifact-hash")
+                      timely(observe_clock())
+                      stage = invocation["outputPrefix"] + "-exact-test-result"
+                      if invocation["libtestCapture"]:
+                          if result.stderr:
+                              raise ValueError("headless-tests-returned-failure")
+                          filtered = exact_headless_result(result.stdout, result.returncode, invocation["names"])
+                      else:
+                          # Retain all three typed totals before any cap pass decision.
+                          stage = invocation["outputPrefix"] + "-closed-numeric-output"
+                          invocation["catalogueBudget"] = parse_catalogue_budget(result.stderr)
+                          filtered = exact_headless_result(result.stdout, result.returncode, invocation["names"])
+                          check_catalogue_budget(invocation["catalogueBudget"])
+                      timely(observe_clock())
+                      invocation.update(testsPassed=True, tests=len(invocation["names"]),
+                          failed=0, ignored=0, measured=0, filtered=filtered)
+                  record["artifactOriginalUnchanged"] = True
+                  stage = prefix + "-catalogue-batch-finality"
+              finally:
+                  if record["ownerCallsEntered"] == record["ownerCallsReturned"]:
+                      # Independent known cleanup still runs after a nonzero/late/malformed
+                      # test result. Unknown owner return cannot authorize even one close.
+                      try:
+                          if original_digest() != digest:
+                              raise ValueError("headless-original-artifact-hash")
+                      except BaseException as error:
+                          record["artifactOriginalUnchanged"] = False
+                          batch_errors.append({"stage": "main-final-artifact-hash", "type": type(error).__name__})
+                      for field, directory in (("homeOriginalRetired", home), ("tmpOriginalRetired", tmp)):
+                          try:
+                              directory.rmdir()
+                              record[field] = True
+                          except BaseException as error:
+                              batch_errors.append({"stage": field, "type": type(error).__name__})
+                      descriptor, original["fd"] = original["fd"], None
+                      record["artifactCloseAttempts"] += 1
+                      try:
+                          os.close(descriptor)  # One consuming attempt; outer finally skips None.
+                          record["artifactOriginalClosed"] = True
+                      except BaseException as error:
+                          batch_errors.append({"stage": "main-original-close", "type": type(error).__name__})
+                      if end is not None:
+                          try:
+                              final = observe_clock()
+                              record["finalElapsedNanoseconds"] = str(final - start)
+                              timely(final)
+                              record["deadlineMetAfterFinalCloses"] = (not clock_unconfirmed
+                                  and record["artifactOriginalClosed"] and record["homeOriginalRetired"] and record["tmpOriginalRetired"])
+                          except BaseException as error:
+                              batch_errors.append({"stage": "main-after-final-closes-clock", "type": type(error).__name__})
+                  else:
+                      record["headlessCustodyRetained"] = True
+                  if batch_errors:
+                      record["cleanupErrors"] = batch_errors
+              if (batch_errors or record["ownerCallsEntered"] != 2 or record["ownerCallsReturned"] != 2
+                      or not record["originalReturned"] or not record["artifactOriginalUnchanged"]
+                      or not record["artifactOriginalClosed"] or record["artifactCloseAttempts"] != 1
+                      or not record["deadlineMetAfterFinalCloses"] or record["headlessCustodyRetained"]
+                      or not all(row["testsPassed"] for row in invocations)):
+                  raise ValueError("headless-catalogue-main-finality-unconfirmed")
+              record.update(testsPassed=True, tests=27, failed=0, ignored=0, measured=0)
+          # END_CATALOGUE_HEADLESS_CONTROL
           names = (
               "asset_source::macos::tests::private_asset_suffixes_admit_android_without_broadening_apple_formats",
               "asset_source::macos::tests::root_aliases_are_exact_and_physical_protection_is_not_path_text",
@@ -465,6 +724,10 @@ jobs:
               )
               main_count, native_count = 6, 7
               scope = "six-main-and-seven-native-macos-shipping-gate-data-regressions"
+          if catalogue_gate:
+              names += (CATALOGUE_ROUNDTRIP_TEST, CATALOGUE_BUDGET_TEST)
+              main_count = 27
+              scope = "twenty-seven-main-and-two-native-macos-headless-catalogue-data-regressions"
           libraries = (
               ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, main_count, "headless"),
               ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",
@@ -520,6 +783,9 @@ jobs:
               receipt.update(compilerOriginalReturned=False, cargoTargetRetired=False,
                              cargoTargetOriginalClosed=False, workOriginalClosed=False,
                              genuineServiceQualified=False, protectedCopyQualified=False)
+          if catalogue_gate:
+              receipt.update(ownerCallsEntered=0, ownerCallsReturned=0, genuineServiceQualified=False,
+                             protectedCopyQualified=False, androidLifecycleQualified=False)
           stage = "original-compiler"
           try:
               if owned_headless:
@@ -650,6 +916,10 @@ jobs:
                   home.mkdir(mode=0o700)
                   tmp.mkdir(mode=0o700)
                   if original_digest() != digest: raise ValueError("headless-original-artifact-hash")
+                  if catalogue_gate and prefix == "headless":
+                      run_catalogue_batch(owner, binary, test_names, count, prefix, record, original,
+                                          original_digest, digest, home, tmp)
+                      continue  # Same main FD is already consumed before the independent native leg.
                   stage = prefix + "-original-test-invocation"
                   calls_entered += 1
                   result = owner.run_owned(
@@ -659,7 +929,7 @@ jobs:
                       cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024,
                   )
                   if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int
-                          or shipping_gate and (type(result.args) is not list or result.args !=
+                          or (shipping_gate or catalogue_gate) and (type(result.args) is not list or result.args !=
                               [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *test_names])
                           or type(result.stdout) is not bytes or type(result.stderr) is not bytes
                           or len(result.stdout) + len(result.stderr) > 64 * 1024):
@@ -694,7 +964,9 @@ jobs:
           finally:
               close_errors = []
               for original in originals:
-                  if shipping_gate and calls_entered != calls_returned:
+                  if original["fd"] is None:
+                      continue  # The catalogue main batch already consumed its one original FD.
+                  if (shipping_gate or catalogue_gate) and calls_entered != calls_returned:
                       continue  # Unknown original owner cannot authorize any close.
                   descriptor, original["fd"] = original["fd"], None
                   try:
@@ -776,6 +1048,15 @@ jobs:
                       and not receipt["headlessCustodyRetained"] and not receipt["cargoTargetRetired"]
                       and receipt["cargoTargetOriginalClosed"] and receipt["workOriginalClosed"]
                       and receipt.get("cargoTargetRetentionReason") == "required-follow-on-build-and-gate-control")
+              if catalogue_gate:
+                  receipt.update(ownerCallsEntered=calls_entered, ownerCallsReturned=calls_returned)
+                  main_rows = [row for row in receipt["targets"] if row["role"] == "main"]
+                  receipt["passed"] = (receipt["passed"] and calls_entered == calls_returned == 3
+                      and len(main_rows) == 1 and main_rows[0].get("ownerCallsEntered") == 2
+                      and main_rows[0].get("ownerCallsReturned") == 2
+                      and main_rows[0].get("artifactCloseAttempts") == 1
+                      and main_rows[0].get("deadlineMetAfterFinalCloses") is True
+                      and main_rows[0].get("headlessCustodyRetained") is False)
               if receipt["passed"]: receipt.update(tests=len(names) + len(native_names), failed=0, ignored=0, measured=0)
               # Unknown owner/close finality retains original target output.
               data = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() + b"\n"
@@ -787,6 +1068,8 @@ jobs:
                   raise ValueError("headless-android-lifecycle-finality-unconfirmed")
               if shipping_gate and not receipt["passed"] and "failure" not in receipt:
                   raise ValueError("headless-shipping-gate-finality-unconfirmed")
+              if catalogue_gate and not receipt["passed"] and "failure" not in receipt:
+                  raise ValueError("headless-catalogue-finality-unconfirmed")
           PY_HEADLESS
       - name: Three ordinary Mac capacity DATA cases from the same compiled app-test original
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
@@ -3215,6 +3498,9 @@ jobs:
             ${{ steps.work.outputs.root }}/headless-tests.stdout
             ${{ steps.work.outputs.root }}/headless-tests.stderr
             ${{ steps.work.outputs.root }}/headless-tests.status
+            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stdout
+            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stderr
+            ${{ steps.work.outputs.root }}/headless-catalogue-tests.status
             ${{ steps.work.outputs.root }}/headless-native-tests.stdout
             ${{ steps.work.outputs.root }}/headless-native-tests.stderr
             ${{ steps.work.outputs.root }}/headless-native-tests.status
