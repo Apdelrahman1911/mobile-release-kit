@@ -391,22 +391,129 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         order = ("if packagedRequireDiagnosticActive, let ordinal = diagnosticOrdinal, (1...4).contains(ordinal)",
                  "try checkOriginalOwners()", "_ = try remaining(5)",
                  "let enabled = open.isEnabled", "let hittable = open.isHittable",
-                 "for (title, reason) in reasons")
+                 "for (titles, reason) in reasons")
         self.assertEqual([sample.index(item) for item in order], sorted(sample.index(item) for item in order))
-        self.assertEqual(sample.count("try checkOriginalOwners()"), 1)
-        self.assertEqual(sample.count("try remaining(5)"), 1)
+        # Entry, each group, and exit use the original owner/case end; no new wait or lease.
+        self.assertEqual(sample.count("try checkOriginalOwners()"), 3)
+        self.assertEqual(sample.count("try remaining(5)"), 3)
         self.assertEqual(sample.count("open.isEnabled"), 1)
         self.assertEqual(sample.count("open.isHittable"), 1)
-        self.assertEqual(sample.count('.firstMatch.exists'), 1)
-        self.assertEqual(sample.count('("'), 6)  # Only the six fixed public reason literals.
-        for title in ("Application capabilities are being loaded.", "Application capabilities have not been loaded.",
-                      "The native desktop bridge is unavailable.",
-                      "Project selection is not available in the current desktop runtime profile.",
-                      "Finish the original project selection first.", "The application is shutting down."):
-            self.assertEqual(sample.count('("' + title + '",'), 1)
-        self.assertIn('renderer.staticTexts.matching(NSPredicate(format: "title == %@", title)).firstMatch.exists', sample)
+        self.assertNotIn(".firstMatch", sample)
+        self.assertEqual(sample.count("let reasons: [([String], DashboardReason)] = ["), 1)
+        self.assertEqual(sample.count("                ([\n"), 15)
+        self.assertEqual(sample.count("for (titles, reason) in reasons"), 1)
+        self.assertEqual(sample.count("renderer.staticTexts."), 1)
+        self.assertEqual(sample.count(".count"), 1)
+        self.assertEqual(source.count("private enum DashboardReason: String {"), 1)
+        self.assertIn("    private enum DashboardReason: String {\n        case loading, notLoaded = \"not-loaded\", bridgeUnavailable = \"bridge-unavailable\"\n        case selectionUnavailable = \"selection-unavailable\", selectionInProgress = \"selection-in-progress\"\n        case shuttingDown = \"shutting-down\"\n        case ownerOfflinePreflight = \"owner-offline-preflight\", ownerAndroidBuild = \"owner-android-build\"\n        case ownerIOSArchive = \"owner-ios-archive\", ownerProjectRecovery = \"owner-project-recovery\"\n        case ownerGitHubPreflight = \"owner-github-preflight\", ownerGitHubRelease = \"owner-github-release\"\n        case ownerProjectPath = \"owner-project-path\", ownerSavedVersionEdit = \"owner-saved-version-edit\"\n        case ownerMetadataImages = \"owner-metadata-images\"\n        case otherOrUnobserved = \"other-or-unobserved\", ambiguous\n    }\n", source)
+        groups = (
+            ("loading", "loading", (
+                "Application capabilities are being loaded.",
+            )),
+            ("notLoaded", "not-loaded", (
+                "Application capabilities have not been loaded.",
+            )),
+            ("bridgeUnavailable", "bridge-unavailable", (
+                "The native desktop bridge is unavailable.",
+            )),
+            ("selectionUnavailable", "selection-unavailable", (
+                "Project selection is not available in the current desktop runtime profile.",
+            )),
+            ("selectionInProgress", "selection-in-progress", (
+                "Finish the original project selection first.",
+            )),
+            ("shuttingDown", "shutting-down", (
+                "The application is shutting down.",
+            )),
+            ("ownerOfflinePreflight", "owner-offline-preflight", (
+                "Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                "Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original offline-check status is unverified. Check retained status before conflicting work.",
+            )),
+            ("ownerAndroidBuild", "owner-android-build", (
+                "Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                "The original Android service action is active or unconfirmed. Keep its Status and Cancel; do not repeat registration.",
+                "The original Android source inspection or protected registration is active or unconfirmed. Keep its Status and Cancel; do not repeat copy.",
+                "An original source review is retained. Register that exact review or explicitly discard it before conflicting work.",
+                "The original Android tool picker or folder check is active or unconfirmed. Keep tool-selection Status and Cancel before conflicting work.",
+                "The original Android tool catalog is still reading, stopping or unconfirmed. Keep catalog Status and Cancel before conflicting work.",
+                "The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original Android-build status is unverified. Check retained Status before conflicting work.",
+            )),
+            ("ownerIOSArchive", "owner-ios-archive", (
+                "iOS-archive ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                "The iOS archive holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original iOS-archive status is unverified. Check retained Status before conflicting work.",
+            )),
+            ("ownerProjectRecovery", "owner-project-recovery", (
+                "Project-recovery ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                "Project build-input recovery holds the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                "The original project-recovery status is unverified. Check retained status before conflicting work.",
+            )),
+            ("ownerGitHubPreflight", "owner-github-preflight", (
+                "The original GitHub preflight action is running or unverified. Read its local Status before starting another operation.",
+            )),
+            ("ownerGitHubRelease", "owner-github-release", (
+                "The original protected release workflow action is running or unverified. Read its local Status before starting another operation.",
+            )),
+            ("ownerProjectPath", "owner-project-path", (
+                "The original project-path outcome or cleanup is unverified. Conflicting native operations remain blocked.",
+                "Finish the original project-path selection. Changing drafts or projects does not cancel it.",
+            )),
+            ("ownerSavedVersionEdit", "owner-saved-version-edit", (
+                "Saved-version edit ownership is unverified. Keep its original operation and do not retry.",
+                "A saved-version edit is still owned. Close or finish that original session before another operation.",
+                "This project needs separately authorized saved-version recovery. No other edit can clear that journal.",
+            )),
+            ("ownerMetadataImages", "owner-metadata-images", (
+                "Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one.",
+                "An original image selection or local-copy review is retained. Finish or stop that operation first.",
+                "This project needs a separate image recovery inspection. Another edit cannot bypass its journal.",
+            )),
+        )
+        self.assertEqual(len(groups), 15)
+        literals = [title for _, _, titles in groups for title in titles]
+        self.assertEqual(len(literals), 33)
+        self.assertEqual(len(set(literals)), 33)
+        self.assertEqual(len({label for _, label, _ in groups}), 15)
+        expected_table = "            let reasons: [([String], DashboardReason)] = [\n"
+        for name, _, titles in groups:
+            expected_table += "                ([\n"
+            expected_table += "".join("                    " + json.dumps(title) + ",\n" for title in titles)
+            expected_table += "                ], ." + name + "),\n"
+        expected_table += "            ]\n"
+        self.assertIn(expected_table, sample)
+        expected_scan = "            var selected: DashboardReason?\n            var ambiguous = false\n            for (titles, reason) in reasons {\n                try checkOriginalOwners()\n                _ = try remaining(5)\n                let matches = renderer.staticTexts.matching(NSPredicate(\n                    format: \"identifier IN %@ OR label IN %@ OR title IN %@\",\n                    argumentArray: [titles, titles, titles])).count\n                if matches > 1 || (matches == 1 && selected != nil) {\n                    ambiguous = true\n                    break // No further diagnostic observation can repair ambiguity.\n                }\n                if matches == 1 { selected = reason }\n            }\n            try checkOriginalOwners()\n            _ = try remaining(5)\n"
+        self.assertIn(expected_scan, sample)
+        # Inert count DATA only, paired with the exact Swift reducer above.
+        # This does not execute XCTest queries or prove native AX exposure.
+        def reduce_counts(counts):
+            self.assertEqual(len(counts), 15)
+            selected, ambiguous, observations = None, False, 0
+            for index, matches in enumerate(counts):
+                observations += 1
+                if matches > 1 or (matches == 1 and selected is not None):
+                    ambiguous = True
+                    break
+                if matches == 1:
+                    selected = groups[index][1]
+            return ("ambiguous" if ambiguous else selected or "other-or-unobserved"), observations
+
+        self.assertEqual(reduce_counts([0] * 15), ("other-or-unobserved", 15))
+        for index, (_, label, _) in enumerate(groups):
+            counts = [0] * 15
+            counts[index] = 1
+            self.assertEqual(reduce_counts(counts), (label, 15))
+            for duplicate_count in (2, 5):
+                counts[index] = duplicate_count
+                self.assertEqual(reduce_counts(counts), ("ambiguous", index + 1))
+            for second in range(index + 1, 15):
+                conflicting = [0] * 15
+                conflicting[index] = conflicting[second] = 1
+                self.assertEqual(reduce_counts(conflicting), ("ambiguous", second + 1))
         self.assertIn("reason: ambiguous ? .ambiguous : selected ?? .otherOrUnobserved)", sample)
-        for forbidden in ("print(", ".label", ".value", "debugDescription", "screenshot", "while ", "sleep("):
+        for forbidden in ("print(", ".label", ".value", "debugDescription", "screenshot",
+                          "while ", "sleep(", "waitFor", "XCTWaiter", "catch", "try?", "Date(", "systemUptime"):
             self.assertNotIn(forbidden, sample)
         self.assertEqual(dashboard.count('NSPredicate(format: "enabled == true AND hittable == true"), object: open'), 1)
         self.assertEqual(dashboard.count("XCTWaiter.wait(for: [ready], timeout: try remaining(5))"), 1)

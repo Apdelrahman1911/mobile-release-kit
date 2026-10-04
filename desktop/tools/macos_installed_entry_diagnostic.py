@@ -145,7 +145,10 @@ def ui_failure_diagnostics(stdout, stderr):
     dashboard_pattern = (re.escape(dashboard_namespace) + rb"=v1;line=([1-9][0-9]{0,4});ordinal=([1-4])"
                          rb";waiter=(timed-out|incorrect-order|inverted-fulfillment|interrupted|unknown)"
                          rb";enabled=([01]);hittable=([01]);reason=(loading|not-loaded|bridge-unavailable|"
-                         rb"selection-unavailable|selection-in-progress|shutting-down|other-or-unobserved|ambiguous)"
+                         rb"selection-unavailable|selection-in-progress|shutting-down|owner-offline-preflight|"
+                         rb"owner-android-build|owner-ios-archive|owner-project-recovery|owner-github-preflight|"
+                         rb"owner-github-release|owner-project-path|owner-saved-version-edit|owner-metadata-images|"
+                         rb"other-or-unobserved|ambiguous)"
                          rb";sample=pre-wait;nonAtomic=1")
     dashboard_candidates, dashboard_candidate = 0, None
     query_pattern = (rb"MRK_MACOS_NORMAL_(RENDERER|DASHBOARD)_QUERY=observation="

@@ -16,7 +16,13 @@ final class NormalAppUITests: XCTestCase {
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
         case selectionUnavailable = "selection-unavailable", selectionInProgress = "selection-in-progress"
-        case shuttingDown = "shutting-down", otherOrUnobserved = "other-or-unobserved", ambiguous
+        case shuttingDown = "shutting-down"
+        case ownerOfflinePreflight = "owner-offline-preflight", ownerAndroidBuild = "owner-android-build"
+        case ownerIOSArchive = "owner-ios-archive", ownerProjectRecovery = "owner-project-recovery"
+        case ownerGitHubPreflight = "owner-github-preflight", ownerGitHubRelease = "owner-github-release"
+        case ownerProjectPath = "owner-project-path", ownerSavedVersionEdit = "owner-saved-version-edit"
+        case ownerMetadataImages = "owner-metadata-images"
+        case otherOrUnobserved = "other-or-unobserved", ambiguous
     }
     private enum DashboardWaiter: String {
         case completed, timedOut = "timed-out", incorrectOrder = "incorrect-order"
@@ -541,21 +547,89 @@ final class NormalAppUITests: XCTestCase {
             _ = try remaining(5)
             let enabled = open.isEnabled
             let hittable = open.isHittable
-            let reasons: [(String, DashboardReason)] = [
-                ("Application capabilities are being loaded.", .loading),
-                ("Application capabilities have not been loaded.", .notLoaded),
-                ("The native desktop bridge is unavailable.", .bridgeUnavailable),
-                ("Project selection is not available in the current desktop runtime profile.", .selectionUnavailable),
-                ("Finish the original project selection first.", .selectionInProgress),
-                ("The application is shutting down.", .shuttingDown),
+            // Closed public literals only; never fetch or emit arbitrary AX text.
+            // Sequential counts are non-atomic observations, not an internal cause.
+            let reasons: [([String], DashboardReason)] = [
+                ([
+                    "Application capabilities are being loaded.",
+                ], .loading),
+                ([
+                    "Application capabilities have not been loaded.",
+                ], .notLoaded),
+                ([
+                    "The native desktop bridge is unavailable.",
+                ], .bridgeUnavailable),
+                ([
+                    "Project selection is not available in the current desktop runtime profile.",
+                ], .selectionUnavailable),
+                ([
+                    "Finish the original project selection first.",
+                ], .selectionInProgress),
+                ([
+                    "The application is shutting down.",
+                ], .shuttingDown),
+                ([
+                    "Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                    "Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original offline-check status is unverified. Check retained status before conflicting work.",
+                ], .ownerOfflinePreflight),
+                ([
+                    "Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                    "The original Android service action is active or unconfirmed. Keep its Status and Cancel; do not repeat registration.",
+                    "The original Android source inspection or protected registration is active or unconfirmed. Keep its Status and Cancel; do not repeat copy.",
+                    "An original source review is retained. Register that exact review or explicitly discard it before conflicting work.",
+                    "The original Android tool picker or folder check is active or unconfirmed. Keep tool-selection Status and Cancel before conflicting work.",
+                    "The original Android tool catalog is still reading, stopping or unconfirmed. Keep catalog Status and Cancel before conflicting work.",
+                    "The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original Android-build status is unverified. Check retained Status before conflicting work.",
+                ], .ownerAndroidBuild),
+                ([
+                    "iOS-archive ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.",
+                    "The iOS archive holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original iOS-archive status is unverified. Check retained Status before conflicting work.",
+                ], .ownerIOSArchive),
+                ([
+                    "Project-recovery ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
+                    "Project build-input recovery holds the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
+                    "The original project-recovery status is unverified. Check retained status before conflicting work.",
+                ], .ownerProjectRecovery),
+                ([
+                    "The original GitHub preflight action is running or unverified. Read its local Status before starting another operation.",
+                ], .ownerGitHubPreflight),
+                ([
+                    "The original protected release workflow action is running or unverified. Read its local Status before starting another operation.",
+                ], .ownerGitHubRelease),
+                ([
+                    "The original project-path outcome or cleanup is unverified. Conflicting native operations remain blocked.",
+                    "Finish the original project-path selection. Changing drafts or projects does not cancel it.",
+                ], .ownerProjectPath),
+                ([
+                    "Saved-version edit ownership is unverified. Keep its original operation and do not retry.",
+                    "A saved-version edit is still owned. Close or finish that original session before another operation.",
+                    "This project needs separately authorized saved-version recovery. No other edit can clear that journal.",
+                ], .ownerSavedVersionEdit),
+                ([
+                    "Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one.",
+                    "An original image selection or local-copy review is retained. Finish or stop that operation first.",
+                    "This project needs a separate image recovery inspection. Another edit cannot bypass its journal.",
+                ], .ownerMetadataImages),
             ]
             var selected: DashboardReason?
             var ambiguous = false
-            for (title, reason) in reasons {
-                if renderer.staticTexts.matching(NSPredicate(format: "title == %@", title)).firstMatch.exists {
-                    if selected != nil { ambiguous = true } else { selected = reason }
+            for (titles, reason) in reasons {
+                try checkOriginalOwners()
+                _ = try remaining(5)
+                let matches = renderer.staticTexts.matching(NSPredicate(
+                    format: "identifier IN %@ OR label IN %@ OR title IN %@",
+                    argumentArray: [titles, titles, titles])).count
+                if matches > 1 || (matches == 1 && selected != nil) {
+                    ambiguous = true
+                    break // No further diagnostic observation can repair ambiguity.
                 }
+                if matches == 1 { selected = reason }
             }
+            try checkOriginalOwners()
+            _ = try remaining(5)
             snapshot = DashboardSnapshot(ordinal: ordinal, enabled: enabled, hittable: hittable,
                                          reason: ambiguous ? .ambiguous : selected ?? .otherOrUnobserved)
         } else { snapshot = nil }

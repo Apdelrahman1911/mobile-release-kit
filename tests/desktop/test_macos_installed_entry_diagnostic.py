@@ -521,8 +521,26 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                 self.assertFalse(any(value["markers"].values()))  # Marker does not manufacture XCTest outcome.
 
     def test_dashboard_readiness_is_paired_finite_prewait_data(self):
-        reasons = ("loading", "not-loaded", "bridge-unavailable", "selection-unavailable",
-                   "selection-in-progress", "shutting-down", "other-or-unobserved", "ambiguous")
+        reasons = (
+            "loading",
+            "not-loaded",
+            "bridge-unavailable",
+            "selection-unavailable",
+            "selection-in-progress",
+            "shutting-down",
+            "owner-offline-preflight",
+            "owner-android-build",
+            "owner-ios-archive",
+            "owner-project-recovery",
+            "owner-github-preflight",
+            "owner-github-release",
+            "owner-project-path",
+            "owner-saved-version-edit",
+            "owner-metadata-images",
+            "other-or-unobserved",
+            "ambiguous",
+        )
+        self.assertEqual(len(set(reasons)), 17)
         waiters = ("timed-out", "incorrect-order", "inverted-fulfillment", "interrupted", "unknown")
         for index, reason in enumerate(reasons):
             ordinal, line = index % 4 + 1, (1 if index % 2 == 0 else 65535)
@@ -546,7 +564,7 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
     def test_dashboard_readiness_requires_one_matching_first_site_and_stream(self):
         require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=508;check=condition\n"
         row = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=508;ordinal=1;waiter=timed-out;"
-               b"enabled=0;hittable=0;reason=loading;sample=pre-wait;nonAtomic=1\n")
+               b"enabled=0;hittable=0;reason=owner-android-build;sample=pre-wait;nonAtomic=1\n")
         for stdout, stderr in (
                 (row, b""), (require, b""), (require, row), (row, require),
                 (require.replace(b"line=508", b"line=509") + row, b""),
@@ -571,6 +589,9 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
             (b"ordinal=1", b"ordinal=01"), (b"timed-out", b"completed"), (b"timed-out", b"fixture-secret"),
             (b"enabled=0", b"enabled=true"), (b"hittable=0", b"hittable=2"),
             (b"reason=loading", b"reason=fixture-secret"), (b"sample=pre-wait", b"sample=post-wait"),
+            (b"reason=loading", b"reason=owner-native"), (b"reason=loading", b"reason=owner-Android-build"),
+            (b"reason=loading", b"reason=owner-offline-preflight-extra"),
+            (b"reason=loading", b"reason=owner-metadata-images;detail=fixture-secret"),
             (b"nonAtomic=1", b"nonAtomic=0"))]
         malformed += [row[:-1], namespace[:-1], b"fixture-secret " + namespace[:-1],
                       b"fixture-secret " + row, row[:-1] + b";extra=fixture-secret\n",
@@ -628,7 +649,7 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                           b"forceReturned=false;originalTerminated=false;unknownStateRetained=false\n")
         require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=65535;check=condition\n"
         readiness = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=65535;ordinal=4;waiter=inverted-fulfillment;"
-                     b"enabled=0;hittable=0;reason=selection-unavailable;sample=pre-wait;nonAtomic=1\n")
+                     b"enabled=0;hittable=0;reason=owner-saved-version-edit;sample=pre-wait;nonAtomic=1\n")
         codes = b"".join(f"Error Domain=IDETestOperationsObserverErrorDomain Code={-2147483648 + i}\n".encode() for i in range(8))
         sites = b"".join(b"NormalAppUITests.swift:" + str(line).encode() + b":4096: error: " + UI_FAILURE_CASE
                          + b" : fixture-secret\n" for line in range(65532, 65536))
@@ -637,6 +658,7 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                          [8, 4, 8, 4])
         self.assertEqual(maximum["requireFailure"]["status"], "observed")
         self.assertEqual(maximum["dashboardReadiness"]["waiter"], "inverted-fulfillment")
+        self.assertEqual(maximum["dashboardReadiness"]["reason"], "owner-saved-version-edit")
         self.assertFalse(maximum["findingsTruncated"])
         encoded = MODULE.encoded(maximum, MODULE.UI_FAILURE_LIMIT)
         self.assertLessEqual(len(encoded), 4096)
@@ -728,7 +750,7 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
         original = subprocess.CompletedProcess([], 65, b"Error Domain=NSPOSIXErrorDomain Code=13\n"
             b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=591;check=condition\n"
             b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=591;ordinal=3;waiter=timed-out;"
-            b"enabled=0;hittable=1;reason=loading;sample=pre-wait;nonAtomic=1\n"
+            b"enabled=0;hittable=1;reason=owner-offline-preflight;sample=pre-wait;nonAtomic=1\n"
             b"MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=true;originalRecord=true;uidMatches=true;"
             b"gidMatches=true;nameMatches=false;homeMatches=true\n", b"fixture-secret")
         context, runner, events = self.ui_failure_context(original)
@@ -751,7 +773,7 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
             "stream": "stdout", "line": 591, "check": "condition"}})
         self.assertEqual(context.report["uiFailureDiagnostics"]["dashboardReadiness"], {
             "stream": "stdout", "line": 591, "ordinal": 3, "waiter": "timed-out", "enabled": False,
-            "hittable": True, "reason": "loading", "sample": "pre-wait", "nonAtomic": True})
+            "hittable": True, "reason": "owner-offline-preflight", "sample": "pre-wait", "nonAtomic": True})
         self.assertFalse(context.report["uiFailureDiagnostics"]["contextObservations"][0]["nameMatches"])
         self.assertEqual(context.report["originalTestReturncode"], 65)
         self.assertEqual(context.report["error"], "original-ui-test-nonzero")
