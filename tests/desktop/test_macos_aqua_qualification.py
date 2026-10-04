@@ -3836,7 +3836,7 @@ class IOSAquaDataTests(unittest.TestCase):
         self.assertIn("|| self.ios_unsigned_installed_selected()\n                            && observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive)", qualified)
         self.assertIn("SavedCommandDomain::IOSArchive => self.ios_unsigned_installed_selected()", qualified)
         mode = owner.split("fn ios_mode_qualified(", 1)[1].split("fn start_clocks(", 1)[0]
-        self.assertIn("(Some(owner), Some(bound)) => std::ptr::eq(bound.as_ref(), owner)", mode)
+        self.assertIn("(Some(owner), Some(bound)) => std::ptr::eq(bound.original.as_ref(), owner)", mode)
         self.assertIn("return same_original && observation.control.permits_mode(selected.operation)", mode)
         self.assertIn("selected.operation != ios_wire::Operation::IOSUnsignedArchive || self.ios_unsigned_installed_selected()", mode)
 
