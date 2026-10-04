@@ -475,6 +475,16 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                          '"post-Cancel navigation is unavailable"', '"normal affirmative Quit is unavailable"'):
             self.assertIn(required, basic)
         self.assertLess(basic.index("try beginCase(seconds: 60)"), basic.index("try admittedJourneyApplication"))
+        # macOS puts the first source submenu under the app's name, not File.
+        quit_menu = source.split("private func quitSheet(", 1)[1].split("        let query = window.sheets", 1)[0]
+        self.assertIn('try unique(app.menuBars,', quit_menu)
+        self.assertIn('try click(menuBar.menuBarItems.matching(identifier: "Mobile Release Kit"),', quit_menu)
+        self.assertIn('try click(menuBar.menuItems.matching(identifier: "Quit"),', quit_menu)
+        self.assertNotIn('matching(identifier: "File")', quit_menu)
+        self.assertEqual(quit_menu.count("try click("), 2)
+        for name in ("Info.plist", "EntryInfo.plist"):
+            info = plistlib.loads((ROOT / "desktop/macos-installed-inputs" / name).read_bytes())
+            self.assertEqual((info["CFBundleName"], info["CFBundleDisplayName"]), ("Mobile Release Kit",) * 2)
 
 
 @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and hasattr(os, "pread"), "POSIX inert original-file DATA")

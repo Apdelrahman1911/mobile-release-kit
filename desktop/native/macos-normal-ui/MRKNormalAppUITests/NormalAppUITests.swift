@@ -570,9 +570,11 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func quitSheet(_ app: XCUIApplication, _ window: XCUIElement) throws -> XCUIElement {
         try require(window.sheets.count == 0, "an unrelated sheet is already present")
         let menuBar = try unique(app.menuBars, "application menu bar is missing or ambiguous")
-        try click(menuBar.menuBarItems.matching(identifier: "File"), "the application's File menu is unavailable")
+        // The first Tauri submenu occupies the native application menu,
+        // regardless of its source label. The fixed bundle names this app.
+        try click(menuBar.menuBarItems.matching(identifier: "Mobile Release Kit"), "the application's native menu is unavailable")
         // Scoped to this application's opened menu bar, never a global keystroke.
-        try click(menuBar.menuItems.matching(identifier: "Quit"), "the File menu has no unique Quit action")
+        try click(menuBar.menuItems.matching(identifier: "Quit"), "the application menu has no unique Quit action")
         let query = window.sheets
         try require(query.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "normal Quit did not present its native sheet")
         let sheet = try unique(query, "normal Quit sheet is ambiguous")
