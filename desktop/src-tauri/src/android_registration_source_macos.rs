@@ -130,10 +130,7 @@ impl SourceReview {
     pub(crate) fn account(&self) -> u32 { self.account }
     pub(crate) fn instance(&self) -> &str { &self.instance }
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
-        size_of::<Self>().checked_add(self.closure.retained_bytes()?.checked_sub(size_of::<Closure>())?)?
-            .checked_add(self.support.retained_bytes()?.checked_sub(size_of::<FixedSupportReview>())?)?
-            .checked_add(self.proposal.retained_bytes()?.checked_sub(size_of::<ProposalDocuments>())?)?
-            .checked_add(self.instance.capacity())
+        source_review_allocation_bytes(&self.closure,self.support.retained_bytes()?,&self.proposal,&self.instance)
     }
     pub(crate) fn sources(&self) -> Vec<app::Source> {
         [Role::Jdk, Role::Sdk, Role::Gradle].into_iter().zip(self.closure.counts)
@@ -142,6 +139,12 @@ impl SourceReview {
                 entries: count.entries, aliases: count.aliases, complete: true, compatibility: app::Compatibility::Compatible,
             }).collect()
     }
+}
+fn source_review_allocation_bytes(closure:&Closure,support:usize,proposal:&ProposalDocuments,instance:&String)->Option<usize>{
+    size_of::<SourceReview>().checked_add(closure.retained_bytes()?.checked_sub(size_of::<Closure>())?)?
+        .checked_add(support.checked_sub(size_of::<FixedSupportReview>())?)?
+        .checked_add(proposal.retained_bytes()?.checked_sub(size_of::<ProposalDocuments>())?)?
+        .checked_add(instance.capacity())
 }
 /// Concrete, phase-bound allocation DATA created before workers/GO. No path,
 /// native original, consent, read result or finality can be supplied here.
@@ -156,6 +159,10 @@ pub(crate) struct SourceReservation {
 }
 impl SourceReservation {
     pub(crate) fn bytes(&self) -> usize { self.bytes }
+    #[cfg(test)]
+    pub(crate) fn catalogue_allocation_components(&self)->(usize,usize){
+        (self.bytes.checked_sub(self.supplier_work).unwrap(),self.supplier_work)
+    }
     fn covers(&self, recipe: &Recipe, phase: SourcePhase) -> bool {
         self.phase == phase && self.supplier_work > 0
             && recipe.working_reservation_bytes().ok().is_some_and(|bytes| bytes <= self.proposal_validity)
@@ -230,11 +237,14 @@ impl SourceSlots {
             None if !self.frame_entered => 0, _ => return None,
         } };
         if self.unknown { return None; }
+        self.allocation_bytes(native,self.support.retained_bytes()?)
+    }
+    fn allocation_bytes(&self,native:usize,support:usize)->Option<usize>{
         let mut bytes = size_of::<Self>().checked_add(native)?
             .checked_add(self.originals.capacity().checked_mul(size_of::<Original>())?)?
             .checked_add(self.aliases.capacity().checked_mul(size_of::<AliasOriginal>())?)?
             .checked_add(self.observed.capacity().checked_mul(size_of::<Option<Member>>())?)?
-            .checked_add(self.support.retained_bytes()?.checked_sub(size_of::<FixedSupportSlots>())?)?;
+            .checked_add(support.checked_sub(size_of::<FixedSupportSlots>())?)?;
         for original in &self.originals { if let Name::Owned(name) = &original.name { bytes = bytes.checked_add(name.capacity())?; } }
         for alias in &self.aliases { bytes = bytes.checked_add(alias.target.capacity())?; }
         for member in self.observed.iter().flatten() { bytes = bytes.checked_add(member.heap_bytes()?)?; }
@@ -1142,6 +1152,221 @@ fn source_hash_text(digest: [u8; 32]) -> Result<String> {
     let mut bytes = vec_with(64)?;
     for byte in digest { bytes.push(HEX[usize::from(byte >> 4)]); bytes.push(HEX[usize::from(byte & 15)]); }
     String::from_utf8(bytes).map_err(native_error)
+}
+
+#[cfg(test)]
+mod catalogue_allocation_data {
+    use super::*;
+    use std::collections::BTreeMap;
+    use super::super::android_fixed_support::CatalogueSupportData;
+
+    pub(crate) struct CatalogueSourceData {
+        original:SourceSlots,recipe:Recipe,closure:Closure,support:CatalogueSupportData,
+        proposal:ProposalDocuments,instance:String,
+    }
+    fn identity(ino:u64,mode:u16,size:i64)->Identity{
+        Identity{dev:7,ino,mode,uid:501,gid:20,links:1,size,mtime:1,mtime_ns:2,ctime:3,ctime_ns:4,flags:0}
+    }
+    fn cell(slots:&mut SourceSlots,parent:Option<usize>,name:Name)->usize{
+        let index=slots.originals.len();assert!(index<slots.originals.capacity());
+        slots.originals.push(Original{state:State::Reserved,fd:None,parent,name,identity:None,
+            selected:false,readonly:false,retained:false});
+        index
+    }
+    // A temporary lexical DATA index, not a filesystem/source walker. It is
+    // dropped before any retained subtotal and never enters production.
+    fn static_child(slots:&mut SourceSlots,index:&mut BTreeMap<(usize,&'static str),usize>,
+        parent:usize,name:&'static str)->usize{
+        if let Some(found)=index.get(&(parent,name)){return *found;}
+        let found=cell(slots,Some(parent),Name::Static(name));index.insert((parent,name),found);found
+    }
+    fn static_path(slots:&mut SourceSlots,index:&mut BTreeMap<(usize,&'static str),usize>,
+        mut parent:usize,path:&'static str)->usize{
+        if !path.is_empty(){for part in path.split('/'){parent=static_child(slots,index,parent,part);}}
+        parent
+    }
+    impl SourceSlots {
+        pub(crate) fn catalogue_maximal_roots_data()->[RegisteredRoot;3]{
+            // chain's ANCESTORS includes slash. 47 names total4049 bytes plus
+            // 47 slashes is the legal4096-byte limit (7*87 +40*86).
+            let names=ANCESTORS-1;let name_bytes=4096-names;
+            std::array::from_fn(|role|{
+                let mut path=String::new();path.try_reserve_exact(4096).unwrap();
+                for part in 0..names{
+                    path.push('/');
+                    let length=name_bytes/names+usize::from(part<name_bytes%names);
+                    let suffix=if role==0 && part+1==names{".jdk"}else{""};
+                    assert!(length<=255 && length>suffix.len());
+                    for _ in 0..length-suffix.len(){path.push(['j','s','g'][role]);}
+                    path.push_str(suffix);
+                }
+                assert_eq!(path.len(),4096);assert_eq!(path.capacity(),4096);
+                RegisteredRoot{path:path.into(),identity:crate::asset_source::ProjectIdentity::Posix(
+                    crate::asset_source::DirectoryIdentity::synthetic_evidence_identity())}
+            })
+        }
+        pub(crate) fn catalogue_allocation_data(recipe:Recipe,roots:&[RegisteredRoot;3],
+            observed:SourceObservations<'_>,provider_files:&[FileSpec],payload:&'static [PayloadSource],
+            instance:String,audit:watch::Receiver<Instant>,reservation:SourceReservation)->CatalogueSourceData{
+            assert_eq!(reservation.phase,SourcePhase::Inspection);
+            assert!(reservation.covers(&recipe,SourcePhase::Inspection));
+            let roster=recipe.source_roster();let shape=recipe.source_storage().unwrap();
+            assert_eq!(observed.members.len(),roster.members.len());
+            let mut slots=Self::new_original(audit,None,Some(reservation));
+            slots.originals=vec_with(reservation.storage.originals).unwrap();
+            slots.aliases=vec_with(reservation.storage.aliases).unwrap();
+            slots.observed=vec_with(roster.members.len()).unwrap();
+            let mut root_data:[Vec<Identity>;3]=std::array::from_fn(|_|Vec::new());
+            let mut chosen=[0;3];
+            for (role,root) in roots.iter().enumerate(){
+                let path=root.path.to_str().unwrap();assert_eq!(path.len(),4096);
+                let count=path[1..].split('/').count()+1;assert_eq!(count,ANCESTORS);
+                root_data[role]=vec_with(count+4).unwrap();
+                let mut parent=cell(&mut slots,None,Name::Static("/"));
+                root_data[role].push(identity(1,0o40555,0));
+                for name in path[1..].split('/'){
+                    parent=cell(&mut slots,Some(parent),Name::Owned(text_owned(name,255).unwrap()));
+                    root_data[role].push(identity(parent as u64+2,0o40555,0));
+                }
+                chosen[role]=parent;
+                assert_eq!(root_data[role].capacity(),ANCESTORS+4);
+            }
+            let mut index=BTreeMap::new();
+            for tree in roster.trees{
+                let role=group_index(tree.group).unwrap();let mut parent=chosen[role];
+                if !tree.prefix.is_empty(){for name in tree.prefix.split('/'){
+                    parent=static_child(&mut slots,&mut index,parent,name);
+                    assert!(root_data[role].len()<root_data[role].capacity());
+                    root_data[role].push(identity(parent as u64+2,0o40555,0));
+                }}
+            }
+            for (expected,data) in roster.members.iter().zip(observed.members){
+                assert_eq!(data.group,expected.group);assert_eq!(data.relative(),expected.relative);
+                let role=group_index(expected.group).unwrap();
+                let (parent_path,name)=expected.relative.rsplit_once('/').unwrap_or(("",expected.relative));
+                let parent=static_path(&mut slots,&mut index,chosen[role],parent_path);
+                let (member_identity,kind)=match data.kind{
+                    SourceMemberKind::Directory{mode,..}=>{
+                        let at=static_child(&mut slots,&mut index,parent,name);
+                        (identity(at as u64+2,u16::try_from(0o40000|mode).unwrap(),0),MemberKind::Directory(mode))
+                    },
+                    SourceMemberKind::File(file)=>{
+                        let at=static_child(&mut slots,&mut index,parent,name);
+                        (identity(at as u64+2,u16::try_from(0o100000|file.mode).unwrap(),file.size as i64),
+                            MemberKind::File(copy_file(file).unwrap()))
+                    },
+                    SourceMemberKind::Alias{data,mode}=>{
+                        let id=identity(100000+slots.aliases.len() as u64,u16::try_from(0o120000|mode).unwrap(),data.target.len() as i64);
+                        slots.aliases.push(AliasOriginal{parent,name,identity:id,target:text_owned(&data.target,512).unwrap()});
+                        (id,MemberKind::Alias(Alias{path:text_owned(&data.path,512).unwrap(),
+                            target:text_owned(&data.target,512).unwrap(),canonical:text_owned(&data.canonical,512).unwrap()},mode))
+                    },
+                };
+                slots.observed.push(Some(Member{group:expected.group,relative:expected.relative,identity:member_identity,kind}));
+            }
+            let mut metadata_parents=[identity(0,0,0);2];
+            let optional=std::array::from_fn(|slot|{
+                let spec=&roster.optional_sdk_metadata[slot];
+                let actual=observed.optional_sdk_metadata[slot].expect("both real compiled XML comparison cases");
+                assert_eq!(spec.max_bytes,SDK_METADATA_BYTES);assert!(actual.contents.len()<=SDK_METADATA_BYTES);
+                let (parent_path,name)=spec.relative.rsplit_once('/').unwrap();
+                let parent=static_path(&mut slots,&mut index,chosen[1],parent_path);
+                metadata_parents[slot]=identity(parent as u64+2,0o40555,0);
+                let at=static_child(&mut slots,&mut index,parent,name);
+                let mut contents=vec_with(SDK_METADATA_BYTES).unwrap();
+                contents.extend_from_slice(actual.contents);contents.resize(SDK_METADATA_BYTES,b' ');
+                assert_eq!(contents.len(),SDK_METADATA_BYTES);assert_eq!(contents.capacity(),SDK_METADATA_BYTES);
+                Some(ObservedSdkMetadata{identity:identity(at as u64+2,0o100644,SDK_METADATA_BYTES as i64),
+                    file:FileSpec{path:text_owned(spec.relative,512).unwrap(),size:SDK_METADATA_BYTES as u64,
+                        sha256:source_hash_text(Sha256::digest(&contents).into()).unwrap(),mode:actual.file.mode},contents})
+            });
+            let provider_first=slots.originals.len();
+            let provider_root=cell(&mut slots,None,Name::Static("/"));
+            let mut provider_indexes=vec_with(policy::OS_FILES.len()).unwrap();
+            for path in policy::OS_ROOTS.into_iter().chain(policy::OS_FILES){
+                let at=static_path(&mut slots,&mut index,provider_root,&path[1..]);
+                if !policy::OS_ROOTS.contains(&path){provider_indexes.push(at);}
+            }
+            let provider_count=slots.originals.len()-provider_first;assert!(provider_count<=128);
+            let mut provider_roots=vec_with(provider_count).unwrap();
+            for at in provider_first..slots.originals.len(){
+                let data=provider_indexes.iter().position(|index|*index==at).map(|i|&provider_files[i]);
+                let (mode,size)=data.map_or((0o40555,0),|file|(u16::try_from(0o100000|file.mode).unwrap(),file.size as i64));
+                provider_roots.push(Identity{uid:0,gid:0,..identity(at as u64+2,mode,size)});
+            }
+            assert_eq!(provider_files.len(),policy::OS_FILES.len());
+            assert_eq!(provider_indexes.len(),provider_files.len());
+            let mut provider=vec_with(provider_files.len()).unwrap();
+            for ((at,file),expected) in provider_indexes.iter().zip(provider_files).zip(policy::OS_FILES){
+                assert_eq!(file.path,expected);
+                provider.push(ProviderFile{identity:provider_roots[*at-provider_first],file:copy_file(file).unwrap()});
+            }
+            drop(index);
+            let mut members=vec_with(slots.observed.len()).unwrap();let mut counts=[Count::default();3];
+            for value in &mut slots.observed{
+                let member=value.take().unwrap();let count=&mut counts[group_index(member.group).unwrap()];
+                count.entries=count.entries.checked_add(1).unwrap();
+                match &member.kind{
+                    MemberKind::File(file)=>{count.files=count.files.checked_add(1).unwrap();count.bytes=count.bytes.checked_add(file.size).unwrap();},
+                    MemberKind::Alias(_,_)=>count.aliases=count.aliases.checked_add(1).unwrap(),
+                    MemberKind::Directory(_)=>{},
+                }
+                members.push(member);
+            }
+            for metadata in optional.iter().flatten(){
+                counts[1].entries=counts[1].entries.checked_add(1).unwrap();
+                counts[1].files=counts[1].files.checked_add(1).unwrap();
+                counts[1].bytes=counts[1].bytes.checked_add(metadata.file.size).unwrap();
+            }
+            let (support_slots,support)=FixedSupportSlots::catalogue_allocation_data(&recipe);slots.support=support_slots;
+            let closure=Closure{roots:root_data,members,provider_roots,provider,counts,layout:recipe.jdk_layout(),
+                optional_sdk_metadata:optional,sdk_metadata_parents:metadata_parents};
+            // Same actual Member::data/copy_file projections as inspect_once,
+            // from the shared genuine fixture. Canonical finalize validates the
+            // padded optional XML; its borrowed payload table is never copied.
+            let mut member_views=vec_with(closure.members.len()).unwrap();
+            for member in &closure.members{member_views.push(member.data());}
+            let complete=SourceObservations{members:&member_views,support:observed.support,
+                archive_members:observed.archive_members,optional_sdk_metadata:std::array::from_fn(|slot|
+                    closure.optional_sdk_metadata[slot].as_ref().map(ObservedSdkMetadata::data))};
+            let mut provider_view=vec_with(closure.provider.len()).unwrap();
+            for file in &closure.provider{provider_view.push(copy_file(&file.file).unwrap());}
+            let proposal=recipe.finalize_proposal(&instance,501,&complete,&provider_view).unwrap();
+            assert!(std::ptr::eq(proposal.payload_map(),payload));
+            assert!(proposal.documents().iter().all(|bytes|!bytes.is_empty()));
+            assert!(proposal.retained_bytes().unwrap()<=recipe.working_reservation_bytes().unwrap());
+            assert_eq!(slots.originals.capacity(),reservation.storage.originals);
+            assert_eq!(slots.aliases.capacity(),reservation.storage.aliases);
+            assert_eq!(slots.aliases.len(),shape.aliases);
+            assert_eq!(slots.observed.capacity(),roster.members.len());
+            assert_eq!(closure.members.capacity(),roster.members.len());
+            assert!(slots.observed.iter().all(Option::is_none));
+            assert!(closure.members.iter().try_fold(0usize,|sum,member|sum.checked_add(member.heap_bytes()?)).unwrap()
+                <=shape.file_heap.checked_add(shape.alias_heap).unwrap());
+            assert!(!slots.begun && !slots.settled && !slots.frame_entered && !slots.frame_settled && slots.frame.is_none());
+            assert!(slots.originals.iter().all(|entry|entry.state==State::Reserved && entry.fd.is_none() && entry.identity.is_none()));
+            drop(provider_view);drop(member_views);
+            CatalogueSourceData{original:slots,recipe,closure,support,proposal,instance}
+        }
+    }
+    impl CatalogueSourceData {
+        pub(crate) fn source_bytes(&self)->usize{
+            self.original.allocation_bytes(0,self.original.support.catalogue_retained_bytes().unwrap()).unwrap()
+        }
+        pub(crate) fn review_bytes(&self)->usize{
+            source_review_allocation_bytes(&self.closure,self.support.retained_bytes().unwrap(),&self.proposal,&self.instance).unwrap()
+        }
+        pub(crate) fn document_heap_bytes(&self)->usize{
+            self.proposal.retained_bytes().unwrap().checked_sub(size_of::<ProposalDocuments>()).unwrap()
+        }
+        pub(crate) fn public_sources(&self)->Vec<app::Source>{
+            [Role::Jdk,Role::Sdk,Role::Gradle].into_iter().zip(self.closure.counts)
+                .zip(self.recipe.source_versions()).map(|((role,count),version)|app::Source{
+                    role,version:Some(version.to_owned()),logical_bytes:u32::try_from(count.bytes).unwrap(),
+                    files:count.files,entries:count.entries,aliases:count.aliases,
+                    complete:false,compatibility:app::Compatibility::Unavailable}).collect()
+        }
+    }
 }
 
 #[cfg(test)]

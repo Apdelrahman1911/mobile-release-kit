@@ -130,9 +130,14 @@ impl ControlSlot {
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         let book = self.book.try_lock().ok()?;
         if self.is_unknown() || Self::pending(&book) { return None; }
+        Self::allocation_bytes(book.review.as_ref().map(|route| (&route.operation_id, &route.review_id)))
+    }
+    // Allocation arithmetic only. Eligibility and the original route lock stay
+    // in retained_bytes; inert DATA cannot create a ReviewRoute or admission.
+    fn allocation_bytes(review: Option<(&String, &String)>) -> Option<usize> {
         let mut bytes = arc_bytes::<Self>()?.checked_add(SIGNAL_STORAGE)?;
-        if let Some(route) = &book.review {
-            bytes = bytes.checked_add(route.operation_id.capacity())?.checked_add(route.review_id.capacity())?;
+        if let Some((operation_id, review_id)) = review {
+            bytes = bytes.checked_add(operation_id.capacity())?.checked_add(review_id.capacity())?;
         }
         Some(bytes)
     }
@@ -579,11 +584,7 @@ impl Checked {
     pub(crate) fn picker_originals(&self)->&[Arc<crate::asset_session::OriginalWork>;3]{self.snapshot.source.picker_originals()}
     pub(crate) fn context(&self)->&android_wire::Prepare{self.snapshot.request.context()}
     fn retained_bytes(&self)->Option<usize>{
-        std::mem::size_of::<Self>().checked_add(self.snapshot.request.retained_heap_bytes()?)?
-            .checked_add(self.id.capacity())?.checked_add(self.review_id.capacity())?.checked_add(self.instance.capacity())?
-            .checked_add(arc_bytes::<()>()?)? // SAME move-only admission identity allocation.
-            .checked_add(arc_bytes::<SourceSnapshot>()?)?
-            .checked_add(self.snapshot.source.retained_bytes()?.checked_sub(std::mem::size_of::<SourceSnapshot>())?)
+        checked_allocation_bytes(&self.snapshot.request,&self.id,&self.review_id,&self.instance,&self.snapshot.source)
     }
 }
 struct SourceReturn {
@@ -722,12 +723,7 @@ impl Operation {
         if !returned.known{return None;}
         #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
         if returned.review.is_some(){return None;} // The final Review owns it now.
-        arc_bytes::<Self>()?.checked_add(operation_projection_bytes(&self.data)?)?
-            .checked_add(self.review_id.capacity())?.checked_add(self.instance.capacity())?
-            .checked_add(self.control.retained_bytes()?)?.checked_add(arc_bytes::<()>()?)? // SAME Operation/cohort identity, counted once.
-            .checked_add(arc_bytes::<SourceSnapshot>()?)?
-            .checked_add(self.source.retained_bytes()?.checked_sub(std::mem::size_of::<SourceSnapshot>())?)?
-            .checked_add(returned.retained_bytes?)
+        retained_operation_allocation_bytes(&self.data,&self.review_id,&self.instance,&self.control,&self.source,returned.retained_bytes?)
     }
 }
 impl Registration {
@@ -811,19 +807,13 @@ impl Registration {
     }
     fn retained_bytes(&self,source:&SourceSnapshot)->Option<usize>{
         if self.active.is_some(){return None;}
-        let mut bytes=std::mem::size_of::<Self>().checked_add(self.service.retained_bytes()?.checked_sub(std::mem::size_of::<service_setup::State>())?)?;
-        if let Some(last)=&self.last{
-            bytes=bytes.checked_add(operation_projection_bytes(&last.data)?)?
-                .checked_add(last.report.as_ref().map_or(Some(0),report_bytes)?)?;
-        }
+        let mut bytes=registration_allocation_bytes(self.service.retained_bytes()?,self.last.as_ref())?;
         if let Some(review)=&self.review{
             // A usable Review can retain only the SAME selected picker set.
             // Drift hooks retire it before a new selection is published. A
             // known prior failure retains only Last DATA, never hidden pickers.
             if !review.original.source.picker_originals().iter().zip(source.picker_originals()).all(|(old,new)|Arc::ptr_eq(old,new)){return None;}
-            bytes=bytes.checked_add(arc_bytes::<Review>()?)?.checked_add(review.original.retained_bytes()?)?
-                .checked_add(review.public.review_id.capacity())?.checked_add(review.public.context.retained_heap_bytes()?)?
-                .checked_add(source_projection_bytes(&review.public.sources)?)?;
+            bytes=bytes.checked_add(retained_review_projection_bytes(review.original.retained_bytes()?,&review.public)?)?;
             #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
             {bytes=bytes.checked_add(review.source.retained_bytes()?.checked_sub(std::mem::size_of::<AndroidRegistrationSourceReview>())?)?;}
         }
@@ -839,6 +829,10 @@ fn source_failure(control:&Control,failure:AdmissionFailure,at:Instant){
         _=>wire::Reason::SourceRefused,
     };
     control.stop_at(reason,at);
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+fn inspection_source_task(original:Arc<Operation>,enter:oneshot::Receiver<()>)->impl FnOnce()->SourceReturn{
+    move||inspect_source(original,enter)
 }
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 fn inspect_source(original:Arc<Operation>,enter:oneshot::Receiver<()>)->SourceReturn{
@@ -1307,13 +1301,10 @@ impl SavedCommandOwner {
                 client:None,sources:Mutex::new(AndroidRegistrationSourceSlots::new_registered(audit_read,
                     WorkGate{slot:self.inner.android_registration_control.clone(),control:control.clone()},source_budget))});
             let (release,enter)=oneshot::channel();let (source_release,source_enter)=oneshot::channel();
-            let source_worker={let original=original.clone();move||inspect_source(original,source_enter)};
+            let source_worker=inspection_source_task(original.clone(),source_enter);
             let coordinator=coordinate_inspection(original.clone(),enter,source_release);
-            let task_storage=std::mem::size_of_val(&source_worker).checked_add(std::mem::size_of_val(&coordinator))
-                .and_then(|bytes|bytes.checked_add(2usize.checked_mul(std::mem::size_of::<SourceReturn>())?))
-                .and_then(|bytes|bytes.checked_add(std::mem::size_of::<Finalization>()))
-                .and_then(|bytes|bytes.checked_add(2usize.checked_mul(SIGNAL_STORAGE)?)).ok_or_else(wire::unavailable)?;
-            let whole=bounded_operation_sum(total,task_storage).ok_or_else(wire::unavailable)?;
+            let whole=inspection_admission_bytes(total,std::mem::size_of_val(&source_worker),std::mem::size_of_val(&coordinator))
+                .ok_or_else(wire::unavailable)?;
             original.reservation.set(Reservation{whole,source:source_reservation}).map_err(|_|wire::unavailable())?;
             // All typed original slots, comparison operands and whole retained
             // census have been charged BEFORE either task or payload GO exists.
@@ -1367,15 +1358,71 @@ impl SavedCommandOwner {
 /// census, including an old full Review AND its retained closed-source original.
 fn operation_admission_bytes(previous:usize,data:&wire::Operation,review_id:&String,instance:&String,
     control:&Control,phase_storage:usize)->Option<usize>{
-    let added=arc_bytes::<Operation>()?.checked_add(operation_projection_bytes(data)?)?
+    bounded_operation_sum(previous,operation_allocation_bytes(data,review_id,instance,control,phase_storage)?)
+}
+fn operation_allocation_bytes(data:&wire::Operation,review_id:&String,instance:&String,
+    control:&Control,phase_storage:usize)->Option<usize>{
+    arc_bytes::<Operation>()?.checked_add(operation_projection_bytes(data)?)?
         .checked_add(review_id.capacity())?.checked_add(instance.capacity())?
         .checked_add(control.retained_bytes()?)?.checked_add(phase_storage)?
         .checked_add(3usize.checked_mul(wire::STATUS_LIMIT)?)?
-        .checked_add(3usize.checked_mul(wire::REQUEST_LIMIT)?)?;
-    bounded_operation_sum(previous,added)
+        .checked_add(3usize.checked_mul(wire::REQUEST_LIMIT)?)
 }
 fn bounded_operation_sum(previous:usize,added:usize)->Option<usize>{
     previous.checked_add(added).filter(|bytes|*bytes<=OWNED_LIMIT)
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+fn inspection_task_bytes(source:usize,coordinator:usize)->Option<usize>{
+    source.checked_add(coordinator)?
+        .checked_add(2usize.checked_mul(std::mem::size_of::<SourceReturn>())?)?
+        .checked_add(std::mem::size_of::<Finalization>())?
+        .checked_add(2usize.checked_mul(SIGNAL_STORAGE)?)
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+fn inspection_admission_bytes(base:usize,source:usize,coordinator:usize)->Option<usize>{
+    bounded_operation_sum(base,inspection_task_bytes(source,coordinator)?)
+}
+// These are only the existing retained additions, not lifecycle predicates or
+// constructors. Production keeps every identity/join/known-return gate above.
+fn checked_allocation_bytes(request:&Request,id:&String,review_id:&String,instance:&String,source:&SourceSnapshot)->Option<usize>{
+    std::mem::size_of::<Checked>().checked_add(request.retained_heap_bytes()?)?
+        .checked_add(id.capacity())?.checked_add(review_id.capacity())?.checked_add(instance.capacity())?
+        .checked_add(arc_bytes::<()>()?)? // SAME move-only admission identity allocation.
+        .checked_add(arc_bytes::<SourceSnapshot>()?)?
+        .checked_add(source.retained_bytes()?.checked_sub(std::mem::size_of::<SourceSnapshot>())?)
+}
+fn retained_operation_allocation_bytes(data:&wire::Operation,review_id:&String,instance:&String,control:&Control,
+    source:&SourceSnapshot,returned_bytes:usize)->Option<usize>{
+    arc_bytes::<Operation>()?.checked_add(operation_projection_bytes(data)?)?
+        .checked_add(review_id.capacity())?.checked_add(instance.capacity())?
+        .checked_add(control.retained_bytes()?)?.checked_add(arc_bytes::<()>()?)? // SAME Operation/cohort identity, counted once.
+        .checked_add(arc_bytes::<SourceSnapshot>()?)?
+        .checked_add(source.retained_bytes()?.checked_sub(std::mem::size_of::<SourceSnapshot>())?)?
+        .checked_add(returned_bytes)
+}
+fn registration_allocation_bytes(service_bytes:usize,last:Option<&Last>)->Option<usize>{
+    let mut bytes=std::mem::size_of::<Registration>()
+        .checked_add(service_bytes.checked_sub(std::mem::size_of::<service_setup::State>())?)?;
+    if let Some(last)=last{
+        bytes=bytes.checked_add(operation_projection_bytes(&last.data)?)?
+            .checked_add(last.report.as_ref().map_or(Some(0),report_bytes)?)?;
+    }
+    Some(bytes)
+}
+fn retained_review_projection_bytes(original_bytes:usize,public:&wire::Review)->Option<usize>{
+    arc_bytes::<Review>()?.checked_add(original_bytes)?
+        .checked_add(public.review_id.capacity())?.checked_add(public.context.retained_heap_bytes()?)?
+        .checked_add(source_projection_bytes(&public.sources)?)
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+fn registration_base_retained_bytes(document_bytes:usize,control_bytes:usize,runtime_heap:usize,sources_bytes:usize,
+    catalog_bytes:usize,registration_bytes:usize,checked_bytes:usize)->Option<usize>{
+    document_bytes.checked_add(arc_bytes::<Inner>()?)?.checked_add(SIGNAL_STORAGE)?
+        .checked_add(control_bytes)?.checked_add(runtime_heap)?
+        .checked_add(sources_bytes.checked_sub(std::mem::size_of::<android_sources::Sources>())?)?
+        .checked_add(catalog_bytes.checked_sub(std::mem::size_of::<android_catalog::Catalog>())?)?
+        .checked_add(registration_bytes.checked_sub(std::mem::size_of::<Registration>())?)?
+        .checked_add(checked_bytes)
 }
 
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
@@ -1397,14 +1444,10 @@ fn registration_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>
     // active original is unresolved structure, not spare capacity for a new GO.
     if control.original.is_some() || ControlSlot::pending(&control) || inner.android_registration_control.is_unknown(){return None;}
     drop(control);
-    let mut bytes=census.for_originals(document,checked.picker_originals())?
-        .checked_add(arc_bytes::<Inner>()?)?.checked_add(SIGNAL_STORAGE)?
-        .checked_add(inner.android_registration_control.retained_bytes()?)?
-        .checked_add(inner.runtime.android_registration_retained_heap_bytes(document)?)?
-        .checked_add(registry.android_sources.retained_data_bytes()?.checked_sub(std::mem::size_of::<android_sources::Sources>())?)?
-        .checked_add(registry.android_catalog.registration_retained_bytes()?.checked_sub(std::mem::size_of::<android_catalog::Catalog>())?)?
-        .checked_add(registry.android_registration.retained_bytes(&checked.snapshot.source)?
-            .checked_sub(std::mem::size_of::<Registration>())?)?.checked_add(checked.retained_bytes()?)?;
+    let mut bytes=registration_base_retained_bytes(census.for_originals(document,checked.picker_originals())?,
+        inner.android_registration_control.retained_bytes()?,inner.runtime.android_registration_retained_heap_bytes(document)?,
+        registry.android_sources.retained_data_bytes()?,registry.android_catalog.registration_retained_bytes()?,
+        registry.android_registration.retained_bytes(&checked.snapshot.source)?,checked.retained_bytes()?)?;
     if inner.android_service_dispatcher.get().is_some(){bytes=bytes.checked_add(arc_bytes::<service_setup::Dispatcher>()?)?;}
     #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
         not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer")))]
@@ -1420,6 +1463,185 @@ fn registration_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>
         }
     }
     (bytes<=OWNED_LIMIT).then_some(bytes)
+}
+
+#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+impl SavedCommandOwner {
+    pub(crate) fn assert_android_catalogue_whole_owner_data_contract(){
+        catalogue_budget_tests::genuine_catalogue_fits_fresh_inspect_retained_review_and_register_data();
+    }
+}
+
+#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+mod catalogue_budget_tests {
+    use super::*;
+    use crate::android_supplier_macos_source::SourcePhase;
+
+    fn sum(values:&[usize])->usize{
+        values.iter().try_fold(0usize,|bytes,next|bytes.checked_add(*next)).unwrap()
+    }
+    fn control_data(slot:&Arc<ControlSlot>,lane:ControlLane,id:String,generation:u32)->Arc<Control>{
+        let admitted=Instant::now();let work=admitted.checked_add(WORK).unwrap();let hard=admitted.checked_add(HARD).unwrap();
+        let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
+        // No claim/install, AdmissionCohort, owner, GO, retirement or receipt.
+        Arc::new(Control{lane,owner:Weak::new(),id,generation,admitted,work,hard,
+            slot:Arc::downgrade(slot),cohort:Arc::new(()),epoch:0,first:Mutex::new(None),
+            unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
+            latches:std::sync::atomic::AtomicUsize::new(0),stop,audit})
+    }
+    // Return-type inference only: never invoke either function item and never
+    // create an Operation, closure value, coordinator future or executor.
+    fn returned2<A,B,R,F:FnOnce(A,B)->R>(_:F)->usize{std::mem::size_of::<R>()}
+    fn returned3<A,B,C,R,F:FnOnce(A,B,C)->R>(_:F)->usize{std::mem::size_of::<R>()}
+
+    #[test]
+    fn genuine_catalogue_fits_fresh_inspect_retained_review_and_register(){
+        genuine_catalogue_fits_fresh_inspect_retained_review_and_register_data();
+    }
+    pub(super) fn genuine_catalogue_fits_fresh_inspect_retained_review_and_register_data(){
+        let project_id="synthetic-catalogue-budget-project";
+        let project=RegisteredRoot{path:"/synthetic-catalogue-budget-project-never-opened".into(),
+            identity:crate::asset_source::ProjectIdentity::Posix(
+                crate::asset_source::DirectoryIdentity::synthetic_evidence_identity())};
+        let context=android_wire::Prepare{project_id:project_id.to_owned(),draft_revision:1,baseline_generation:1,
+            saved_config:android_wire::Content{bytes:32,sha256:"a".repeat(64)},
+            saved_version:android_wire::SavedVersion{source:"version.properties".to_owned(),bytes:20,
+                sha256:"b".repeat(64),name:"1.0.0".to_owned(),build:1},
+            artifact_validation:android_wire::ArtifactValidation{mode:android_wire::ValidationMode::StructureAndVersion,
+                upload_certificate_sha256:None},signing:None};
+        let document=Arc::new(());
+        let roots=AndroidRegistrationSourceSlots::catalogue_maximal_roots_data();
+        let census=crate::asset_session::catalogue_census_data(project_id,&project,&roots);
+        let (sources,current,old)=android_sources::Sources::catalogue_allocation_data(project_id,&project,&roots,&census.pickers);
+        assert!(!Arc::ptr_eq(&current,&old));
+        assert!(current.picker_originals().iter().zip(old.picker_originals()).zip(&census.pickers)
+            .all(|((current,old),picker)|Arc::ptr_eq(current,old)&&Arc::ptr_eq(current,picker)));
+
+        let slot=Arc::new(ControlSlot::default());
+        let old_id="0".repeat(32);let old_review_id="1".repeat(32);let old_instance="2".repeat(32);
+        let inspect_id="3".repeat(32);let inspect_review_id="4".repeat(32);let inspect_instance="5".repeat(32);
+        let register_id="6".repeat(32);let service_id="7".repeat(32);
+        let old_control=control_data(&slot,ControlLane::Sources,old_id.clone(),2);
+        let inspect_control=control_data(&slot,ControlLane::Sources,inspect_id.clone(),3);
+        let register_control=control_data(&slot,ControlLane::Sources,register_id.clone(),3);
+        let service_control=control_data(&slot,ControlLane::Service,service_id.clone(),1);
+        let service=service_setup::CatalogueServiceData::new(wire::ServiceOperation{operation_id:service_id,
+            setup_generation:1,source_generation:1,action:wire::ServiceAction::Check,context:context.clone()},service_control);
+        let service_bytes=service.retained_bytes().unwrap();
+        // The previous completed setup retains a dispatcher/manager charge.
+        // These actual type/bound rows do not construct either native object.
+        let dispatcher=arc_bytes::<service_setup::Dispatcher>().unwrap();
+        let resources=std::path::Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE)
+            .parent().unwrap().parent().unwrap().join("Resources");
+        let runtime=RuntimeConfig::packaged(resources);
+        let runtime_heap=runtime.android_registration_retained_heap_bytes(&document).unwrap();
+        let catalog=android_catalog::Catalog::default(); // No prior catalogue selection is needed.
+        let catalog_bytes=catalog.registration_retained_bytes().unwrap();
+        let sources_bytes=sources.retained_data_bytes().unwrap();
+
+        let inspection=AndroidRegistrationSourceSlots::reservation(SourcePhase::Inspection).unwrap();
+        let reproof=AndroidRegistrationSourceSlots::reservation(SourcePhase::Reproof).unwrap();
+        let source=crate::android_supplier_macos::with_compiled_catalogue_data(|recipe,observed,provider,payload|
+            AndroidRegistrationSourceSlots::catalogue_allocation_data(recipe,&roots,observed,provider,payload,
+                old_instance.clone(),old_control.audit.subscribe(),inspection));
+        let old_data=wire::Operation{operation_id:old_id,registration_generation:2,source_generation:1,
+            kind:wire::Kind::Inspection,context:context.clone()};
+        let public=wire::Review{review_id:old_review_id.clone(),source_generation:1,context:context.clone(),
+            consent_version:wire::CONSENT,license_acknowledgment_required:true,sources:source.public_sources()};
+        assert!(public.sources.iter().all(|source|!source.complete && source.compatibility==wire::Compatibility::Unavailable));
+        let old_source_bytes=source.source_bytes();let source_review_bytes=source.review_bytes();
+        let old_operation=retained_operation_allocation_bytes(&old_data,&old_review_id,&old_instance,
+            &old_control,&old,old_source_bytes).unwrap();
+        let old_review=sum(&[retained_review_projection_bytes(old_operation,&public).unwrap(),
+            source_review_bytes.checked_sub(std::mem::size_of::<AndroidRegistrationSourceReview>()).unwrap()]);
+        // Actual separate route String allocations, never a forged ReviewRoute.
+        let route_operation=old_data.operation_id.clone();let route_review=public.review_id.clone();
+        let fresh_slot=ControlSlot::allocation_bytes(None).unwrap();
+        assert_eq!(slot.retained_bytes(),Some(fresh_slot));
+        let review_slot=ControlSlot::allocation_bytes(Some((&route_operation,&route_review))).unwrap();
+        assert_eq!(review_slot-fresh_slot,sum(&[route_operation.capacity(),route_review.capacity()]));
+
+        let inspect_request=Request::Inspect(wire::Inspect{registration_generation:2,source_generation:1,context:context.clone()});
+        let register_request=Request::Register(wire::Register{registration_generation:2,source_generation:1,
+            review_id:old_review_id.clone(),context:context.clone()});
+        let checked_inspect=checked_allocation_bytes(&inspect_request,&inspect_id,&inspect_review_id,&inspect_instance,&current).unwrap();
+        let checked_register=checked_allocation_bytes(&register_request,&register_id,&old_review_id,&old_instance,&current).unwrap();
+        let registration=registration_allocation_bytes(service_bytes,None).unwrap(); // Successful review publication clears Last.
+        let observation_identity=if cfg!(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",
+            feature="macos-installed-observation",not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),
+            not(feature="macos-installed-installer"))){arc_bytes::<()>().unwrap()}else{0};
+        let previous=|control_bytes,checked_bytes,review_bytes|sum(&[
+            registration_base_retained_bytes(census.bytes,control_bytes,runtime_heap,sources_bytes,catalog_bytes,
+                registration.checked_add(review_bytes).unwrap(),checked_bytes).unwrap(),dispatcher,observation_identity]);
+        let fresh_previous=previous(fresh_slot,checked_inspect,0);
+        let inspect_previous=previous(review_slot,checked_inspect,old_review);
+        let register_previous=previous(review_slot,checked_register,old_review);
+        let inspect_data=wire::Operation{operation_id:inspect_id,registration_generation:3,source_generation:1,
+            kind:wire::Kind::Inspection,context:context.clone()};
+        let register_data=wire::Operation{operation_id:register_id,registration_generation:3,source_generation:1,
+            kind:wire::Kind::Registration,context};
+        let source_task=returned2(inspection_source_task);let coordinator=returned3(coordinate_inspection);
+        let inspection_tasks=inspection_task_bytes(source_task,coordinator).unwrap();
+        let client=client::catalogue_client_rows(reproof.bytes());
+        let inspect_added=operation_allocation_bytes(&inspect_data,&inspect_review_id,&inspect_instance,&inspect_control,inspection.bytes()).unwrap();
+        let register_added=operation_allocation_bytes(&register_data,&old_review_id,&old_instance,&register_control,client.phase).unwrap();
+        let cases=[
+            ("fresh_inspect",fresh_previous,fresh_slot,checked_inspect,0,inspection.bytes(),inspect_added,inspection_tasks,
+                sum(&[fresh_previous,inspect_added,inspection_tasks])),
+            ("inspect_retained_review",inspect_previous,review_slot,checked_inspect,old_review,inspection.bytes(),inspect_added,inspection_tasks,
+                sum(&[inspect_previous,inspect_added,inspection_tasks])),
+            ("register_retained_review",register_previous,review_slot,checked_register,old_review,client.phase,register_added,0,
+                sum(&[register_previous,register_added])),
+        ];
+        let (inspection_source,proposal_work)=inspection.catalogue_allocation_components();
+        let (reproof_source,reproof_work)=reproof.catalogue_allocation_components();
+        // Bounded numeric output only. ALL three raw checked totals are printed
+        // before any whole-owner fit assertion, so over-cap remains evidence.
+        eprintln!("catalogue_budget document_rows={:?}",census.rows);
+        eprintln!("catalogue_budget common document={} owner_cells={} runtime_heap={} sources_heap={} catalog_heap={} service_heap={} dispatcher={} observation_identity={}",
+            census.bytes,sum(&[arc_bytes::<Inner>().unwrap(),SIGNAL_STORAGE]),runtime_heap,
+            sources_bytes.checked_sub(std::mem::size_of::<android_sources::Sources>()).unwrap(),
+            catalog_bytes.checked_sub(std::mem::size_of::<android_catalog::Catalog>()).unwrap(),
+            service_bytes.checked_sub(std::mem::size_of::<service_setup::State>()).unwrap(),dispatcher,observation_identity);
+        eprintln!("catalogue_budget source inspection={} proposal_work={} reproof={} reproof_work={} old_source={} old_operation={} source_review={} proposal_heap={} old_review={} source_task={} coordinator={} inspection_tasks={}",
+            inspection_source,proposal_work,reproof_source,reproof_work,old_source_bytes,old_operation,source_review_bytes,
+            source.document_heap_bytes(),old_review,source_task,coordinator,inspection_tasks);
+        eprintln!("catalogue_budget register client={} preparation={} settled={} phase={} tasks={} task_reserved={}",
+            client.client,client.preparation,client.settled,client.phase,client.tasks,client.task_reserved);
+        for (name,previous,control,checked,review,phase,added,tasks,total) in cases{
+            eprintln!("catalogue_budget case={} previous={} control_slot={} checked={} retained_review={} phase={} new_owner={} final_tasks={} total={} limit={} headroom={} over={}",
+                name,previous,control,checked,review,phase,added.checked_sub(phase).unwrap(),tasks,total,OWNED_LIMIT,
+                OWNED_LIMIT.saturating_sub(total),total.saturating_sub(OWNED_LIMIT));
+        }
+
+        assert_eq!(inspection_source,reproof_source);
+        assert_eq!(client.phase,sum(&[reproof.bytes().checked_add(client.settled).unwrap().max(client.preparation),client.client]));
+        assert!(client.tasks<=client.task_reserved,"actual registration tasks exceed already-charged TASK_STORAGE");
+        assert!(sum(&[old_source_bytes,source_review_bytes])<=inspection.bytes(),"full post-freeze source DATA exceeds original reservation");
+        let admitted=[
+            operation_admission_bytes(fresh_previous,&inspect_data,&inspect_review_id,&inspect_instance,&inspect_control,inspection.bytes())
+                .and_then(|base|inspection_admission_bytes(base,source_task,coordinator)),
+            operation_admission_bytes(inspect_previous,&inspect_data,&inspect_review_id,&inspect_instance,&inspect_control,inspection.bytes())
+                .and_then(|base|inspection_admission_bytes(base,source_task,coordinator)),
+            operation_admission_bytes(register_previous,&register_data,&old_review_id,&old_instance,&register_control,client.phase),
+        ];
+        for ((name,_,_,_,_,_,_,_,total),admitted) in cases.into_iter().zip(admitted){
+            assert_eq!(admitted,(total<=OWNED_LIMIT).then_some(total),"{name}: actual production capped expression");
+            assert!(total<=OWNED_LIMIT,"{name}: genuine catalogue exceeds unchanged whole-owner cap");
+        }
+        // Only the missing inspection final-addition boundaries; existing
+        // base-operation, A-C phase/shape/parser regressions stay unchanged.
+        let exact_base=OWNED_LIMIT.checked_sub(inspection_tasks).unwrap();
+        assert_eq!(inspection_admission_bytes(exact_base,source_task,coordinator),Some(OWNED_LIMIT));
+        assert_eq!(inspection_admission_bytes(exact_base+1,source_task,coordinator),None);
+        assert_eq!(inspection_admission_bytes(usize::MAX,source_task,coordinator),None);
+        assert_eq!(inspection_task_bytes(usize::MAX,1),None);
+        assert_eq!(inspection_admission_bytes(0,usize::MAX,1),None);
+        // Every holder above remains alive across all three sums. No fixture
+        // calls native/source entry, sets accepted/returned flags, or admits GO.
+        assert!(slot.book.lock().unwrap().original.is_none());
+        assert!(!old_control.unknown.load(Ordering::SeqCst));
+    }
 }
 
 #[cfg(test)]

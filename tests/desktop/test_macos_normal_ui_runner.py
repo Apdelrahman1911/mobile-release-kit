@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
+import stat
 import subprocess
 import tempfile
+import sys
+from contextlib import ExitStack
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -523,6 +530,365 @@ class GeneratedProductOriginalTests(unittest.TestCase):
             self.assertEqual(len(closed), len(expected))
             self.assertEqual(originals.held, {})
             self.assertIsNone(originals.fd)
+
+
+@unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and hasattr(os, "pread"), "POSIX inert normal-phase DATA")
+class NormalPhaseDataTests(unittest.TestCase):
+    """Only fake original owners and private synthetic files, never Apple tools."""
+
+    def test_fixed_normal_modes_environment_and_returned_original_contract(self):
+        normal = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui")
+        temporary = str(normal / "tmp") + "/"
+        build = MODULE.normal_request(["--normal-build"], temporary)
+        self.assertEqual((build["phase"], build["derived"], build["result"], build["phaseSeconds"]),
+                         ("build", normal / "DerivedData", None, 450))
+        self.assertEqual(MODULE.normal_build_arguments(build["derived"]), [
+            "/usr/bin/xcodebuild", "build-for-testing", "-project", MODULE.PROJECT, "-scheme", "MRKNormalAppUI",
+            "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+            "-derivedDataPath", str(normal / "DerivedData"), "-jobs", "2", "-disableAutomaticPackageResolution",
+            "COMPILER_INDEX_STORE_ENABLE=NO"])
+        for name, (_, allowance, cap) in MODULE.NORMAL_SELECTIONS.items():
+            summary = MODULE.normal_request(["--normal-summary", name], temporary)
+            test = MODULE.normal_request(normal_arguments(name), temporary)
+            self.assertEqual((summary["phase"], summary["result"], summary["timeout"], summary["phaseSeconds"]),
+                             ("summary", normal / name, 30, 90))
+            self.assertEqual((test["result"], test["allowance"], test["timeout"]), (normal / name, allowance, cap))
+            self.assertEqual(test["phaseSeconds"], {180: 345, 420: 585, 720: 885}[cap])
+        for arguments in ([], ["--normal-build", "extra"], ["--normal-summary"],
+                          ["--normal-summary", "../test.xcresult"], ["--normal-summary", "other.xcresult"],
+                          ["--normal-summary", "test.xcresult", "extra"]):
+            with self.subTest(arguments=arguments), self.assertRaises(MODULE.Refused):
+                MODULE.normal_request(arguments, temporary)
+        for temporary_value in ("", temporary + "/", temporary.replace("/normal-ui/", "/elsewhere/")):
+            with self.assertRaises(MODULE.Refused):
+                MODULE.normal_request(["--normal-build"], temporary_value)
+        tools = {"xcode": b"Xcode 26.0\nBuild version 17A324\n", "sdkVersion": b"26.0\n",
+                 "sdkBuild": b"25A352\n", "sdkPath": b"/Applications/Xcode_26.0.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk\n"}
+        self.assertEqual(MODULE.normal_toolchain(tools)["sdkVersion"], "26.0")
+        MODULE.normal_toolchain(dict(tools, sdkPath=tools["sdkPath"].replace(b"Xcode_26.0.app", b"Xcode.app").replace(b"MacOSX26.0.sdk", b"MacOSX.sdk")))
+        for key, value in (("xcode", b"Xcode 25.0\nBuild version 1A\n"), ("sdkVersion", b"26.0\nextra"),
+                           ("sdkBuild", b"private value"), ("sdkPath", tools["sdkPath"].replace(b"SDKs/", b"SDKs/../SDKs/")),
+                           ("sdkPath", b"/private/arbitrary/SDK.sdk\n"), ("xcode", b"x" * 513)):
+            with self.subTest(tool=key), self.assertRaises((MODULE.Refused, UnicodeError)):
+                MODULE.normal_toolchain(dict(tools, **{key: value}))
+        source = "a" * 40
+        environment = dict(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", USER="runner", LOGNAME="runner",
+            TMPDIR=temporary, LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8", TZ="UTC", DEVELOPER_DIR=MODULE.DEVELOPER,
+            TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB="github-hosted-macos26-arm64",
+            TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=source, TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=source)
+        account = SimpleNamespace(pw_uid=501, pw_gid=20, pw_name="runner", pw_dir="/Users/runner")
+        root = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+        with ExitStack() as stack:
+            for context in (
+                patch.dict(sys.modules, {"resource": SimpleNamespace(RLIMIT_FSIZE=1, getrlimit=lambda _: (32 * 1024**3,) * 2),
+                                         "pwd": SimpleNamespace(getpwuid=lambda _: account)}),
+                patch.object(MODULE.sys, "platform", "darwin"), patch.object(MODULE.platform, "machine", return_value="arm64"),
+                patch.object(MODULE.platform, "mac_ver", return_value=("26.0", (), "arm64")),
+                patch.object(MODULE, "__file__", str(root / "desktop/tools/macos_normal_ui_runner.py")),
+                patch.object(MODULE.Path, "cwd", return_value=root), patch.object(MODULE.os, "environ", dict(environment)),
+                patch.object(MODULE.os, "getuid", return_value=501), patch.object(MODULE.os, "geteuid", return_value=501),
+                patch.object(MODULE.os, "getgid", return_value=20), patch.object(MODULE.os, "getegid", return_value=20),
+                patch.object(MODULE.os, "stat", return_value=SimpleNamespace(st_uid=501)),
+            ):
+                stack.enter_context(context)
+            self.assertEqual(MODULE.normal_context(build), (root, source, environment, (32 * 1024**3,) * 2))
+            for key in ("PATH", "HOME", "LANG", "DEVELOPER_DIR", "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB",
+                        "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE"):
+                with self.subTest(environment=key), patch.dict(MODULE.os.environ, {key: "not-admitted"}), self.assertRaises(MODULE.Refused):
+                    MODULE.normal_context(build)
+            with patch.object(MODULE.os, "geteuid", return_value=502), self.assertRaises(MODULE.Refused):
+                MODULE.normal_context(build)
+        argv = ["/usr/bin/xcodebuild", "-version"]
+        original = subprocess.CompletedProcess(argv, 65, b"ordinary original", b"ordinary stderr")
+        self.assertIs(MODULE.original_command(original, argv, 4096), original)
+        for changed in (SimpleNamespace(args=argv, returncode=0, stdout=b"", stderr=b""),
+                        subprocess.CompletedProcess(tuple(argv), 0, b"", b""),
+                        subprocess.CompletedProcess(argv, True, b"", b""),
+                        subprocess.CompletedProcess(argv, -1, b"", b""),
+                        subprocess.CompletedProcess(argv, 0, "text", b""),
+                        subprocess.CompletedProcess(argv, 0, b"x" * 4096, b"x")):
+            with self.assertRaises(MODULE.Refused):
+                MODULE.original_command(changed, argv, 4096)
+        calls = []
+        def fake_owned(arguments, **kwargs):
+            calls.append((arguments, kwargs))
+            return original
+        phase = MODULE.NormalPhase(SimpleNamespace(run_owned=fake_owned), environment, root,
+                                   MODULE.PhaseClock(90, now=lambda: 0))
+        self.assertIs(phase.call("normal-toolchain-xcode", argv, 15, 4096), original)
+        self.assertEqual(calls, [(argv, dict(environ=environment, cwd=root, timeout=15, capture=True, text=False, output_limit=4096))])
+        self.assertEqual(phase.records[0]["argvSha256"], MODULE.sha(MODULE.encoded(argv)))
+
+    def test_normal_phase_deadlines_file_limits_source_and_receipt_finality(self):
+        for phase, limit in (("build", 32 * 1024**3), ("test", 1024**3), ("summary", 1024**3)):
+            self.assertEqual(MODULE.normal_file_limit(phase, (limit, limit)), (limit, limit))
+            for actual in ((-1, -1), (limit, -1), [limit, limit], (True, limit), (limit - 1, limit - 1)):
+                with self.subTest(phase=phase, actual=actual), self.assertRaises(MODULE.Refused):
+                    MODULE.normal_file_limit(phase, actual)
+        tick = [0]
+        clock = MODULE.PhaseClock(90, now=lambda: tick[0])
+        tick[0] = 70 * 1_000_000_000
+        self.assertEqual(clock.allowance(30), 7)  # remaining20 - owner3 - publication10
+        self.assertEqual(clock.deadline, 90 * 1_000_000_000)
+        tick[0] = 77 * 1_000_000_000
+        with self.assertRaisesRegex(MODULE.Refused, "no-command-budget"):
+            clock.allowance(30)
+        tick[0] = 0
+        with self.assertRaisesRegex(MODULE.Refused, "terminal"):
+            clock.allowance(30)
+        for invalid in (-1, True, 0.5, 90 * 1_000_000_000):
+            tick = [1]
+            clock = MODULE.PhaseClock(90, now=lambda: tick[0], started=0)
+            tick[0] = invalid
+            with self.assertRaises(MODULE.Refused): clock.check()
+            self.assertTrue(clock.failed)
+        finished = MODULE.PhaseClock(90, now=lambda: 0)
+        finished.finish()
+        with self.assertRaisesRegex(MODULE.Refused, "terminal"): finished.allowance(15)
+        calls = []
+        tick = [0]
+        def late_original(argv, **_):
+            calls.append(argv); tick[0] = 90 * 1_000_000_000
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        phase = MODULE.NormalPhase(SimpleNamespace(run_owned=late_original), {}, Path("/inert"),
+                                   MODULE.PhaseClock(90, now=lambda: tick[0]))
+        for _ in range(2):
+            with self.assertRaises(MODULE.Refused): phase.call("normal-ui-summary", ["fixed"], 30, 262144)
+        self.assertEqual(calls, [["fixed"]])
+        # Real SOURCE readers/receipt originals; fake owner returns inert bytes only.
+        for fault in (None, "native-nonzero", "query-nonzero", "source-changed", "late-command", "close", "late-close"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="mrk-normal-phase-data-") as temporary:
+                root = Path(temporary)
+                normal = root / "normal-ui"; normal.mkdir(mode=0o700)
+                relative_names = ("desktop/tools/macos_normal_ui_runner.py",
+                    "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift")
+                source_rows = []
+                for relative in relative_names:
+                    path = root / relative; path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    body = b"inert source fixture, never imported or compiled\n"; path.write_bytes(body)
+                    blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+                    source_rows.append(b"100644 blob " + blob.encode() + b"\t" + relative.encode() + b"\0")
+                tool_values = (b"Xcode 26.0\nBuild version 17A324\n",
+                    b"/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk\n",
+                    b"26.0\n", b"25A352\n")
+                query_values = {tuple(query[2]): body for query, body in zip(MODULE.TOOLCHAIN_QUERIES, tool_values)}
+                tick, owned = [0], []
+                def owned_fake(argv, **kwargs):
+                    owned.append((argv, kwargs))
+                    if argv[0] == "/usr/bin/git":
+                        return subprocess.CompletedProcess(argv, 0, b"".join(source_rows), b"")
+                    if tuple(argv) in query_values:
+                        return subprocess.CompletedProcess(argv, 66 if fault == "query-nonzero" else 0, query_values[tuple(argv)], b"")
+                    if argv[1] == "build-for-testing":
+                        if fault == "source-changed": (root / relative_names[0]).write_bytes(b"changed inert SOURCE\n")
+                        if fault == "late-command": tick[0] = 450 * 1_000_000_000
+                        return subprocess.CompletedProcess(argv, 65 if fault == "native-nonzero" else 0, b"inert build original\n", b"")
+                    self.fail("unexpected fake original route")
+                request = MODULE.normal_request(["--normal-build"], str(normal / "tmp") + "/")
+                phase = MODULE.NormalPhase(SimpleNamespace(run_owned=owned_fake), {}, root, MODULE.PhaseClock(450, now=lambda: tick[0]))
+                receipt_fd, closed = [None], []
+                original_open, original_close = os.open, os.close
+                def open_original(path, flags, *args, **kwargs):
+                    fd = original_open(path, flags, *args, **kwargs)
+                    if str(path).endswith("/build.command-admission.json"): receipt_fd[0] = fd
+                    return fd
+                def close_original(fd):
+                    original_close(fd)
+                    if fd == receipt_fd[0]:
+                        closed.append(fd)
+                        if fault == "close": raise OSError("synthetic consuming close failure")
+                        if fault == "late-close": tick[0] = 450 * 1_000_000_000
+                with patch.object(MODULE.os, "open", open_original), patch.object(MODULE.os, "close", close_original):
+                    if fault in (None, "native-nonzero"):
+                        original = MODULE.execute_normal_phase(phase, request, "a" * 40, (32 * 1024**3,) * 2)
+                        self.assertEqual(original.returncode, 65 if fault else 0)
+                    else:
+                        with self.assertRaises((MODULE.Refused, MODULE.NativeQueryFailure, OSError)):
+                            MODULE.execute_normal_phase(phase, request, "a" * 40, (32 * 1024**3,) * 2)
+                if fault in ("query-nonzero", "source-changed", "late-command"):
+                    self.assertFalse((normal / "build.command-admission.json").exists())
+                if fault == "query-nonzero": self.assertEqual(len(owned), 2)
+                if fault in (None, "native-nonzero", "close", "late-close"):
+                    self.assertEqual(len(closed), 1)
+                if fault is None:
+                    facts = json.loads((normal / "build.command-admission.json").read_bytes())
+                    self.assertEqual([row["role"] for row in facts["commands"]], ["normal-ui-source-roster",
+                        "normal-toolchain-xcode", "normal-toolchain-sdkPath", "normal-toolchain-sdkVersion",
+                        "normal-toolchain-sdkBuild", "normal-ui-build", "normal-ui-source-roster"])
+                    self.assertTrue(facts["sourcePrePostMatched"])
+                    self.assertTrue(facts["phaseClock"]["postCloseDeadlineRequired"])
+                    self.assertEqual(stat.S_IMODE((normal / "build.command-admission.json").stat().st_mode), 0o600)
+                    with self.assertRaises(OSError): MODULE.exclusive_output(normal / "build.command-admission.json", b"no overwrite\n", 32768)
+                    # Same checked original source route for the fixed summary, no Apple command.
+                    (normal / "test.xcresult").mkdir(mode=0o700)
+                    def summary_fake(argv, **kwargs):
+                        owned.append((argv, kwargs))
+                        return subprocess.CompletedProcess(argv, 0, b"".join(source_rows) if argv[0] == "/usr/bin/git" else b'{"totalTestCount":1}\n', b"")
+                    summary = MODULE.normal_request(["--normal-summary", "test.xcresult"], str(normal / "tmp") + "/")
+                    summary_phase = MODULE.NormalPhase(SimpleNamespace(run_owned=summary_fake), {}, root, MODULE.PhaseClock(90, now=lambda: 0))
+                    MODULE.execute_normal_phase(summary_phase, summary, "a" * 40, (1024**3,) * 2)
+                    self.assertEqual(owned[-2][0], ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(normal / "test.xcresult"), "--compact"])
+                    self.assertEqual(owned[-2][1]["timeout"], 30)
+                    self.assertEqual(owned[-2][1]["output_limit"], 262144)
+                    self.assertEqual(json.loads((normal / "summary.command-admission.json").read_bytes())["resultBundle"], "test.xcresult")
+
+    def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
+        selected = "testLaunchCancelAndQuit"
+        query = b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=title;matches=2;exceedsFour=0;nonAtomic=1\n"
+        secret = b"PRIVATE-SYNTHETIC-NOT-FOR-PUBLIC-output"
+        body = (b"/Users/private/" + secret + b" Error Domain=NSCocoaErrorDomain Code=-4 description=" + secret + b"\n"
+            b"NormalAppUITests.swift:123:9: error: -[MRKNormalAppUITests.NormalAppUITests testLaunchCancelAndQuit] : private reason\n"
+            b"Test Case '-[MRKNormalAppUITests.NormalAppUITests testLaunchCancelAndQuit]' started.\n" + query + query)
+        original = subprocess.CompletedProcess(["fixed-original"], 65, body, b"** TEST EXECUTE FAILED **\n")
+        value = MODULE.normal_failure_diagnostics("test", "test.xcresult", original)
+        self.assertEqual(value["errorCodes"], [{"stream": "stdout", "domain": "NSCocoaErrorDomain", "code": -4}])
+        self.assertEqual(value["sourceFailures"], [{"stream": "stdout", "source": "NormalAppUITests.swift", "method": selected, "line": 123, "column": 9}])
+        self.assertEqual(len(value["queryObservations"]), 2)  # Preserve repeats, never substitute the last as authority.
+        self.assertTrue(value["markers"]["selectedCaseStarted"] and value["markers"]["testExecuteFailed"])
+        self.assertEqual(value["stdoutSha256"], hashlib.sha256(body).hexdigest())
+        for private in (secret, b"/Users/private", b"private reason", b"description="):
+            self.assertNotIn(private, MODULE.encoded(value))
+        invalid = (query.rstrip(b"\n") + b" invalid\n" + query.rstrip(b"\n") + b"\nextra=private\n" +
+            b"Error Domain=NSCocoaErrorDomain Code=-0\nError Domain=NSCocoaErrorDomain Code=2147483648\n" +
+            b"Error Domain=PrivateDomain Code=1\nNormalAppUITests.swift:65536:9: error: -[MRKNormalAppUITests.NormalAppUITests testLaunchCancelAndQuit] : bad\n")
+        invalid_value = MODULE.normal_failure_diagnostics("test", "test.xcresult", subprocess.CompletedProcess([], 65, invalid, b""))
+        self.assertEqual(invalid_value["errorCodes"], [])
+        self.assertEqual(invalid_value["sourceFailures"], [])
+        incomplete = MODULE.normal_failure_diagnostics("test", "test.xcresult", subprocess.CompletedProcess([], 65, query[:-1], b""))
+        self.assertEqual(incomplete["queryObservations"], [])
+        many = MODULE.normal_failure_diagnostics("test", "test.xcresult", subprocess.CompletedProcess([], 65, query * 5, b""))
+        self.assertEqual(len(many["queryObservations"]), 4)
+        self.assertTrue(many["findingsTruncated"])
+        self.assertLessEqual(len(MODULE.encoded(many)) + 1, 4096)
+        long_body = b"x" * 65537 + b"\nError Domain=NSPOSIXErrorDomain Code=2\n"
+        complete = MODULE.normal_failure_diagnostics("build", None, subprocess.CompletedProcess([], 65, long_body, b""))
+        self.assertEqual(complete["errorCodes"][0]["code"], 2)  # Not a truncated64-KiB tail/prefix.
+        for phase, selection, cap in (("build", None, 1048576), ("test", "test.xcresult", 1048576),
+                                      ("summary", "test.xcresult", 262144), ("query", None, 4096)):
+            with self.assertRaises(MODULE.Refused):
+                MODULE.normal_failure_diagnostics(phase, selection, subprocess.CompletedProcess([], 65, b"x" * (cap + 1), b""))
+        for bad in (subprocess.CompletedProcess([], 0, b"", b""), subprocess.CompletedProcess([], True, b"", b""),
+                    SimpleNamespace(returncode=65, stdout=secret, stderr=b"")):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_failure_diagnostics("build", None, bad)
+        normal = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui")
+        request = MODULE.normal_request(["--normal-build"], str(normal / "tmp") + "/")
+        # Main's formatter/output failures preserve a genuine COMPLETE original failure.
+        # Context/owner are inert fakes here, not actual runtime/native admission.
+        for fault in ("formatter", "oversize", "publication", "query"):
+            with self.subTest(fault=fault), ExitStack() as stack:
+                published = []
+                output, errors = io.BytesIO(), io.BytesIO()
+                stream = lambda buffer: SimpleNamespace(buffer=buffer, write=lambda value: buffer.write(value.encode()), flush=lambda: None)
+                native = subprocess.CompletedProcess(["fixed-original"], 66 if fault == "query" else 65, secret, b"private stderr")
+                for context in (
+                    patch.object(MODULE.sys, "argv", ["helper", "--normal-build"]),
+                    patch.object(MODULE.os, "environ", {"TMPDIR": str(normal / "tmp") + "/"}),
+                    patch.object(MODULE.time, "monotonic_ns", return_value=0),
+                    patch.object(MODULE, "normal_context", return_value=(Path("/inert"), "a" * 40, {}, (32 * 1024**3,) * 2)),
+                    patch.object(MODULE, "load_normal_owner", return_value=SimpleNamespace(ProcessError=OSError, ProcessInterrupted=InterruptedError)),
+                    patch.object(MODULE, "execute_normal_phase", side_effect=MODULE.NativeQueryFailure(native) if fault == "query" else None, return_value=native),
+                    patch.object(MODULE.sys, "stdout", stream(output)), patch.object(MODULE.sys, "stderr", stream(errors)),
+                ): stack.enter_context(context)
+                if fault == "formatter": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", side_effect=ValueError(secret.decode())))
+                if fault == "oversize": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", return_value={"private": "x" * 5000}))
+                def publish(path, data, cap):
+                    published.append((path, data, cap))
+                    if fault == "publication": raise OSError("synthetic original close failure")
+                stack.enter_context(patch.object(MODULE, "exclusive_output", publish))
+                self.assertEqual(MODULE.main(), native.returncode)
+                self.assertEqual(len(published), 1)
+                self.assertNotIn(secret, published[0][1])
+                self.assertLessEqual(len(published[0][1]), 4096)
+                diagnostic = json.loads(published[0][1])
+                self.assertEqual(diagnostic["originalReturncode"], native.returncode)
+                if fault in ("formatter", "oversize"): self.assertEqual(diagnostic["status"], "unavailable")
+                if fault == "query":
+                    self.assertEqual(published[0][0].name, "toolchain.failure-diagnostics.json")
+                    self.assertEqual(output.getvalue(), b"")
+                if fault == "publication": self.assertIn(b"normal-failure-diagnostic-publication-failed\n", errors.getvalue())
+
+    def test_acl_complete_source_inventory_reads_originals_at_current_native_size(self):
+        workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
+        begin = "          # Fixed complete ACL SOURCE reader; logs retain their separate 128-KiB bound.\n"
+        end = "          # End fixed complete ACL SOURCE reader.\n"
+        self.assertEqual(workflow.count(begin), 1); self.assertEqual(workflow.count(end), 1)
+        source = workflow.split(begin, 1)[1].split(end, 1)[0]
+        self.assertTrue(all(not line.strip() or line.startswith("          ") for line in source.splitlines()))
+        source = "\n".join(line[10:] for line in source.splitlines()) + "\n"
+        namespace = dict(hashlib=hashlib, json=json, os=os, re=re, stat=stat)
+        exec(compile(source, "<fixed ACL source reader only>", "exec"), namespace)
+        read_sources = namespace["acl_source_hashes"]
+        paths = ("desktop/native/macos-installed-native/src/native.m", "desktop/native/macos-installed-native/tests/acl_probe.m")
+        current_length = len((ROOT / paths[0]).read_bytes())
+        self.assertGreater(current_length, 131072); self.assertLessEqual(current_length, 262144)
+        for length in (current_length, 262144):
+            with self.subTest(length=length), tempfile.TemporaryDirectory(prefix="mrk-acl-source-data-") as temporary:
+                root = Path(temporary)
+                rows = []
+                for name, size in zip(paths, (length, 73)):
+                    body = b"x" * size
+                    path = root / name; path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    path.write_bytes(body); path.chmod(0o644)
+                    rows.append({"path": name, "gitMode": "100644", "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
+                                 "blob": hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()})
+                original = dict(source="a" * 40, tree="b" * 40, files=rows)
+                inventory = root / "source-inventory.json"
+                def save(value):
+                    inventory.write_text(json.dumps(value)); inventory.chmod(0o600)
+                save(original)
+                expected = {row["path"]: row["sha256"] for row in rows}
+                self.assertEqual(read_sources(str(root), str(inventory), "a" * 40, "a" * 40), expected)
+                for key, bad in (("sha256", "0" * 64), ("blob", "0" * 40), ("size", length - 1),
+                                 ("size", True), ("size", 262145), ("gitMode", "100755")):
+                    changed = dict(original, files=[dict(rows[0], **{key: bad}), rows[1]])
+                    save(changed)
+                    with self.subTest(row=key), self.assertRaises(ValueError):
+                        read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                save(dict(original, files=rows + [rows[0]]))
+                with self.assertRaises(ValueError): read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                inventory.write_text(json.dumps(original)[:-1] + ',"source":"' + "a" * 40 + '"}')
+                with self.assertRaises(ValueError): read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                save(original)
+                with self.assertRaises(ValueError): read_sources(str(root), str(inventory), "a" * 40, "c" * 40)
+                with self.assertRaises(ValueError): read_sources(str(root), str(inventory), "c" * 40, "c" * 40)
+                native = root / paths[0]
+                native.chmod(0o744)
+                with self.assertRaises(ValueError): read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                native.chmod(0o644)
+                link = root / "task-hardlink"; os.link(native, link)
+                with self.assertRaises(ValueError): read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                link.unlink()
+                native.unlink(); os.symlink(root / paths[1], native)
+                with self.assertRaises(OSError): read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                native.unlink(); native.write_bytes(b"x" * (262144 + 1)); native.chmod(0o644)
+                with self.assertRaises(ValueError): read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                native.write_bytes(b"x" * length)
+                actual_open, actual_read, actual_close = os.open, os.read, os.close
+                for fault in ("early-eof", "changed", "close"):
+                    selected, closed, changed = [None], [], [False]
+                    def opened(path, flags, *args, **kwargs):
+                        fd = actual_open(path, flags, *args, **kwargs)
+                        if str(path) == str(native):
+                            self.assertTrue(flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK)
+                            selected[0] = fd
+                        return fd
+                    def reading(fd, size):
+                        if fd == selected[0] and fault == "early-eof": return b""
+                        data = actual_read(fd, size)
+                        if fd == selected[0] and fault == "changed" and not changed[0]:
+                            changed[0] = True
+                            with native.open("ab") as output: output.write(b"!")
+                        return data
+                    def closing(fd):
+                        actual_close(fd)
+                        if fd == selected[0]:
+                            closed.append(fd)
+                            if fault == "close": raise OSError("synthetic consuming source close failure")
+                    with patch.object(os, "open", opened), patch.object(os, "read", reading), patch.object(os, "close", closing):
+                        with self.assertRaises((ValueError, OSError)):
+                            read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
+                    self.assertEqual(len(closed), 1)
+                    native.write_bytes(b"x" * length)
 
 
 if __name__ == "__main__":

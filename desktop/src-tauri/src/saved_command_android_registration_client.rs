@@ -900,6 +900,51 @@ async fn coordinate(original: Arc<Operation>, input: CoordinatorInputs) -> bool 
     }
 }
 
+// Production factories expose their concrete returned types without executing a
+// worker. Capture the separate channels exactly as the original inline closures;
+// assembling Inputs outside the closure would measure a different environment.
+fn registration_source_task(original:Arc<Operation>,reproof:oneshot::Receiver<ReadOnlyReproof>,
+    reproved:oneshot::Sender<Reproved>,transfer:oneshot::Receiver<TransferGo>)->impl FnOnce()->SourceReturn{
+    move||source_worker(original,SourceInputs{reproof,reproved,transfer})
+}
+fn registration_ipc_task(original:Arc<Operation>,preparation:oneshot::Receiver<BeginPreparation>,
+    ready:oneshot::Sender<Ready>,transfer:oneshot::Receiver<TransferGo>,
+    finish:oneshot::Receiver<FinishAfterSourceJoin>)->impl FnOnce()->ClientReturn{
+    move||ipc_worker(original,IpcInputs{preparation,ready:Some(ready),transfer,finish})
+}
+fn registration_phase_storage(reproof:usize,preparation:Option<usize>,client:usize)->Option<usize>{
+    reproof.checked_add(service_setup::Preparation::SETTLED_BYTES)?
+        .max(preparation.unwrap_or(usize::MAX)).checked_add(client)
+}
+fn registration_task_bytes(source:usize,ipc:usize,coordinator:usize)->Option<usize>{
+    source.checked_add(ipc)?.checked_add(coordinator)?
+        .checked_add(2usize.checked_mul(std::mem::size_of::<SourceReturn>())?)?
+        .checked_add(std::mem::size_of::<Finalization>())
+}
+#[cfg(test)]
+pub(super) struct CatalogueClientRows {
+    pub(super) client:usize,pub(super) preparation:usize,pub(super) settled:usize,
+    pub(super) phase:usize,pub(super) tasks:usize,pub(super) task_reserved:usize,
+}
+#[cfg(test)]
+pub(super) fn catalogue_client_rows(reproof:usize)->CatalogueClientRows{
+    // Fixed-arity inference from the SAME production function items. These
+    // helpers never invoke a factory, create/poll a future or make an Operation.
+    fn returned2<A,B,R,F:FnOnce(A,B)->R>(_:F)->usize{std::mem::size_of::<R>()}
+    fn returned4<A,B,C,D,R,F:FnOnce(A,B,C,D)->R>(_:F)->usize{std::mem::size_of::<R>()}
+    fn returned5<A,B,C,D,E,R,F:FnOnce(A,B,C,D,E)->R>(_:F)->usize{std::mem::size_of::<R>()}
+    let client=ClientOriginal::reservation_bytes().expect("actual client/native allocation bound");
+    let preparation=service_setup::Preparation::reservation_bytes().expect("actual preparation bound");
+    let tasks=registration_task_bytes(returned4(registration_source_task),returned5(registration_ipc_task),
+        returned2(coordinate)).unwrap();
+    // TASK_STORAGE is already inside client, not an extra phase charge.
+    assert_eq!(registration_task_bytes(usize::MAX,1,0),None);
+    assert_eq!(registration_phase_storage(usize::MAX,Some(preparation),client),None);
+    assert_eq!(registration_phase_storage(reproof,None,client),None);
+    CatalogueClientRows{client,preparation,settled:service_setup::Preparation::SETTLED_BYTES,
+        phase:registration_phase_storage(reproof,Some(preparation),client).unwrap(),tasks,task_reserved:TASK_STORAGE}
+}
+
 pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mut Registry,
     checked: &Checked, current: crate::asset_session::ValidatedSavedInput,
     census: &crate::asset_session::AndroidRegistrationCensus<'_>, gate: android_wire::Availability,
@@ -941,10 +986,8 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
     // Before genuine Ready the source slots are inert. The actual fixed Check
     // retires inspector storage and enforces its retained bound before native
     // begin/reproof. Reserve the larger genuine phase, never omit live storage.
-    let phase_bytes=source_reservation.checked_add(service_setup::Preparation::SETTLED_BYTES)
-        .map(|bytes|bytes.max(service_setup::Preparation::reservation_bytes().unwrap_or(usize::MAX)))
+    let phase_storage = registration_phase_storage(source_reservation,service_setup::Preparation::reservation_bytes(),client_bytes)
         .ok_or_else(wire::unavailable)?;
-    let phase_storage = phase_bytes.checked_add(client_bytes).ok_or_else(wire::unavailable)?;
     let total = operation_admission_bytes(previous,&data,&checked.review_id,&checked.instance,&control,phase_storage)
         .ok_or_else(wire::unavailable)?;
     // The whole high-water, including bounded task/channel cells, is accepted
@@ -966,17 +1009,12 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
     let (reproof_send, reproof) = oneshot::channel(); let (reproved_send, reproved) = oneshot::channel();
     let (source_go, source_transfer) = oneshot::channel(); let (ipc_go, ipc_transfer) = oneshot::channel();
     let (finish_send, finish) = oneshot::channel();
-    let source_task = { let original = original.clone(); move || source_worker(original, SourceInputs {
-        reproof, reproved: reproved_send, transfer: source_transfer }) };
-    let ipc_task = { let original = original.clone(); move || ipc_worker(original, IpcInputs {
-        preparation, ready: Some(ready_send), transfer: ipc_transfer, finish }) };
+    let source_task = registration_source_task(original.clone(),reproof,reproved_send,source_transfer);
+    let ipc_task = registration_ipc_task(original.clone(),preparation,ready_send,ipc_transfer,finish);
     let coordinator = coordinate(original.clone(), CoordinatorInputs { begin, prepare: Some(prepare), ready,
         reproof: Some(reproof_send), reproved, source_go: Some(source_go), ipc_go: Some(ipc_go), finish: Some(finish_send) });
-    let task_bytes = std::mem::size_of_val(&source_task).checked_add(std::mem::size_of_val(&ipc_task))
-        .and_then(|n| n.checked_add(std::mem::size_of_val(&coordinator)))
-        .and_then(|n| n.checked_add(2usize.checked_mul(std::mem::size_of::<SourceReturn>())?))
-        .and_then(|n| n.checked_add(std::mem::size_of::<Finalization>()))
-        .ok_or_else(wire::unavailable)?;
+    let task_bytes = registration_task_bytes(std::mem::size_of_val(&source_task),std::mem::size_of_val(&ipc_task),
+        std::mem::size_of_val(&coordinator)).ok_or_else(wire::unavailable)?;
     if task_bytes > TASK_STORAGE { return Err(wire::unavailable()); }
     original.reservation.set(Reservation { whole: total, source: source_reservation }).map_err(|_| wire::unavailable())?;
     let mut native_slot = original_client(&original).native.try_lock().map_err(|_| wire::unavailable())?;

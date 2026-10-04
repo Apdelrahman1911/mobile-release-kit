@@ -403,7 +403,7 @@ SHELL_RECOVERY_PRODUCER = r'''try:
     need(threading.current_thread() is threading.main_thread() and threading.active_count()==1)
     sys.path.insert(0, core)
     from mobile_release import build_inputs as inputs
-    from mobile_release.owned_process import ProcessCleanupError
+    from mobile_release.owned_process import ProcessError
     need(inputs.__file__.startswith(core+"/") and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
     original_init=inputs._FD.__init__
     original_retire=inputs._retire_terminal
@@ -448,7 +448,8 @@ SHELL_RECOVERY_PRODUCER = r'''try:
         inputs._retire_terminal=original_retire
     # NO core operation or filesystem access below: inspect the original retained
     # objects and emit bounded closed DATA to the original stdout only.
-    need(type(caught) is ProcessCleanupError and invocation is not None and original is not None)
+    need(type(caught) is ProcessError and invocation is not None and original is not None
+         and caught.dispatched is False and caught.contained is True and caught.cleanup_complete is False)
     guard=invocation.cancellation
     ledger=guard._ledger
     project=invocation._original_project
@@ -458,7 +459,8 @@ SHELL_RECOVERY_PRODUCER = r'''try:
     need(all(slot.guard is guard and slot.open_state in ("OPEN","NO_EFFECT") and slot.close_state=="CLOSED" and slot.number is None for slot in attempted))
     need(all(slot.guard is guard and slot.number is None and slot.close_state in ("NOT_ATTEMPTED","CLOSED") for slot in never_opened))
     need(guard._restoration=="RESTORED" and ledger._fatal and ledger._command is None and ledger._profile is None
-         and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False)
+         and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False
+         and ledger._profile_contained is True and ledger._command_contained is True)
     need(invocation.claimed and not invocation.active and not invocation.reserved and not invocation.frames
          and invocation.child is None and invocation.project_owner is None and invocation.store_namespace is None
          and invocation.reservation_state=="RELEASED" and invocation.lock_result is None and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
@@ -2913,7 +2915,7 @@ def _accessibility_selection_projection_diagnostic(value, selection, button, err
          and eligible < ACCESSIBILITY_SELECT_NODES and attempted <= min(64, eligible) and added <= 64
          and value["maxDepth"] <= 8 and (added == 0) == (value["maxDepth"] == 0), label)
     for key, allowed in (("normalFixtureMask", 31), ("alternateValueMask", 31), ("frontierLabelMask", 31),
-                         ("outsideFieldMask", 31), ("alternateRoleMask", 0x7004), ("frontierRoleMask", 0x1f004),
+                         ("outsideFieldMask", 31), ("alternateRoleMask", 0x7004), ("frontierRoleMask", 0x1f014),
                          ("unavailable", 63), ("omissions", 1023)):
         need(value[key] & ~allowed == 0, label)
     need((value["alternateValueMask"] == 0) == (value["alternateRoleMask"] == 0)
@@ -4611,12 +4613,24 @@ class Fixtures:
         # Do not create/repair/adopt a pending namespace. The genuine producer
         # must acquire the ordinary core lease and refuse any existing session.
 
-    def _account_file(self, parent, name, *, body_hash=None, limit=512*1024, identity=None):
+    def _account_file(self, parent, name, *, body_hash=None, limit=512*1024, identity=None, role="private"):
+        need((role == "private" and name in ("intent.json", "state.json", "account-baseline.json")
+              and body_hash is not None and identity is None)
+             or (role == "native" and name in ("signing.keychain-db", IOS_ACCOUNT_LOCK_NAME)
+                 and identity is not None and body_hash is None), "ios-account-file-role")
+        need(type(limit) is int and limit >= 0, "ios-account-file-limit")
+        # The native caller keeps its64MiB allowance for both names. Only the
+        # fixed AtomicFile lock has an effective cap0; private JSON stays0600.
+        cap = (0 if name == IOS_ACCOUNT_LOCK_NAME else 64*1024*1024 if role == "native"
+               else 12*1024 if name == "account-baseline.json" else 512*1024)
         fd = self._account_open(name, parent)
         before = signature(os.fstat(fd))
+        mode = stat.S_IMODE(before[2])
+        role_safe = ((name == IOS_ACCOUNT_LOCK_NAME and mode in (0o400, 0o404, 0o440, 0o444) and before[6] == 0)
+                     or (name != IOS_ACCOUNT_LOCK_NAME and mode == 0o600))
         need(before == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
-             and before[2] == stat.S_IFREG | 0o600 and before[3] == self.uid and before[5] == 1
-             and 0 <= before[6] <= limit, "ios-account-owned-file")
+             and stat.S_ISREG(before[2]) and role_safe and before[3] == self.uid and before[5] == 1
+             and 0 <= before[6] <= min(limit, cap), "ios-account-owned-file")
         if identity is not None:
             need(before[:2] == (identity["device"], identity["inode"]), "ios-account-owned-file-identity")
         row = (parent, name, fd, before, body_hash)
@@ -4663,7 +4677,7 @@ class Fixtures:
                  "ios-account-baseline-original")
             self.account_baseline_files.append((parent, path.name, fd, before))
         for name, identity in private["native"].items():
-            self.account_native_files.append(self._account_file(native, name, identity=identity, limit=64*1024*1024))
+            self.account_native_files.append(self._account_file(native, name, identity=identity, limit=64*1024*1024, role="native"))
         for name, expected in private["controls"].items():
             row = self._account_file(session, name, body_hash=expected["sha256"])
             need(row[3][6] == expected["bytes"], "ios-account-control-size")
@@ -4704,11 +4718,13 @@ class Fixtures:
             parent, name, fd, before, sha = row
             current = signature(os.fstat(fd))
             if after:
-                need(current[:5] == before[:5] and current[5] == 0, "ios-account-original-not-unlinked")
+                need(current[:5] == before[:5] and current[5] == 0
+                     and (name != IOS_ACCOUNT_LOCK_NAME or current[6] == 0), "ios-account-original-not-unlinked")
                 absent(parent, name)
             else:
-                need(current[:6] == before[:6]
-                     and signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:6] == before[:6], "ios-account-owned-file-changed")
+                named = signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
+                need(current[:6] == before[:6] and named[:6] == before[:6]
+                     and (name != IOS_ACCOUNT_LOCK_NAME or current[6] == named[6] == 0), "ios-account-owned-file-changed")
                 if sha is not None:
                     self._account_hash(row)
         self._roster(self.account_lease, () if after else ("session-"+private["token"],), "ios-account-lease-roster")

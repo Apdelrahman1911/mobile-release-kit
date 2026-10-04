@@ -70,6 +70,8 @@ mod installation;
 #[path = "asset_session_installation_memory.rs"]
 mod installation_memory;
 pub(crate) use installation_memory::{AndroidRegistrationCensus,AndroidServiceSetupCensus};
+#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(crate) use installation_memory::catalogue_census_data;
 
 // Explicitly ignored component fixture only: no installed window, persistent
 // provider admission or renderer command is enabled by compiling this module.

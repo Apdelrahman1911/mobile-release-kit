@@ -1981,13 +1981,13 @@ static void mrk_ax_projection_diagnostic_probe(MRKPrompt *s, const MRKSelectionP
         unsigned role = q->roles[at];
         BOOL text = role == MRK_SELECT_TEXT || role == MRK_SELECT_FIELD;
         BOOL entry = role == MRK_ROLE_GROUP || role == MRK_SELECT_ROW || role == MRK_SELECT_CELL || role == MRK_SELECT_IMAGE;
-        if (entry && !mrk_ax_diag_label(s, q->nodes[at], role, kAXTitleAttribute, MRK_AX_ATTR_TITLE,
+        BOOL button = role == MRK_ROLE_BUTTON;
+        if ((entry || button) && !mrk_ax_diag_label(s, q->nodes[at], role, kAXTitleAttribute, MRK_AX_ATTR_TITLE,
             MRK_DIAG_TITLE, &d->frontier_label_mask, &d->frontier_role_mask)) return;
-        if ((text || entry) && !mrk_ax_diag_label(s, q->nodes[at], role, kAXValueAttribute, MRK_AX_ATTR_VALUE,
+        if ((text || entry || button) && !mrk_ax_diag_label(s, q->nodes[at], role, kAXValueAttribute, MRK_AX_ATTR_VALUE,
             MRK_DIAG_VALUE, &d->frontier_label_mask, &d->frontier_role_mask)) return;
         if (text || role == MRK_SELECT_IMAGE) continue;
-        if (role == MRK_ROLE_BUTTON) { d->omissions |= MRK_DIAG_OMIT_ROLE; continue; }
-        // Remaining closed roles are structural/opaque or row/cell containers.
+        // Added Button labels/children are diagnostic only, never selection eligibility.
         if (!mrk_ax_diag_children(s, p, original_count, q->nodes[at], q->depths[at])) return;
     }
     for (unsigned at = 0; at < original_count; ++at) {

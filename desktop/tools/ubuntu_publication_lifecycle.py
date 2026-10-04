@@ -94,7 +94,7 @@ need(root.is_absolute() and root.name=="project" and root.parent.name==case and 
 need(threading.current_thread() is threading.main_thread() and threading.active_count()==1)
 sys.path.insert(0, core)
 from mobile_release import build_inputs as inputs
-from mobile_release.owned_process import ProcessCleanupError
+from mobile_release.owned_process import ProcessError
 need(inputs.__file__.startswith(core+"/") and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
 original_init=inputs._FD.__init__
 original_retire=inputs._retire_terminal
@@ -139,7 +139,8 @@ finally:
     inputs._retire_terminal=original_retire
 # NO core operation or filesystem access below: inspect the original retained
 # objects and emit bounded closed DATA to the original stdout only.
-need(type(caught) is ProcessCleanupError and invocation is not None and original is not None)
+need(type(caught) is ProcessError and invocation is not None and original is not None
+     and caught.dispatched is False and caught.contained is True and caught.cleanup_complete is False)
 guard=invocation.cancellation
 ledger=guard._ledger
 project=invocation._original_project
@@ -149,7 +150,8 @@ need(0<len(attempted)<=2048 and len(attempted)+len(never_opened)==len(slots))
 need(all(slot.guard is guard and slot.open_state in ("OPEN","NO_EFFECT") and slot.close_state=="CLOSED" and slot.number is None for slot in attempted))
 need(all(slot.guard is guard and slot.number is None and slot.close_state in ("NOT_ATTEMPTED","CLOSED") for slot in never_opened))
 need(guard._restoration=="RESTORED" and ledger._fatal and ledger._command is None and ledger._profile is None
-     and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False)
+     and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False
+     and ledger._profile_contained is True and ledger._command_contained is True)
 need(invocation.claimed and not invocation.active and not invocation.reserved and not invocation.frames
      and invocation.child is None and invocation.project_owner is None and invocation.store_namespace is None
      and invocation.reservation_state=="RELEASED" and invocation.lock_result is None and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)

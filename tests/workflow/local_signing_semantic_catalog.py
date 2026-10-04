@@ -132,18 +132,20 @@ UNKNOWN_STATUS = MappingProxyType({
     "native-unrecorded-inode": CONFLICT, "active-build-result": CONFLICT, "active-build-pending": CONFLICT,
 })
 
-# Physical prefix expectations come from this fixed source, never worker JSON
+# Physical-effect expectations come from this fixed source, never worker JSON
 # or a claim to have observed an operand inside another process's stack.
+# Keep the historical N/native-prefix/lock ID, but its truthful edge is empty
+# readonly lock CREATION before the DB, not a nonexistent lock-payload write.
 NATIVE_PREFIXES = MappingProxyType({
     "database": native("native-effect/write/" + DB_NAME, edge="partial",
                        operationKind="create", operationPhase="ARMED"),
-    "lock": native("native-effect/write/" + LOCK_NAME, edge="partial",
+    "lock": native("native-effect/create/" + LOCK_NAME, edge="after",
                    operationKind="create", operationPhase="ARMED"),
     "transaction-stage": native("native-effect/write/native-atomic-stage", edge="partial",
                                 operationKind="settings", operationPhase="ARMED"),
 })
 NATIVE_PREFIX_CONTENT = MappingProxyType({
-    "database": b"fictional-db", "lock": b"fictional-lock",
+    "database": b"fictional-db", "lock": b"",
     "transaction-stage": b"fictional-db-revision-1",
 })
 

@@ -50,11 +50,90 @@ impl FixedSupportReview {
         self.archives[0].bytes.checked_add(self.archives[1].bytes)?.checked_add(self.member.bytes)
     }
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
-        self.archives.iter().try_fold(size_of::<Self>()
-            .checked_add(self.installation.capacity().checked_mul(size_of::<Identity>())?)?,
-            |sum, archive| sum.checked_add(archive.sha256.capacity()))
+        support_review_allocation_bytes(&self.installation,&self.archives)
     }
 }
+fn support_review_allocation_bytes(installation:&Vec<Identity>,archives:&[ArchiveObservation;2])->Option<usize>{
+    archives.iter().try_fold(size_of::<FixedSupportReview>()
+        .checked_add(installation.capacity().checked_mul(size_of::<Identity>())?)?,
+        |sum,archive|sum.checked_add(archive.sha256.capacity()))
+}
+// Separate inert comparison holder; never construct a FixedSupportReview
+// claiming whole-archive reads or set the slots' frozen/settled/native facts.
+#[cfg(test)]
+pub(crate) struct CatalogueSupportData {
+    installation:Vec<Identity>,archives:[ArchiveObservation;2],_member:ZipMemberSpec<'static>,
+}
+#[cfg(test)]
+impl CatalogueSupportData {
+    pub(crate) fn retained_bytes(&self)->Option<usize>{
+        support_review_allocation_bytes(&self.installation,&self.archives)
+    }
+}
+#[cfg(test)]
+impl FixedSupportSlots {
+    pub(crate) fn catalogue_allocation_data(recipe:&Recipe)->(Self,CatalogueSupportData){
+        fn cell(slots:&mut FixedSupportSlots,parent:Option<usize>,name:&str)->usize{
+            let index=slots.original.records.len();
+            assert!(index<SUPPORT_RECORDS);
+            slots.original.records.push(Record{state:State::Reserved,fd:None,parent,name:name.to_owned(),
+                identity:None,android_flags:None});
+            index
+        }
+        let mut slots=Self::new();
+        slots.original.records.try_reserve_exact(8256).unwrap();
+        slots.names.try_reserve_exact(ZIP_ENTRIES).unwrap();
+        slots.spans.try_reserve_exact(ZIP_ENTRIES).unwrap();
+        assert_eq!(slots.original.records.capacity(),8256);
+        assert_eq!(slots.names.capacity(),ZIP_ENTRIES);assert_eq!(slots.spans.capacity(),ZIP_ENTRIES);
+        // Mirror the exact protected_app_once + fixed support lexical roster.
+        // These names are compiled constants, never current_exe or path reads.
+        let mut parent=cell(&mut slots,None,"/");
+        for part in crate::macos_install_paths::INSTALL_ROOT.strip_prefix('/').unwrap().split('/'){
+            assert!(!part.is_empty());parent=cell(&mut slots,Some(parent),part);
+        }
+        for name in [crate::macos_install_paths::APP_NAME,"Contents","Helpers",
+            crate::macos_install_paths::PAYLOAD_NAME,"Contents"]{
+            parent=cell(&mut slots,Some(parent),name);
+        }
+        let contents=parent;
+        let macos=cell(&mut slots,Some(contents),"MacOS");
+        cell(&mut slots,Some(macos),"mobile-release-kit-desktop");
+        let resources=cell(&mut slots,Some(contents),"Resources");
+        let support=cell(&mut slots,Some(resources),"android-support");
+        for asset in [SupportAsset::BundletoolJar,SupportAsset::Aapt2OsxJar]{
+            cell(&mut slots,Some(support),asset_leaf(asset));
+        }
+        let roster=recipe.source_roster();
+        assert_eq!(roster.support.len(),2);assert_eq!(roster.archive_members.len(),1);
+        assert_eq!(roster.support[0].asset,SupportAsset::BundletoolJar);
+        assert_eq!(roster.support[1].asset,SupportAsset::Aapt2OsxJar);
+        let mut installation=Vec::new();installation.try_reserve_exact(slots.original.records.len()).unwrap();
+        assert_eq!(installation.capacity(),slots.original.records.len());
+        for (index,record) in slots.original.records.iter().enumerate(){
+            let archive=roster.support.iter().find(|spec|record.name==asset_leaf(spec.asset));
+            let (mode,size)=if let Some(spec)=archive{
+                (u16::try_from(0o100000|spec.modes[0]).unwrap(),i64::try_from(spec.archive.bytes).unwrap())
+            }else if record.name=="mobile-release-kit-desktop"{(0o100555,1)}else{(0o40555,0)};
+            installation.push(Identity{dev:7,ino:index as u64+1,mode,uid:0,gid:0,links:1,size,
+                mtime:1,mtime_ns:2,ctime:3,ctime_ns:4,flags:0});
+        }
+        let archives=std::array::from_fn(|index|{
+            let spec=roster.support[index];
+            ArchiveObservation{asset:spec.asset,identity:installation[installation.len()-2+index],
+                bytes:spec.archive.bytes,sha256:spec.archive.sha256.to_owned(),mode:spec.modes[0]}
+        });
+        assert!(!slots.inspected && !slots.settled && !slots.projected && slots.frozen.is_none());
+        assert!(slots.original.records.iter().all(|record|record.state==State::Reserved && record.fd.is_none() && record.identity.is_none()));
+        (slots,CatalogueSupportData{installation,archives,_member:roster.archive_members[0].member})
+    }
+    pub(crate) fn catalogue_retained_bytes(&self)->Option<usize>{
+        // Only the numeric expression; production retained_bytes still refuses
+        // this never-started nonempty book rather than inventing a close receipt.
+        self.allocation_bytes(self.record_allocation_bytes()?)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Span { first: u64, end: u64 }
 struct Scratch {
@@ -102,10 +181,15 @@ impl FixedSupportSlots {
         let original = if let Some((known, _)) = self.frozen {
             if !known { return None; }
             // Frozen source-worker outcome: do not re-enter the retired Book.
-            self.original.records.iter().try_fold(
-                self.original.records.capacity().checked_mul(size_of::<Record>())?,
-                |sum, record| sum.checked_add(record.name.capacity()))?
+            self.record_allocation_bytes()?
         } else { self.original.retained_heap_bytes()? };
+        self.allocation_bytes(original)
+    }
+    fn record_allocation_bytes(&self)->Option<usize>{
+        self.original.records.iter().try_fold(self.original.records.capacity().checked_mul(size_of::<Record>())?,
+            |sum,record|sum.checked_add(record.name.capacity()))
+    }
+    fn allocation_bytes(&self,original:usize)->Option<usize>{
         size_of::<Self>().checked_add(size_of::<InflateState>())?
             .checked_add(original)?
             .checked_add(self.names.capacity().checked_mul(size_of::<[u8; 32]>())?)?

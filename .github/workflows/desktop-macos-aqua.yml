@@ -34,8 +34,8 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       # Exact independently accepted current-payload DATA; not native qualification.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       # Independent immutable publisher bindings; caller hashes come from build.rs.
       MRK_GITHUB_PREFLIGHT_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
@@ -62,8 +62,8 @@ jobs:
           [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
           if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private && "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle ]]; then
             # Supplier/CLT admission belongs only to the unchanged build routes.
-            [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3 ]] || exit 1
-            [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659 ]] || exit 1
+            [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5 ]] || exit 1
+            [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0 ]] || exit 1
             [[ -d "$DEVELOPER_DIR" ]] || exit 1
           fi
           if [[ "$MRK_MACOS_AQUA_SCOPE" == android-registration-lifecycle ]]; then

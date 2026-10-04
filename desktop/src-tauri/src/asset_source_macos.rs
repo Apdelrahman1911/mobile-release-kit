@@ -79,6 +79,25 @@ impl SourceBook {
         for alias in &self.aliases { bytes = bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?; }
         Some(bytes)
     }
+    #[cfg(test)]
+    pub(crate) fn catalogue_folder_allocation_data(path:&Path)->Self{
+        let components=parts(path).expect("bounded never-opened folder DATA");
+        // The actual Android folder route has no origins/vault: precisely
+        // roster_limit([parts.len()],0), not a blanket descriptor-limit charge.
+        let capacity=roster_limit(std::iter::once(components.len()),0).unwrap();
+        let mut book=Self::new();
+        book.slots.try_reserve_exact(capacity).unwrap();
+        assert_eq!(book.slots.capacity(),capacity);
+        for (index,name) in std::iter::once(&b"/"[..]).chain(components.iter().copied()).enumerate(){
+            book.slots.push(Descriptor{state:OriginalState::Reserved,fd:None,
+                parent:if index==0{None}else{Some(index-1)},name:copy_bytes(name).unwrap(),
+                identity:None,role:PhysicalRole::Other,acl:[CallState::NotStarted;2]});
+        }
+        assert_eq!(book.slots.len(),capacity);
+        assert!(!book.begun && !book.terminal && book.probes.is_empty() && book.aliases.is_empty() && book.anchors.is_none());
+        // Do not call begin/reserve/close, install an identity, or claim settled.
+        book
+    }
     fn begin(&mut self, capacity: usize, probes: usize, aliases: usize) -> Result<(), Reason> {
         if !self.not_started() || self.terminal { return Err(Reason::CleanupUnknown); }
         if capacity == 0 || capacity > DESCRIPTOR_LIMIT || probes > 32 || aliases > 32 { return Err(Reason::Capacity); }

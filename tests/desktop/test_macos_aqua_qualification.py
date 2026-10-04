@@ -5461,6 +5461,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                                               "selection-projection", error, content=True)
 
         for data, error in ((None, "deadline"), (diagnostic, "none"),
+                            ({**diagnostic, "frontierRoleMask": 1 << 4}, "none"),
                             ({**diagnostic, "state": "entered"}, "objc-exception"),
                             ({**diagnostic, "state": "returned-incomplete", "unavailable": 32}, "none"),
                             ({**diagnostic, "state": "returned-incomplete", "omissions": 32}, "none"),
@@ -5488,7 +5489,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         for field, invalid in (("version", 0), ("version", True), ("state", "complete"),
             ("callsBefore", 0), ("callsBefore", 222), ("callsAfter", 3073), ("cfAfter", 1025),
             ("eligibleFrontiers", 13), ("attemptedFrontiers", 65), ("addedNodes", 65), ("maxDepth", 9),
-            ("normalFixtureMask", 32), ("alternateRoleMask", 1 << 4), ("frontierRoleMask", 1 << 4),
+            ("normalFixtureMask", 32), ("alternateRoleMask", 1 << 4), ("frontierRoleMask", 1 << 3),
             ("frontierLabelMask", 0), ("unavailable", 64), ("omissions", 1024), ("duplicates", 65),
             ("nonStringValues", 11), ("unavailable", 32), ("omissions", 32), ("nonStringValues", 1),
             ("state", "entered"), ("state", "returned-incomplete")):
@@ -5527,6 +5528,16 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertLess(children.index("if (!CFEqual(parent, node))"), children.index("q->nodes[at] = child"))
         self.assertIn("if (known) continue;", children)
         self.assertIn("if (depth >= MRK_CONTROL_DEPTH)", children)
+        frontier, probe = diagnostic.split("static BOOL mrk_ax_diag_frontier(", 1)[1].split("static void mrk_ax_projection_diagnostic_probe(", 1)
+        self.assertNotIn("MRK_ROLE_BUTTON", frontier)  # Do not scan all original Buttons.
+        added = probe.split("for (unsigned at = 0; at < d->added_nodes; ++at) {", 1)[1].split("for (unsigned at = 0; at < original_count; ++at) {", 1)[0]
+        self.assertIn("BOOL button = role == MRK_ROLE_BUTTON;", added)
+        self.assertIn("if ((entry || button) && !mrk_ax_diag_label(s, q->nodes[at], role, kAXTitleAttribute", added)
+        self.assertIn("if ((text || entry || button) && !mrk_ax_diag_label(s, q->nodes[at], role, kAXValueAttribute", added)
+        self.assertNotIn("MRK_DIAG_OMIT_ROLE", added)
+        self.assertEqual(added.count("continue;"), 1)
+        self.assertIn("if (text || role == MRK_SELECT_IMAGE) continue;", added)
+        self.assertIn("if (!mrk_ax_diag_children(s, p, original_count, q->nodes[at], q->depths[at])) return;", added)
         self.assertIn("const MRKSelectionPass *p = &s->selection[0];", diagnostic)
         self.assertLess(diagnostic.index("d->version = 1u; d->state = 1u;"),
                         diagnostic.index("mrk_ax_projection_diagnostic_probe(s, p, original_count)"))

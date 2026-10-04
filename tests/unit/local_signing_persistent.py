@@ -432,9 +432,11 @@ class PersistentSigningModel:
             self.trace.end(event, succeeded=True)
         return result
 
-    def file_create(self, path):
+    def file_create(self, path, *, readonly=False):
+        assert type(readonly) is bool and (not readonly or path.name == LOCK_NAME)
         def create():
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            descriptor = os.open(path, (os.O_RDONLY if readonly else os.O_WRONLY) | os.O_CREAT | os.O_EXCL,
+                                 0o400 if readonly else 0o600)
             os.close(descriptor)
             self.oracle.record(path, "native")
         self.effect("create/" + path.name, create)
@@ -709,10 +711,11 @@ class PersistentSigningModel:
         elif command == "create-keychain":
             self.state["keychain"] = argv[-1]
             keychain = Path(argv[-1])
+            # AtomicFile creates its empty readonly lock before opening the DB.
+            # There is no native lock-payload write or partial-write edge.
+            self.file_create(keychain.parent / LOCK_NAME, readonly=True)
             self.file_create(keychain)
             self.file_write(keychain, b"fictional-db")
-            self.file_create(keychain.parent / LOCK_NAME)
-            self.file_write(keychain.parent / LOCK_NAME, b"fictional-lock")
             if self.auto_add:
                 self.effect("create-search-add", lambda: self.state["preferences"]["search"].append(str(keychain)))
         elif command in {"set-keychain-settings", "unlock-keychain", "import", "set-key-partition-list", "build"}:

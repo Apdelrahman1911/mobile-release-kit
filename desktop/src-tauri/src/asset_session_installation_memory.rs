@@ -8,6 +8,9 @@
 //! refused, never measured as zero, disposed, polled, reconciled or retried here.
 use super::*;
 
+#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(crate) use known::catalogue_census_data;
+
 pub(super) fn admitted(state: &DocumentState, control: usize) -> Result<(), Reason> {
     // The one native/JSON/index/control partition is fixed, inside the unchanged
     // 64MiB session quota. A smaller caller value cannot create payload credit.
@@ -307,9 +310,7 @@ mod known {
                 self.gui(&value.gui, value)?;
                 let source = value.source.try_lock().map_err(|_| Reason::Capacity)?;
                 if !source.not_started() && !source.settled() { return Err(Reason::Capacity); }
-                if self.seen.insert(&value.source)? {
-                    self.arc::<Mutex<SourceBook>>()?; self.add(capacity(source.retained_bytes())?)?;
-                }
+                self.source_data_rows(&value.source,&source)?;
                 let work = value.vault.try_lock().map_err(|_| Reason::Capacity)?;
                 if !work.settled() { return Err(Reason::Capacity); }
                 if let Some(store) = work.store_ref() { self.vault_store(store)?; }
@@ -318,10 +319,20 @@ mod known {
                 Ok(())
             }
         }
+        fn source_data_rows(&mut self,value:&Arc<Mutex<SourceBook>>,source:&SourceBook)->Count<()>{
+            if self.seen.insert(value)? {
+                self.arc::<Mutex<SourceBook>>()?; self.add(capacity(source.retained_bytes())?)?;
+            }
+            Ok(())
+        }
         fn slot(&mut self, value: &Slot) -> Count<()> {
             if value.phase != Phase::Idle || value.settlement != Settlement::Known
                 || matches!(value.source, SourceState::Pending | SourceState::Unknown)
                 || value.reason == Reason::CleanupUnknown || value.staged.is_some() { return Err(Reason::Capacity); }
+            self.slot_data_rows(value)?;
+            self.owner(&value.owner)
+        }
+        fn slot_data_rows(&mut self,value:&Slot)->Count<()>{
             // The old Slot still exists at this admission point; it has NOT yet
             // moved into the next owner's retirement. Its inline cells are in
             // DocumentState; all heap holdings and the actual old owner count now.
@@ -360,12 +371,18 @@ mod known {
             }
             if let Some(store) = &value.vault.lease { self.vault_store(store)?; }
             // installation_result and the remainder of SlotData are inline DATA.
-            self.owner(&value.owner)
+            Ok(())
         }
         fn saved_observation(&mut self, lane: &Arc<SavedObservationLane>) -> Count<()> {
             if !lane.returned() { return Err(Reason::Capacity); }
             if !self.seen.insert(lane)? { return Ok(()); }
-            self.arc::<SavedObservationLane>()?; self.add(capacity(lane.retained_heap_bytes())?)
+            self.saved_observation_rows(lane.retained_heap_bytes())
+        }
+        fn saved_observation_rows(&mut self,heap:Option<usize>)->Count<()>{
+            self.arc::<SavedObservationLane>()?; self.add(capacity(heap)?)
+        }
+        fn document_cells(&mut self)->Count<()>{
+            self.arc::<Inner>()?; self.arc::<()>()?; self.add(SESSION_SIGNAL_BYTES)
         }
         fn document(&mut self, state: &DocumentState) -> Count<()> {
             if state.unknown || state.exhausted || state.stopping || state.retiring || state.lock_pending
@@ -378,7 +395,7 @@ mod known {
             // Inner contains the Mutex<DocumentState>, including the inline old
             // Slot, image/evidence/installation/GitHub/vault registry cells.
             // External test-history gates must prove their optional holds absent.
-            self.arc::<Inner>()?; self.arc::<()>()?; self.add(SESSION_SIGNAL_BYTES)?;
+            self.document_cells()?;
             if let Some(lane) = &state.saved_observation { self.saved_observation(lane)?; }
             if let Some(binding) = &state.saved_input { self.saved_observation(&binding.lane)?; }
             self.records(&state.records)?; self.assignments(&state.assignments)?;
@@ -392,6 +409,107 @@ mod known {
             Ok(())
         }
     }
+    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    struct SavedFieldAllocationData {project_id:String,root:asset_source::RegisteredRoot}
+    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    pub(crate) struct CatalogueCensusData {
+        pub(crate) bytes:usize,pub(crate) rows:[(&'static str,usize);8],
+        pub(crate) pickers:[Arc<OriginalWork>;3],
+        _state:DocumentState,_saved:[Arc<SavedFieldAllocationData>;2],
+    }
+    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    pub(crate) fn catalogue_census_data(project_id:&str,project:&asset_source::RegisteredRoot,
+        roots:&[asset_source::RegisteredRoot;3])->CatalogueCensusData{
+        // Deliberately never an AndroidRegistrationCensus, SavedInputBinding or
+        // idle/returned owner. All holders remain live for the three numeric
+        // admissions; fixture-only container/layout overhead is not substituted
+        // for the real Inner, saved lane and OriginalWork layouts being charged.
+        let pickers=std::array::from_fn(|index|{
+            let owner=OriginalWork::new(index as u32+1,false,Weak::new());
+            *owner.source.lock().unwrap()=SourceBook::catalogue_folder_allocation_data(&roots[index].path);
+            assert!(!owner.ended.load(Ordering::SeqCst));
+            assert!(matches!(owner.coordinator.lock().unwrap().receipt,JoinReceipt::New));
+            owner
+        });
+        let context=Arc::new(NativeContext{revision:1,project_id:project_id.to_owned(),project:project.clone(),
+            registry_generation:1,draft:br#"{"schemaVersion":1,"project":{"name":"catalogue-budget"}}"#.to_vec(),
+            platform:Platform::Android,stage:Stage::Candidate,purpose:Purpose::Full});
+        let records=vec![
+            Record{key:RecordKey{id:Token("1".repeat(32)),revision:1},mutation_pending:false,
+                payload:Arc::new(Payload{kind:Kind::GoogleWif,material:None,
+                    fields:Some(commands::own_fields(Kind::GoogleWif,&serde_json::json!({
+                        "provider":"synthetic-never-authenticated-provider",
+                        "serviceAccount":"synthetic-never-authenticated-service-account"})).ok().expect("bounded nonsecret field DATA"))})},
+            Record{key:RecordKey{id:Token("2".repeat(32)),revision:1},mutation_pending:false,
+                payload:Arc::new(Payload{kind:Kind::ProjectReadToken,material:None,
+                    fields:Some(commands::own_fields(Kind::ProjectReadToken,&serde_json::json!({
+                        "token":"synthetic-nonsecret-never-sent"})).ok().expect("bounded nonsecret field DATA"))})},
+        ];
+        let assignments=records.iter().map(|record|Assignment{kind:record.payload.kind,
+            record_id:record.key.id.clone(),record_revision:record.key.revision,context_revision:1,
+            availability:AssignmentAvailability::Unavailable}).collect();
+        let mut slot=Slot::new(pickers[0].clone(),Operation::ChooseAndroidSource,Some(context.clone()),None,None);
+        slot.project=Some(Project{id:project_id.to_owned(),name:"Catalogue allocation DATA".to_owned(),
+            path:project.path.to_str().unwrap().to_owned()});
+        slot.android_source=Some(Arc::new(AndroidSourceBinding{project_id:project_id.to_owned(),generation:1,
+            root:project.clone(),role:crate::android_tool_sources::Role::Jdk}));
+        let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+            exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,
+            session_owner_reason:None,context:Some(context),slot:Some(slot),records,assignments,
+            quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),
+            evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};
+        // Two mentions of one identity proxy, not two made-up returned lanes.
+        // Its smaller layout is never used: saved_observation_rows charges the
+        // actual SavedObservationLane Arc and the shared real field capacities.
+        // Saved config/version comparison arrays are inline in Inner already.
+        let saved=Arc::new(SavedFieldAllocationData{project_id:project_id.to_owned(),root:project.clone()});
+        let saved_aliases=[saved.clone(),saved];
+        let mut census=Census::new();
+        let mut rows=[("document_cells",0),("saved_fields",0),("records",0),("assignments",0),
+            ("context",0),("slot_projection",0),("picker_originals",0),("other_registries",0)];
+        census.document_cells().unwrap();rows[0].1=census.bytes;
+        let before=census.bytes;
+        for fields in &saved_aliases{
+            if census.seen.insert(fields).unwrap(){
+                census.saved_observation_rows(saved_observation::retained_field_heap_bytes(&fields.project_id,&fields.root)).unwrap();
+            }
+        }
+        rows[1].1=census.bytes-before;
+        let before=census.bytes;census.records(&state.records).unwrap();rows[2].1=census.bytes-before;
+        let before=census.bytes;census.assignments(&state.assignments).unwrap();rows[3].1=census.bytes-before;
+        let before=census.bytes;census.context(state.context.as_ref().unwrap()).unwrap();rows[4].1=census.bytes-before;
+        let before=census.bytes;census.slot_data_rows(state.slot.as_ref().unwrap()).unwrap();rows[5].1=census.bytes-before;
+        let before=census.bytes;
+        for owner in std::iter::once(&state.slot.as_ref().unwrap().owner).chain(pickers.iter()){
+            if census.seen.insert(owner).unwrap(){
+                census.arc::<OriginalWork>().unwrap();
+                // The constructor truthfully requires no dialog; this is the
+                // existing guarded GUI row, not fabricated native settlement.
+                census.gui(&owner.gui,owner).unwrap();
+                let source=owner.source.try_lock().unwrap();
+                census.source_data_rows(&owner.source,&source).unwrap();
+            }
+        }
+        rows[6].1=census.bytes-before;
+        let before=census.bytes;
+        census.add(state.github.retained_heap_bytes_if_quiescent().unwrap()).unwrap();
+        census.evidence(&state.evidence).unwrap();
+        census.heap::<images::Registry>(state.images.retained_bytes()).unwrap();
+        rows[7].1=census.bytes-before;
+        let before=census.bytes;
+        census.context(state.context.as_ref().unwrap()).unwrap();
+        assert!(!census.seen.insert(&state.slot.as_ref().unwrap().owner).unwrap());
+        for owner in &pickers{assert!(!census.seen.insert(owner).unwrap());}
+        for fields in &saved_aliases{assert!(!census.seen.insert(fields).unwrap());}
+        assert_eq!(census.bytes,before,"one Seen deduplicates the actual aliases");
+        assert!(rows[..7].iter().all(|(_,bytes)|*bytes>0));
+        assert_eq!(rows.iter().map(|(_,bytes)|*bytes).sum::<usize>(),census.bytes);
+        assert!(Arc::ptr_eq(&state.slot.as_ref().unwrap().owner,&pickers[0]));
+        assert!(pickers.iter().enumerate().all(|(i,owner)|pickers[i+1..].iter().all(|other|!Arc::ptr_eq(owner,other))));
+        CatalogueCensusData{bytes:census.bytes,rows,pickers,_state:state,_saved:saved_aliases}
+    }
+
     pub(super) fn android_registration_bytes(state: &DocumentState, pickers: &[Arc<OriginalWork>; 3]) -> Count<usize> {
         let mut census = Census::new();
         census.document(state)?;

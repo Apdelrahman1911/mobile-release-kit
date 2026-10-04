@@ -147,6 +147,82 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
         value["baseline"] = {"default": raw, "search": [raw]}; value["members"][0]["path"] = raw
         with self.assertRaises(M.Refused): M._ios_account_private(value, UID, "/Users/runner")
 
+        # Real outer adoption, including its native role routing, original FD
+        # registry, private hashes and rosters. Every OS operation is inert.
+        private = private_data()
+        private["native"][M.IOS_ACCOUNT_LOCK_NAME] = {"device": 7, "inode": 7}
+        fixture = M.Fixtures(BINDING, UID, GID, M.IOS_ACCOUNT_CASE)
+        fixture.account_home = private["home"]; fixture.last_returned = True
+        home = Path(private["home"]); lease = home / ".mobile-release-signing"
+        session = lease / ("session-" + private["token"]); native = session / "keychain"
+        state = Path("/inert-account-state")
+        entries = {}
+        for path, identity in ((Path("/"), [7, 20, stat.S_IFDIR | 0o755, 0, 0]),
+                (Path("/Users"), [7, 21, stat.S_IFDIR | 0o755, 0, 0]),
+                (home, private["homeIdentity"]), (lease, private["leaseIdentity"]),
+                (session, private["sessionIdentity"]), (native, private["nativeIdentity"]),
+                (home / "Library", [7, 22, stat.S_IFDIR | 0o700, UID, GID]),
+                (home / "Library/Keychains", [7, 23, stat.S_IFDIR | 0o700, UID, GID]),
+                (state, [7, 24, stat.S_IFDIR | 0o700, UID, GID])):
+            entries[path] = (tuple(identity) + (2, 0, 100, 100), None)
+        for path, inode, mode, body in ((Path(private["members"][0]["path"]), 5, 0o600, b"baseline"),
+                (native / "signing.keychain-db", 6, 0o600, b"inert native DB"),
+                (native / M.IOS_ACCOUNT_LOCK_NAME, 7, 0o400, b""),
+                (session / "intent.json", 8, 0o600, b"{}"), (session / "state.json", 9, 0o600, b"{}")):
+            entries[path] = ((7, inode, stat.S_IFREG | mode, UID, GID, 1, len(body), 100, 100), body)
+        handles = {90: state}; next_fd = [100]
+        fixture.states[M.IOS_ACCOUNT_CASE] = 90; fixture.fds.add(90)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        def info(path): return SimpleNamespace(**dict(zip(fields, entries[path][0])))
+        def route(name, parent): return Path(name) if parent is None else handles[parent] / name
+        def opening(name, flags, mode=0o600, *, dir_fd=None):
+            path = route(name, dir_fd)
+            self.assertEqual(flags & (M.os.O_NOFOLLOW | M.os.O_NONBLOCK | M.os.O_CLOEXEC),
+                             M.os.O_NOFOLLOW | M.os.O_NONBLOCK | M.os.O_CLOEXEC)
+            if flags & M.os.O_CREAT:
+                self.assertEqual(path, state / "account-baseline.json")
+                self.assertTrue(flags & M.os.O_EXCL); self.assertNotIn(path, entries); self.assertEqual(mode, 0o600)
+                entries[path] = ((7, 25, stat.S_IFREG | 0o600, UID, GID, 1, 0, 100, 100), b"")
+            self.assertIn(path, entries)
+            if flags & M.os.O_DIRECTORY: self.assertTrue(stat.S_ISDIR(entries[path][0][2]))
+            next_fd[0] += 1; handles[next_fd[0]] = path; return next_fd[0]
+        def named(name, *, dir_fd, follow_symlinks):
+            self.assertIs(follow_symlinks, False); return info(route(name, dir_fd))
+        def writing(fd, body):
+            path = handles[fd]; self.assertEqual(path, state / "account-baseline.json")
+            row, old = entries[path]; body = old + body
+            entries[path] = (row[:6] + (len(body),) + row[7:], body); return len(body) - len(old)
+        def reading(fd, size, offset):
+            path = handles[fd]
+            self.assertIn(path.name, ("intent.json", "state.json", "account-baseline.json"))
+            return entries[path][1][offset:offset + size]
+        class Listing:
+            def __init__(self, fd):
+                self.rows = iter(SimpleNamespace(name=path.name) for path in entries if path != handles[fd] and path.parent == handles[fd])
+            def __iter__(self): return self
+            def __next__(self): return next(self.rows)
+            def close(self): pass
+        with patch.object(M.os, "open", side_effect=opening), patch.object(M.os, "fstat", side_effect=lambda fd: info(handles[fd])), \
+                patch.object(M.os, "stat", side_effect=named), patch.object(M.os, "get_inheritable", return_value=False), \
+                patch.object(M.os, "write", side_effect=writing), patch.object(M.os, "pread", side_effect=reading), \
+                patch.object(M.os, "scandir", side_effect=Listing), patch.object(M.os, "close", side_effect=lambda fd: handles.pop(fd)):
+            try:
+                fixture.accept_account_producer({**child_data("produce"), "private": private})
+                self.assertTrue(fixture.account_produced)
+                self.assertEqual({row[1] for row in fixture.account_native_files}, {"signing.keychain-db", M.IOS_ACCOUNT_LOCK_NAME})
+                self.assertTrue(all(len(row) == 5 for row in fixture.account_native_files))
+                self.assertEqual(entries[state / "account-baseline.json"][0][2], stat.S_IFREG | 0o600)
+                control = session / "state.json"; original_control = entries[control]
+                entries[control] = (original_control[0], b"[]")  # Same metadata cannot replace the private hash.
+                with self.assertRaises(M.Refused): fixture._account_current(after=False)
+                entries[control] = original_control
+                database = native / "signing.keychain-db"; row, body = entries[database]
+                entries[database] = (row[:6] + (len(body) + 1, 101, 101), body + b"x")
+                fixture._account_current(after=False)  # Native DB content/timestamps are not a private-control hash.
+            finally:
+                fixture.close()
+        self.assertEqual(handles, {}); self.assertEqual(fixture.account_fds, set()); self.assertEqual(fixture.fds, set())
+
     def test_private_receipt_refuses_incomplete_ambiguous_or_unbounded_returns(self):
         for mode in ("produce", "observe"):
             good = returned([], mode)
@@ -311,6 +387,56 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
             closed.assert_called_once_with(99)
         self.assertEqual(fixture.close_errors, 1); self.assertIsNotNone(fixture.first_close_error)
 
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        def admit(role, name, mode, size, allowed, *, changed=None, named_change=None, **options):
+            fixture = M.Fixtures(BINDING, UID, GID, M.IOS_ACCOUNT_CASE)
+            row = [7, 6, stat.S_IFREG | mode, UID, GID, 1, size, 100, 100]
+            if changed is not None: row[changed[0]] = changed[1]
+            named = list(row)
+            if named_change is not None: named[named_change[0]] = named_change[1]
+            kwargs = {"role": role, "identity": {"device": 7, "inode": 6} if role == "native" else None,
+                      "body_hash": "f" * 64 if role == "private" else None, "limit": 128*1024*1024}
+            kwargs.update(options)
+            private_role = role == "private" and name in ("intent.json", "state.json", "account-baseline.json") and kwargs["body_hash"] is not None and kwargs["identity"] is None
+            native_role = role == "native" and name in ("signing.keychain-db", M.IOS_ACCOUNT_LOCK_NAME) and kwargs["identity"] is not None and kwargs["body_hash"] is None
+            with self.subTest(role=role, name=name, mode=mode, size=size, changed=changed, named_change=named_change, options=options), \
+                    patch.object(fixture, "_account_open", return_value=99) as opened, patch.object(fixture, "_account_hash") as hashed, \
+                    patch.object(M.os, "fstat", return_value=SimpleNamespace(**dict(zip(fields, row)))), \
+                    patch.object(M.os, "stat", return_value=SimpleNamespace(**dict(zip(fields, named)))) as named_stat:
+                if allowed:
+                    observed = fixture._account_file(10, name, **kwargs)
+                    self.assertEqual(observed, (10, name, 99, tuple(row), kwargs["body_hash"]))
+                    if private_role: hashed.assert_called_once_with(observed)
+                    else: hashed.assert_not_called()
+                    named_stat.assert_called_once_with(name, dir_fd=10, follow_symlinks=False)
+                else:
+                    with self.assertRaises(M.Refused): fixture._account_file(10, name, **kwargs)
+                    hashed.assert_not_called()
+                if not (private_role or native_role): opened.assert_not_called()
+        for mode in (0o400, 0o404, 0o440, 0o444):
+            admit("native", M.IOS_ACCOUNT_LOCK_NAME, mode, 0, True, limit=64*1024*1024)
+        admit("native", "signing.keychain-db", 0o600, 64*1024*1024, True)
+        admit("native", "signing.keychain-db", 0o600, 64*1024*1024+1, False)
+        for name, cap in (("intent.json", 512*1024), ("state.json", 512*1024), ("account-baseline.json", 12*1024)):
+            admit("private", name, 0o600, 2, True)
+            admit("private", name, 0o400, 2, False)
+            admit("private", name, 0o600, cap+1, False)
+        for mode in (0o000, 0o200, 0o600, 0o644, 0o401, 0o1400, 0o4400):
+            admit("native", M.IOS_ACCOUNT_LOCK_NAME, mode, 0, False)
+        admit("native", M.IOS_ACCOUNT_LOCK_NAME, 0o400, 1, False)
+        admit("native", "signing.keychain-db", 0o400, 2, False)
+        for role, name in (("private", M.IOS_ACCOUNT_LOCK_NAME), ("private", "signing.keychain-db"),
+                           ("native", "state.json"), ("native", "unknown"), ("unknown", "state.json")):
+            admit(role, name, 0o600, 0, False)
+        admit("native", M.IOS_ACCOUNT_LOCK_NAME, 0o400, 0, False, body_hash="f" * 64)
+        admit("private", "state.json", 0o600, 2, False, identity={"device": 7, "inode": 6})
+        admit("private", "state.json", 0o600, 2, False, body_hash=None)
+        for changed in ((0, 8), (1, 16), (3, UID+1), (5, 2), (2, stat.S_IFLNK | 0o400), (2, stat.S_IFDIR | 0o400)):
+            admit("native", M.IOS_ACCOUNT_LOCK_NAME, 0o400, 0, False, changed=changed)
+        for changed in ((6, 1), (7, 101), (8, 101)):
+            admit("native", M.IOS_ACCOUNT_LOCK_NAME, 0o400, 0, False, named_change=changed)
+        admit("native", "signing.keychain-db", 0o600, 2, False, limit=1)
+
     def test_independent_readback_refuses_baseline_substitution_or_retained_owned_name(self):
         fixture = M.Fixtures(BINDING, UID, GID, M.IOS_ACCOUNT_CASE)
         fixture.account_private = private_data(); fixture.account_home = "/Users/runner"; fixture.account_lease = 11
@@ -336,6 +462,24 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
             with self.assertRaises(M.Refused): fixture._account_current(after=True)
             live[15] = (*owned[:5], 0, *owned[6:]); named[13, "signing.keychain-db"] = owned
             with self.assertRaises(M.Refused): fixture._account_current(after=True)
+            del named[13, "signing.keychain-db"]
+            lock = (7, 7, stat.S_IFREG | 0o400, UID, GID, 1, 0, 100, 100)
+            fixture.account_native_files.append((13, M.IOS_ACCOUNT_LOCK_NAME, 16, lock, None))
+            live[16] = (*lock[:5], 0, *lock[6:])
+            fixture._account_current(after=True)
+            for changed in ((1, 107), (2, stat.S_IFREG | 0o600), (5, 1), (6, 1)):
+                row = list(live[16]); row[changed[0]] = changed[1]; original = live[16]; live[16] = tuple(row)
+                with self.assertRaises(M.Refused): fixture._account_current(after=True)
+                live[16] = original
+            named[13, M.IOS_ACCOUNT_LOCK_NAME] = lock
+            with self.assertRaises(M.Refused): fixture._account_current(after=True)
+            live[15] = owned; named[13, "signing.keychain-db"] = owned; live[16] = lock
+            fixture._roster = lambda fd, roster, label: self.assertEqual((fd, roster), (11, ("session-" + "e" * 32,)))
+            fixture._account_current(after=False)
+            live[16] = (*lock[:6], 1, *lock[7:])
+            with self.assertRaises(M.Refused): fixture._account_current(after=False)
+            live[16] = lock; named[13, M.IOS_ACCOUNT_LOCK_NAME] = (*lock[:6], 1, *lock[7:])
+            with self.assertRaises(M.Refused): fixture._account_current(after=False)
 
     def test_closed_scope_fixture_and_public_parser_do_not_widen_nine_case_roster(self):
         self.assertEqual(M.argument_scope(["--scope", M.IOS_ACCOUNT_CASE]), M.IOS_ACCOUNT_CASE)

@@ -952,11 +952,16 @@ class SigningSession:
         names = _names(self.native_fd)
         _require(names <= {DB_NAME, LOCK_NAME}, "unknown native staging remains; preserve it for recovery")
         result = {}
+        # Apple Security AtomicFile (db15acbe6a7f257a859ad9a3bb86097bfe0679d9):
+        # its empty O_RDONLY|O_CREAT lock uses 0444 masked by the creator's umask;
+        # it is not secret database content. Both remain in our private0700 parent.
         for name in names:
             details = os.stat(name, dir_fd=self.native_fd, follow_symlinks=False)
+            mode = stat.S_IMODE(details.st_mode)
+            role_safe = ((name == DB_NAME and mode == 0o600 and details.st_size <= 64 * 1024 * 1024)
+                         or (name == LOCK_NAME and mode in {0o400, 0o404, 0o440, 0o444} and details.st_size == 0))
             _require(stat.S_ISREG(details.st_mode) and details.st_uid == os.getuid() and details.st_nlink == 1
-                     and stat.S_IMODE(details.st_mode) == 0o600 and details.st_size <= 64 * 1024 * 1024,
-                     "native resource ownership is unsafe")
+                     and role_safe, "native resource ownership is unsafe")
             result[name] = _identity(details)
         return result
 

@@ -18,10 +18,14 @@ impl SavedObservationLane {
         self.stage.load(Ordering::SeqCst) == RETURNED && self.completion_returned.load(Ordering::SeqCst)
     }
     pub(super) fn retained_heap_bytes(&self) -> Option<usize> {
-        self.project_id.capacity().checked_add(self.root.path.capacity())?
-            .checked_add(std::mem::size_of::<SavedObservationCompletion>())?
-            .checked_add(crate::release_version_protocol::RESULT_LIMIT)?.checked_add(4 * 1024)
+        retained_field_heap_bytes(&self.project_id,&self.root)
     }
+}
+// Capacity-only expression: no SavedEditStamp, completion or saved-input grant.
+pub(super) fn retained_field_heap_bytes(project_id:&String,root:&asset_source::RegisteredRoot)->Option<usize>{
+    project_id.capacity().checked_add(root.path.capacity())?
+        .checked_add(std::mem::size_of::<SavedObservationCompletion>())?
+        .checked_add(crate::release_version_protocol::RESULT_LIMIT)?.checked_add(4 * 1024)
 }
 #[derive(Clone, Copy)]
 struct SavedComparisonData {

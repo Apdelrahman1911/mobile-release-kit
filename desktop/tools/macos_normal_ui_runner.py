@@ -2,7 +2,7 @@
 """Fixed generated Mac UI-runner admission; no application launch or repair here.
 
 Import is inert. The diagnostic uses its existing original-command owner; the
-normal workflow CLI is confined to its five existing exact test selections.
+normal workflow CLI admits fixed build/summary phases and five exact test selections.
 Only XCTest/NSWorkspace in the reviewed Swift source may request the outer app.
 """
 from __future__ import annotations
@@ -19,11 +19,12 @@ import re
 import stat
 import subprocess
 import sys
+import time
 
 DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "4efd22b690a443809bd0f5ce9b7adb774b59894565724030dd77128b447c9eae"
+LOADER_SHA = "ac3aee089c168b16d6c00363cf3894fec540165c4205fc1a67c4de5b14368e1a"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
 PACKAGED_METHOD = CLASS + "testPackagedEntryLaunchCancelAndQuit"
@@ -449,114 +450,435 @@ def normal_cli_arguments(arguments):
     return derived, result, tuple(CLASS + method for method in methods), allowance, timeout
 
 
-def main():
-    owner = None
-    records = []
+
+SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-summary",
+    "persistence-test.xcresult": "persistence-summary", "diagnostics-test.xcresult": "diagnostics-summary",
+    "saved-checks-test.xcresult": "saved-checks-summary"}
+TOOLCHAIN_QUERIES = (
+    ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
+    ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
+    ("sdkVersion", "sdk-version.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version")),
+    ("sdkBuild", "sdk-build.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version")),
+)
+
+
+def normal_request(arguments, temporary):
+    """Two fixed added modes; the original entire test argv remains unchanged."""
+    need(type(temporary) is str, "normal-fixed-tmpdir")
+    normal = Path(temporary).parent
+    if arguments == ["--normal-build"]:
+        value = dict(phase="build", derived=normal / "DerivedData", result=None,
+                     methods=(), allowance=None, timeout=240, phaseSeconds=450)
+    elif len(arguments) == 2 and arguments[0] == "--normal-summary":
+        need(arguments[1] in NORMAL_SELECTIONS, "normal-summary-selection")
+        value = dict(phase="summary", derived=normal / "DerivedData", result=normal / arguments[1],
+                     methods=(), allowance=None, timeout=30, phaseSeconds=90)
+    else:
+        derived, result, methods, allowance, timeout = normal_cli_arguments(arguments)
+        value = dict(phase="test", derived=derived, result=result, methods=methods,
+                     allowance=allowance, timeout=timeout,
+                     phaseSeconds=345 if timeout == 180 else 885 if timeout == 720 else 585)
+    need(value["derived"].is_absolute() and value["derived"].parent.name == "normal-ui"
+         and temporary == str(value["derived"].parent / "tmp") + "/", "normal-fixed-tmpdir")
+    return value
+
+
+def normal_file_limit(phase, actual):
+    need(phase in ("build", "test", "summary"), "normal-file-budget-phase")
+    expected = 32 * 1024**3 if phase == "build" else 1024**3
+    need(type(actual) is tuple and len(actual) == 2 and all(type(n) is int for n in actual)
+         and actual == (expected, expected), "normal-host-developer-file-budget")
+    return actual
+
+
+class PhaseClock:
+    """One immutable endpoint, including original-owner cleanup and publication."""
+    def __init__(self, seconds, *, now=None, started=None):
+        self.now = time.monotonic_ns if now is None else now
+        self.started = self.now() if started is None else started
+        need(type(seconds) is int and seconds > 0 and type(self.started) is int and self.started >= 0,
+             "normal-phase-clock")
+        self.deadline = self.started + seconds * 1_000_000_000
+        self.last = self.started
+        self.failed = False
+        self.finalized = False
+        self.check()
+
+    def check(self):
+        need(not self.failed and not self.finalized, "normal-phase-terminal")
+        value = self.now()
+        if type(value) is not int or value < self.last or value < 0 or value >= self.deadline:
+            self.failed = True
+            raise Refused("normal-phase-deadline-or-clock")
+        self.last = value
+        return value
+
+    def allowance(self, cap):
+        current = self.check()
+        # Existing owner CLEANUP_NS=3s, plus10s for this phase's final publication.
+        remaining = (self.deadline - current - 13_000_000_000) // 1_000_000_000
+        if type(cap) is not int or cap < 1 or remaining < 1:
+            self.failed = True
+            raise Refused("normal-phase-no-command-budget")
+        return min(cap, remaining)
+
+    def before_publication(self):
+        current = self.check()
+        return {"startNs": str(self.started), "deadlineNs": str(self.deadline),
+                "beforePublicationNs": str(current), "postCloseDeadlineRequired": True}
+
+    def finish(self):
+        self.check()
+        self.finalized = True
+
+
+def original_command(value, argv, limit):
+    need(type(value) is subprocess.CompletedProcess and type(value.args) is list and value.args == argv
+         and type(value.returncode) is int and 0 <= value.returncode <= 255
+         and type(value.stdout) is bytes and type(value.stderr) is bytes
+         and len(value.stdout) + len(value.stderr) <= limit, "normal-original-command")
+    return value
+
+
+class NormalPhase:
+    def __init__(self, owner, environment, root, clock):
+        self.owner, self.environment, self.root, self.clock = owner, environment, root, clock
+        self.records = []
+
+    def call(self, role, argv, seconds, limit=1024 * 1024):
+        try:
+            actual = self.clock.allowance(seconds)
+            value = self.owner.run_owned(argv, environ=self.environment, cwd=self.root, timeout=actual,
+                                        capture=True, text=False, output_limit=limit)
+            original_command(value, argv, limit)
+            self.records.append({"role": role, "returncode": value.returncode,
+                "timeoutSeconds": actual, "roleCapSeconds": seconds, "outputLimitBytes": limit,
+                "argvSha256": sha(encoded(argv)), "stdoutBytes": len(value.stdout), "stdoutSha256": sha(value.stdout),
+                "stderrBytes": len(value.stderr), "stderrSha256": sha(value.stderr)})
+            self.clock.check()
+            return value
+        except BaseException:
+            self.clock.failed = True
+            raise
+
+
+def exclusive_output(path, body, limit):
+    """No overwrite/reopen; original complete readback and consuming close."""
+    need(type(body) is bytes and 0 < len(body) <= limit, "normal-output-bound")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        derived, result, methods, allowance, timeout = normal_cli_arguments(sys.argv[1:])
-        source = os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
-        need(re.fullmatch(r"[0-9a-f]{40}", source)
-             and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source
-             and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == "github-hosted-macos26-arm64",
-             "normal-same-build-only")
-        import resource  # Native CLI only; DATA/source import remains portable.
-        need(sys.platform == "darwin" and platform.machine() == "arm64" and platform.mac_ver()[0].startswith("26.")
-             and os.environ.get("DEVELOPER_DIR") == DEVELOPER and resource.getrlimit(resource.RLIMIT_FSIZE) == (1024**3, 1024**3),
-             "normal-host-developer-file-budget")
-        import pwd
-        account = pwd.getpwuid(os.getuid())
-        need(os.getuid() > 0 and os.getuid() == os.geteuid() == account.pw_uid
-             and os.getgid() == os.getegid() == account.pw_gid and account.pw_name == "runner"
-             and account.pw_dir == "/Users/runner" and os.stat("/dev/console").st_uid == os.getuid(), "normal-console-account")
-        root = Path(__file__).absolute().parents[2]
-        need(str(root) == "/Users/runner/work/mobile-release-kit/mobile-release-kit" and Path.cwd() == root
-             and derived.parent.parent.parent == Path("/Users/runner/work/_temp")
-             and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", derived.parent.parent.name)
-             and os.environ.get("TMPDIR") == str(derived.parent / "tmp") + "/", "normal-fixed-work")
-        environment = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ",
-            "DEVELOPER_DIR", "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB", "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE",
-            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE")}
-        need(all(environment[key] == value for key, value in {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-             "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner", "LANG": "en_US.UTF-8",
-             "LC_ALL": "en_US.UTF-8", "TZ": "UTC"}.items()), "normal-clean-environment")
-        loader_fd = os.open(root / LOADER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        initial = os.fstat(fd)
+        need(stat.S_ISREG(initial.st_mode) and stat.S_IMODE(initial.st_mode) == 0o600
+             and initial.st_uid == os.getuid() and initial.st_gid == os.getgid()
+             and initial.st_nlink == 1 and initial.st_size == 0, "normal-output-original")
+        offset = 0
+        while offset < len(body):
+            count = os.write(fd, body[offset:])
+            need(type(count) is int and 0 < count <= len(body) - offset, "normal-output-write")
+            offset += count
+        os.fsync(fd)
+        observed, identity, digest = original_body(fd, limit, collect=True)
+        need(observed == body and digest == sha(body) and identity[6] == len(body)
+             and full9(os.stat(path, follow_symlinks=False)) == identity, "normal-output-readback")
+    finally:
+        os.close(fd)  # Original consumed once; a close failure never authorizes retry.
+
+
+def normal_toolchain(values):
+    need(type(values) is dict and set(values) == {q[0] for q in TOOLCHAIN_QUERIES}, "normal-toolchain-fields")
+    text = {}
+    for key, body in values.items():
+        need(type(body) is bytes and 0 < len(body) <= 512, "normal-toolchain-bound")
+        value = body.decode("ascii", "strict")
+        text[key] = value[:-1] if value.endswith("\n") else value
+    version = r"26(?:\.[0-9]{1,3}){0,3}"
+    need(re.fullmatch(r"Xcode " + version + r"\nBuild version [0-9A-Za-z]{1,32}", text["xcode"])
+         and re.fullmatch(version, text["sdkVersion"])
+         and re.fullmatch(r"[0-9A-Za-z]{1,32}", text["sdkBuild"]), "normal-toolchain-version")
+    prefix = (r"/Applications/Xcode(?:_" + version + r")?\.app/Contents/Developer"
+              r"/Platforms/MacOSX\.platform/Developer/SDKs/")
+    need(re.fullmatch(prefix + r"MacOSX(?:" + re.escape(text["sdkVersion"]) + r")?\.sdk", text["sdkPath"]),
+         "normal-toolchain-sdk-path")
+    return text
+
+
+def normal_build_arguments(derived):
+    return ["/usr/bin/xcodebuild", "build-for-testing", "-project", PROJECT, "-scheme", "MRKNormalAppUI",
+        "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+        "-derivedDataPath", str(derived), "-jobs", "2", "-disableAutomaticPackageResolution",
+        "COMPILER_INDEX_STORE_ENABLE=NO"]
+
+
+def normal_source_state(phase, source):
+    arguments = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
+        "desktop/tools/macos_normal_ui_runner.py"]
+    original = phase.call("normal-ui-source-roster", arguments, 15)
+    need(original.returncode == 0 and len(original.stdout) <= 8192, "normal-ui-source-command")
+    rows = original.stdout.split(b"\0")
+    need(rows[-1] == b"" and 0 < len(rows) <= 16, "normal-ui-source-roster")
+    facts = {}
+    for row in rows[:-1]:
+        header, raw_name = row.split(b"\t", 1)
+        mode, kind, blob = header.split(b" ")
+        name = raw_name.decode("utf-8", "strict")
+        need(kind == b"blob" and mode in (b"100644", b"100755")
+             and (name.startswith("desktop/native/macos-normal-ui/") or name == "desktop/tools/macos_normal_ui_runner.py")
+             and all(part not in ("", ".", "..") for part in name.split("/")) and name not in facts,
+             "normal-ui-source-entry")
+        fd = os.open(phase.root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            _, loader_identity, loader_digest = original_body(loader_fd, 1024 * 1024)
-            need(loader_digest == LOADER_SHA, "normal-owner-loader-pin")
-            spec = importlib.util.spec_from_file_location("mrk_normal_ui_owner_loader", root / LOADER)
-            need(spec is not None and spec.loader is not None, "normal-owner-loader")
-            loader = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(loader)
-            owner = loader.load_owner(root)
-            need(full9(os.stat(root / LOADER, follow_symlinks=False)) == loader_identity
-                 and original_body(loader_fd, 1024 * 1024)[1:] == (loader_identity, loader_digest), "normal-owner-loader-changed")
-        finally:
-            os.close(loader_fd)
-
-        def call(role, argv, seconds):
-            original = owner.run_owned(argv, environ=environment, cwd=root, timeout=seconds,
-                capture=True, text=False, output_limit=1024 * 1024)
-            need(type(original) is subprocess.CompletedProcess and type(original.args) is list and original.args == argv
-                 and type(original.returncode) is int and 0 <= original.returncode <= 255
-                 and type(original.stdout) is bytes and type(original.stderr) is bytes
-                 and len(original.stdout) + len(original.stderr) <= 1024 * 1024, "normal-original-command")
-            records.append({"role": role, "returncode": original.returncode,
-                "stdoutBytes": len(original.stdout), "stdoutSha256": sha(original.stdout),
-                "stderrBytes": len(original.stderr), "stderrSha256": sha(original.stderr)})
-            return original
-
-        source_arguments = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-            "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
-            "desktop/tools/macos_normal_ui_runner.py"]
-        def source_state():
-            original = call("normal-ui-source-roster", source_arguments, 15)
-            need(original.returncode == 0 and len(original.stdout) <= 8192, "normal-ui-source-command")
-            rows = original.stdout.split(b"\0")
-            need(rows[-1] == b"" and 0 < len(rows) <= 16, "normal-ui-source-roster")
-            facts = {}
-            for row in rows[:-1]:
-                header, raw_name = row.split(b"\t", 1)
-                mode, kind, blob = header.split(b" ")
-                name = raw_name.decode("utf-8", "strict")
-                need(kind == b"blob" and mode in (b"100644", b"100755")
-                     and (name.startswith("desktop/native/macos-normal-ui/") or name == "desktop/tools/macos_normal_ui_runner.py")
-                     and all(part not in ("", ".", "..") for part in name.split("/")) and name not in facts,
-                     "normal-ui-source-entry")
-                fd = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-                try:
-                    body, identity, digest = original_body(fd, 1024 * 1024, collect=True)
-                    need(hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest() == blob.decode("ascii")
-                         and full9(os.stat(root / name, follow_symlinks=False)) == identity, "normal-ui-source-correspondence")
-                    facts[name] = [decimal(identity), digest]
-                finally:
-                    os.close(fd)
-            need("desktop/tools/macos_normal_ui_runner.py" in facts
-                 and "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift" in facts,
-                 "normal-ui-source-complete")
-            return facts
-
-        before = source_state()
-        original, facts = run_admitted_test(call, derived, result, methods, allowance, timeout)
-        need(source_state() == before, "normal-ui-source-pre-post")
-        facts.update(sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,
-                     originalCommandReturned=True, originalTestReturncode=original.returncode, commands=records)
-        receipt = result.with_suffix(".runner-admission.json")
-        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        try:
-            body = encoded(facts) + b"\n"
-            need(len(body) <= 32768, "normal-runner-receipt-bound")
-            offset = 0
-            while offset < len(body):
-                count = os.write(fd, body[offset:])
-                need(count > 0, "normal-runner-receipt-write")
-                offset += count
-            os.fsync(fd)
+            body, identity, digest = original_body(fd, 1024 * 1024, collect=True)
+            need(hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest() == blob.decode("ascii")
+                 and full9(os.stat(phase.root / name, follow_symlinks=False)) == identity, "normal-ui-source-correspondence")
+            facts[name] = [decimal(identity), digest]
         finally:
             os.close(fd)
-        sys.stdout.buffer.write(original.stdout)
+    need("desktop/tools/macos_normal_ui_runner.py" in facts
+         and "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift" in facts,
+         "normal-ui-source-complete")
+    return facts
+
+
+class NativeQueryFailure(Exception):
+    """One validated returned nonzero query; no later build/query is dispatched."""
+    def __init__(self, original):
+        super().__init__("normal-toolchain-original-nonzero")
+        self.original = original
+
+
+def execute_normal_phase(phase, request, source, file_limit):
+    """Original owner/source checks shared by fixed build, test and summary."""
+    mode, derived, result = request["phase"], request["derived"], request["result"]
+    before = normal_source_state(phase, source)
+    if mode == "build":
+        need(not os.path.lexists(derived), "fresh-derived-data-required")
+        values = {}
+        for key, name, arguments in TOOLCHAIN_QUERIES:
+            original = phase.call("normal-toolchain-" + key, list(arguments), 15, 4096)
+            if original.returncode != 0:
+                raise NativeQueryFailure(original)
+            values[key] = original.stdout
+        normal_toolchain(values)
+        for key, name, _ in TOOLCHAIN_QUERIES:
+            phase.clock.check()
+            exclusive_output(derived.parent / name, values[key], 4096)
+        original = phase.call("normal-ui-build", normal_build_arguments(derived), 240)
+        facts = {"schemaVersion": 1, "scope": "normal-ui-original-command-admission-only", "phase": "build",
+                 "resultBundle": None, "originalCommandRole": "normal-ui-build", "originalReturncode": original.returncode}
+        receipt = derived.parent / "build.command-admission.json"
+    elif mode == "summary":
+        observed = os.stat(result, follow_symlinks=False)
+        need(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.getuid()
+             and not observed.st_mode & 0o022, "normal-summary-original-directory")
+        arguments = ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(result), "--compact"]
+        original = phase.call("normal-ui-summary", arguments, 30, 262144)
+        facts = {"schemaVersion": 1, "scope": "normal-ui-original-command-admission-only", "phase": "summary",
+                 "resultBundle": result.name, "originalCommandRole": "normal-ui-summary", "originalReturncode": original.returncode}
+        receipt = result.parent / (SUMMARY_STEMS[result.name] + ".command-admission.json")
+    else:
+        need(mode == "test", "normal-phase-selection")
+        original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
+                                            request["allowance"], request["timeout"])
+        facts.update(originalTestReturncode=original.returncode, normalPhase="test", resultBundle=result.name)
+        receipt = result.with_suffix(".runner-admission.json")
+    need(normal_source_state(phase, source) == before, "normal-ui-source-pre-post")
+    facts.update(sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,
+                 originalCommandReturned=True, commands=phase.records, fileLimitBytes=list(file_limit),
+                 phaseClock=phase.clock.before_publication(), receiptPolicy="exclusive0600-readback-consuming-close")
+    exclusive_output(receipt, encoded(facts) + b"\n", 32768)
+    phase.clock.check()  # Includes actual original receipt close, never inferred from a persisted flag.
+    return original
+
+
+def failure_base(phase, selection, original):
+    need(phase in ("build", "test", "summary", "query")
+         and (selection is None if phase in ("build", "query") else selection in NORMAL_SELECTIONS),
+         "normal-diagnostic-selection")
+    cap = 4096 if phase == "query" else 262144 if phase == "summary" else 1024 * 1024
+    need(type(original) is subprocess.CompletedProcess and type(original.returncode) is int
+         and 1 <= original.returncode <= 255 and type(original.stdout) is bytes and type(original.stderr) is bytes
+         and len(original.stdout) + len(original.stderr) <= cap, "normal-diagnostic-original")
+    return {"schemaVersion": 1, "scope": "normal-macos-ui-failure-diagnostic-only", "phase": phase,
+        "selection": selection, "originalReturncode": original.returncode,
+        "stdoutBytes": len(original.stdout), "stdoutSha256": sha(original.stdout),
+        "stderrBytes": len(original.stderr), "stderrSha256": sha(original.stderr),
+        "status": "unavailable", "findingsTruncated": False, "errorCodes": [], "sourceFailures": [],
+        "queryObservations": [], "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
+            "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
+
+
+def normal_failure_diagnostics(phase, selection, original):
+    """Whole-original bounded text to fixed observations, never raw error/reason text."""
+    value = failure_base(phase, selection, original)
+    domains = {domain.encode("ascii"): domain for domain in (
+        "NSCocoaErrorDomain", "NSPOSIXErrorDomain", "NSOSStatusErrorDomain", "NSMachErrorDomain",
+        "XCTestErrorDomain", "XCTRunnerErrorDomain", "com.apple.dt.xctest.error",
+        "IDETestOperationsObserverErrorDomain", "IDEFoundationErrorDomain", "RBSRequestErrorDomain",
+        "RBSServiceErrorDomain", "FBSOpenApplicationServiceErrorDomain", "FBSOpenApplicationErrorDomain",
+        "IXUserPresentableErrorDomain")}
+    codes = (rb"(?:\A|(?<=[ \t\r\n({\x5b]))Error[ \t]{1,8}Domain=(" + b"|".join(re.escape(x) for x in domains)
+             + rb")[ \t]{1,8}Code=(-?(?:0|[1-9][0-9]{0,9}))(?=\Z|[ \t\r\n,;\"')}\x5d])")
+    methods = NORMAL_SELECTIONS[selection][0] if selection is not None else ()
+    method_pattern = b"|".join(re.escape(m.encode("ascii")) for m in methods)
+    case = rb"-\[MRKNormalAppUITests\.NormalAppUITests (?:" + method_pattern + rb")\]"
+    locations = (rb"(?:\A|(?<=[/ \t\r\n]))NormalAppUITests\.swift:([1-9][0-9]{0,4})"
+                 rb"(?::([1-9][0-9]{0,3}))?:[ \t]{1,8}error:[ \t]{1,8}"
+                 rb"-\[MRKNormalAppUITests\.NormalAppUITests (" + method_pattern + rb")\][ \t]{0,8}:")
+    markers = {"testExecuteFailed": rb"(?m)^\*\* TEST EXECUTE FAILED \*\*\r?$",
+               "testingFailed": rb"(?m)^Testing failed:", "xcodebuildError": rb"(?m)^xcodebuild: error:"}
+    if methods:
+        markers.update(selectedCaseStarted=rb"(?m)^Test Case '" + case + rb"' started\.\r?$",
+            selectedCaseFailed=rb"(?m)^Test Case '" + case + rb"' failed(?: \([0-9]{1,6}(?:\.[0-9]{1,9})? seconds\))?\.\r?$")
+    query = (rb"MRK_MACOS_NORMAL_(RENDERER|DASHBOARD)_QUERY=observation="
+             rb"(initial|identifier|title|label|value|placeholderValue|containingSameStaticText)"
+             rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
+
+    def retain(key, finding, maximum, distinct=True):
+        if not distinct or finding not in value[key]:
+            if len(value[key]) < maximum:
+                value[key].append(finding)
+            else:
+                value["findingsTruncated"] = True
+
+    for stream, body in (("stdout", original.stdout), ("stderr", original.stderr)):
+        for key, pattern in markers.items():
+            value["markers"][key] = value["markers"][key] or re.search(pattern, body) is not None
+        for match in re.finditer(codes, body):
+            token = match.group(2)
+            code = int(token)
+            if token != b"-0" and -2147483648 <= code <= 2147483647:
+                retain("errorCodes", {"stream": stream, "domain": domains[match.group(1)], "code": code}, 8)
+        if methods:
+            for match in re.finditer(locations, body):
+                line, column = int(match.group(1)), int(match.group(2)) if match.group(2) is not None else None
+                if line <= 65535 and (column is None or column <= 4096):
+                    retain("sourceFailures", {"stream": stream, "source": "NormalAppUITests.swift",
+                        "method": match.group(3).decode("ascii"), "line": line, "column": column}, 4)
+        offset = 0
+        while True:
+            end = body.find(b"\n", offset)
+            if end < 0:
+                break  # Incomplete records are not converted into complete observations.
+            record, offset = body[offset:end], end + 1
+            if record.endswith(b"\r"):
+                record = record[:-1]
+            match = re.fullmatch(query, record)
+            if match is None:
+                continue
+            kind = "renderer" if match.group(1) == b"RENDERER" else "dashboard"
+            observation, count = match.group(2).decode("ascii"), int(match.group(3))
+            exceeds = match.group(4) == b"1"
+            if (kind == "renderer" and observation != "initial") or (observation == "initial" and count == 1):
+                continue
+            if exceeds == (count == 5):
+                retain("queryObservations", {"stream": stream, "kind": kind, "observation": observation,
+                    "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 4, distinct=False)
+    value["status"] = "classified" if any(value[key] for key in ("errorCodes", "sourceFailures", "queryObservations")) else "unclassified"
+    need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
+    return value
+
+
+def publish_failure_diagnostics(request, original, *, query=False):
+    phase = "query" if query else request["phase"]
+    selection = None if phase in ("build", "query") else request["result"].name
+    # Validate before formatting: caller must already hold a genuine returned nonzero original.
+    unavailable = failure_base(phase, selection, original)
+    try:
+        value = normal_failure_diagnostics(phase, selection, original)
+        body = encoded(value) + b"\n"
+        need(len(body) <= 4096, "normal-diagnostic-output-bound")
+    except Exception:
+        body = encoded(unavailable) + b"\n"
+    name = ("toolchain" if query else "build" if phase == "build" else
+            SUMMARY_STEMS[selection] if phase == "summary" else request["result"].stem)
+    try:
+        exclusive_output(request["derived"].parent / (name + ".failure-diagnostics.json"), body, 4096)
+    except Exception:
+        # A formatter/output failure cannot turn the original native nonzero into success.
+        try:
+            sys.stderr.write("normal-failure-diagnostic-publication-failed\n")
+        except Exception:
+            pass
+
+
+def load_normal_owner(root):
+    loader_fd = os.open(root / LOADER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        _, loader_identity, loader_digest = original_body(loader_fd, 1024 * 1024)
+        need(loader_digest == LOADER_SHA, "normal-owner-loader-pin")
+        spec = importlib.util.spec_from_file_location("mrk_normal_ui_owner_loader", root / LOADER)
+        need(spec is not None and spec.loader is not None, "normal-owner-loader")
+        loader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loader)
+        owner = loader.load_owner(root)
+        need(full9(os.stat(root / LOADER, follow_symlinks=False)) == loader_identity
+             and original_body(loader_fd, 1024 * 1024)[1:] == (loader_identity, loader_digest), "normal-owner-loader-changed")
+        return owner
+    finally:
+        os.close(loader_fd)
+
+
+def normal_context(request):
+    source = os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
+    need(re.fullmatch(r"[0-9a-f]{40}", source)
+         and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source
+         and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == "github-hosted-macos26-arm64",
+         "normal-same-build-only")
+    import resource  # Native CLI only; inert helper import stays portable.
+    need(sys.platform == "darwin" and platform.machine() == "arm64" and platform.mac_ver()[0].startswith("26.")
+         and os.environ.get("DEVELOPER_DIR") == DEVELOPER, "normal-host-developer-file-budget")
+    file_limit = normal_file_limit(request["phase"], resource.getrlimit(resource.RLIMIT_FSIZE))
+    import pwd
+    account = pwd.getpwuid(os.getuid())
+    need(os.getuid() > 0 and os.getuid() == os.geteuid() == account.pw_uid
+         and os.getgid() == os.getegid() == account.pw_gid and account.pw_name == "runner"
+         and account.pw_dir == "/Users/runner" and os.stat("/dev/console").st_uid == os.getuid(), "normal-console-account")
+    root = Path(__file__).absolute().parents[2]
+    derived = request["derived"]
+    need(str(root) == "/Users/runner/work/mobile-release-kit/mobile-release-kit" and Path.cwd() == root
+         and derived.parent.parent.parent == Path("/Users/runner/work/_temp")
+         and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", derived.parent.parent.name)
+         and os.environ.get("TMPDIR") == str(derived.parent / "tmp") + "/", "normal-fixed-work")
+    environment = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ",
+        "DEVELOPER_DIR", "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB", "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE",
+        "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE")}
+    need(all(environment[key] == value for key, value in {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+         "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner", "LANG": "en_US.UTF-8",
+         "LC_ALL": "en_US.UTF-8", "TZ": "UTC"}.items()), "normal-clean-environment")
+    return root, source, environment, file_limit
+
+
+def main():
+    owner = None
+    phase = None
+    records = []
+    try:
+        started = time.monotonic_ns()  # Includes CLI/context/loader admission in this one phase.
+        request = normal_request(sys.argv[1:], os.environ.get("TMPDIR", ""))
+        clock = PhaseClock(request["phaseSeconds"], started=started)
+        root, source, environment, file_limit = normal_context(request)
+        owner = load_normal_owner(root)
+        phase = NormalPhase(owner, environment, root, clock)
+        records = phase.records
+        try:
+            original = execute_normal_phase(phase, request, source, file_limit)
+        except NativeQueryFailure as failure:
+            # No subsequent query/build/source command after the original failed query.
+            publish_failure_diagnostics(request, failure.original, query=True)
+            clock.finish()
+            return failure.original.returncode
+        if original.returncode != 0:
+            publish_failure_diagnostics(request, original)
+        sys.stdout.buffer.write(original.stdout)  # Workflow keeps these full originals PRIVATE.
         sys.stderr.buffer.write(original.stderr)
+        sys.stdout.buffer.flush()
+        sys.stderr.buffer.flush()
+        clock.finish()
         return original.returncode
     except BaseException as error:
+        if phase is not None:
+            phase.clock.failed = True
         failure = {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
             "error": str(error) if type(error) is Refused else "runner-admission-or-owner-error",
             "commands": records, "unknownStateRetained": True}

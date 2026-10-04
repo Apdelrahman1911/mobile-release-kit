@@ -33,8 +33,17 @@ class MacProjectRecoverySourceTests(unittest.TestCase):
         source = "".join(line[4:] for line in body_lines).encode()
         self.assertTrue(handler.endswith("    raise SystemExit(1) from None\n"))
         self.assertEqual(source, literal(ROOT / "desktop/tools/ubuntu_publication_lifecycle.py", "SHELL_RECOVERY_PRODUCER").encode())
-        self.assertEqual(len(source), 5919)
-        self.assertEqual(hashlib.sha256(source).hexdigest(), "32ccb0e534e1021442e8620b0cbcdf73c8a7f6bb4799d8f791b2d9282ffb23fd")
+        self.assertEqual(len(source), 6088)
+        self.assertEqual(hashlib.sha256(source).hexdigest(), "7dcdd821b07f611e1339ce40add59e318363637ea25b2277b468ba794cbd1080")
+        decoded = source.decode("utf-8")
+        self.assertIn("from mobile_release.owned_process import ProcessError\n", decoded)
+        self.assertIn("need(type(caught) is ProcessError and invocation is not None and original is not None", decoded)
+        for fact in ("caught.dispatched is False", "caught.contained is True", "caught.cleanup_complete is False",
+                     "ledger._profile_contained is True", "ledger._command_contained is True"):
+            self.assertIn(fact, decoded)
+        self.assertNotIn("ProcessCleanupError", decoded)
+        self.assertEqual(literal(ROOT / "desktop/tools/macos_normal_ui_runner.py", "LOADER_SHA"),
+                         hashlib.sha256(adapter.read_bytes()).hexdigest())
         imports = [node for node in ast.walk(ast.parse(adapter.read_bytes())) if isinstance(node, (ast.Import, ast.ImportFrom))]
         self.assertFalse(any(isinstance(node, ast.ImportFrom) and node.module and "ubuntu_publication" in node.module
                              or isinstance(node, ast.Import) and any("ubuntu_publication" in alias.name for alias in node.names) for node in imports))

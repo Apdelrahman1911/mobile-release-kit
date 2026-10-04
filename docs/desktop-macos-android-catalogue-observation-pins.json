@@ -1,0 +1,1116 @@
+{
+  "generatedSource": {
+    "bytes": 20409772,
+    "path": "desktop/src-tauri/src/android_supplier_macos_catalogue.rs",
+    "sha256": "364bf1438d5e3801aec40bc3136f377c34c317439999edaa4a3f794a7bc69204"
+  },
+  "generation": {
+    "deterministicOutputVerifiedTwice": true,
+    "inputPrePostMatched": true,
+    "originalExitCode": 0,
+    "sourcePrePostMatched": true
+  },
+  "generator": {
+    "bytes": 139123,
+    "path": "desktop/tools/macos_android_supplier_catalogue.py",
+    "sha256": "4294528812c53def9b05cc189da16a3419557160324df2933da187447fc8ddd5"
+  },
+  "inputBytes": 7338029,
+  "inputCommitmentSha256": "58a9f1ba78b19be5788717812c47070c2444d93bf0092966eda77fe2fe4fd931",
+  "inputCount": 217,
+  "limits": {
+    "compiled": false,
+    "desktopReady": false,
+    "nativeMacVerified": false,
+    "supplierAuthorityEstablished": false
+  },
+  "observations": [
+    {
+      "bytes": 1048,
+      "path": "aapt2-data.json",
+      "sha256": "7119f3a1a4f5512aac7e1f028227d10b05c4b4eead32eb0e59a460ea3ca738fd"
+    },
+    {
+      "bytes": 9848,
+      "path": "evidence/aapt2-native-0.json",
+      "sha256": "26601f896f8f946d920ad6c80becc0fd4edaebfbe664cc8d9524f5a3f31f9b11"
+    },
+    {
+      "bytes": 16445,
+      "path": "evidence/bundletool-resources.json",
+      "sha256": "2c9eb826bf3c7424aea7a208c11ab2b3ba0608805da2f6384f73f60a388b6e53"
+    },
+    {
+      "bytes": 1049,
+      "path": "evidence/gradle-wrapper-negative.json",
+      "sha256": "463c0ffd0f79761d222b83818ced8ec8e0c31f5b0df98c5d74d832e5fe278fcd"
+    },
+    {
+      "bytes": 19400,
+      "path": "evidence/jdk-completion.json",
+      "sha256": "c106a9f948ba88eb1b87e94ecf4656890b0111c73cbf6c284c2e32268c036ccd"
+    },
+    {
+      "bytes": 1247,
+      "path": "evidence/jdk-jvm-100.json",
+      "sha256": "85693a215325cb6f74f7dc1fb939628bf665bef6ead101fc82ef138d68fadaec"
+    },
+    {
+      "bytes": 1244,
+      "path": "evidence/jdk-jvm-101.json",
+      "sha256": "66afa0670cdeec8bcc538e190ade50f48fb3005baa9668461fb56cd79c855aa2"
+    },
+    {
+      "bytes": 1239,
+      "path": "evidence/jdk-jvm-102.json",
+      "sha256": "8f11e3ff96834192afececef6a5aa0ec102ca8f95c7e3e4ac50a7b496fda3ae9"
+    },
+    {
+      "bytes": 1249,
+      "path": "evidence/jdk-jvm-103.json",
+      "sha256": "19dd9c033b246cb36885635f6e815f3713106b96d82b94e582526cecc227def4"
+    },
+    {
+      "bytes": 1248,
+      "path": "evidence/jdk-jvm-104.json",
+      "sha256": "063a9030f12478f3f33ab55c0cdbabcbf78c8c9f8428fab1657f2351e17e125c"
+    },
+    {
+      "bytes": 1270,
+      "path": "evidence/jdk-jvm-105.json",
+      "sha256": "1e771855773691d0efdcd840b3a657d222daa8b3f233d6a1bac43f24e9a7cfb2"
+    },
+    {
+      "bytes": 18497,
+      "path": "evidence/jdk-jvm-106.json",
+      "sha256": "6f6d863dc019f64c4fcb26d0c4ac6f57454deb2afa7d323e4cbd8eba49ea1b46"
+    },
+    {
+      "bytes": 9875,
+      "path": "evidence/jdk-jvm-107.json",
+      "sha256": "2e7a2ab6cab4e9117d9b03c4d2263f5154340387fc74c36af80ed946a7fed9bc"
+    },
+    {
+      "bytes": 53007,
+      "path": "evidence/jdk-jvm-108.json",
+      "sha256": "2aea528a3eff624616d4278f7c0a6cd90764929add0a765995059e3f308b60cf"
+    },
+    {
+      "bytes": 9874,
+      "path": "evidence/jdk-jvm-109.json",
+      "sha256": "56ebcd4ab3acaac1ac34e2fe1feb9cf379f704a4d2a9db5155cad4a323815386"
+    },
+    {
+      "bytes": 27131,
+      "path": "evidence/jdk-jvm-110.json",
+      "sha256": "69b1a1894e5f3281cb4bbd027eb5c7e3bd13385302c7b07c2f560b572f99ddbd"
+    },
+    {
+      "bytes": 9860,
+      "path": "evidence/jdk-jvm-111.json",
+      "sha256": "0e32f380290aacc3e16af6dfd050a0e56e25b867812bb01f2d7c32227ce5a537"
+    },
+    {
+      "bytes": 17945,
+      "path": "evidence/jdk-jvm-112.json",
+      "sha256": "99d8227e5e4d8f08f1a51c9d697dcb948dab24c3718401230b6eba5ab95c4e20"
+    },
+    {
+      "bytes": 9859,
+      "path": "evidence/jdk-jvm-113.json",
+      "sha256": "e7a9990f67757b73ce7009b590d859ff69e97543d0ec5ea3841428d32ac53ce3"
+    },
+    {
+      "bytes": 27126,
+      "path": "evidence/jdk-jvm-114.json",
+      "sha256": "53e9d5495cfe2e988e829196a992d273e17bdec35090ca303f2744008ff66f4d"
+    },
+    {
+      "bytes": 18730,
+      "path": "evidence/jdk-jvm-115.json",
+      "sha256": "3aa91158bf7a0ccd2ea581c990f6b36e3b80faeab0fe65e38e4798054dca4320"
+    },
+    {
+      "bytes": 9869,
+      "path": "evidence/jdk-jvm-116.json",
+      "sha256": "65497b3520c400bcc2e035d732bac4a06e444a23f598355ec7c297061577fb16"
+    },
+    {
+      "bytes": 1226,
+      "path": "evidence/jdk-jvm-117.json",
+      "sha256": "b381b3ca48cc576ed96c22a0479d2aa5a17926be1a2eccab719f233f1252983f"
+    },
+    {
+      "bytes": 9861,
+      "path": "evidence/jdk-jvm-118.json",
+      "sha256": "d54059c5f425c29a28d880ec556ffa12623c2901a902284c95e74e09a14c232f"
+    },
+    {
+      "bytes": 1252,
+      "path": "evidence/jdk-jvm-119.json",
+      "sha256": "2f23b3e908529680f190e93e6eac799a021c70afcb887fafd825f2f3f98d093e"
+    },
+    {
+      "bytes": 9338,
+      "path": "evidence/jdk-jvm-120.json",
+      "sha256": "57a28e7a3596586dc9f4534e9b11bca37859449e3c8f5d70f35fc3b35b689b29"
+    },
+    {
+      "bytes": 1243,
+      "path": "evidence/jdk-jvm-121.json",
+      "sha256": "fe2de03a8516a9fbac2fe8285a38fe846ab52a8e58dcfbe13064712a81e58a1d"
+    },
+    {
+      "bytes": 9630,
+      "path": "evidence/jdk-jvm-122.json",
+      "sha256": "8e8ebb2902686ebd50927cc18b0d0786e0acfeb64cf56614ac405f26807d8d80"
+    },
+    {
+      "bytes": 1235,
+      "path": "evidence/jdk-jvm-123.json",
+      "sha256": "cbc2de90d612a1b7f7f7258427354d0eb5b33700de73342ed4aae8146a40205d"
+    },
+    {
+      "bytes": 1234,
+      "path": "evidence/jdk-jvm-124.json",
+      "sha256": "a3ece2f357ac740228eb7a198f05b115b15264c4db26dd1aa0dd2d0358a98370"
+    },
+    {
+      "bytes": 9212,
+      "path": "evidence/jdk-jvm-125.json",
+      "sha256": "013f02addce47b007fce1ee8167d87011dfab7e12c1cc504fb88d2e7bba70b55"
+    },
+    {
+      "bytes": 1232,
+      "path": "evidence/jdk-jvm-126.json",
+      "sha256": "f13cd2756e537d8847d3a9f463de6ce7108fcc8249a1531214ac6de3cc667e88"
+    },
+    {
+      "bytes": 1226,
+      "path": "evidence/jdk-jvm-127.json",
+      "sha256": "08bb2d972a9fa0751e068f7ee07afc96af0da5bad3eb530cbee9c0c4d00bd5cd"
+    },
+    {
+      "bytes": 1222,
+      "path": "evidence/jdk-jvm-128.json",
+      "sha256": "250947c99528b71c06ceb9ba908c660f941580e4775e29f93e133db5e296a4f4"
+    },
+    {
+      "bytes": 9166,
+      "path": "evidence/jdk-jvm-129.json",
+      "sha256": "a7261f0f3371ecd89a7bc329b08c8a8ab94ab74ee0eefbae640a26b30136f13a"
+    },
+    {
+      "bytes": 1240,
+      "path": "evidence/jdk-jvm-130.json",
+      "sha256": "f697c77f2fd611fbb7ffce1c34469cf85ea32745c543249258c2db8aa4286fa4"
+    },
+    {
+      "bytes": 1252,
+      "path": "evidence/jdk-jvm-131.json",
+      "sha256": "af93b93f60007cea7bcbd12d8c6dbb4524d592718da8e7ce753670f1e2259c0d"
+    },
+    {
+      "bytes": 1236,
+      "path": "evidence/jdk-jvm-132.json",
+      "sha256": "b7ac6b9b012a3013b18c0fc6e77e749509c68209cb68992dcd137eac7781c909"
+    },
+    {
+      "bytes": 1228,
+      "path": "evidence/jdk-jvm-133.json",
+      "sha256": "7789a3876a2523de3fb1feb5a0b26f69a2aa89734ff4788e38efabd7cec74e1b"
+    },
+    {
+      "bytes": 1227,
+      "path": "evidence/jdk-jvm-134.json",
+      "sha256": "109051d229cf3fb2c1aad0f998460f29981f128912f2aaf8bc0d68944bde05c0"
+    },
+    {
+      "bytes": 1214,
+      "path": "evidence/jdk-jvm-459.json",
+      "sha256": "2af065c51a9869966e12859dc9ef23b6cadbaf7022d468cb35092cba285364ee"
+    },
+    {
+      "bytes": 124710,
+      "path": "evidence/jdk-jvm-65.json",
+      "sha256": "e98d3f271d81c6bdd7a8009281bd8dc3d672e4be9d0bf490a9b33787ea2668be"
+    },
+    {
+      "bytes": 1239,
+      "path": "evidence/jdk-jvm-66.json",
+      "sha256": "f9cfae5df8e0ee7499d03148ca567c920d49ff2f88633ebe8cca021664b3727f"
+    },
+    {
+      "bytes": 1241,
+      "path": "evidence/jdk-jvm-67.json",
+      "sha256": "f323e623e8b6f48e212e3d33c1164fb7ceeb1b8f13e069a1f86f706c33a47a3e"
+    },
+    {
+      "bytes": 128852,
+      "path": "evidence/jdk-jvm-68.json",
+      "sha256": "5b789ef5f79a38129bb0da5f862ec2605a8bbefc3f7b150d4badf1f126d17c27"
+    },
+    {
+      "bytes": 10060,
+      "path": "evidence/jdk-jvm-69.json",
+      "sha256": "c40288e853c7fd6622625f76c817f180cff38d009ff49cd964c930e1fe6562f2"
+    },
+    {
+      "bytes": 1233,
+      "path": "evidence/jdk-jvm-70.json",
+      "sha256": "7c2b431764200affd63c023ad00032ddb5f4dee0b1de17da5bdc304b3223318c"
+    },
+    {
+      "bytes": 9423,
+      "path": "evidence/jdk-jvm-71.json",
+      "sha256": "ca8c52aeb5ed719fbd08d822dba294c627047ba4c8c362e603fbb6ba21e5f5b4"
+    },
+    {
+      "bytes": 1245,
+      "path": "evidence/jdk-jvm-72.json",
+      "sha256": "9cf1027e79e1a4977105217412e5840b9a79d677220058d5d81cbc58ebb109c0"
+    },
+    {
+      "bytes": 1235,
+      "path": "evidence/jdk-jvm-73.json",
+      "sha256": "6940627f63ea84638a550b800d7f9b7906ec6bc50ca40a91eeaa0e63e7483eb7"
+    },
+    {
+      "bytes": 1240,
+      "path": "evidence/jdk-jvm-74.json",
+      "sha256": "e632554aebeada0884cbe419feaebceffed7fad5e896b62b5120a01bd122f9f0"
+    },
+    {
+      "bytes": 9805,
+      "path": "evidence/jdk-jvm-75.json",
+      "sha256": "c89a5aa488f559fb14dfcaa8336f6d9dfae665153cc9f2876b62d1f60bea89ee"
+    },
+    {
+      "bytes": 17751,
+      "path": "evidence/jdk-jvm-76.json",
+      "sha256": "30c1f96e4f10ed5a6af3d2a06405eb19de199e0944d569c8be0f72b680cf800d"
+    },
+    {
+      "bytes": 9873,
+      "path": "evidence/jdk-jvm-77.json",
+      "sha256": "490e75b3c26b21a388e331c4edda15ab51c2e6775495973541ca4a16bb15bd8e"
+    },
+    {
+      "bytes": 1214,
+      "path": "evidence/jdk-jvm-78.json",
+      "sha256": "74438463c1283bc6267941594a742ff139629b4a07f35ebf0204dca50abf491d"
+    },
+    {
+      "bytes": 19118,
+      "path": "evidence/jdk-jvm-79.json",
+      "sha256": "687a41ac7427808fbb0f76109ec98aca81208ed20d4dc7244286bc2a24f0f037"
+    },
+    {
+      "bytes": 1243,
+      "path": "evidence/jdk-jvm-80.json",
+      "sha256": "1f23013ed0d193e9e19104bc6bddb3a74dcf180193452a80b59622e6e00eacae"
+    },
+    {
+      "bytes": 9274,
+      "path": "evidence/jdk-jvm-81.json",
+      "sha256": "cbd6c823195e1f725f04e50a66aed8dffa58cba9678a2943ea08b38da7c04d4b"
+    },
+    {
+      "bytes": 1223,
+      "path": "evidence/jdk-jvm-82.json",
+      "sha256": "db0a99e8f66859542a03d92b7b470d5641378307d332b517adead39d78f9946f"
+    },
+    {
+      "bytes": 1240,
+      "path": "evidence/jdk-jvm-83.json",
+      "sha256": "7f4a0bff79a66ea315b27e2eb0352045516f133c5985bc3814189cec15335e68"
+    },
+    {
+      "bytes": 1240,
+      "path": "evidence/jdk-jvm-84.json",
+      "sha256": "24293fb44eb6d53fec61dd4c2251b3b2e94267825eafe4ef5321118654952b31"
+    },
+    {
+      "bytes": 1244,
+      "path": "evidence/jdk-jvm-85.json",
+      "sha256": "c0aa0e9a1a40ad33edc6ac31f329a68c4430e36dd32e7ab16e13ea9895c09600"
+    },
+    {
+      "bytes": 1240,
+      "path": "evidence/jdk-jvm-86.json",
+      "sha256": "aa9fe4d9be4d35ef1725013f334a7c9797496eabe953b1380e79a26d2a042e56"
+    },
+    {
+      "bytes": 1241,
+      "path": "evidence/jdk-jvm-87.json",
+      "sha256": "7421338c84e121c42f1c3b9e961555e8bbd0fb27db9845b8acbe9399d8c23628"
+    },
+    {
+      "bytes": 9390,
+      "path": "evidence/jdk-jvm-88.json",
+      "sha256": "be8566f658c656ecfebec834b569b35915dd8c05e9460206e6ef0867c76c9bfa"
+    },
+    {
+      "bytes": 1240,
+      "path": "evidence/jdk-jvm-89.json",
+      "sha256": "439c3efacdb7529931ba5622d694163a6bf9689061dc7570ed3c65bafa105048"
+    },
+    {
+      "bytes": 18661,
+      "path": "evidence/jdk-jvm-90.json",
+      "sha256": "31fe9e712fd014fff31b45bbf25597700e32bea189b39a8f84c7d11c9606d65c"
+    },
+    {
+      "bytes": 9408,
+      "path": "evidence/jdk-jvm-91.json",
+      "sha256": "8637202f0c23ffde4199ec860842a4daf73c7d04e4f46a00c348de2fc08befee"
+    },
+    {
+      "bytes": 1235,
+      "path": "evidence/jdk-jvm-92.json",
+      "sha256": "0dca7e9fc0442c533e2a3ece1dbb676423271e591c36e32e117e183f943de1ec"
+    },
+    {
+      "bytes": 1236,
+      "path": "evidence/jdk-jvm-93.json",
+      "sha256": "64b9e4c835f8b71f0e74e13aef0395f5688fda26aaab6212ff1e577b92716e26"
+    },
+    {
+      "bytes": 1224,
+      "path": "evidence/jdk-jvm-94.json",
+      "sha256": "2b04f7a264314fd5b2927b25d9021d85fc1e59c0e30c4ec6666a5b8bb40038a9"
+    },
+    {
+      "bytes": 19569,
+      "path": "evidence/jdk-jvm-95.json",
+      "sha256": "ada7fb5da26256ec104bda2d1a52075e6288dc07798b6b9ed128c43c93f8c62c"
+    },
+    {
+      "bytes": 1237,
+      "path": "evidence/jdk-jvm-96.json",
+      "sha256": "50c133f629f7ce91611a39991496e6f4ca9673478bb11429b9a15954baf2c8d8"
+    },
+    {
+      "bytes": 8428,
+      "path": "evidence/jdk-jvm-97.json",
+      "sha256": "6096a3b173ba92edabbcb93d35b9f526b9416fe221bf60bbdcb5fe14439dcf64"
+    },
+    {
+      "bytes": 1254,
+      "path": "evidence/jdk-jvm-98.json",
+      "sha256": "400d5c978f8fb2897bf6b5489cca3ed70857efcf14aa82969c4f2984f5f368b7"
+    },
+    {
+      "bytes": 1232,
+      "path": "evidence/jdk-jvm-99.json",
+      "sha256": "546782b17e83de6361aec6c0068f2f1083f11aba04ec49391c6dd006ab82a3e2"
+    },
+    {
+      "bytes": 741,
+      "path": "evidence/jdk-jvm-cfg-bytes.json",
+      "sha256": "2b4eef57c14ee77aa181ed526e8d473dbdf3ea1e6eaff3c0c7c310f0c85504f2"
+    },
+    {
+      "bytes": 8923,
+      "path": "evidence/jdk-native-10.json",
+      "sha256": "0420edd47fe90a0669a535b514cc0eb993a2b6acf78f1fab496f8b3503f569ed"
+    },
+    {
+      "bytes": 8921,
+      "path": "evidence/jdk-native-11.json",
+      "sha256": "fedbb1a7c87e4237263d4d9c1b337b8c15dfa7ad3f23909a84a92fa152ce0a80"
+    },
+    {
+      "bytes": 8920,
+      "path": "evidence/jdk-native-12.json",
+      "sha256": "183c1d6579353e278ca0170577b4d5c2b14c5cecbe19df657f6d7500fa08e9d4"
+    },
+    {
+      "bytes": 8924,
+      "path": "evidence/jdk-native-13.json",
+      "sha256": "e3893093cda0658408d9d5b95a457ca7f050d0779638a8b50d141e341a51ec74"
+    },
+    {
+      "bytes": 8919,
+      "path": "evidence/jdk-native-14.json",
+      "sha256": "630eda14402a0121a8a96299c3b755f8d49dbdd4e8ca8af16d12f22481720231"
+    },
+    {
+      "bytes": 8925,
+      "path": "evidence/jdk-native-15.json",
+      "sha256": "9c7df9d78604fb022b206c1ab9567d33b2ac1de579fd5747f64912199305c6eb"
+    },
+    {
+      "bytes": 8921,
+      "path": "evidence/jdk-native-16.json",
+      "sha256": "883ec59c18ae9c4de70da43211b1a667108d599fb08ff80898e7ab329e56f8b0"
+    },
+    {
+      "bytes": 8919,
+      "path": "evidence/jdk-native-17.json",
+      "sha256": "7b8568847e1388eb3bcfa02870cc5f32a8f2d2643b056e8d9e033ad882c8abae"
+    },
+    {
+      "bytes": 8921,
+      "path": "evidence/jdk-native-18.json",
+      "sha256": "15937c2ac74851842f305ce42234df2ab88bc07e30817e1f4477c8e45f2a90ca"
+    },
+    {
+      "bytes": 8922,
+      "path": "evidence/jdk-native-19.json",
+      "sha256": "e73004bed29abee8905ebd5384c815ca82b318da5ad20ab1182f9f6b55aa484f"
+    },
+    {
+      "bytes": 8921,
+      "path": "evidence/jdk-native-20.json",
+      "sha256": "934f16e595ec04a574e5b5916e463ecc8445401f68f6230f5ca63dc15b16da27"
+    },
+    {
+      "bytes": 8921,
+      "path": "evidence/jdk-native-21.json",
+      "sha256": "a8a3bea542dd2f474219e2ba9e9c5b88b505163e0817552ad935ac073c413dca"
+    },
+    {
+      "bytes": 8920,
+      "path": "evidence/jdk-native-22.json",
+      "sha256": "73e3212cbe31eed10de870d46afd0cb736158f76c980138e8a3cd98d0e84bf00"
+    },
+    {
+      "bytes": 8920,
+      "path": "evidence/jdk-native-23.json",
+      "sha256": "95284fd786bb1aa193c0d8352304c4556fb7fa64e158bc1c164985adb3707b9d"
+    },
+    {
+      "bytes": 8924,
+      "path": "evidence/jdk-native-24.json",
+      "sha256": "0f8682a1f44238a43a383172de272efef564a92436e29dfffe81315c8e359cb8"
+    },
+    {
+      "bytes": 8919,
+      "path": "evidence/jdk-native-25.json",
+      "sha256": "a8f94010e1f61a626dbd70f1a09a205409996e2053fddf3c4fc12d10f8dd6538"
+    },
+    {
+      "bytes": 8926,
+      "path": "evidence/jdk-native-26.json",
+      "sha256": "aeecbbcfaab7070ac3d662c1fd73fe7d51ba5e2fc06ce3eff85d9378e7c48af2"
+    },
+    {
+      "bytes": 8922,
+      "path": "evidence/jdk-native-27.json",
+      "sha256": "9d7f6b3554e9e006aef27e6c11f4c434b0262fbf05fcb980857b9cef0ababc70"
+    },
+    {
+      "bytes": 8922,
+      "path": "evidence/jdk-native-28.json",
+      "sha256": "c9a209f78fe9553dbf7d014b88a057ea64f50c42408034e8d8a559134e0da879"
+    },
+    {
+      "bytes": 8921,
+      "path": "evidence/jdk-native-29.json",
+      "sha256": "a27653b85243b1acb445b2567af63024738b4d001dd5e855f5e04f54753f02dc"
+    },
+    {
+      "bytes": 8922,
+      "path": "evidence/jdk-native-30.json",
+      "sha256": "dfbf776253c8bcd0d839fb3394b2fca749ce8b6e6c32874accbdc89cdb37a192"
+    },
+    {
+      "bytes": 8923,
+      "path": "evidence/jdk-native-31.json",
+      "sha256": "64b314b9cb432167718e6cdea88fb946f92c0054aa3b037ea25acf87a5218ad0"
+    },
+    {
+      "bytes": 8927,
+      "path": "evidence/jdk-native-32.json",
+      "sha256": "95b4d5f31265e3e33261d64f545152f98632a05a598179c1339dd5d9ce663c3d"
+    },
+    {
+      "bytes": 8925,
+      "path": "evidence/jdk-native-33.json",
+      "sha256": "092698d52edd85e25e2a8a49d596cfbc5aff50d9197e99b835923181a67e6613"
+    },
+    {
+      "bytes": 8492,
+      "path": "evidence/jdk-native-460.json",
+      "sha256": "5314567b5ea6ff6e533e88770ac652d9b6865eef42a3bb2dfa8315af2f1a98e6"
+    },
+    {
+      "bytes": 8451,
+      "path": "evidence/jdk-native-462.json",
+      "sha256": "cdec8031a5e2785ad9ac272feb0c3e72b69fa56202717960886e6320ac05477c"
+    },
+    {
+      "bytes": 9742,
+      "path": "evidence/jdk-native-463.json",
+      "sha256": "c76671172f9012f89a1b72990ec03dafdeb44e14d5cf4473417471bd561aefda"
+    },
+    {
+      "bytes": 13342,
+      "path": "evidence/jdk-native-464.json",
+      "sha256": "4ff7824173f31cbcb6773ed2e957913052aa7e03d7b0df7399a9cec290204827"
+    },
+    {
+      "bytes": 8442,
+      "path": "evidence/jdk-native-465.json",
+      "sha256": "5a7b9b8337a5f82cca5c589a254b554709352a663dbaf08328c5a6cb4b2d2b05"
+    },
+    {
+      "bytes": 8279,
+      "path": "evidence/jdk-native-466.json",
+      "sha256": "139f276bc50577c7fc8f24a20124d4d600fc827470b997f5c31646ccb552e7eb"
+    },
+    {
+      "bytes": 9688,
+      "path": "evidence/jdk-native-467.json",
+      "sha256": "92e9522764296e15df22091d17ef286533c2627ebda95a1ec1995c8d5ce9620b"
+    },
+    {
+      "bytes": 8443,
+      "path": "evidence/jdk-native-468.json",
+      "sha256": "0f2bdfe0170e5f2f976d4270e7cda05daa4f3e7f6c950f56de6e4123d3b5084c"
+    },
+    {
+      "bytes": 9109,
+      "path": "evidence/jdk-native-469.json",
+      "sha256": "7b25b1eb2bdc5c06015d61cf317f012e6258afc6f2edb3f4d631a8cc47f45273"
+    },
+    {
+      "bytes": 8534,
+      "path": "evidence/jdk-native-470.json",
+      "sha256": "64cdc935e94efd0fee3869e66ece3431278e38a9aab3acd6a6ba7a903b4aa130"
+    },
+    {
+      "bytes": 8323,
+      "path": "evidence/jdk-native-471.json",
+      "sha256": "6bd42ee4ba248f01527758613d8dee54132b34e1dcba82b69dc446197147acc3"
+    },
+    {
+      "bytes": 8443,
+      "path": "evidence/jdk-native-472.json",
+      "sha256": "1ac2bdf69fe25bdfea85cec994379aa80499acfcdff13b543fcb23805c5c9edf"
+    },
+    {
+      "bytes": 8213,
+      "path": "evidence/jdk-native-473.json",
+      "sha256": "1f4ae21b55bcfebe58b48bb7ae6591c60eae25f5c7efbaf66c2ae062ba0f8839"
+    },
+    {
+      "bytes": 9839,
+      "path": "evidence/jdk-native-474.json",
+      "sha256": "6850e7b565eea28fcf825b4d47b202476454b8e596b71e22f0c835ea3618c514"
+    },
+    {
+      "bytes": 8891,
+      "path": "evidence/jdk-native-475.json",
+      "sha256": "ded0ae6261eef8c1dad1f3abcd4603ec676a6b5ee2747a13892126e8717f9e05"
+    },
+    {
+      "bytes": 8053,
+      "path": "evidence/jdk-native-476.json",
+      "sha256": "1dfc1c3ca262616e691384f451e432872303df84ab94ff6231f688269fc05dd9"
+    },
+    {
+      "bytes": 8847,
+      "path": "evidence/jdk-native-477.json",
+      "sha256": "bca0ff5e01e3c9c33e8b3d3c2855a4bf5e80bf24c0dfdbc48bfc9c7a0fc201c6"
+    },
+    {
+      "bytes": 9091,
+      "path": "evidence/jdk-native-478.json",
+      "sha256": "0d108bf297b8008f3dc39b2651e8638bea9286864c6f3b359828efe8a4b1b37b"
+    },
+    {
+      "bytes": 10018,
+      "path": "evidence/jdk-native-479.json",
+      "sha256": "f254a75c0c974d42d0ae321a11b28cf8f97ce6410aecc4a1f7b98ca8eafe2ab8"
+    },
+    {
+      "bytes": 8533,
+      "path": "evidence/jdk-native-480.json",
+      "sha256": "bd8c7d238f05f33a89e49aad3dd54977f5f86a01277b82a7e63d8f7fcd57043d"
+    },
+    {
+      "bytes": 9957,
+      "path": "evidence/jdk-native-481.json",
+      "sha256": "84a90f97978b3dc6e501652424edf26daa21fd57d36bc9d69882dc980e896882"
+    },
+    {
+      "bytes": 8835,
+      "path": "evidence/jdk-native-482.json",
+      "sha256": "63ac5db6e66d4f0e46eca99d6ee776c3d9c6e02f661f3e83819cc2a70d7609c1"
+    },
+    {
+      "bytes": 8467,
+      "path": "evidence/jdk-native-483.json",
+      "sha256": "5c14afe74726eb139e3ffac9646da2ce79e3027c98299224ad6337a42f0d1ad0"
+    },
+    {
+      "bytes": 8377,
+      "path": "evidence/jdk-native-484.json",
+      "sha256": "030b932b70c91df103f770ee2cb97a494b290204d078727bc7a9b3ea3c94f2d8"
+    },
+    {
+      "bytes": 8683,
+      "path": "evidence/jdk-native-485.json",
+      "sha256": "c63c724d30d32cca7fbbc99ba6d45cd53fa5f6b38226d9ba9a63e295bc1392ed"
+    },
+    {
+      "bytes": 8573,
+      "path": "evidence/jdk-native-486.json",
+      "sha256": "9feba520c6aebed9aa97344b41d9c3cae93e032973b401a36617116b11d4e8bb"
+    },
+    {
+      "bytes": 9282,
+      "path": "evidence/jdk-native-487.json",
+      "sha256": "b37a4b0c91ae5c8055088b17ae1d85f494e8789be9a145ec6a5f075cd5c208b9"
+    },
+    {
+      "bytes": 8834,
+      "path": "evidence/jdk-native-488.json",
+      "sha256": "cc0e8d3b215f8bccc3adf6e50645ca639682f23f91f652e3dbedc8e2ce9de3a6"
+    },
+    {
+      "bytes": 10528,
+      "path": "evidence/jdk-native-489.json",
+      "sha256": "ca4956119dc6595a2dace2a5c4e8b7e95f4ddd2bf9b0913e2c48261e1232c153"
+    },
+    {
+      "bytes": 12569,
+      "path": "evidence/jdk-native-490.json",
+      "sha256": "7b9652be9e4c8013d5ed6ebb12861f3d89c6bca0e34012e788359302f9134216"
+    },
+    {
+      "bytes": 9912,
+      "path": "evidence/jdk-native-491.json",
+      "sha256": "db2738087a1b66485f77732f814240e407ad89350a54e5f691fbc77cd89d0322"
+    },
+    {
+      "bytes": 9820,
+      "path": "evidence/jdk-native-492.json",
+      "sha256": "d66c741a92849fbf244d145e78bb9c8cb0162e80a9ab616f472823c2ba2c3718"
+    },
+    {
+      "bytes": 11886,
+      "path": "evidence/jdk-native-493.json",
+      "sha256": "da95fdc6fc5847be395f43af8fa3db48e93fc89c1b7882b8c18831251ca80589"
+    },
+    {
+      "bytes": 8866,
+      "path": "evidence/jdk-native-494.json",
+      "sha256": "3b60cec39d9593e8ddf28a37e921618bea83f78cadbf4188408cbf3615d9d1f6"
+    },
+    {
+      "bytes": 8172,
+      "path": "evidence/jdk-native-495.json",
+      "sha256": "d119d86dd3df97ce2020f9eaf707dbbfda44ef69c27ad3b681b3a490404e79c6"
+    },
+    {
+      "bytes": 9969,
+      "path": "evidence/jdk-native-496.json",
+      "sha256": "7edc660f9f92aaafda96ea5c1aa115f06f67bc81f9a0f1f8dc055d0445746058"
+    },
+    {
+      "bytes": 10859,
+      "path": "evidence/jdk-native-497.json",
+      "sha256": "2595756431c49f017aa2c7d3b6288dc267f43273b77849d9ab6caef964ce1d13"
+    },
+    {
+      "bytes": 7461,
+      "path": "evidence/jdk-native-498.json",
+      "sha256": "da5d85513566d1ea5726ad17a28ce3d1efe2b307d0b4f5b7642660d2f788e1ba"
+    },
+    {
+      "bytes": 8497,
+      "path": "evidence/jdk-native-499.json",
+      "sha256": "e7231a476cb2974785df035de56e0a71e425d4b630cb5943c6c36241d0623564"
+    },
+    {
+      "bytes": 8770,
+      "path": "evidence/jdk-native-500.json",
+      "sha256": "42ff2506647373535b9a5b7eb43dd3af85dcfcd906451406af8015ff3c90043d"
+    },
+    {
+      "bytes": 8540,
+      "path": "evidence/jdk-native-512.json",
+      "sha256": "a36db7171b8c94569e3d26965c45cc14fba40a2e1ad7e0e2fb57d7626e2d01f8"
+    },
+    {
+      "bytes": 9613,
+      "path": "evidence/jdk-native-513.json",
+      "sha256": "3319f7dc2f9af0526821b5cf5d3cae7a160b1cab5682b63bd754d7e3165eb1dc"
+    },
+    {
+      "bytes": 10015,
+      "path": "evidence/jdk-native-550.json",
+      "sha256": "8a3d670bb218ae3d7a2678379e923e6e56f433ff8af18ca000f5d83377bdad49"
+    },
+    {
+      "bytes": 8919,
+      "path": "evidence/jdk-native-6.json",
+      "sha256": "c18f6adfa8ac9954a2abbe915320f151164e62992aa2aacd10472444f51f576b"
+    },
+    {
+      "bytes": 8925,
+      "path": "evidence/jdk-native-7.json",
+      "sha256": "859d98fcc0d2a8275a00adf0b96cdf7bbdf0521370497eb3b5d9e752082231a1"
+    },
+    {
+      "bytes": 8920,
+      "path": "evidence/jdk-native-8.json",
+      "sha256": "e9450cc1ad239f752a604136e209d9c0f51816840784b1b85ef22122db393a54"
+    },
+    {
+      "bytes": 8921,
+      "path": "evidence/jdk-native-9.json",
+      "sha256": "f6b4d351b7b89d3d515b61fd12779e3e8cbe8ec16ecc0fe47e053a34d6ec4996"
+    },
+    {
+      "bytes": 894,
+      "path": "evidence/jdk-negative-453.json",
+      "sha256": "06404f6cccdaddd28710b1df536b8597bdb6f59f585bddf6d9ce4ff9f338efbf"
+    },
+    {
+      "bytes": 913,
+      "path": "evidence/jdk-negative-508.json",
+      "sha256": "c009c8357231bd82ed00aef7ba119f6df8c303428e9f3d9a340f4cbe38a32490"
+    },
+    {
+      "bytes": 897,
+      "path": "evidence/jdk-negative-515.json",
+      "sha256": "650c037fb8427b85e0688a3f0b78d020b393e06e2172e220f597cf04563093e5"
+    },
+    {
+      "bytes": 1038,
+      "path": "evidence/jdk-nested-65-0.json",
+      "sha256": "69b873b014b05c83ffb79f2f0e74c4fb4d8b144a989f51cd9b2828404ab3652f"
+    },
+    {
+      "bytes": 1065,
+      "path": "evidence/jdk-nested-65-1.json",
+      "sha256": "3db8a39a187652304d89ce4f901ee2de4d4a860b06668cd847f33cb837ae0342"
+    },
+    {
+      "bytes": 1047,
+      "path": "evidence/jdk-nested-90-0.json",
+      "sha256": "aba2aaefad61ecfb5a1f274b299b85a2907aa48ea7f8f64ca33303c1952b5003"
+    },
+    {
+      "bytes": 2885,
+      "path": "evidence/jdk-release-bytes.json",
+      "sha256": "a691255c6fe3078c28d5b9e5f054a1e5056af977ea752a71d644781c97f12417"
+    },
+    {
+      "bytes": 8567,
+      "path": "evidence/other-completion.json",
+      "sha256": "8b96e36276f9bda5b9ccbc8cbb7f6f5bc2c37da0847b851d9e602b082701953a"
+    },
+    {
+      "bytes": 2931209,
+      "path": "evidence/outer-bundletool.json",
+      "sha256": "bf103c620df6acb8162e96665bcfe90ba7600758930b2710fba1b4e7b740f96d"
+    },
+    {
+      "bytes": 101340,
+      "path": "evidence/outer-jdk.json",
+      "sha256": "4d4804620abb74c8157e792f0d2c10934af1d8cd80e3c2514639563eed5a7253"
+    },
+    {
+      "bytes": 35637,
+      "path": "evidence/outer-sdk-build-tools.json",
+      "sha256": "fc364df22a2279bf2ac23654677d339ce296cbcd01e88b9112537b48631c44f6"
+    },
+    {
+      "bytes": 9525,
+      "path": "evidence/sdk-build-tools-native-0.json",
+      "sha256": "6024d388ba5994d16129b7b23deab03494a45525f964fe05801719134ee9baee"
+    },
+    {
+      "bytes": 9783,
+      "path": "evidence/sdk-build-tools-native-1.json",
+      "sha256": "9e2040fa17150de66d43b1afd4998570150d128c98ce10f7e9b3852089c15d1b"
+    },
+    {
+      "bytes": 9187,
+      "path": "evidence/sdk-build-tools-native-10.json",
+      "sha256": "11cbfa23cdbaf5e9e153bbdd61ffad2a5becafc96125929abf827a466e8b5916"
+    },
+    {
+      "bytes": 9065,
+      "path": "evidence/sdk-build-tools-native-11.json",
+      "sha256": "0100092ea6761de9942d0c71d0e427c23b3caa4a18716fdce6d3a4fbbada282d"
+    },
+    {
+      "bytes": 9581,
+      "path": "evidence/sdk-build-tools-native-12.json",
+      "sha256": "e23646236617d5f749cc83c3a6b7390bd2df93b50067303676d8927ed651a896"
+    },
+    {
+      "bytes": 8896,
+      "path": "evidence/sdk-build-tools-native-13.json",
+      "sha256": "da117044d7022d654f8ecdb17f2a86c97b83cf9b441f37d011f42951441f483c"
+    },
+    {
+      "bytes": 9424,
+      "path": "evidence/sdk-build-tools-native-14.json",
+      "sha256": "ea79e393337547f0060b7c2ebd2abb94f9d60bc5e1a208918c63dafcfb5d0610"
+    },
+    {
+      "bytes": 9400,
+      "path": "evidence/sdk-build-tools-native-15.json",
+      "sha256": "250fbbbe29787013fa9dca07380883aefdb040cd0263811bf0573e1a07bbd587"
+    },
+    {
+      "bytes": 9637,
+      "path": "evidence/sdk-build-tools-native-16.json",
+      "sha256": "b3bf8873d6d5fa5a7973ee560ffb7075c496a6636fdfef1201c40744411190b9"
+    },
+    {
+      "bytes": 6236,
+      "path": "evidence/sdk-build-tools-native-18.json",
+      "sha256": "05499416aaa11121035ba689155dc3f1200936cb3505e6c51cf0b09abdc42f05"
+    },
+    {
+      "bytes": 6237,
+      "path": "evidence/sdk-build-tools-native-19.json",
+      "sha256": "8da471d2947054f3bd36c3936a8282bc07c76de1f58b0be0a8470e7eeefca12b"
+    },
+    {
+      "bytes": 9313,
+      "path": "evidence/sdk-build-tools-native-2.json",
+      "sha256": "609837f25e760c640af5afe5e121f66828171fef7eaf3502f60a5176a2ef48f8"
+    },
+    {
+      "bytes": 6230,
+      "path": "evidence/sdk-build-tools-native-20.json",
+      "sha256": "ca4560b5ddb46e182ac42bb8f8d9f7a27b3b884069c0b10a2589c6aa524b621b"
+    },
+    {
+      "bytes": 6233,
+      "path": "evidence/sdk-build-tools-native-21.json",
+      "sha256": "0d9319af37100833dfc181f8003c7de8989b8ec4e8dfd7aed144ec6d12b82e7d"
+    },
+    {
+      "bytes": 6240,
+      "path": "evidence/sdk-build-tools-native-22.json",
+      "sha256": "e5f0497be7edbdb9e680c775eddb3ce76458f33c32d75170c9e820a2b7eb7547"
+    },
+    {
+      "bytes": 6239,
+      "path": "evidence/sdk-build-tools-native-23.json",
+      "sha256": "b46a54bec5643ee35861f0360fb837f0526bc5e2314bd7f3ae4f5436df5c9bac"
+    },
+    {
+      "bytes": 6241,
+      "path": "evidence/sdk-build-tools-native-24.json",
+      "sha256": "5faa6770065cc005a769d27bdfbbf061652b5704d4823497965b891b5853c153"
+    },
+    {
+      "bytes": 6241,
+      "path": "evidence/sdk-build-tools-native-25.json",
+      "sha256": "9e02480d7706658bf500cb1b074d051aa918f7e6890557d45b4474e6ff465301"
+    },
+    {
+      "bytes": 6234,
+      "path": "evidence/sdk-build-tools-native-26.json",
+      "sha256": "8a5c8e9416c1c9c7da62fa32545b651dd358a261426b7d61075db1651ea57e67"
+    },
+    {
+      "bytes": 6233,
+      "path": "evidence/sdk-build-tools-native-27.json",
+      "sha256": "ea366a03152dcc0946b99de5a97637475f039f4bdedd7b9d09553292a05af550"
+    },
+    {
+      "bytes": 6237,
+      "path": "evidence/sdk-build-tools-native-28.json",
+      "sha256": "2124d1e59f01691a3211dec51e315df76ae5429693fad59bd39c16bc5b6a9cb6"
+    },
+    {
+      "bytes": 6236,
+      "path": "evidence/sdk-build-tools-native-29.json",
+      "sha256": "f118e348533db410cfb107a20bc3533eedc55cb3fb96645d2df55993971aa4f8"
+    },
+    {
+      "bytes": 9410,
+      "path": "evidence/sdk-build-tools-native-3.json",
+      "sha256": "7a91d5806609349e338f5dbe018e35872c11d5e5b03da30cae8347c8f8f0ea92"
+    },
+    {
+      "bytes": 6243,
+      "path": "evidence/sdk-build-tools-native-30.json",
+      "sha256": "c31f32cb125af2cc9196dcd7a924b774d4962c98889dd7d33b8866390c6a85bd"
+    },
+    {
+      "bytes": 6237,
+      "path": "evidence/sdk-build-tools-native-31.json",
+      "sha256": "384fc0015bb12e617bd88509bb932c6310adfec39590ef4f64cf527850c1487d"
+    },
+    {
+      "bytes": 6246,
+      "path": "evidence/sdk-build-tools-native-32.json",
+      "sha256": "1175979dc0ddbd8f020dfb88a195b1cd0ec49778ed72b0ac57ff1b448e23d6be"
+    },
+    {
+      "bytes": 6244,
+      "path": "evidence/sdk-build-tools-native-33.json",
+      "sha256": "d9a37a558554f90f5dbb74464128e423433e4142d0ffda9331d579cbe9df12ea"
+    },
+    {
+      "bytes": 6239,
+      "path": "evidence/sdk-build-tools-native-34.json",
+      "sha256": "98242546a12266f60cf78fce5cd8d31b3aa09073d15a64f5d6e930c74f74340a"
+    },
+    {
+      "bytes": 6248,
+      "path": "evidence/sdk-build-tools-native-35.json",
+      "sha256": "d47f108a766afd2a069e7c4b7e5e5c8281370e25669bd96d9080de8e156b1d8f"
+    },
+    {
+      "bytes": 6237,
+      "path": "evidence/sdk-build-tools-native-36.json",
+      "sha256": "28cd4dc20cf206f9c52377aff635ec198789740b0b9692cf68ae8c15620b7566"
+    },
+    {
+      "bytes": 6231,
+      "path": "evidence/sdk-build-tools-native-37.json",
+      "sha256": "1220aeb1268b3a608cdcf7695da002a488ab312d35959a3dd687211f655dac61"
+    },
+    {
+      "bytes": 6240,
+      "path": "evidence/sdk-build-tools-native-38.json",
+      "sha256": "3b856cf7c78358f01e693280a05370e2fcf185b51eb3c0bf5990b33375eb3d61"
+    },
+    {
+      "bytes": 6240,
+      "path": "evidence/sdk-build-tools-native-39.json",
+      "sha256": "f1f4b0eb5b5b2a4f20d7462a2d6cb2e45f3017ae5c46179deb33a91589f2c7cb"
+    },
+    {
+      "bytes": 6234,
+      "path": "evidence/sdk-build-tools-native-40.json",
+      "sha256": "b504e7c8b890aeff1d20c5158269954072eee263148ba2faf9b738a511d57e06"
+    },
+    {
+      "bytes": 6243,
+      "path": "evidence/sdk-build-tools-native-41.json",
+      "sha256": "f81856ec638aae459db5625fb3eb8b1d0e3d1420e24cb4ea36fd73715fd575dc"
+    },
+    {
+      "bytes": 9533,
+      "path": "evidence/sdk-build-tools-native-43.json",
+      "sha256": "b057e4721764c622f76edd6c46d2174c9c4fbfd4595988525a094e69d48a946d"
+    },
+    {
+      "bytes": 9314,
+      "path": "evidence/sdk-build-tools-native-44.json",
+      "sha256": "a2a85dbce81e945d33b0d69e61180a810093e376d67885695804a022d91f5f4f"
+    },
+    {
+      "bytes": 9464,
+      "path": "evidence/sdk-build-tools-native-5.json",
+      "sha256": "2a16833db2aa5bd36eb1325319e99550664fdffc9083333e57fb26fe36136c0e"
+    },
+    {
+      "bytes": 9455,
+      "path": "evidence/sdk-build-tools-native-8.json",
+      "sha256": "f1fc3f65346427c537aa4333a5eaabcb2ca21615134cf18deabe5400b6c890f7"
+    },
+    {
+      "bytes": 9356,
+      "path": "evidence/sdk-build-tools-native-9.json",
+      "sha256": "9f82da632b3ffb4302ac390de16c392d6dbd56d4944efd97dd8c0ba7496233df"
+    },
+    {
+      "bytes": 907,
+      "path": "evidence/sdk-build-tools-negative-17.json",
+      "sha256": "1a46d746d9829631f52e3a9de7ece92689904e64a7278aee7bbd3f1869986f54"
+    },
+    {
+      "bytes": 891,
+      "path": "evidence/sdk-build-tools-negative-4.json",
+      "sha256": "b09ba7bb431574c1508920a615ed11b35bd95df462b6255a9613d15b1894b4f9"
+    },
+    {
+      "bytes": 911,
+      "path": "evidence/sdk-build-tools-negative-42.json",
+      "sha256": "93a77376c22219945fee698e2722fcaa8b16f1f698e7a4827a4de6d13c9385ef"
+    },
+    {
+      "bytes": 897,
+      "path": "evidence/sdk-build-tools-negative-6.json",
+      "sha256": "73cb9c60854ee4a07fc78b4b0922672969924b9d91abbbea78d749e31c1733ff"
+    },
+    {
+      "bytes": 895,
+      "path": "evidence/sdk-build-tools-negative-7.json",
+      "sha256": "dd31c3fa3483a4053f4a26b2af2b87d9725bccab24ee97e4f64c0bdb9212f867"
+    },
+    {
+      "bytes": 891,
+      "path": "evidence/sdk-platform-negative-0.json",
+      "sha256": "8f4559c34e8e1c108e5f0c8a3e68c060245e70e8443b1f1d96b714d9f929803a"
+    },
+    {
+      "bytes": 885,
+      "path": "evidence/sdk-platform-negative-1.json",
+      "sha256": "d8f51fd85abd6b0d7b42ede30d6ddb3d0b7c8ae4a177532ca5ca8502e77bf5c6"
+    },
+    {
+      "bytes": 896,
+      "path": "evidence/sdk-platform-negative-2.json",
+      "sha256": "1c3087fb0375cb901944edf9296e68a45e55369eeb531f6edd657d86c01e9382"
+    },
+    {
+      "bytes": 885,
+      "path": "evidence/sdk-platform-negative-3.json",
+      "sha256": "f62a5454ea5760441ec6815ed8e56797403e11690e4690c39a4233deed4b55fc"
+    },
+    {
+      "bytes": 884,
+      "path": "evidence/sdk-platform-negative-4.json",
+      "sha256": "81d7008b0b163f5ae8d4716f9723df4cf5be62f056a9dddcaea8529216133c90"
+    },
+    {
+      "bytes": 889,
+      "path": "evidence/sdk-platform-negative-5.json",
+      "sha256": "e9fef4198f2024e903db1f1010be97c8759c1c8b461207fac83437c20aff6232"
+    },
+    {
+      "bytes": 889,
+      "path": "evidence/sdk-platform-negative-6.json",
+      "sha256": "418e5e44a7ad95aeb8027c47aef08ff87eb3af10b67aff7b363a036e62ab4f2d"
+    },
+    {
+      "bytes": 891,
+      "path": "evidence/sdk-platform-negative-7.json",
+      "sha256": "0d4700e35fbc31133045f974cfc4bec304240145bbb722d94b8c5668980e0fb6"
+    },
+    {
+      "bytes": 899,
+      "path": "evidence/sdk-platform-negative-8.json",
+      "sha256": "1ebf85148bba38757619d6ed8f652cdc14aededc8e3187c003bc0618a82d7f3a"
+    },
+    {
+      "bytes": 874,
+      "path": "evidence/sdk-platform-negative-9.json",
+      "sha256": "33d4635be9e5bbf08b7682d1b6c8cc7fc5d42a878304d788b064c7262d38b03f"
+    },
+    {
+      "bytes": 64059,
+      "path": "gradle-data.json",
+      "sha256": "a27c4f27180dcc8c35eb1448983d1e6c02da9672c485311ea4d60930eb330033"
+    },
+    {
+      "bytes": 246063,
+      "path": "gradle-native-data.json",
+      "sha256": "79be1718a74ff941b6e212610f88fa2799335cdac070e4d17cd7d3f2fd9c7281"
+    },
+    {
+      "bytes": 2219325,
+      "path": "sdk-platform-data.json",
+      "sha256": "db21716251963ea99e07b4274833a48960f240ef6d47ce98a979d68fcbb12144"
+    }
+  ],
+  "schemaVersion": 1,
+  "scope": "curated public SOURCE provenance for proposed compiled Android supplier catalogue; no raw observation bodies or private host locators"
+}

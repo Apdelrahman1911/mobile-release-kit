@@ -1339,7 +1339,7 @@ mod observation {
             || eligible_frontiers >= SELECT_NODES || attempted_frontiers > eligible_frontiers || attempted_frontiers > 64
             || added_nodes > 64 || max_depth > 8 || (added_nodes == 0) != (max_depth == 0)
             || normal_fixture_mask > 31 || alternate_value_mask > 31 || frontier_label_mask > 31 || outside_field_mask > 31
-            || alternate_role_mask & !0x7004 != 0 || frontier_role_mask & !0x1f004 != 0
+            || alternate_role_mask & !0x7004 != 0 || frontier_role_mask & !0x1f014 != 0
             || (alternate_value_mask == 0) != (alternate_role_mask == 0)
             || (frontier_label_mask == 0) != (frontier_role_mask == 0)
             || unavailable & !63 != 0 || omissions & !1023 != 0
@@ -1385,6 +1385,13 @@ mod observation {
             calls: 221, owned: 120, selection_projection_diagnostic: row, ..OpenWire::default() };
         let Some(Some(data)) = selection_projection_diagnostic_return(wire) else { return false; };
         if data.state != "returned-complete" || data.frontier_label_mask != 2 || data.outside_field_mask != 1 { return false; }
+        // Button is diagnostic frontier DATA only; alternate-role admission stays unchanged.
+        for (index, role, valid) in [(15, 4, true), (15, 3, false), (14, 2, true), (14, 4, false)] {
+            let mut current = wire;
+            current.selection_projection_diagnostic[index] = 1 << role;
+            if index == 14 { current.selection_projection_diagnostic[11] = 1; }
+            if selection_projection_diagnostic_return(current).is_some() != valid { return false; }
+        }
         for index in 0..20 {
             let mut bad = wire; bad.selection_projection_diagnostic[index] = u32::MAX;
             if selection_projection_diagnostic_return(bad).is_some() { return false; }

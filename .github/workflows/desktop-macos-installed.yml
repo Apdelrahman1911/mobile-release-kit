@@ -18,14 +18,14 @@ jobs:
   engineering-install:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview')
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 300
     env:
       RUSTUP_TOOLCHAIN: "1.98.1"
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       # Exact accepted current-payload DATA; ordinary installation is not Aqua qualification.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       # Independent immutable publisher bindings; caller hashes come from build.rs.
       MRK_GITHUB_PREFLIGHT_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
@@ -44,8 +44,8 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
           # Historical archive reuse supplies the interpreter, not the current core.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3 ]] || exit 1
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659 ]] || exit 1
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5 ]] || exit 1
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0 ]] || exit 1
           [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
           [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
           [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
@@ -323,12 +323,74 @@ jobs:
               if not re.fullmatch(r"MRK_ACL_PROBE_CASE=" + re.escape(name) + r";ok=1;phase=[0-9]{1,2};result=[0-9]{1,10};call=-?[0-9]{1,10};errno=[0-9]{1,10};freeCall=0;freeErrno=0", line):
                   raise ValueError("ACL probe exact case missing")
           if lines[-1] != "MRK_ACL_PROBE_FINAL=cases=6;cleanup=1;passed=1": raise ValueError("ACL probe finality missing")
-          source_paths = ("desktop/native/macos-installed-native/src/native.m", "desktop/native/macos-installed-native/tests/acl_probe.m")
-          hashes = {}
-          for path in source_paths:
-              with open(path, "rb") as stream: body = stream.read(131073)
-              if len(body) > 131072: raise ValueError("ACL source bound")
-              hashes[path] = hashlib.sha256(body).hexdigest()
+          # Fixed complete ACL SOURCE reader; logs retain their separate 128-KiB bound.
+          def acl_source_hashes(workspace, inventory_path, source, workflow_source):
+              paths = ("desktop/native/macos-installed-native/src/native.m",
+                       "desktop/native/macos-installed-native/tests/acl_probe.m")
+              if (type(source) is not str or re.fullmatch(r"[0-9a-f]{40}", source) is None
+                      or source != workflow_source):
+                  raise ValueError("ACL source binding refused")
+              def identity(s):
+                  return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                          s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+              def original(path, limit):
+                  fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                  try:
+                      before = identity(os.fstat(fd))
+                      if (not stat.S_ISREG(before[2]) or before[3] != os.getuid() or before[5] != 1
+                              or before[2] & 0o133 or not 0 <= before[6] <= limit):
+                          raise ValueError("ACL complete source original refused")
+                      chunks, count = [], 0
+                      while True:
+                          block = os.read(fd, min(65536, limit + 1 - count))
+                          if not block: break
+                          count += len(block)
+                          if count > before[6]: raise ValueError("ACL complete source grew")
+                          chunks.append(block)
+                      if (count != before[6] or identity(os.fstat(fd)) != before
+                              or identity(os.stat(path, follow_symlinks=False)) != before):
+                          raise ValueError("ACL complete source changed")
+                      return b"".join(chunks)
+                  finally:
+                      os.close(fd)  # Consume this original once; any close error refuses publication.
+              def unique(pairs):
+                  value = {}
+                  for key, item in pairs:
+                      if key in value: raise ValueError("ACL duplicate inventory field")
+                      value[key] = item
+                  return value
+              inventory = json.loads(original(inventory_path, 2 * 1024 * 1024), object_pairs_hook=unique)
+              if (type(inventory) is not dict or set(inventory) != {"source", "tree", "files"}
+                      or inventory["source"] != source or type(inventory["tree"]) is not str
+                      or re.fullmatch(r"[0-9a-f]{40}", inventory["tree"]) is None
+                      or type(inventory["files"]) is not list or not 0 < len(inventory["files"]) <= 4096):
+                  raise ValueError("ACL complete inventory shape refused")
+              rows = {}
+              for row in inventory["files"]:
+                  if (type(row) is not dict or set(row) != {"path", "gitMode", "blob", "size", "sha256"}
+                          or type(row["path"]) is not str or not 0 < len(row["path"].encode("utf-8")) <= 1024
+                          or "\x00" in row["path"] or any(part in ("", ".", "..") for part in row["path"].split("/"))
+                          or row["path"] in rows or row["gitMode"] not in ("100644", "100755")
+                          or type(row["size"]) is not int or not 0 <= row["size"] <= 32 * 1024 * 1024
+                          or type(row["sha256"]) is not str or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None
+                          or type(row["blob"]) is not str or re.fullmatch(r"[0-9a-f]{40}", row["blob"]) is None):
+                      raise ValueError("ACL inventory row refused")
+                  rows[row["path"]] = row
+              hashes = {}
+              for path in paths:
+                  row = rows.get(path)
+                  if row is None or row["gitMode"] != "100644" or row["size"] > 262144:
+                      raise ValueError("ACL fixed source inventory refused")
+                  body = original(os.path.join(workspace, path), 262144)
+                  digest = hashlib.sha256(body).hexdigest()
+                  blob = hashlib.sha1(b"blob " + str(len(body)).encode("ascii") + b"\0" + body).hexdigest()
+                  if len(body) != row["size"] or digest != row["sha256"] or blob != row["blob"]:
+                      raise ValueError("ACL complete source inventory mismatch")
+                  hashes[path] = digest
+              return hashes
+          # End fixed complete ACL SOURCE reader.
+          hashes = acl_source_hashes(os.getcwd(), os.path.join(root, "source-inventory.json"),
+                                     os.environ["GITHUB_SHA"], os.environ["GITHUB_WORKFLOW_SHA"])
           value = {"schemaVersion":1, "source":os.environ["GITHUB_SHA"], "workflowSource":os.environ["GITHUB_WORKFLOW_SHA"],
                    "runId":os.environ["GITHUB_RUN_ID"], "runAttempt":os.environ["GITHUB_RUN_ATTEMPT"],
                    "nativeSourceSha256":hashes, "cases":names, "logs":logs, "cleanup":"checked-original-closes-fixed-entry-retirement",
@@ -1418,7 +1480,7 @@ jobs:
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.preview_upload.outcome == 'success'
-        timeout-minutes: 4
+        timeout-minutes: 9
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1471,29 +1533,24 @@ jobs:
           clean() {
             /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
               USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" "$@"
+              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
           }
-          clean /usr/bin/xcodebuild -version > "$MRK_MACOS_WORK/normal-ui/xcode-version.txt"
-          clean /usr/bin/xcrun --sdk macosx --show-sdk-path > "$MRK_MACOS_WORK/normal-ui/sdk-path.txt"
-          clean /usr/bin/xcrun --sdk macosx --show-sdk-version > "$MRK_MACOS_WORK/normal-ui/sdk-version.txt"
-          clean /usr/bin/xcrun --sdk macosx --show-sdk-build-version > "$MRK_MACOS_WORK/normal-ui/sdk-build.txt"
-          # One tiny dependency-free runner; the installed normal Cargo app is not rebuilt.
+          # Fixed original owner admits four bounded queries and the external runner build.
+          # The installed normal Cargo app is not rebuilt or instrumented here.
           set +e
-          clean /usr/bin/xcodebuild build-for-testing \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
-            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" -jobs 2 \
-            -disableAutomaticPackageResolution COMPILER_INDEX_STORE_ENABLE=NO \
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-build \
             > "$MRK_MACOS_WORK/normal-ui/build.log" 2>&1
           build_status=$?
           set -e
           printf '%s\n' "$build_status" > "$MRK_MACOS_WORK/normal-ui/build.status"
-          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/build.log" > "$MRK_MACOS_WORK/normal-ui/build.tail.txt"
           [[ "$build_status" == 0 ]] || exit "$build_status"
       - name: Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally
         id: normal_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success'
-        timeout-minutes: 3
+        timeout-minutes: 7
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1547,7 +1604,7 @@ jobs:
               "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
           }
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # The XCTest 60s allowance is separate from this step's 180s ceiling.
+          # XCTest60s and original command180s stay fixed; the one phase includes admission/close.
           set +e
           clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
@@ -1562,12 +1619,11 @@ jobs:
           test_status=$?
           set -e
           printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/test.status"
-          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/test.log" > "$MRK_MACOS_WORK/normal-ui/test.tail.txt"
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim
         id: normal_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'
-        timeout-minutes: 1
+        timeout-minutes: 3
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1575,19 +1631,22 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          # Each summary has its own finite one-GiB file limit and original owner phase.
+          ulimit -f 1048576
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
             "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
-            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
-            --path "$MRK_MACOS_WORK/normal-ui/test.xcresult" --compact \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-summary test.xcresult \
             > "$MRK_MACOS_WORK/normal-ui/summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/summary.stderr"
           summary_status=$?
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/summary.status"
-          /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/summary.stderr" > "$MRK_MACOS_WORK/normal-ui/summary.stderr.tail.txt"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
           "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
-          import hashlib, json, os, stat
+          import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
           def read(path, limit):
@@ -1629,25 +1688,77 @@ jobs:
           summary = json.loads(summary_bytes, object_pairs_hook=unique)
           expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
           if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
-              # Only key names are diagnostic; do not export an unrestricted native result.
-              print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
               raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
-          runner_bytes = read(root / "normal-ui/test.runner-admission.json", 32768)
-          runner = json.loads(runner_bytes, object_pairs_hook=unique)
-          if (runner.get("scope") != "actual-generated-xctrunner-admission-only"
-                  or runner.get("sourceCommit") != os.environ["GITHUB_SHA"]
-                  or runner.get("appSandboxEntitlement") not in ("absent", "false")
-                  or runner.get("strictCodesignOriginalZero") is not True
-                  or runner.get("originalProductsPrePostMatched") is not True
-                  or runner.get("originalClosesCompleted") is not True
-                  or runner.get("sourcePrePostMatched") is not True
-                  or runner.get("originalCommandReturned") is not True
-                  or type(runner.get("originalTestReturncode")) is not int or runner["originalTestReturncode"] != 0
-                  or runner.get("reSignedOrRepaired") is not False):
-              raise ValueError("actual generated runner admission did not close successfully")
-          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
-                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
-                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          # A persisted receipt is not finality: the original helper zero status above
+          # also gates its consuming receipt close and final nonrenewable clock check.
+          def checked_admission(name, phase, bundle, seconds, roles):
+              raw = read(root / ("normal-ui/" + name), 32768)
+              value = json.loads(raw, object_pairs_hook=unique)
+              scope = "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only"
+              limit = 32 * 1024**3 if phase == "build" else 1024**3
+              if (type(value) is not dict or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+                      or value.get("scope") != scope or value.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                      or value.get("normalPhase" if phase == "test" else "phase") != phase or value.get("resultBundle") != bundle
+                      or value.get("sourcePrePostMatched") is not True or value.get("originalCommandReturned") is not True
+                      or type(value.get("sourceRosterSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", value["sourceRosterSha256"]) is None
+                      or type(value.get("fileLimitBytes")) is not list or value["fileLimitBytes"] != [limit, limit]
+                      or any(type(n) is not int for n in value["fileLimitBytes"])
+                      or value.get("receiptPolicy") != "exclusive0600-readback-consuming-close"):
+                  raise ValueError("normal original command admission refused")
+              code = value.get("originalTestReturncode" if phase == "test" else "originalReturncode")
+              if type(code) is not int or code != 0:
+                  raise ValueError("normal original command did not return zero")
+              clock = value.get("phaseClock")
+              if (type(clock) is not dict or set(clock) != {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                      or clock["postCloseDeadlineRequired"] is not True
+                      or any(type(clock[k]) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k]) is None
+                             for k in ("startNs", "deadlineNs", "beforePublicationNs"))):
+                  raise ValueError("normal fixed phase clock refused")
+              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+              if end - start != seconds * 1_000_000_000 or not start <= before_close < end:
+                  raise ValueError("normal phase deadline binding differs")
+              commands = value.get("commands")
+              if type(commands) is not list or len(commands) != len(roles):
+                  raise ValueError("normal original command roster refused")
+              for command, (role, cap, output_limit) in zip(commands, roles):
+                  if (type(command) is not dict or command.get("role") != role
+                          or type(command.get("returncode")) is not int or command["returncode"] != 0
+                          or type(command.get("roleCapSeconds")) is not int or command["roleCapSeconds"] != cap
+                          or type(command.get("timeoutSeconds")) is not int or not 1 <= command["timeoutSeconds"] <= cap
+                          or type(command.get("outputLimitBytes")) is not int or command["outputLimitBytes"] != output_limit
+                          or any(type(command.get(k)) is not int or not 0 <= command[k] <= output_limit for k in ("stdoutBytes", "stderrBytes"))
+                          or command["stdoutBytes"] + command["stderrBytes"] > output_limit
+                          or any(type(command.get(k)) is not str or re.fullmatch(r"[0-9a-f]{64}", command[k]) is None
+                                 for k in ("argvSha256", "stdoutSha256", "stderrSha256"))):
+                      raise ValueError("normal original command fact refused")
+              if phase != "test" and value.get("originalCommandRole") != roles[-2][0]:
+                  raise ValueError("normal original command role differs")
+              return value, raw
+          roster = ("normal-ui-source-roster", 15, 1048576)
+          build, build_bytes = checked_admission("build.command-admission.json", "build", None, 450,
+              [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+               ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+               ("normal-ui-build", 240, 1048576), roster])
+          runner, runner_bytes = checked_admission("test.runner-admission.json", "test", "test.xcresult", 345,
+              [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+               ("one-admitted-ui-test", 180, 1048576), roster])
+          summary_admission, summary_admission_bytes = checked_admission("summary.command-admission.json", "summary", "test.xcresult", 90,
+              [roster, ("normal-ui-summary", 30, 262144), roster])
+          if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+                  or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
+                  or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
+                  or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
+                  or summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()
+                  or summary_admission["commands"][1]["stdoutBytes"] != len(summary_bytes)):
+              raise ValueError("own generated runner and build/summary original admissions did not close successfully")
+          toolchain = {}
+          for index, (key, name) in enumerate((("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                              ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt")), 1):
+              raw = read(root / ("normal-ui/" + name), 4096)
+              query = build["commands"][index]
+              if len(raw) != query["stdoutBytes"] or hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]:
+                  raise ValueError("native tool observation differs from its original owned query")
+              toolchain[key] = raw.decode("ascii", "strict").strip()
           if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
           result = {"schemaVersion": 1, "scope": "normal-app-launch-cancel-navigation-quit-ui-only",
                     "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
@@ -1658,6 +1769,8 @@ jobs:
                     "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
                     "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
                     "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                    "buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest(),
+                    "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
                     "sameOriginalApplicationTerminationAndGateClose": "observed",
                     "signedEntryBinarySha256": preview["signedEntryBinarySha256"],
                     "entryBundleIdentifier": preview["entryBundleIdentifier"], "payloadBundleIdentifier": preview["payloadBundleIdentifier"],
@@ -1681,7 +1794,7 @@ jobs:
       - name: Use the normal app to select a project and persist reviewed local edits and images
         id: normal_project_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
-        timeout-minutes: 7
+        timeout-minutes: 11
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1735,7 +1848,7 @@ jobs:
               "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
           }
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # One 300s journey, after the accepted basic gate; outer ceiling420s.
+          # One 300s journey, original command cap420s; shared phase includes admission/close.
           set +e
           clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
@@ -1750,12 +1863,11 @@ jobs:
           test_status=$?
           set -e
           printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
-          /usr/bin/tail -c 65536 "$MRK_MACOS_WORK/normal-ui/project-test.log" > "$MRK_MACOS_WORK/normal-ui/project-test.tail.txt"
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Verify the one selected project journey against its original XCTest result
         id: normal_project_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
-        timeout-minutes: 1
+        timeout-minutes: 3
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1763,19 +1875,22 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          # Each summary has its own finite one-GiB file limit and original owner phase.
+          ulimit -f 1048576
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
             "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
-            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
-            --path "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" --compact \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-summary project-test.xcresult \
             > "$MRK_MACOS_WORK/normal-ui/project-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/project-summary.stderr"
           summary_status=$?
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/project-summary.status"
-          /usr/bin/tail -c 8192 "$MRK_MACOS_WORK/normal-ui/project-summary.stderr" > "$MRK_MACOS_WORK/normal-ui/project-summary.stderr.tail.txt"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
           "$MRK_PYTHON" -I -S -B - <<'PY_UI_RESULT'
-          import hashlib, json, os, stat
+          import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
           def read(path, limit):
@@ -1821,12 +1936,77 @@ jobs:
           summary = json.loads(summary_bytes, object_pairs_hook=unique)
           expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
           if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
-              # Only key names are diagnostic; do not export an unrestricted native result.
-              print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
               raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
-          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
-                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
-                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          # A persisted receipt is not finality: the original helper zero status above
+          # also gates its consuming receipt close and final nonrenewable clock check.
+          def checked_admission(name, phase, bundle, seconds, roles):
+              raw = read(root / ("normal-ui/" + name), 32768)
+              value = json.loads(raw, object_pairs_hook=unique)
+              scope = "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only"
+              limit = 32 * 1024**3 if phase == "build" else 1024**3
+              if (type(value) is not dict or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+                      or value.get("scope") != scope or value.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                      or value.get("normalPhase" if phase == "test" else "phase") != phase or value.get("resultBundle") != bundle
+                      or value.get("sourcePrePostMatched") is not True or value.get("originalCommandReturned") is not True
+                      or type(value.get("sourceRosterSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", value["sourceRosterSha256"]) is None
+                      or type(value.get("fileLimitBytes")) is not list or value["fileLimitBytes"] != [limit, limit]
+                      or any(type(n) is not int for n in value["fileLimitBytes"])
+                      or value.get("receiptPolicy") != "exclusive0600-readback-consuming-close"):
+                  raise ValueError("normal original command admission refused")
+              code = value.get("originalTestReturncode" if phase == "test" else "originalReturncode")
+              if type(code) is not int or code != 0:
+                  raise ValueError("normal original command did not return zero")
+              clock = value.get("phaseClock")
+              if (type(clock) is not dict or set(clock) != {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                      or clock["postCloseDeadlineRequired"] is not True
+                      or any(type(clock[k]) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k]) is None
+                             for k in ("startNs", "deadlineNs", "beforePublicationNs"))):
+                  raise ValueError("normal fixed phase clock refused")
+              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+              if end - start != seconds * 1_000_000_000 or not start <= before_close < end:
+                  raise ValueError("normal phase deadline binding differs")
+              commands = value.get("commands")
+              if type(commands) is not list or len(commands) != len(roles):
+                  raise ValueError("normal original command roster refused")
+              for command, (role, cap, output_limit) in zip(commands, roles):
+                  if (type(command) is not dict or command.get("role") != role
+                          or type(command.get("returncode")) is not int or command["returncode"] != 0
+                          or type(command.get("roleCapSeconds")) is not int or command["roleCapSeconds"] != cap
+                          or type(command.get("timeoutSeconds")) is not int or not 1 <= command["timeoutSeconds"] <= cap
+                          or type(command.get("outputLimitBytes")) is not int or command["outputLimitBytes"] != output_limit
+                          or any(type(command.get(k)) is not int or not 0 <= command[k] <= output_limit for k in ("stdoutBytes", "stderrBytes"))
+                          or command["stdoutBytes"] + command["stderrBytes"] > output_limit
+                          or any(type(command.get(k)) is not str or re.fullmatch(r"[0-9a-f]{64}", command[k]) is None
+                                 for k in ("argvSha256", "stdoutSha256", "stderrSha256"))):
+                      raise ValueError("normal original command fact refused")
+              if phase != "test" and value.get("originalCommandRole") != roles[-2][0]:
+                  raise ValueError("normal original command role differs")
+              return value, raw
+          roster = ("normal-ui-source-roster", 15, 1048576)
+          build, build_bytes = checked_admission("build.command-admission.json", "build", None, 450,
+              [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+               ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+               ("normal-ui-build", 240, 1048576), roster])
+          runner, runner_bytes = checked_admission("project-test.runner-admission.json", "test", "project-test.xcresult", 585,
+              [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+               ("one-admitted-ui-test", 420, 1048576), roster])
+          summary_admission, summary_admission_bytes = checked_admission("project-summary.command-admission.json", "summary", "project-test.xcresult", 90,
+              [roster, ("normal-ui-summary", 30, 262144), roster])
+          if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+                  or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
+                  or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
+                  or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
+                  or summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()
+                  or summary_admission["commands"][1]["stdoutBytes"] != len(summary_bytes)):
+              raise ValueError("own generated runner and build/summary original admissions did not close successfully")
+          toolchain = {}
+          for index, (key, name) in enumerate((("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                              ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt")), 1):
+              raw = read(root / ("normal-ui/" + name), 4096)
+              query = build["commands"][index]
+              if len(raw) != query["stdoutBytes"] or hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]:
+                  raise ValueError("native tool observation differs from its original owned query")
+              toolchain[key] = raw.decode("ascii", "strict").strip()
           if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
           result = {"schemaVersion": 1, "scope": "normal-app-project-config-workflows-text-version-images-ui",
                     "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
@@ -1836,6 +2016,9 @@ jobs:
                     "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
                     "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
                     "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                    "buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest(),
+                    "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
                     "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
                     "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
                     "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
@@ -1853,7 +2036,7 @@ jobs:
       - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
         id: normal_persistence_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
-        timeout-minutes: 7
+        timeout-minutes: 11
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1972,7 +2155,7 @@ jobs:
       - name: Bind the single persistence journey to original XCTest and app-helper evidence
         id: normal_persistence_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'
-        timeout-minutes: 1
+        timeout-minutes: 3
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1980,11 +2163,15 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          # Each summary has its own finite one-GiB file limit and original owner phase.
+          ulimit -f 1048576
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
             "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
-            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
-            --path "$MRK_MACOS_WORK/normal-ui/persistence-test.xcresult" --compact \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-summary persistence-test.xcresult \
             > "$MRK_MACOS_WORK/normal-ui/persistence-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/persistence-summary.stderr"
           summary_status=$?
           set -e
@@ -2074,9 +2261,76 @@ jobs:
                   or "MRK_MACOS_UI_FAILURE_CLEANUP=" in log or "MRK_MACOS_UI_ORIGINAL=" in log
                   or not test_events[0][0] < terminal_events[0][0] < terminal_events[-1][0] < test_events[1][0]):
               raise ValueError("two ordered normal lifetimes and final restart marker without failure cleanup required")
-          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
-                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
-                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          # A persisted receipt is not finality: the original helper zero status above
+          # also gates its consuming receipt close and final nonrenewable clock check.
+          def checked_admission(name, phase, bundle, seconds, roles):
+              raw = read(root / ("normal-ui/" + name), 32768)
+              value = json.loads(raw, object_pairs_hook=unique)
+              scope = "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only"
+              limit = 32 * 1024**3 if phase == "build" else 1024**3
+              if (type(value) is not dict or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+                      or value.get("scope") != scope or value.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                      or value.get("normalPhase" if phase == "test" else "phase") != phase or value.get("resultBundle") != bundle
+                      or value.get("sourcePrePostMatched") is not True or value.get("originalCommandReturned") is not True
+                      or type(value.get("sourceRosterSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", value["sourceRosterSha256"]) is None
+                      or type(value.get("fileLimitBytes")) is not list or value["fileLimitBytes"] != [limit, limit]
+                      or any(type(n) is not int for n in value["fileLimitBytes"])
+                      or value.get("receiptPolicy") != "exclusive0600-readback-consuming-close"):
+                  raise ValueError("normal original command admission refused")
+              code = value.get("originalTestReturncode" if phase == "test" else "originalReturncode")
+              if type(code) is not int or code != 0:
+                  raise ValueError("normal original command did not return zero")
+              clock = value.get("phaseClock")
+              if (type(clock) is not dict or set(clock) != {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                      or clock["postCloseDeadlineRequired"] is not True
+                      or any(type(clock[k]) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k]) is None
+                             for k in ("startNs", "deadlineNs", "beforePublicationNs"))):
+                  raise ValueError("normal fixed phase clock refused")
+              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+              if end - start != seconds * 1_000_000_000 or not start <= before_close < end:
+                  raise ValueError("normal phase deadline binding differs")
+              commands = value.get("commands")
+              if type(commands) is not list or len(commands) != len(roles):
+                  raise ValueError("normal original command roster refused")
+              for command, (role, cap, output_limit) in zip(commands, roles):
+                  if (type(command) is not dict or command.get("role") != role
+                          or type(command.get("returncode")) is not int or command["returncode"] != 0
+                          or type(command.get("roleCapSeconds")) is not int or command["roleCapSeconds"] != cap
+                          or type(command.get("timeoutSeconds")) is not int or not 1 <= command["timeoutSeconds"] <= cap
+                          or type(command.get("outputLimitBytes")) is not int or command["outputLimitBytes"] != output_limit
+                          or any(type(command.get(k)) is not int or not 0 <= command[k] <= output_limit for k in ("stdoutBytes", "stderrBytes"))
+                          or command["stdoutBytes"] + command["stderrBytes"] > output_limit
+                          or any(type(command.get(k)) is not str or re.fullmatch(r"[0-9a-f]{64}", command[k]) is None
+                                 for k in ("argvSha256", "stdoutSha256", "stderrSha256"))):
+                      raise ValueError("normal original command fact refused")
+              if phase != "test" and value.get("originalCommandRole") != roles[-2][0]:
+                  raise ValueError("normal original command role differs")
+              return value, raw
+          roster = ("normal-ui-source-roster", 15, 1048576)
+          build, build_bytes = checked_admission("build.command-admission.json", "build", None, 450,
+              [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+               ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+               ("normal-ui-build", 240, 1048576), roster])
+          runner, runner_bytes = checked_admission("persistence-test.runner-admission.json", "test", "persistence-test.xcresult", 585,
+              [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+               ("one-admitted-ui-test", 420, 1048576), roster])
+          summary_admission, summary_admission_bytes = checked_admission("persistence-summary.command-admission.json", "summary", "persistence-test.xcresult", 90,
+              [roster, ("normal-ui-summary", 30, 262144), roster])
+          if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+                  or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
+                  or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
+                  or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
+                  or summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()
+                  or summary_admission["commands"][1]["stdoutBytes"] != len(summary_bytes)):
+              raise ValueError("own generated runner and build/summary original admissions did not close successfully")
+          toolchain = {}
+          for index, (key, name) in enumerate((("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                              ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt")), 1):
+              raw = read(root / ("normal-ui/" + name), 4096)
+              query = build["commands"][index]
+              if len(raw) != query["stdoutBytes"] or hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]:
+                  raise ValueError("native tool observation differs from its original owned query")
+              toolchain[key] = raw.decode("ascii", "strict").strip()
           if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
           result = {"schemaVersion": 1, "scope": "normal-app-synthetic-persistent-credentials-ui",
                     "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
@@ -2087,6 +2341,9 @@ jobs:
                     "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
                     "signedAppBinarySha256": preview["signedAppBinarySha256"],
                     "vaultHelperSha256": helper["helperSha256"], "vaultHelperBytes": helper["helperBytes"], "toolchain": toolchain,
+                    "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                    "buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest(),
+                    "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
                     "originalCommandStatuses": {"sharedBuild": 0, "persistenceTest": 0, "persistenceSummary": 0},
                     "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials",
                     "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
@@ -2105,7 +2362,7 @@ jobs:
       - name: Observe one original build-tool diagnostics report through the ordinary Mac UI
         id: normal_diagnostics_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success'
-        timeout-minutes: 7
+        timeout-minutes: 11
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -2223,7 +2480,7 @@ jobs:
       - name: Bind the single diagnostics journey to original XCTest and the same ordinary package
         id: normal_diagnostics_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success'
-        timeout-minutes: 1
+        timeout-minutes: 3
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -2231,18 +2488,22 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          # Each summary has its own finite one-GiB file limit and original owner phase.
+          ulimit -f 1048576
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
             "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
-            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
-            --path "$MRK_MACOS_WORK/normal-ui/diagnostics-test.xcresult" --compact \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-summary diagnostics-test.xcresult \
             > "$MRK_MACOS_WORK/normal-ui/diagnostics-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/diagnostics-summary.stderr"
           summary_status=$?
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
           "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS_RESULT'
-          import hashlib, json, os, stat
+          import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
           def read(path, limit):
@@ -2318,9 +2579,76 @@ jobs:
                   or facts["workflowSourceCommit"] != source or facts["runId"] != preview["runId"] or facts["runAttempt"] != preview["runAttempt"]
                   or facts["nativeSuccessInferred"] is not False or facts["rawTextExported"] is not False):
               raise ValueError("bounded diagnostics facts are not from this original invocation")
-          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
-                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
-                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          # A persisted receipt is not finality: the original helper zero status above
+          # also gates its consuming receipt close and final nonrenewable clock check.
+          def checked_admission(name, phase, bundle, seconds, roles):
+              raw = read(root / ("normal-ui/" + name), 32768)
+              value = json.loads(raw, object_pairs_hook=unique)
+              scope = "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only"
+              limit = 32 * 1024**3 if phase == "build" else 1024**3
+              if (type(value) is not dict or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+                      or value.get("scope") != scope or value.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                      or value.get("normalPhase" if phase == "test" else "phase") != phase or value.get("resultBundle") != bundle
+                      or value.get("sourcePrePostMatched") is not True or value.get("originalCommandReturned") is not True
+                      or type(value.get("sourceRosterSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", value["sourceRosterSha256"]) is None
+                      or type(value.get("fileLimitBytes")) is not list or value["fileLimitBytes"] != [limit, limit]
+                      or any(type(n) is not int for n in value["fileLimitBytes"])
+                      or value.get("receiptPolicy") != "exclusive0600-readback-consuming-close"):
+                  raise ValueError("normal original command admission refused")
+              code = value.get("originalTestReturncode" if phase == "test" else "originalReturncode")
+              if type(code) is not int or code != 0:
+                  raise ValueError("normal original command did not return zero")
+              clock = value.get("phaseClock")
+              if (type(clock) is not dict or set(clock) != {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                      or clock["postCloseDeadlineRequired"] is not True
+                      or any(type(clock[k]) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k]) is None
+                             for k in ("startNs", "deadlineNs", "beforePublicationNs"))):
+                  raise ValueError("normal fixed phase clock refused")
+              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+              if end - start != seconds * 1_000_000_000 or not start <= before_close < end:
+                  raise ValueError("normal phase deadline binding differs")
+              commands = value.get("commands")
+              if type(commands) is not list or len(commands) != len(roles):
+                  raise ValueError("normal original command roster refused")
+              for command, (role, cap, output_limit) in zip(commands, roles):
+                  if (type(command) is not dict or command.get("role") != role
+                          or type(command.get("returncode")) is not int or command["returncode"] != 0
+                          or type(command.get("roleCapSeconds")) is not int or command["roleCapSeconds"] != cap
+                          or type(command.get("timeoutSeconds")) is not int or not 1 <= command["timeoutSeconds"] <= cap
+                          or type(command.get("outputLimitBytes")) is not int or command["outputLimitBytes"] != output_limit
+                          or any(type(command.get(k)) is not int or not 0 <= command[k] <= output_limit for k in ("stdoutBytes", "stderrBytes"))
+                          or command["stdoutBytes"] + command["stderrBytes"] > output_limit
+                          or any(type(command.get(k)) is not str or re.fullmatch(r"[0-9a-f]{64}", command[k]) is None
+                                 for k in ("argvSha256", "stdoutSha256", "stderrSha256"))):
+                      raise ValueError("normal original command fact refused")
+              if phase != "test" and value.get("originalCommandRole") != roles[-2][0]:
+                  raise ValueError("normal original command role differs")
+              return value, raw
+          roster = ("normal-ui-source-roster", 15, 1048576)
+          build, build_bytes = checked_admission("build.command-admission.json", "build", None, 450,
+              [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+               ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+               ("normal-ui-build", 240, 1048576), roster])
+          runner, runner_bytes = checked_admission("diagnostics-test.runner-admission.json", "test", "diagnostics-test.xcresult", 585,
+              [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+               ("one-admitted-ui-test", 420, 1048576), roster])
+          summary_admission, summary_admission_bytes = checked_admission("diagnostics-summary.command-admission.json", "summary", "diagnostics-test.xcresult", 90,
+              [roster, ("normal-ui-summary", 30, 262144), roster])
+          if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+                  or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
+                  or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
+                  or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
+                  or summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()
+                  or summary_admission["commands"][1]["stdoutBytes"] != len(summary_bytes)):
+              raise ValueError("own generated runner and build/summary original admissions did not close successfully")
+          toolchain = {}
+          for index, (key, name) in enumerate((("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                              ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt")), 1):
+              raw = read(root / ("normal-ui/" + name), 4096)
+              query = build["commands"][index]
+              if len(raw) != query["stdoutBytes"] or hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]:
+                  raise ValueError("native tool observation differs from its original owned query")
+              toolchain[key] = raw.decode("ascii", "strict").strip()
           if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
           result = {"schemaVersion": 1, "scope": "ordinary-ui-observed-original-diagnostics-report-and-settled-projection",
                     "applicationSourceCommit": source, "harnessSourceCommit": source, "sourceTree": preview["sourceTree"],
@@ -2329,6 +2657,9 @@ jobs:
                     "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
                     "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
                     "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                    "buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest(),
+                    "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
                     "originalCommandStatuses": {"sharedBuild": 0, "diagnosticsTestFileLimit": 0, "diagnosticsTestFileBudget": 0,
                                                 "diagnosticsTest": 0, "diagnosticsSummary": 0},
                     "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectBuildToolDiagnostics", "testCounts": expected,
@@ -2355,7 +2686,7 @@ jobs:
       - name: Observe saved offline checks and empty build-input inspection through the ordinary Mac UI
         id: normal_saved_checks_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success'
-        timeout-minutes: 12
+        timeout-minutes: 17
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -2477,7 +2808,7 @@ jobs:
       - name: Bind both saved-check journeys to original XCTest and the same ordinary package
         id: normal_saved_checks_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success'
-        timeout-minutes: 1
+        timeout-minutes: 3
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -2485,18 +2816,22 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          # Each summary has its own finite one-GiB file limit and original owner phase.
+          ulimit -f 1048576
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
             "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
-            "DEVELOPER_DIR=$DEVELOPER_DIR" /usr/bin/xcrun xcresulttool get test-results summary \
-            --path "$MRK_MACOS_WORK/normal-ui/saved-checks-test.xcresult" --compact \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-summary saved-checks-test.xcresult \
             > "$MRK_MACOS_WORK/normal-ui/saved-checks-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/saved-checks-summary.stderr"
           summary_status=$?
           set -e
           printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/saved-checks-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
           "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_CHECKS_RESULT'
-          import hashlib, json, os, stat
+          import hashlib, json, os, re, stat
           from pathlib import Path
           root = Path(os.environ["MRK_MACOS_WORK"])
           def read(path, limit):
@@ -2580,9 +2915,76 @@ jobs:
                   or facts["workflowSourceCommit"] != source or facts["runId"] != preview["runId"] or facts["runAttempt"] != preview["runAttempt"]
                   or facts["nativeSuccessInferred"] is not False or facts["rawTextExported"] is not False):
               raise ValueError("bounded saved-checks facts are not from this original invocation")
-          toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
-                       for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
-                                         ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
+          # A persisted receipt is not finality: the original helper zero status above
+          # also gates its consuming receipt close and final nonrenewable clock check.
+          def checked_admission(name, phase, bundle, seconds, roles):
+              raw = read(root / ("normal-ui/" + name), 32768)
+              value = json.loads(raw, object_pairs_hook=unique)
+              scope = "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only"
+              limit = 32 * 1024**3 if phase == "build" else 1024**3
+              if (type(value) is not dict or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+                      or value.get("scope") != scope or value.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                      or value.get("normalPhase" if phase == "test" else "phase") != phase or value.get("resultBundle") != bundle
+                      or value.get("sourcePrePostMatched") is not True or value.get("originalCommandReturned") is not True
+                      or type(value.get("sourceRosterSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", value["sourceRosterSha256"]) is None
+                      or type(value.get("fileLimitBytes")) is not list or value["fileLimitBytes"] != [limit, limit]
+                      or any(type(n) is not int for n in value["fileLimitBytes"])
+                      or value.get("receiptPolicy") != "exclusive0600-readback-consuming-close"):
+                  raise ValueError("normal original command admission refused")
+              code = value.get("originalTestReturncode" if phase == "test" else "originalReturncode")
+              if type(code) is not int or code != 0:
+                  raise ValueError("normal original command did not return zero")
+              clock = value.get("phaseClock")
+              if (type(clock) is not dict or set(clock) != {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                      or clock["postCloseDeadlineRequired"] is not True
+                      or any(type(clock[k]) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k]) is None
+                             for k in ("startNs", "deadlineNs", "beforePublicationNs"))):
+                  raise ValueError("normal fixed phase clock refused")
+              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+              if end - start != seconds * 1_000_000_000 or not start <= before_close < end:
+                  raise ValueError("normal phase deadline binding differs")
+              commands = value.get("commands")
+              if type(commands) is not list or len(commands) != len(roles):
+                  raise ValueError("normal original command roster refused")
+              for command, (role, cap, output_limit) in zip(commands, roles):
+                  if (type(command) is not dict or command.get("role") != role
+                          or type(command.get("returncode")) is not int or command["returncode"] != 0
+                          or type(command.get("roleCapSeconds")) is not int or command["roleCapSeconds"] != cap
+                          or type(command.get("timeoutSeconds")) is not int or not 1 <= command["timeoutSeconds"] <= cap
+                          or type(command.get("outputLimitBytes")) is not int or command["outputLimitBytes"] != output_limit
+                          or any(type(command.get(k)) is not int or not 0 <= command[k] <= output_limit for k in ("stdoutBytes", "stderrBytes"))
+                          or command["stdoutBytes"] + command["stderrBytes"] > output_limit
+                          or any(type(command.get(k)) is not str or re.fullmatch(r"[0-9a-f]{64}", command[k]) is None
+                                 for k in ("argvSha256", "stdoutSha256", "stderrSha256"))):
+                      raise ValueError("normal original command fact refused")
+              if phase != "test" and value.get("originalCommandRole") != roles[-2][0]:
+                  raise ValueError("normal original command role differs")
+              return value, raw
+          roster = ("normal-ui-source-roster", 15, 1048576)
+          build, build_bytes = checked_admission("build.command-admission.json", "build", None, 450,
+              [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+               ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+               ("normal-ui-build", 240, 1048576), roster])
+          runner, runner_bytes = checked_admission("saved-checks-test.runner-admission.json", "test", "saved-checks-test.xcresult", 885,
+              [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+               ("one-admitted-ui-test", 720, 1048576), roster])
+          summary_admission, summary_admission_bytes = checked_admission("saved-checks-summary.command-admission.json", "summary", "saved-checks-test.xcresult", 90,
+              [roster, ("normal-ui-summary", 30, 262144), roster])
+          if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+                  or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
+                  or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
+                  or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
+                  or summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()
+                  or summary_admission["commands"][1]["stdoutBytes"] != len(summary_bytes)):
+              raise ValueError("own generated runner and build/summary original admissions did not close successfully")
+          toolchain = {}
+          for index, (key, name) in enumerate((("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                              ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt")), 1):
+              raw = read(root / ("normal-ui/" + name), 4096)
+              query = build["commands"][index]
+              if len(raw) != query["stdoutBytes"] or hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]:
+                  raise ValueError("native tool observation differs from its original owned query")
+              toolchain[key] = raw.decode("ascii", "strict").strip()
           if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
           result = {"schemaVersion": 1, "scope": "ordinary-ui-observed-saved-offline-and-empty-build-input-inspection",
                     "applicationSourceCommit": source, "harnessSourceCommit": source, "sourceTree": preview["sourceTree"],
@@ -2591,6 +2993,9 @@ jobs:
                     "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
                     "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
                     "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                    "buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest(),
+                    "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
                     "originalCommandStatuses": {"sharedBuild": 0, "savedChecksTestFileLimit": 0, "savedChecksTestFileBudget": 0,
                                                 "savedChecksTest": 0, "savedChecksSummary": 0},
                     "testIdentifiers": ["MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks",
@@ -2670,13 +3075,28 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/persistence-test-file-limit.status
             ${{ steps.work.outputs.root }}/normal-ui/persistence-test-file-budget.status
             ${{ steps.work.outputs.root }}/normal-ui/persistence-test-file-budget.json
+            ${{ steps.work.outputs.root }}/normal-ui/toolchain.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/build.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/build.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/test.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/summary.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/summary.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/project-test.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/project-summary.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/project-summary.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-test.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-summary.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-summary.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-summary.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-summary.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-summary.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-summary.command-admission.json
             ${{ steps.work.outputs.root }}/normal-ui/build.status
-            ${{ steps.work.outputs.root }}/normal-ui/build.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/test.status
             ${{ steps.work.outputs.root }}/normal-ui/test.runner-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/test.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/summary.status
-            ${{ steps.work.outputs.root }}/normal-ui/summary.stderr.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/xcode-version.txt
             ${{ steps.work.outputs.root }}/normal-ui/sdk-path.txt
             ${{ steps.work.outputs.root }}/normal-ui/sdk-version.txt
@@ -2689,9 +3109,7 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/persistence-result.json
             ${{ steps.work.outputs.root }}/normal-ui/project-test.status
             ${{ steps.work.outputs.root }}/normal-ui/project-test.runner-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/project-test.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/project-summary.status
-            ${{ steps.work.outputs.root }}/normal-ui/project-summary.stderr.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/project-result.json
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-limit.status
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-budget.status

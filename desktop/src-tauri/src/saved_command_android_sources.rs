@@ -50,6 +50,24 @@ impl Default for Sources {
         active: None, last: None, phase: wire::Phase::Idle, reason: wire::Reason::NotInspected } }
 }
 impl Sources {
+    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    pub(super) fn catalogue_allocation_data(project_id:&str,project:&RegisteredRoot,roots:&[RegisteredRoot;3],
+        originals:&[Arc<OriginalWork>;3])->(Self,Arc<SourceSnapshot>,Arc<SourceSnapshot>){
+        // Comparison/allocation DATA only. The SAME picker Arcs remain New;
+        // neither originals_settled nor snapshot/check/admission is invoked.
+        let mut sources=Self::default();
+        sources.generation=1;sources.binding=Some((project_id.to_owned(),1,project.clone()));
+        for (index,role) in [wire::Role::Jdk,wire::Role::Sdk,wire::Role::Gradle].into_iter().enumerate(){
+            sources.selected.insert(role,Selected{root:roots[index].clone(),original:originals[index].clone()});
+        }
+        sources.last=Some(wire::Operation{operation_id:3,source_generation:1,role:wire::Role::Gradle});
+        let snapshot=||Arc::new(SourceSnapshot{project_id:project_id.to_owned(),registration:1,
+            project:project.clone(),generation:1,roots:roots.clone(),originals:originals.clone()});
+        let current=snapshot();let old=snapshot();
+        assert!(!Arc::ptr_eq(&current,&old));
+        assert!(current.picker_originals().iter().zip(old.picker_originals()).all(|(a,b)|Arc::ptr_eq(a,b)));
+        (sources,current,old)
+    }
     pub(super) fn census_generation(&self)->u32{self.generation}
     /// Separate read-only census seam for service setup, including a genuinely
     /// empty or partial selection. This does NOT weaken snapshot()'s all-three

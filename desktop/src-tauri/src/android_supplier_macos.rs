@@ -409,11 +409,10 @@ struct Reference {
     directories: &'static [&'static str],
 }
 
-// Deliberately empty. Metadata preparation and local observations are not a
-// complete reviewed official archive/member/native catalogue. Adding any
-// production record requires actual correspondence, independent source review,
-// support provisioning and integration; no runtime JSON/flag populates this.
-const REFERENCES: &[Reference] = &[];
+// Complete immutable observations for the fixed official toolchain.
+// Comparison DATA, never runtime registration or native qualification.
+// Structural, inventory, native, support and whole-owner gates still apply.
+include!("android_supplier_macos_catalogue.rs");
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1456,6 +1455,11 @@ mod tests {
     fn static_slice<T: 'static>(value: Vec<T>) -> &'static [T] { Box::leak(value.into_boxed_slice()) }
     fn static_text(value: String) -> &'static str { Box::leak(value.into_boxed_str()) }
     fn retained(reference: Reference) -> &'static Reference { Box::leak(Box::new(reference)) }
+    fn assert_fixture_is_not_compiled(reference: &Reference) {
+        let digest = reference_digest(reference).expect("bounded comparison fixture digest");
+        assert!(REFERENCES.iter().all(|compiled| reference_digest(compiled) != Some(digest)),
+            "comparison fixtures must never be production suppliers");
+    }
     fn native_fixture(file: &CanonicalFile) -> &'static [NestedNative] {
         // Exact tuple/roster comparison DATA with deliberately synthetic headers.
         // This is NOT an actual archive-byte/native execution receipt.
@@ -1642,6 +1646,23 @@ mod tests {
         f(&SourceObservations { members: &members, support: &support, archive_members: &projected,
             optional_sdk_metadata: [None, None] })
     }
+    // One complete projection shared by the genuine roundtrip and whole-owner
+    // budget contract. os_files is explicitly synthetic provider comparison DATA.
+    pub(super) fn complete_compiled_observations<T>(r:&Reference,
+        f:impl FnOnce(SourceObservations<'_>,&[FileSpec])->T)->T{
+        observed(r,|observations|{
+            let metadata=[sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::Platform35Revision2),
+                sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::BuildTools35)];
+            let picked:Vec<_>=metadata.iter().zip(&sdk_metadata::OPTIONAL).map(|(doc,spec)|
+                FileSpec{path:spec.relative.into(),size:doc.bytes.len() as u64,
+                    sha256:policy::digest(doc.bytes),mode:0o644}).collect();
+            let complete=SourceObservations{members:observations.members,support:observations.support,
+                archive_members:observations.archive_members,optional_sdk_metadata:[
+                    Some(PickedSdkMetadataData{file:&picked[0],contents:metadata[0].bytes}),
+                    Some(PickedSdkMetadataData{file:&picked[1],contents:metadata[1].bytes})]};
+            let provider=os_files();f(complete,&provider)
+        })
+    }
     fn implicit_directory(mut r: Reference, group: SourceGroup, relative: &str) -> Reference {
         let index = source_index(&r, group, relative).unwrap();
         let SourceProvenance::Vendor { archive, member } = r.source_bindings[index].provenance else { panic!("fixture directory") };
@@ -1705,7 +1726,7 @@ mod tests {
         let serialized = serde_json::to_string(&r.source_bindings[index]).unwrap();
         assert!(serialized.contains("ArchiveParent") && serialized.contains("android-35"));
         assert!(!serialized.contains("member") && !serialized.contains("mode"));
-        assert!(!available());
+        assert_fixture_is_not_compiled(&r);
     }
     pub(super) fn implicit_archive_parent_component_prefix_and_bounds_refuse_data() {
         let r = implicit_directory(fixture(), SourceGroup::Sdk, "platforms/android-35");
@@ -1829,7 +1850,7 @@ mod tests {
         let r = retained(fixture());
         assert!(r.structural());
         let layouts = SourceLayouts { jdk: JdkLayout::Bundle, jdk_vendor: "test", jdk_version: "17.0.1" };
-        assert!(!available());
+        assert_fixture_is_not_compiled(r);
         assert!(matches!(recipe(&layouts), Err(Failure::Unavailable)));
         let recipe = choose(std::slice::from_ref(r), &layouts).unwrap();
         assert_eq!(recipe.source_roster().members.len(), r.source_members.len());
@@ -1946,7 +1967,7 @@ mod tests {
             group: SourceGroup::Sdk, relative: "build-tools/35.0.0/package.xml" });
         wrong = exact; wrong.payload = static_slice(replaced);
         assert!(!wrong.compiled_metadata_pair());
-        assert!(!available());
+        assert_fixture_is_not_compiled(&exact);
     }
     #[test]
     fn compiled_sdk_metadata_does_not_forge_picked_source_observations() {
@@ -2393,7 +2414,7 @@ mod tests {
         assert_eq!(native_profile::JDK_JVM_ARCHIVES.len(), 71);
         assert_eq!(native_profile::JDK_JVM_ARCHIVES.iter().map(|a| a.members.len()).sum::<usize>(), 71);
         assert_eq!(native_profile::JDK_JVM_ARCHIVES.iter().flat_map(|a| a.members).filter(|m| m.counterpart.is_some()).count(), 70);
-        assert!(!available()); // A header/data predicate is never supplier activation.
+        assert_fixture_is_not_compiled(&subject); // A header/data predicate is never supplier activation.
     }
     fn direct_tuple_reference(base: Reference, file: CanonicalFile, group: SourceGroup, component: Component,
         archive: ArchivePin<'static>, member: &'static str, original_mode: u32) -> Reference {
@@ -2497,11 +2518,165 @@ mod tests {
             + policy::proposal_tree_reservation_bytes(1, 0, 0).unwrap()
             - policy::proposal_tree_reservation_bytes(0, 0, 0).unwrap());
         let layouts = SourceLayouts { jdk: JdkLayout::Bundle, jdk_vendor: "test", jdk_version: "17.0.1" };
+        assert!(matches!(choose(&[], &layouts), Err(Failure::Unavailable)));
         assert!(matches!(choose(REFERENCES, &layouts), Err(Failure::Unavailable)));
     }
     #[test]
     fn catalogue_phase_budget_preserves_validity_without_phantom_payload_copy() {
         catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data();
+    }
+
+    // Strict integration gate: no skip, fallback fixture or synthetic table. This
+    // remains intentionally unsatisfied until the reviewed generated include is
+    // integrated. Expected observations below are DATA comparisons, not custody,
+    // installed-file observations, consent or native-execution evidence.
+    pub(super) fn compiled_six_component_catalogue_roundtrips_and_rejects_mismatches_data() {
+        assert_eq!(REFERENCES.len(), 1, "integrate the genuine combined six-component catalogue");
+        let r = &REFERENCES[0];
+        assert!(r.archives.iter().map(|archive| archive.component).eq(COMPONENTS));
+        let expected_archives: [(u64, &str, &str, &str); 6] = [
+            (185_851_019, JDK17_ARCHIVE_SHA,
+                "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz", "jdk-17.0.20.1+1"),
+            (64_273_788, "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0",
+                "https://dl.google.com/android/repository/platform-35_r02.zip", "platform-35_r02"),
+            (76_857_898, "530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48",
+                "https://dl.google.com/android/repository/build-tools_r35_macosx.zip", "build-tools-35.0.0"),
+            (138_068_841, GRADLE_ARCHIVE_SHA,
+                "https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip", "gradle-8.14.5"),
+            (4_339_472, AAPT_SHA,
+                "https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar", "8.9.2-12782657-osx"),
+            (32_520_401, BUNDLE_SHA,
+                "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar", "1.18.3"),
+        ];
+        for (archive, expected) in r.archives.iter().zip(expected_archives) {
+            assert_eq!((archive.archive.bytes, archive.archive.sha256, archive.official_source, archive.vendor_release), expected);
+        }
+        assert_eq!(r.profile, crate::android_build_protocol::MAC_TOOLCHAIN_PROFILE);
+        assert_eq!((r.observed_jdk_vendor, r.observed_jdk_version), ("Eclipse Adoptium", "17.0.20.1"));
+        let v = &r.versions;
+        assert_eq!((v.jdk_vendor, v.jdk_version, v.gradle_version, v.agp_version,
+            v.sdk_platform, v.sdk_platform_revision, v.sdk_build_tools_version),
+            ("temurin", "17.0.20.1", "8.14.5", "8.9.2", "android-35", "2", "35.0.0"));
+        assert_eq!((r.roles.java, r.roles.javac, r.roles.gradle, r.roles.bundletool, r.roles.sdk),
+            ("jdk/temurin-17.jdk/Contents/Home/bin/java", "jdk/temurin-17.jdk/Contents/Home/bin/javac",
+             "gradle/bin/gradle", "bundletool/bundletool.jar", "sdk"));
+        assert_eq!(r.gradle_distribution_url, r.archives[3].official_source);
+        assert!(r.structural() && r.source_directory_closure() && r.compiled_metadata_pair());
+        assert!(support_manifest_matches(r) && available());
+        let digest = reference_digest(r).expect("complete reference fits the bounded Rust commitment stream");
+
+        // Supplier-side storage/phase accounting only. Fresh Inspect, retained-
+        // Review Inspect and Register still require their real combined caller
+        // totals and actual target allocations under the SAME whole-app64MiB cap.
+        let budget = source_catalogue_budget().unwrap();
+        assert_eq!(budget.storage, r.source_storage().unwrap());
+        assert_eq!(budget.proposal_work, r.working_bytes().unwrap());
+        assert_eq!(budget.reproof_work, fixed_working_bytes().unwrap());
+        assert!(budget.reproof_work > 0 && budget.reproof_work < budget.proposal_work);
+        assert!(budget.proposal_work <= APP_BYTES);
+        assert_eq!(max_working_reservation_bytes().unwrap(), budget.proposal_work);
+        let layouts = [JdkLayout::Bundle, JdkLayout::HomeInSameBundle];
+        let recipes = layouts.map(|jdk| recipe(&SourceLayouts {
+            jdk, jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" }).unwrap());
+        for (selected, layout) in recipes.iter().zip(layouts) {
+            assert_eq!(selected.jdk_layout(), layout);
+            assert_eq!(reference_digest(selected.reference), Some(digest));
+            assert_eq!(selected.source_versions(), ["17.0.20.1", "35.0.0", "8.14.5"]);
+            assert_eq!(selected.source_storage().unwrap(), budget.storage);
+            assert_eq!(selected.working_reservation_bytes().unwrap(), budget.proposal_work);
+            let roster = selected.source_roster();
+            assert!(std::ptr::eq(roster.members, selected.reference.source_members));
+            assert!(std::ptr::eq(roster.trees, selected.reference.trees));
+            assert!(std::ptr::eq(roster.support, selected.reference.support));
+            assert!(std::ptr::eq(roster.archive_members, selected.reference.support_members));
+            assert!(std::ptr::eq(roster.optional_sdk_metadata, &sdk_metadata::OPTIONAL));
+        }
+        assert!(matches!(recipe(&SourceLayouts { jdk: JdkLayout::Bundle,
+            jdk_vendor: "temurin", jdk_version: "17.0.20.1" }), Err(Failure::Unavailable)));
+
+        // Borrow shifted slices rather than cloning the complete catalogue.
+        // Payload/class reindexing may not silently rebind source ordinals.
+        let shifted = Reference { payload: &r.payload[1..], classes: &r.classes[1..], ..*r };
+        assert!(!shifted.structural());
+        assert_ne!(reference_digest(&shifted).unwrap(), digest);
+        let oversized = Reference { directories: &["oversized"; policy::ENTRY_LIMIT], ..*r };
+        assert!(oversized.working_bytes().is_none() && !oversized.structural());
+        let mut support_member = r.support_members[0];
+        support_member.member.crc32 ^= 1;
+        let support_drift = Reference { support_members: static_slice(vec![support_member]), ..*r };
+        assert!(!support_drift.structural());
+        assert_ne!(reference_digest(&support_drift).unwrap(), digest);
+
+        // Reach actual compiled JMOD and foreign-resource joins, not fixture
+        // headers. Removing a member or changing its header remains a refusal.
+        for path in ["jdk/temurin-17.jdk/Contents/Home/jmods/jdk.management.agent.jmod",
+            "gradle/lib/gradle-fileevents-0.2.7.jar"] {
+            let (file, class) = r.payload.iter().zip(r.classes).find(|(file, _)| file.installed.path == path).unwrap();
+            let FileClass::JvmArchive { native_members } = class else { panic!("compiled native archive class") };
+            assert!(!native_members.is_empty() && native_members_match(&file.installed, native_members));
+            assert!(!native_members_match(&file.installed, &native_members[1..]));
+            if path.starts_with("gradle/") {
+                assert_eq!(native_members[0].kind, NativeResourceKind::OtherPlatformElf);
+            } else {
+                let header = native_members[0].header.unwrap();
+                let mut prefix = header.prefix.to_vec(); prefix[0] ^= 1;
+                let mut changed = native_members.to_vec();
+                changed[0].header = Some(NativeHeader { prefix: static_slice(prefix), ..header });
+                assert!(!native_members_match(&file.installed, &changed));
+            }
+        }
+
+        let selected = &recipes[0];
+        let instance = "a".repeat(32);
+        complete_compiled_observations(r, |complete, provider| {
+            assert!(selected.observations_match(&complete));
+            let missing = SourceObservations { members: &complete.members[1..], ..complete };
+            assert!(matches!(selected.finalize_proposal(&instance, 501, &missing, provider), Err(Failure::SourceMismatch)));
+            let result = selected.finalize_proposal(&instance, 501, &complete, provider).unwrap();
+            let bytes = result.documents();
+            for (raw, expected) in bytes.iter().zip(result.hashes()) {
+                assert_eq!(<[u8; 32]>::from(Sha256::digest(raw)), expected);
+            }
+            let selection = crate::android_build_protocol::MacToolchainSelection {
+                instance: instance.clone(), owner_uid: 501, catalog_generation: 1,
+                record_sha256: policy::digest(bytes[1]), inventory_sha256: policy::digest(bytes[0]),
+                os_provider_sha256: policy::digest(bytes[2]),
+            };
+            let mut parsed = policy::parse_manifest(bytes[0], &selection).unwrap();
+            assert!(policy::Provider::parse(bytes[2], &selection).is_some());
+            assert!(policy::Registration::parse(bytes[1], 501, &instance).unwrap().matches(&selection));
+            assert!(r.matches_inventory(&parsed) && r.native_closure(&parsed));
+            assert_eq!(result.supplier_record(), &digest);
+            assert_eq!(admit(&parsed, &digest), Ok(()));
+            assert_eq!(result.payload_map(), r.payload);
+            assert!(std::ptr::eq(result.payload_map(), selected.reference.payload));
+            assert_eq!(result.payload_bytes(), r.payload.iter().map(|p| p.installed.size).sum::<u64>());
+            assert_eq!(result.metadata_bytes(), bytes.iter().map(|v| v.len() as u64).sum::<u64>());
+            assert_eq!(result.directory_count() as usize, r.directories.len());
+            assert_eq!(result.alias_count() as usize, r.aliases.len());
+            assert!(result.retained_bytes().unwrap() <= budget.proposal_work);
+
+            let mut wrong_digest = digest; wrong_digest[0] ^= 1;
+            assert_eq!(admit(&parsed, &wrong_digest), Err(SupplierFailure::Unavailable));
+            parsed.data.versions.gradle_version.push('x');
+            assert!(!r.matches_inventory(&parsed));
+            assert_eq!(admit(&parsed, &digest), Err(SupplierFailure::Unavailable));
+            parsed.data.versions.gradle_version.pop();
+            let at = parsed.data.files.iter().position(|file|
+                file.path == "jdk/temurin-17.jdk/Contents/Home/lib/server/libjvm.dylib").unwrap();
+            let saved = std::mem::replace(&mut parsed.data.files[at].sha256, HASH.into());
+            assert!(!r.native_closure(&parsed) && !r.matches_inventory(&parsed));
+            assert_eq!(admit(&parsed, &digest), Err(SupplierFailure::Unavailable));
+            parsed.data.files[at].sha256 = saved;
+            assert!(r.matches_inventory(&parsed) && r.native_closure(&parsed));
+            parsed.data.files.remove(at);
+            assert!(!r.native_closure(&parsed) && !r.matches_inventory(&parsed));
+            assert_eq!(admit(&parsed, &digest), Err(SupplierFailure::Unavailable));
+        });
+    }
+    #[test]
+    fn compiled_six_component_catalogue_roundtrips_and_rejects_mismatches() {
+        compiled_six_component_catalogue_roundtrips_and_rejects_mismatches_data();
     }
 
     pub(super) fn archive_only_vendor_metadata_never_grants_filesystem_policy_data() {
@@ -2536,11 +2711,26 @@ mod tests {
     #[test]
     fn incomplete_reference_mapping_namespace_and_stream_bounds_refuse() { incomplete_reference_mapping_namespace_and_stream_bounds_refuse_data(); }
 }
+// Only the genuine compiled tuple enters this DATA seam. Recipe is move-only;
+// copy its static reference before moving it into the callback, not its owners.
+#[cfg(test)]
+pub(crate) fn with_compiled_catalogue_data<T>(
+    f:impl FnOnce(Recipe,SourceObservations<'_>,&[FileSpec],&'static [PayloadSource])->T)->T{
+    assert_eq!(REFERENCES.len(),1,"genuine complete compiled catalogue is required");
+    let reference=&REFERENCES[0];
+    let selected=recipe(&SourceLayouts{jdk:JdkLayout::Bundle,jdk_vendor:reference.observed_jdk_vendor,
+        jdk_version:reference.observed_jdk_version}).unwrap();
+    tests::complete_compiled_observations(reference,|observations,provider|
+        f(selected,observations,provider,reference.payload))
+}
 /// Same inert regression bodies for the repository's harness=false runner.
 #[cfg(test)]
 pub(crate) fn assert_macos_supplier_builder_data_contract() {
     crate::android_supplier_macos_source::assert_source_storage_data_contract();
     tests::catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data();
+    tests::compiled_six_component_catalogue_roundtrips_and_rejects_mismatches_data();
+    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    crate::saved_command_owner::SavedCommandOwner::assert_android_catalogue_whole_owner_data_contract();
     tests::implicit_archive_parents_bind_complete_source_closure_data();
     tests::implicit_archive_parent_component_prefix_and_bounds_refuse_data();
     tests::implicit_archive_parent_cannot_replace_headers_payload_or_observations_data();

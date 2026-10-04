@@ -509,6 +509,35 @@ impl Preparation {
 fn service_operation_bytes(value:&wire::ServiceOperation)->Option<usize>{
     value.operation_id.capacity().checked_add(value.context.retained_heap_bytes()?)
 }
+fn completed_state_allocation_bytes(last:Option<&wire::ServiceOperation>)->Option<usize>{
+    let mut bytes=std::mem::size_of::<State>();
+    if let Some(last)=last{bytes=bytes.checked_add(service_operation_bytes(last)?)?;}
+    Some(bytes)
+}
+#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+fn persistent_manager_allocation_bytes(retirement:&Retirement)->Option<usize>{
+    retirement.retained_bytes()?.checked_add(std::mem::size_of::<MainSlot>())?
+        .checked_add(management::ServiceManager::project_owned_upper_bound()?)
+}
+#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+pub(super) struct CatalogueServiceData {data:wire::ServiceOperation,retirement:Arc<Retirement>}
+#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+impl CatalogueServiceData {
+    pub(super) fn new(data:wire::ServiceOperation,control:Arc<Control>)->Self{
+        assert!(control.lane==ControlLane::Service);
+        // A normal Inspect retains the previous setup's nonempty operation and
+        // persistent manager charge. This is only inert allocation DATA: no
+        // State/Completed, Preparation, ServiceManager or finality is made.
+        Self{data,retirement:Arc::new(Retirement{original:control,action:management::Action::Observe,
+            require_enabled:false,phase:std::sync::atomic::AtomicU8::new(PENDING),
+            retired_serial:std::sync::atomic::AtomicU32::new(0)})}
+    }
+    pub(super) fn retained_bytes(&self)->Option<usize>{
+        assert_eq!(self.retirement.phase.load(Ordering::SeqCst),PENDING);
+        completed_state_allocation_bytes(Some(&self.data))?
+            .checked_add(persistent_manager_allocation_bytes(&self.retirement)?)
+    }
+}
 fn setup_prerequisite(observation:Option<wire::ServiceObservation>,failure:Option<wire::Reason>)->wire::Prerequisite{
     if failure==Some(wire::Reason::ApprovalDenied)
         || observation.is_some_and(|observation|observation.outcome==wire::ServiceOutcome::DeniedByUser){
@@ -563,16 +592,13 @@ impl State {
     }
     pub(super) fn retained_bytes(&self)->Option<usize>{
         if self.active.is_some(){return None;}
-        let mut bytes=std::mem::size_of::<Self>();
-        if let Some(last)=&self.last{bytes=bytes.checked_add(service_operation_bytes(&last.data)?)?;}
+        let mut bytes=completed_state_allocation_bytes(self.last.as_ref().map(|last|&last.data))?;
         #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
         if let Some(retirement)=&self.retirement{
             if retirement.phase.load(Ordering::SeqCst)!=OWNER_FINALIZED{return None;}
             // The persistent settled TLS manager survives Preparation itself.
             // Count it for inspection/other admissions, not only a next setup.
-            bytes=bytes.checked_add(retirement.retained_bytes()?)?
-                .checked_add(std::mem::size_of::<MainSlot>())?
-                .checked_add(management::ServiceManager::project_owned_upper_bound()?)?;
+            bytes=bytes.checked_add(persistent_manager_allocation_bytes(retirement)?)?;
         }
         Some(bytes)
     }

@@ -81,15 +81,15 @@ RENDERER_READINESS_SHA256 = '9f8936dd612d12ae8dc10c561181686359171a3ce98021603c1
 ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
 ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
 # The normal result also binds M2-A entry identity without claiming full M2/maintenance readiness.
-BLOCK_PINS = {'normal_ui_result': '9b88586efe9d1532bf810fa3cb0ea2e9706c1edd0c6c942210b0be009048748e',
- 'normal_project_ui_test': 'd903ce62063fd858c158a87bcc2a5532c47c043f13ddaf9147a568222b306bd2',
- 'normal_project_ui_result': '20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d',
- 'normal_persistence_ui_test': '2396acc5b9f10129447f2b52933feab88d06c6a84a512edaad8c637994a59a99',
- 'normal_persistence_ui_result': '0fbce9ceda8158a7e0c8585d24d2991d860121171d030afc78073a92ff1143fe',
- 'normal_diagnostics_ui_test': '633a31e2b44a1b7fb21abc05a0182e66753fcbe2508090aacac3d5ff2127a613',
- 'normal_diagnostics_ui_result': '5987afe38eaac0e72dce32aed908f1276b3fe7572c831e43935f09f24896096f',
- 'normal_saved_checks_ui_test': 'e4fa12c713afdd5d88f62d61e943024eb821833d5182b2159f43031de5570f3c',
- 'normal_saved_checks_ui_result': '7a28b53e92362616f6839d0c2dd75fe758f74ba91ff253b2830916febf3b43d0'}
+BLOCK_PINS = {'normal_ui_result': '9665ebd13fa186678201f972c5cb165812b9fa59a3d5959d9b38e72c860d6ccf',
+ 'normal_project_ui_test': '8edcd4ca6e2b730673c830a24591909f050256cbb6661f724fa04e55b4ce7be7',
+ 'normal_project_ui_result': 'f6c8d14dde9b58bad7a0803508fb343b82703bd4ed5e09a1de0ca903117cc55b',
+ 'normal_persistence_ui_test': '3ff4b7295bf3be9a52887f06e2c83acfb7010a6cad2113ffcd434a423a7fc259',
+ 'normal_persistence_ui_result': '865a2243d5cc1bf3e9929d6db1a6bb657f15817135a2a6e11041a60adea0b7cf',
+ 'normal_diagnostics_ui_test': 'c09b1404ff79414f26b4be3c5b071be5472e66a9de129804f728400e1386279d',
+ 'normal_diagnostics_ui_result': '8b9d4423a7cce285acc24d27e32d2eebfc1f056142f839a53bc534c84a52d5e7',
+ 'normal_saved_checks_ui_test': '55b8cce29447bb324074bdeab676ed1cc1d63993a2a1655a87b4717e90480ccf',
+ 'normal_saved_checks_ui_result': '7d79d1b912cfe9d37312a871347e90e25991b4eb1cad085b35b83468116d2065'}
 # One added source regression covers the two deliberately separate GUI scopes.
 # The workflow appends only this method after the unchanged original81 selection.
 SAVED_CHECKS_SOURCE_METHOD = 'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'
@@ -638,7 +638,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(test.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 1)
         selector = '-only-testing:MRKNormalAppUITests/NormalAppUITests/' + METHOD
         self.assertEqual(workflow.count(selector), 1)
-        for fragment in ('timeout-minutes: 7', 'ulimit -f 1048576', 'resource.getrlimit(resource.RLIMIT_FSIZE)',
+        for fragment in ('timeout-minutes: 11', 'ulimit -f 1048576', 'resource.getrlimit(resource.RLIMIT_FSIZE)',
                          'admitted = actual == (expected, expected)', '"phase": "diagnostics-test"',
                          '[[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"',
                          '[[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"',
@@ -717,12 +717,85 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             self.assertIn(fragment, data, fragment)
 
 
+
+        # All native commands now use the fixed original owner; only the local
+        # affected selection adds new helper tests, never the existing native82.
+        self.assertIn('    timeout-minutes: 300\n', workflow)
+        ceilings = [int(value) for value in re.findall(r'^        timeout-minutes: ([0-9]+)$', workflow, re.M)]
+        self.assertEqual((len(ceilings), sum(ceilings)), (33, 239))
+        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --normal-summary '), 5)
+        build = blocks['normal_ui_build']
+        self.assertIn('timeout-minutes: 9', build)
+        self.assertIn('ulimit -f 33554432', build)
+        self.assertIn('desktop/tools/macos_normal_ui_runner.py --normal-build', build)
+        for fragment in ('TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64',
+                         'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA',
+                         'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA'):
+            self.assertIn(fragment, build)
+        for ident, stem, summary_stem, minutes in (
+            ('normal_ui', 'test', 'summary', 7),
+            ('normal_project_ui', 'project-test', 'project-summary', 11),
+            ('normal_persistence_ui', 'persistence-test', 'persistence-summary', 11),
+            ('normal_diagnostics_ui', 'diagnostics-test', 'diagnostics-summary', 11),
+            ('normal_saved_checks_ui', 'saved-checks-test', 'saved-checks-summary', 17),
+        ):
+            original_test, original_result = blocks[ident + '_test'], blocks[ident + '_result']
+            self.assertIn('timeout-minutes: ' + str(minutes), original_test)
+            self.assertIn('timeout-minutes: 3', original_result)
+            self.assertIn('ulimit -f 1048576', original_result)
+            self.assertIn('desktop/tools/macos_normal_ui_runner.py --normal-summary ' + stem + '.xcresult', original_result)
+            for fragment in (
+                'TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64',
+                'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA', 'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA',
+                'checked_admission("build.command-admission.json", "build", None, 450,',
+                'checked_admission("' + stem + '.runner-admission.json", "test", "' + stem + '.xcresult", ',
+                'checked_admission("' + summary_stem + '.command-admission.json", "summary", "' + stem + '.xcresult", 90,',
+                'runner.get("strictCodesignOriginalZero") is not True', 'runner.get("originalClosesCompleted") is not True',
+                'runner.get("originalProductsPrePostMatched") is not True', 'runner.get("reSignedOrRepaired") is not False',
+                'value.get("sourcePrePostMatched") is not True', 'value.get("originalCommandReturned") is not True',
+                'end - start != seconds * 1_000_000_000 or not start <= before_close < end',
+                'clock["postCloseDeadlineRequired"] is not True',
+                'build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]',
+                'summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()',
+                'hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]',
+                '"generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest()',
+                '"buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest()',
+                '"summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest()',
+            ):
+                self.assertIn(fragment, original_result, ident + ':' + fragment)
+            self.assertLess(original_result.index('[[ "$summary_status" == 0 ]]'), original_result.index('def checked_admission('))
+            for name in (stem + '.runner-admission.json', stem + '.failure-diagnostics.json',
+                         summary_stem + '.command-admission.json', summary_stem + '.failure-diagnostics.json'):
+                self.assertEqual(evidence.count('${{ steps.work.outputs.root }}/normal-ui/' + name + '\n'), 1)
+            for suffix in (stem + '.log', stem + '.xcresult', stem + '.tail.txt',
+                           summary_stem + '.stderr', summary_stem + '.stderr.tail.txt', summary_stem + '.raw.json'):
+                self.assertNotIn('/normal-ui/' + suffix + '\n', evidence)
+        for leaf in ('build.command-admission.json', 'build.failure-diagnostics.json', 'toolchain.failure-diagnostics.json'):
+            self.assertEqual(evidence.count('${{ steps.work.outputs.root }}/normal-ui/' + leaf + '\n'), 1)
+        self.assertNotIn('join(sorted(summary))', workflow)
+        for name in ('build.tail.txt', 'test.tail.txt', 'project-test.tail.txt', 'summary.stderr.tail.txt', 'project-summary.stderr.tail.txt'):
+            self.assertNotIn('/normal-ui/' + name, workflow)
+        for fragment in ('def acl_source_hashes(', 'original(inventory_path, 2 * 1024 * 1024)',
+                         'body = original(os.path.join(workspace, path), 262144)', 'row["gitMode"] != "100644"',
+                         'len(body) != row["size"] or digest != row["sha256"] or blob != row["blob"]',
+                         'source != workflow_source', 'inventory["source"] != source',
+                         'identity(os.stat(path, follow_symlinks=False)) != before'):
+            self.assertIn(fragment, workflow)
+        self.assertNotIn('body = stream.read(131073)', workflow)
+        self.assertIn('read("native-acl-probe.log", 131072)', workflow)
+        for name in ('test_fixed_normal_modes_environment_and_returned_original_contract',
+                     'test_normal_phase_deadlines_file_limits_source_and_receipt_finality',
+                     'test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy',
+                     'test_acl_complete_source_inventory_reads_originals_at_current_native_size'):
+            self.assertNotIn(name, data)
+
         # One already-built runner invocation contains precisely these two independent journeys.
         saved_test = blocks['normal_saved_checks_ui_test']
         saved_result = blocks['normal_saved_checks_ui_result']
         saved_methods = ['testSyntheticProjectSavedOfflineChecks', 'testSyntheticProjectEmptyBuildInputInspection']
         saved_identifiers = ['MRKNormalAppUITests/NormalAppUITests/' + name for name in saved_methods]
-        self.assertEqual(workflow.count('/usr/bin/xcodebuild build-for-testing'), 1)
+        self.assertNotIn('/usr/bin/xcodebuild build-for-testing', workflow)
+        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --normal-build'), 1)
         self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 5)
         self.assertEqual(saved_test.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 1)
         self.assertEqual(re.findall(r'-only-testing:MRKNormalAppUITests/NormalAppUITests/(test[A-Za-z0-9_]+)', saved_test), saved_methods)
@@ -730,7 +803,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             self.assertEqual(workflow.count('-only-testing:' + identifier), 1)
         self.assertIn("steps.normal_diagnostics_ui_result.outcome == 'success'", saved_test)
         self.assertIn("steps.normal_saved_checks_ui_test.outcome == 'success'", saved_result)
-        for fragment in ('timeout-minutes: 12', 'ulimit -f 1048576', 'resource.getrlimit(resource.RLIMIT_FSIZE)',
+        for fragment in ('timeout-minutes: 17', 'ulimit -f 1048576', 'resource.getrlimit(resource.RLIMIT_FSIZE)',
                          'admitted = actual == (expected, expected)', '"phase": "saved-checks-test"',
                          '[[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"',
                          '[[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"',
