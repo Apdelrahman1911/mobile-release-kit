@@ -70,6 +70,33 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Refused, "duplicate-plist-key"):
             MODULE.sandbox_entitlement(duplicate)
 
+    def test_ui_target_requests_boolean_false_sandbox_at_build_time(self):
+        # Source intent only; the actual generated signature is admitted separately.
+        project_root = ROOT / "desktop/native/macos-normal-ui"
+        project = (project_root / "MRKNormalAppUI.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        target_marker = "\t\tA10000000000000000000008 = {\n"
+        self.assertEqual(project.count("isa = PBXNativeTarget;"), 1)
+        self.assertEqual(project.count(target_marker), 1)
+        target = project.split(target_marker, 1)[1].split("\n\t\t};", 1)[0]
+        self.assertIn("name = MRKNormalAppUITests;", target)
+        self.assertIn('productType = "com.apple.product-type.bundle.ui-testing";', target)
+        self.assertIn("buildConfigurationList = A1000000000000000000000E;", target)
+        self.assertIn("A1000000000000000000000E = {isa = XCConfigurationList; "
+                      "buildConfigurations = (A1000000000000000000000F);", project)
+        config_marker = "\t\tA1000000000000000000000F = {\n"
+        self.assertEqual(project.count(config_marker), 1)
+        config = project.split(config_marker, 1)[1].split("\n\t\t};", 1)[0]
+        self.assertEqual(project.count("CODE_SIGN_ENTITLEMENTS"), 1)
+        self.assertIn("CODE_SIGN_ENTITLEMENTS = MRKNormalAppUITests.entitlements;", config)
+        for preserved in ('CODE_SIGN_IDENTITY = "-";', "CODE_SIGN_STYLE = Manual;",
+                          'DEVELOPMENT_TEAM = "";', "ENABLE_APP_SANDBOX = NO;",
+                          "ENABLE_HARDENED_RUNTIME = NO;", "name = Debug;"):
+            self.assertIn(preserved, config)
+        body = (project_root / "MRKNormalAppUITests.entitlements").read_bytes()
+        value = MODULE.plist(body)  # Strict dictionary/duplicate-key parsing.
+        self.assertEqual(set(value), {"com.apple.security.app-sandbox"})
+        self.assertIs(value["com.apple.security.app-sandbox"], False)
+
     def test_manifest_is_exact_one_generated_runner_not_an_app_target(self):
         products = Path("/fresh/DerivedData/Build/Products")
         self.assertEqual(MODULE.target_from_xctestrun(manifest(), products)["BlueprintName"], MODULE.TARGET)
