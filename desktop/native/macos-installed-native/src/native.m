@@ -454,6 +454,8 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
                 : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
                 : kind == 6 ? @"Choose an existing Xcode workspace directory" : @"Choose an existing metadata directory inside the project";
             [panel setTitle:title];
+            // The message displays the purpose inside the sheet; its window title may not.
+            [panel setMessage:title];
             [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9];
             [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12)];
             [panel setAllowsMultipleSelection:kind == 9]; [panel setCanCreateDirectories:NO];
