@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two fixed fresh-host Mac diagnostic duties; never a general app runner.
+"""Two fixed entry diagnostics and a separate fixed package-reuse UI duty.
 
 Only main loads the pinned current stager/command owner. Import is inert stdlib.
 The reused application and diagnostic harness deliberately have different SHAs.
@@ -25,6 +25,11 @@ import zipfile
 
 REPO = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-entry-diagnostic"
+UI_REF = "refs/heads/verify/desktop-macos-packaged-ui"
+UI_HELPER = "desktop/tools/macos_normal_ui_runner.py"
+UI_DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
+PACKAGE_BYTES = 50964188
+PACKAGE_SHA = "618c873f0b841b54faceae9e5ad1ca073a94215a1a53cee0bf28c3aa17361119"
 WORKFLOW = ".github/workflows/desktop-macos-entry-diagnostic.yml"
 APPLICATION_SOURCE = "53850a9fd94768a2521f2634db6121550dbdd71c"
 SOURCE_RUN = "37143431561"
@@ -38,6 +43,7 @@ STAGER = "desktop/tools/stage_macos_installed.py"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
 NATIVE = "desktop/native/macos-installed-entry-diagnostic/observe.m"
 PINS = {
+    UI_HELPER: "207e473f346c4643e7e56d343625cd86eb99ecdfc44256676e558cecbeaa68e2",
     STAGER: "03a400dd9ba5086762ff06535004a56f8828592a38ae564d96ef0e46b6109490",
     LOADER: "1271fc4765e6709e8c2b7d4f6094c4437d8642f91fa140c795eb49731b8a816b",
     "desktop/macos-installed-inputs/build-release.json": "a71990f4eba76fb6c05e011799999decf8620c5ad8ea0471fb13cada37646630",
@@ -300,20 +306,27 @@ class Context:
         self.run = os.environ.get("GITHUB_RUN_ID", "")
         self.attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
         self.job = os.environ.get("GITHUB_JOB", "")
-        need(len(sys.argv) == 2 and sys.argv[1] in {"prepare", "readback", "observe"}, "fixed-phase")
+        self.ui = self.job == "packaged_ui"
+        self.ui_helper = None
+        phases = {"prepare", "readback", "ui-build", "ui-test"} if self.ui else {"prepare", "readback", "observe"}
+        need(len(sys.argv) == 2 and sys.argv[1] in phases, "fixed-phase")
         need(sys.platform == "darwin" and platform.machine() == "arm64" and platform.mac_ver()[0].startswith("26.")
              and threading.current_thread() is threading.main_thread(), "native-host")
         need(re.fullmatch(r"[0-9a-f]{40}", self.source) and all(re.fullmatch(r"[1-9][0-9]{0,19}", x) for x in (self.run, self.attempt))
-             and self.job in {"launchservices", "direct_entry"}, "run-binding")
+             and self.job in {"launchservices", "direct_entry", "packaged_ui"}, "run-binding")
         import pwd  # Native admission only; inert DATA parsers remain portable.
         user = pwd.getpwuid(os.getuid())
         need(os.getuid() > 0 and os.getuid() == os.geteuid() == user.pw_uid
              and os.getgid() == os.getegid() == user.pw_gid and user.pw_name == "runner"
              and user.pw_dir == "/Users/runner", "account")
+        selected_ref = UI_REF if self.ui else REF
+        self.developer = UI_DEVELOPER if self.ui else "/Library/Developer/CommandLineTools"
+        if self.ui:
+            need(os.stat("/dev/console").st_uid == os.getuid(), "ui-console-account")
         expected = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64",
-            "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": REPO, "GITHUB_REF": REF,
-            "GITHUB_WORKFLOW_REF": f"{REPO}/{WORKFLOW}@{REF}", "GITHUB_WORKFLOW_SHA": self.source,
-            "GITHUB_WORKSPACE": str(self.root), "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}
+            "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": REPO, "GITHUB_REF": selected_ref,
+            "GITHUB_WORKFLOW_REF": f"{REPO}/{WORKFLOW}@{selected_ref}", "GITHUB_WORKFLOW_SHA": self.source,
+            "GITHUB_WORKSPACE": str(self.root), "DEVELOPER_DIR": self.developer}
         need(str(self.root) == "/Users/runner/work/mobile-release-kit/mobile-release-kit"
              and all(os.environ.get(k) == v for k, v in expected.items()), "hosted-route")
         self.work = work_path(self.source, self.run, self.attempt, self.job)
@@ -323,7 +336,7 @@ class Context:
         self.work_original = full9(info)[:5]
         self.environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner",
                             "TMPDIR": str(self.work / "tmp") + "/", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TZ": "UTC",
-                            "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}
+                            "DEVELOPER_DIR": self.developer}
         self.snapshot = self.source_state()
         for name, expected_sha in PINS.items():
             need(expected_sha is not None and name in self.snapshot and self.snapshot[name][1] == expected_sha, "source-pin")
@@ -347,6 +360,13 @@ class Context:
             "normalQuitQualified": False, "fullUIQualified": False, "fullM2Qualified": False, "productReady": False,
             "allWorkerFinality": "not-established", "error": None, "retainedInstallation": True,
             "cleanup": {"compilerOutputsRemoved": False, "unknownStateRetained": False, "error": None}}
+        if self.ui:
+            self.report.update(scope="packaged-macos-entry-ui-only", harnessSource=self.source,
+                ui=None, generatedRunner=None, uiScenarioObserved=False, originalTestReturncode=None,
+                cleanExitStatus=None, sameBuildQualified=False)
+            # No old native-observer result is manufactured for this selection.
+            for name in ("native", "registeredPayloadIdentityObserved", "directEntryOutcome"):
+                self.report.pop(name)
 
     def source_state(self):
         # Fixed read-only Git metadata admission, as in the existing installed
@@ -444,7 +464,7 @@ class Context:
         self.check()
         self.report["stage"] = role
         self.inflight, self.last_returned = True, False
-        if role in {"one-direct-entry", "one-launchservices-observer"}:
+        if role in {"one-direct-entry", "one-launchservices-observer", "one-admitted-ui-test"}:
             self.report["applicationCallAttempted"] = True
         result = self.owner.run_owned(argv, environ=self.environment, cwd=self.work,
                                       timeout=timeout, capture=True, text=False, output_limit=LIMIT)
@@ -469,6 +489,112 @@ class Context:
                 for line in result.stderr.decode("utf-8", "replace").splitlines() if "error:" in line][:8]
         need(result.returncode == 0, role + "-status")
         return result
+
+    def ui_tools(self):
+        need(self.ui and self.developer == UI_DEVELOPER, "fixed-ui-profile")
+        loader = load_source(self.root, LOADER, "mrk_packaged_ui_owner_loader")
+        self.owner = loader.load_owner(self.root)
+        self.ui_helper = load_source(self.root, UI_HELPER, "mrk_packaged_ui_runner_admission")
+
+    def ui_prior(self, phase):
+        need(phase in {"readback", "ui-build"}, "fixed-ui-prior")
+        prior = document(read(self.work / (phase + ".json"), LIMIT)[0])
+        need(prior.get("scope") == "packaged-macos-entry-ui-only"
+             and prior.get("diagnosticSource") == self.source and prior.get("harnessSource") == self.source
+             and prior.get("applicationSource") == APPLICATION_SOURCE and prior.get("job") == self.job
+             and prior.get("runId") == self.run and prior.get("runAttempt") == self.attempt
+             and prior.get("sourceRosterSha256") == self.report["sourceRosterSha256"]
+             and prior.get("diagnosticComplete") is True and prior.get("sourcePrePostMatched") is True
+             and prior.get("error") is None, "original-ui-prior-result")
+        return prior
+
+    def ui_file_budget(self, phase):
+        import resource  # Native UI phase only, not portable DATA import.
+        expected = 32 * 1024**3 if phase == "build" else 1024**3
+        actual = resource.getrlimit(resource.RLIMIT_FSIZE)
+        need(actual == (expected, expected), "ui-file-budget")
+        self.report["fileBudget"] = {"phase": phase, "expectedBytes": expected, "softBytes": actual[0],
+            "hardBytes": actual[1], "admitted": True, "serviceLimitsObserved": False}
+
+    def ui_build(self):
+        self.ui_file_budget("build")
+        prior = self.ui_prior("readback")
+        need(prior.get("freshInstallerOriginalZero") is True, "original-ui-installer-zero")
+        selected = self.selected()
+        need(selected["packageSize"] == PACKAGE_BYTES and selected["packageSha256"] == PACKAGE_SHA,
+             "fixed-reused-ui-package")
+        self.readback()
+        self.report.update(diagnosticValid=False, diagnosticComplete=False)
+        self.ui_tools()
+        (self.work / "tmp").mkdir(mode=0o700)
+        ui = self.work / "normal-ui"; ui.mkdir(mode=0o700)
+        write_new(self.work / "ui-build-attempted", b"packaged_ui\n", 0o400)
+        commands = {
+            "xcode": ["/usr/bin/xcodebuild", "-version"],
+            "sdkPath": ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"],
+            "sdkVersion": ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"],
+            "sdkBuild": ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"],
+        }
+        toolchain = {}
+        for role, command in commands.items():
+            original = self.zero("ui-toolchain-" + role, command, 15)
+            need(0 < len(original.stdout) <= 4096, "ui-toolchain-bound")
+            toolchain[role] = original.stdout.decode("ascii", "strict").strip()
+        need(re.fullmatch(r"Xcode 26(?:\.[0-9]+)*\nBuild version [0-9A-Za-z]+", toolchain["xcode"])
+             and toolchain["sdkPath"].startswith(UI_DEVELOPER + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX")
+             and toolchain["sdkPath"].endswith(".sdk") and ".." not in toolchain["sdkPath"].split("/")
+             and re.fullmatch(r"26(?:\.[0-9]+)*", toolchain["sdkVersion"])
+             and re.fullmatch(r"[0-9A-Za-z]+", toolchain["sdkBuild"]), "ui-fixed-toolchain")
+        self.report["toolchain"] = toolchain
+        self.zero("build-ui-runner", ["/usr/bin/xcodebuild", "build-for-testing", "-quiet",
+            "-project", str(self.root / self.ui_helper.PROJECT), "-scheme", "MRKNormalAppUI",
+            "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+            "-derivedDataPath", str(ui / "DerivedData"), "-jobs", "2",
+            "-disableAutomaticPackageResolution", "COMPILER_INDEX_STORE_ENABLE=NO"], 240)
+        self.report.update(diagnosticValid=True, diagnosticComplete=True, buildOriginalZero=True,
+                           applicationRebuilt=False)
+
+    def ui_test(self):
+        self.ui_file_budget("test")
+        prior = self.ui_prior("ui-build")
+        need(prior.get("buildOriginalZero") is True and prior.get("applicationRebuilt") is False,
+             "original-ui-runner-build")
+        selected = self.selected()
+        need(selected["packageSize"] == PACKAGE_BYTES and selected["packageSha256"] == PACKAGE_SHA,
+             "fixed-reused-ui-package")
+        self.readback()
+        self.report.update(diagnosticValid=False, diagnosticComplete=False, toolchain=prior["toolchain"],
+                           buildReportSha256=digest(read(self.work / "ui-build.json", LIMIT)[0]))
+        self.ui_tools()
+        write_new(self.work / "ui-test-attempted", b"packaged_ui\n", 0o400)
+        self.environment.update({
+            "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": APPLICATION_SOURCE,
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": self.source,
+            "TEST_RUNNER_MRK_NORMAL_UI_ARTIFACT_ID": ARTIFACT_ID,
+            "TEST_RUNNER_MRK_NORMAL_UI_ARCHIVE_BYTES": str(ARCHIVE_BYTES),
+            "TEST_RUNNER_MRK_NORMAL_UI_ARCHIVE_SHA256": ARCHIVE_SHA,
+            "TEST_RUNNER_MRK_NORMAL_UI_PACKAGE_BYTES": str(PACKAGE_BYTES),
+            "TEST_RUNNER_MRK_NORMAL_UI_PACKAGE_SHA256": PACKAGE_SHA,
+        })
+        ui = self.work / "normal-ui"
+        result_path = ui / "test.xcresult"
+        original, runner = self.ui_helper.run_admitted_test(self.call, ui / "DerivedData",
+            result_path, (self.ui_helper.PACKAGED_METHOD,), 60, 180)
+        self.report.update(generatedRunner=runner, originalTestReturncode=original.returncode,
+                           originalCallReturned=True)
+        need(original.returncode == 0, "original-ui-test-nonzero")
+        summary = self.zero("original-ui-summary", ["/usr/bin/xcrun", "xcresulttool", "get", "test-results",
+            "summary", "--path", str(result_path), "--compact"], 15)
+        tests = self.zero("original-ui-tests", ["/usr/bin/xcrun", "xcresulttool", "get", "test-results",
+            "tests", "--path", str(result_path), "--compact"], 15)
+        accepted = self.ui_helper.packaged_ui_result(original.stdout, summary.stdout, tests.stdout)
+        accepted["originalXcodebuildReturncode"] = original.returncode
+        observed = self.stage.observation_command(self.observation_args(selected))
+        self.report.update(ui=accepted, uiScenarioObserved=True, diagnosticValid=True, diagnosticComplete=True,
+            postObservationReadbackSha256=digest(encoded(observed)))
+        # Installation, DerivedData, xcresult and unknown app/worker state stay
+        # in this exclusive disposable job. No direct-entry rerun or cleanup probe.
 
     def observe(self):
         selected = self.selected()
@@ -530,7 +656,8 @@ class Context:
         self.check()
 
     def failure(self, error):
-        label = str(error) if type(error) is Refused or type(error) is self.stage.Refused else "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "diagnostic-or-owner-error"
+        known_ui = self.ui_helper is not None and type(error) is self.ui_helper.Refused
+        label = str(error) if type(error) is Refused or type(error) is self.stage.Refused or known_ui else "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "diagnostic-or-owner-error"
         self.report["error"] = label if re.fullmatch(r"[a-z][a-z0-9-]{0,95}", label) else "diagnostic-or-owner-error"
         self.report["originalCallReturned"] = self.last_returned
         if self.owner is not None and isinstance(error, (self.owner.ProcessError, self.owner.ProcessInterrupted)):
@@ -575,7 +702,7 @@ def main():
     try:
         os.umask(0o077)
         context = Context()
-        getattr(context, sys.argv[1])()
+        getattr(context, sys.argv[1].replace("-", "_"))()
         context.check()
         context.report["sourcePrePostMatched"] = True
         success = True

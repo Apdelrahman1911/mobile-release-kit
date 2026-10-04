@@ -235,19 +235,30 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
     def test_fixed_two_host_workflow_and_original_only_native_route(self):
         workflow = (ROOT / MODULE.WORKFLOW).read_text()
         native = (ROOT / MODULE.NATIVE).read_text()
-        self.assertEqual(workflow.count("runs-on: macos-26"), 2)
+        self.assertEqual(workflow.count("runs-on: macos-26"), 3)
         self.assertIn("  launchservices:", workflow)
         self.assertIn("  direct_entry:", workflow)
-        self.assertEqual(workflow.count("persist-credentials: false"), 2)
+        self.assertEqual(workflow.count("persist-credentials: false"), 3)
         # The service rejects runner context at jobs.<id>.env before allocating
         # any runner. Each consumer gets its value at the permitted step scope;
         # prepare/readback/observe must retain Context's same hosted-runner check.
-        self.assertEqual(workflow.count("${{ runner.environment }}"), 8)
+        self.assertEqual(workflow.count("${{ runner.environment }}"), 13)
         jobs = (
             workflow.split("\n  launchservices:\n", 1)[1].split("\n  direct_entry:\n", 1)[0],
-            workflow.split("\n  direct_entry:\n", 1)[1],
+            workflow.split("\n  direct_entry:\n", 1)[1].split("\n  packaged_ui:\n", 1)[0],
         )
+        ui = workflow.split("\n  packaged_ui:\n", 1)[1]
+        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-packaged-ui'", ui)
+        self.assertNotIn("needs:", ui)
+        self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertNotIn("macos_installed_entry_diagnostic.py observe", ui)
+        self.assertIn("DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer", ui)
+        for phase in ("ui-build", "ui-test"):
+            self.assertEqual(ui.count("macos_installed_entry_diagnostic.py " + phase + " >"), 1)
         for job in jobs:
+            self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-entry-diagnostic'", job)
+            self.assertIn("DEVELOPER_DIR: /Library/Developer/CommandLineTools", job)
+            self.assertNotIn("ui-build", job)
             header, steps = job.split("    steps:\n", 1)
             self.assertNotIn("${{ runner.", header)
             for selected in ("work", "prepare", "readback", "observe"):
@@ -257,7 +268,7 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                 step_header = matches[0].split("\n        run: |", 1)[0]
                 self.assertIn("\n        env:\n", step_header)
                 self.assertIn("\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}", step_header)
-        self.assertEqual(workflow.count('root="/Users/runner/mrk-macos-entry-diagnostic-'), 2)
+        self.assertEqual(workflow.count('root="/Users/runner/mrk-macos-entry-diagnostic-'), 3)
         self.assertNotIn('root="/private/tmp/mrk-macos-entry-diagnostic-', workflow)
         adapter = (ROOT / "desktop/tools/macos_installed_entry_diagnostic.py").read_text()
         self.assertIn("self.work = work_path(self.source, self.run, self.attempt, self.job)", adapter)

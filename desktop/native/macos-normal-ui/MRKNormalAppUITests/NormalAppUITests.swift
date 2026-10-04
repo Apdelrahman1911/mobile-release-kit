@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Darwin
 import Foundation
@@ -11,9 +12,330 @@ import XCTest
 // This is UI evidence, not POSIX exit status or all-worker/descriptor finality.
 final class NormalAppUITests: XCTestCase {
     private enum Refusal: Error { case condition(String) }
-    @MainActor private var launchedApplication: XCUIApplication?
+    @MainActor private var originalLaunch: OrdinaryLaunch?
+    @MainActor private var caseClock: CaseClock?
     @MainActor private var normalQuitObserved = false
     @MainActor private var entryGateObservation: GateObservation?
+
+    // One immutable monotonic case end, started before admission. Stage limits
+    // may narrow it; a failure or restored stage limit never renews work.
+    @MainActor private final class CaseClock {
+        let deadline: TimeInterval
+        private var last: TimeInterval
+        private var unusable = false
+        private(set) var firstFailure: String?
+        init(seconds: TimeInterval) throws {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now.isFinite, now >= 0, seconds == 60 || seconds == 300,
+                  (now + seconds).isFinite, now + seconds > now else {
+                throw Refusal.condition("case clock unavailable")
+            }
+            last = now
+            deadline = now + seconds
+        }
+        func fail(_ reason: String) -> Refusal {
+            if firstFailure == nil { firstFailure = reason }
+            return .condition(firstFailure!)
+        }
+        private func now() throws -> TimeInterval {
+            guard !unusable else { throw fail("case clock unavailable") }
+            let value = ProcessInfo.processInfo.systemUptime
+            guard value.isFinite, value >= last else {
+                unusable = true
+                throw fail("case clock moved backwards or became unavailable")
+            }
+            last = value
+            return value
+        }
+        func remaining(_ maximum: TimeInterval, before end: TimeInterval? = nil,
+                       cleanup: Bool = false) throws -> TimeInterval {
+            if !cleanup, let firstFailure { throw Refusal.condition(firstFailure) }
+            guard maximum.isFinite, maximum > 0, end == nil || end!.isFinite else {
+                throw fail("invalid bounded wait")
+            }
+            let left = min(deadline, end ?? deadline) - (try now())
+            guard left.isFinite, left > 0 else { throw fail("original case or stage deadline elapsed") }
+            return min(maximum, left)
+        }
+        func end(within maximum: TimeInterval, cleanup: Bool = false) throws -> TimeInterval {
+            // One observed start; never add an elapsed allowance to a later
+            // timestamp and thereby grow this absolute interval.
+            if !cleanup, let firstFailure { throw Refusal.condition(firstFailure) }
+            let start = try now()
+            guard maximum.isFinite, maximum > 0, start < deadline,
+                  (start + maximum).isFinite else { throw fail("original case deadline elapsed") }
+            return min(deadline, start + maximum)
+        }
+        func progress(until end: TimeInterval, cleanup: Bool = false) throws {
+            let slice = try remaining(0.02, before: end, cleanup: cleanup)
+            // AppKit's time-varying properties need actual main-run-loop turns.
+            _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: slice))
+        }
+    }
+
+    // Only this lock-protected transport crosses NSWorkspace's concurrent
+    // completion queue. No AppKit property is inspected off the main actor.
+    // @unchecked Sendable covers this private NSLock discipline, not app safety.
+    private final class LaunchReply: @unchecked Sendable {
+        struct Snapshot {
+            let entries: Int
+            let bodies: Int
+            let first: NSRunningApplication?
+            let error: Bool
+        }
+        private let lock = NSLock()
+        private var entries = 0
+        private var bodies = 0
+        private var first: NSRunningApplication?
+        private var error = false
+        func enter() -> Int {
+            lock.lock(); defer { lock.unlock() }
+            entries = min(2, entries + 1)
+            return entries
+        }
+        func body(_ ticket: Int, application: NSRunningApplication?, failed: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            if ticket == 1 {
+                first = application // Retain before ANY fallible validation.
+                error = failed
+            }
+            bodies = min(2, bodies + 1)
+        }
+        func snapshot() -> Snapshot {
+            lock.lock(); defer { lock.unlock() }
+            return Snapshot(entries: entries, bodies: bodies, first: first, error: error)
+        }
+    }
+
+    @MainActor private final class OrdinaryLaunch {
+        static let outerURL = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app", isDirectory: true)
+        static let payloadURL = outerURL.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app", isDirectory: true)
+        private let clock: CaseClock
+        private let reply = LaunchReply()
+        private var original: NSRunningApplication?
+        private var requested = false
+        private var handoffs = 0
+        private var launchEnd: TimeInterval?
+        private var workClosed = false
+        private var cleanupEnd: TimeInterval?
+        private var cleaning = false
+        private var normalRequested = false
+        private var normalReturned: Bool?
+        private var forceRequested = false
+        private var forceReturned: Bool?
+        private var cleanupTerminationObserved = false
+
+        init(clock: CaseClock) { self.clock = clock }
+
+        private func handoff() {
+            handoffs = min(2, handoffs + 1)
+            let value = reply.snapshot()
+            // Main handoffs may reorder: ticket 2 can precede ticket 1's
+            // body. Take only ticket 1's retained value whenever available,
+            // even after duplicate failure; arrival order grants no authority.
+            if original == nil { original = value.first }
+            do {
+                guard let launchEnd, !workClosed else { throw clock.fail("late original is cleanup-only") }
+                _ = try clock.remaining(15, before: launchEnd)
+                try callbackHealthy()
+            } catch {
+                workClosed = true
+                _ = clock.fail("launch completion refused")
+            }
+            // If teardown already started, a late reference can consume only
+            // its SAME original cleanup budget. No new budget or UI authority.
+            if let cleanupEnd, !cleaning { try? driveCleanup(until: cleanupEnd) }
+        }
+
+        private func callbackHealthy(complete: Bool = false) throws {
+            let value = reply.snapshot()
+            guard requested, value.entries <= 1, value.bodies <= 1, handoffs <= 1 else {
+                throw clock.fail("duplicate or unrequested launch completion")
+            }
+            if handoffs == 1 {
+                guard value.entries == 1, value.bodies == 1, !value.error, original != nil else {
+                    throw clock.fail("launch completion has error or no original")
+                }
+            }
+            if complete {
+                guard value.entries == 1, value.bodies == 1, handoffs == 1 else {
+                    throw clock.fail("original launch completion is incomplete")
+                }
+            }
+        }
+        func healthy() throws {
+            guard !workClosed else { throw clock.fail("ordinary launch work is closed") }
+            try callbackHealthy()
+            _ = try clock.remaining(1)
+        }
+        private func payloadIdentity() throws -> NSRunningApplication {
+            guard let original,
+                  original.bundleURL?.path == Self.payloadURL.path,
+                  original.executableURL?.path == Self.payloadURL.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,
+                  original.bundleIdentifier == "dev.mobile-release-kit.desktop" else {
+                throw clock.fail("original running reference is not the fixed payload")
+            }
+            return original
+        }
+
+        func requestAndAwait() throws {
+            guard !requested, Thread.isMainThread else { throw clock.fail("ordinary launch is not one main-thread request") }
+            launchEnd = try clock.end(within: 15)
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            configuration.addsToRecentItems = false
+            configuration.createsNewApplicationInstance = true
+            configuration.allowsRunningApplicationSubstitution = false
+            configuration.promptsUserIfNeeded = false
+            configuration.arguments = []
+            // No environment override: the unchanged ordinary entry derives its
+            // own eight-entry environment and inherits the original gate once.
+            requested = true
+            let mailbox = reply
+            NSWorkspace.shared.openApplication(at: Self.outerURL, configuration: configuration) { [self, mailbox] application, error in
+                let ticket = mailbox.enter()
+                mailbox.body(ticket, application: application, failed: error != nil)
+                DispatchQueue.main.async { self.handoff() }
+            }
+            do {
+                guard let launchEnd else { throw clock.fail("original launch deadline missing") }
+                while true {
+                    try clock.progress(until: launchEnd)
+                    try healthy()
+                    if handoffs == 1 {
+                        let app = try payloadIdentity()
+                        guard !app.isTerminated else { throw clock.fail("original terminated before UI admission") }
+                        if app.isFinishedLaunching && app.isActive {
+                            try callbackHealthy(complete: true)
+                            _ = try clock.remaining(15, before: launchEnd)
+                            return
+                        }
+                    }
+                }
+            } catch {
+                workClosed = true
+                _ = clock.fail("ordinary launch failed or exceeded its original deadline")
+                throw error
+            }
+        }
+
+        func observeNormalTermination(until end: TimeInterval) throws {
+            while true {
+                try clock.progress(until: end)
+                try healthy()
+                let app = try payloadIdentity()
+                if app.isTerminated { try acceptTerminal(); return }
+            }
+        }
+        func acceptTerminal() throws {
+            try healthy()
+            try callbackHealthy(complete: true)
+            let app = try payloadIdentity()
+            guard app.isTerminated, !normalRequested, !forceRequested else {
+                throw clock.fail("same original termination without failure cleanup is required")
+            }
+        }
+
+        private func driveCleanup(until end: TimeInterval) throws {
+            guard !cleaning else { return }
+            cleaning = true; defer { cleaning = false }
+            var graceEnd: TimeInterval?
+            while true {
+                _ = try clock.remaining(5, before: end, cleanup: true)
+                if let original {
+                    // The only allowed cleanup receiver: never a lookup, proxy,
+                    // PID/signal, second callback's app or a replacement owner.
+                    if original.isTerminated { cleanupTerminationObserved = true; return }
+                    if !normalRequested {
+                        normalRequested = true
+                        normalReturned = original.terminate()
+                        graceEnd = min(end, try clock.end(within: 1, cleanup: true))
+                    }
+                    if !forceRequested {
+                        let grace = graceEnd ?? end
+                        do { _ = try clock.remaining(1, before: grace, cleanup: true) }
+                        catch {
+                            _ = try clock.remaining(5, before: end, cleanup: true)
+                            forceRequested = true
+                            forceReturned = original.forceTerminate()
+                        }
+                    }
+                }
+                try clock.progress(until: end, cleanup: true)
+            }
+        }
+        func tearDown(normalQuit: Bool) throws {
+            if normalQuit {
+                do { try acceptTerminal(); return }
+                catch { _ = clock.fail("terminal original changed before teardown") }
+            }
+            workClosed = true
+            _ = clock.fail("normal UI Quit was not accepted")
+            // A failed clock/work stage cannot be repaired. Cleanup may use only
+            // remaining case time, at most five seconds TOTAL, including a late
+            // callback and normal grace. Retain unknown state on exhaustion.
+            do {
+                if cleanupEnd == nil { cleanupEnd = try clock.end(within: 5, cleanup: true) }
+                if let cleanupEnd { try driveCleanup(until: cleanupEnd) }
+            } catch { /* Unknown remains unknown; do not retry or renew. */ }
+            let normal = normalReturned.map { $0 ? "true" : "false" } ?? "null"
+            let forced = forceReturned.map { $0 ? "true" : "false" } ?? "null"
+            print("MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=\(normalRequested);normalReturned=\(normal);forceRequested=\(forceRequested);forceReturned=\(forced);originalTerminated=\(cleanupTerminationObserved);unknownStateRetained=\(!cleanupTerminationObserved)")
+            throw clock.fail("failure cleanup is never normal Quit evidence")
+        }
+    }
+
+    @MainActor private func beginCase(seconds: TimeInterval) throws {
+        try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline cannot be reset")
+        let clock = try CaseClock(seconds: seconds)
+        caseClock = clock
+        journeyDeadline = clock.deadline
+    }
+
+    @MainActor private func launchOrdinaryApplication() throws -> XCUIApplication {
+        _ = try remaining(15)
+        guard let clock = caseClock else { throw Refusal.condition("original case clock missing") }
+        try require(originalLaunch == nil && entryGateObservation == nil, "only one ordinary launch is admitted")
+        let outer = XCUIApplication(url: OrdinaryLaunch.outerURL)
+        let monitor = XCUIApplication(url: OrdinaryLaunch.payloadURL)
+        try require(outer.state == .notRunning && monitor.state == .notRunning,
+                    "occupied outer or payload must not be launched, adopted or terminated")
+        let gate = GateObservation()
+        entryGateObservation = gate
+        try gate.openOnce()
+        try gate.probe(busy: false)
+        let owner = OrdinaryLaunch(clock: clock)
+        originalLaunch = owner // Custody before the one fallible request.
+        try owner.requestAndAwait()
+        try gate.probe(busy: true)
+        try owner.healthy()
+        // This URL proxy is monitoring/UI only, NOT a public original-PID attach.
+        // Never launch, activate, open or terminate it.
+        return monitor
+    }
+
+    @MainActor private func completeNormalQuit(_ app: XCUIApplication) throws {
+        guard let clock = caseClock, let owner = originalLaunch, let gate = entryGateObservation else {
+            throw Refusal.condition("normal Quit original custody missing")
+        }
+        let end = try clock.end(within: 10)
+        try require(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end)),
+                    "genuine Quit did not stop the payload UI proxy")
+        try owner.observeNormalTermination(until: end) // SAME ten seconds, not another ten.
+        try require(app.state == .notRunning, "payload UI proxy changed after original termination")
+        try gate.probe(busy: false)
+        try gate.closeOriginal()
+        try owner.acceptTerminal()
+        normalQuitObserved = true
+    }
+
+    @MainActor private func acceptFinalScenario() throws {
+        try require(normalQuitObserved, "normal Quit and consuming gate close are required before publication")
+        guard let owner = originalLaunch else { throw Refusal.condition("original launch missing at publication") }
+        try owner.acceptTerminal()
+        _ = try remaining(1)
+        print("MRK_MACOS_UI_ORIGINAL=outerRequest=1;completion=1;body=1;handoff=1;payloadIdentity=1;originalTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
+    }
 
     // One read-only original of the already admitted permanent gate. An EX
     // observation is not proof of SH acquisition, process exit status, or all
@@ -75,7 +397,9 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func require(_ value: Bool, _ reason: String) throws {
-        guard value else { throw Refusal.condition(reason) }
+        guard value else { throw caseClock?.fail(reason) ?? Refusal.condition(reason) }
+        if let owner = originalLaunch { try owner.healthy() }
+        if let clock = caseClock { _ = try clock.remaining(1, before: journeyDeadline) }
     }
 
     @MainActor private func unique(_ query: XCUIElementQuery, _ reason: String) throws -> XCUIElement {
@@ -91,7 +415,7 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor private func dashboard(_ renderer: XCUIElement) throws {
         let heading = renderer.staticTexts.matching(identifier: "Good releases start here.")
-        try require(heading.element(boundBy: 0).waitForExistence(timeout: 5), "dashboard heading did not render")
+        try require(heading.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "dashboard heading did not render")
         // Fixed dashboard query diagnostics only; observations are non-atomic.
         let observedCount = heading.count
         if observedCount != 1 {
@@ -111,7 +435,7 @@ final class NormalAppUITests: XCTestCase {
         let open = try unique(renderer.buttons.matching(identifier: "Open project folder"),
                               "ordinary first-party project control is missing or ambiguous")
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true AND hittable == true"), object: open)
-        try require(XCTWaiter.wait(for: [ready], timeout: 5) == .completed, "ordinary project control is not usable")
+        try require(XCTWaiter.wait(for: [ready], timeout: try remaining(5)) == .completed, "ordinary project control is not usable")
         try require(renderer.staticTexts.matching(identifier: "BROWSER PREVIEW — EXAMPLE DATA ONLY").count == 0,
                     "browser-preview data is not ordinary-app evidence")
     }
@@ -123,7 +447,7 @@ final class NormalAppUITests: XCTestCase {
         // Scoped to this application's opened menu bar, never a global keystroke.
         try click(menuBar.menuItems.matching(identifier: "Quit"), "the File menu has no unique Quit action")
         let query = window.sheets
-        try require(query.element(boundBy: 0).waitForExistence(timeout: 5), "normal Quit did not present its native sheet")
+        try require(query.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "normal Quit did not present its native sheet")
         let sheet = try unique(query, "normal Quit sheet is ambiguous")
         _ = try unique(sheet.staticTexts.matching(identifier: "Quit and discard unsaved drafts?"),
                        "unexpected confirmation sheet")
@@ -182,7 +506,9 @@ final class NormalAppUITests: XCTestCase {
         return HostedAccount(name: "runner", home: "/Users/runner")
     }
 
-    @MainActor private func admitHostedAccount() throws -> HostedAccount {
+    private enum SourceProfile { case sameBuild, packagedEntry }
+
+    @MainActor private func admitHostedAccount(_ profile: SourceProfile = .sameBuild) throws -> HostedAccount {
         let context = ProcessInfo.processInfo.environment
         try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
                     "this scenario is not admitted on a shared or personal desktop")
@@ -209,49 +535,44 @@ final class NormalAppUITests: XCTestCase {
         let harnessSource = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""
         let hexadecimal = CharacterSet(charactersIn: "0123456789abcdef")
         try require(applicationSource.utf8.count == 40 && applicationSource.unicodeScalars.allSatisfy(hexadecimal.contains)
-                    && applicationSource == harnessSource,
-                    "this same-build scenario needs exact application and harness source bindings")
+                    && harnessSource.utf8.count == 40 && harnessSource.unicodeScalars.allSatisfy(hexadecimal.contains),
+                    "exact application and harness source bindings are required")
+        switch profile {
+        case .sameBuild:
+            try require(applicationSource == harnessSource,
+                        "this same-build scenario needs exact application and harness source bindings")
+        case .packagedEntry:
+            try require(applicationSource == "53850a9fd94768a2521f2634db6121550dbdd71c" && harnessSource != applicationSource
+                        && context["MRK_NORMAL_UI_ARTIFACT_ID"] == "11281078057"
+                        && context["MRK_NORMAL_UI_ARCHIVE_BYTES"] == "50972943"
+                        && context["MRK_NORMAL_UI_ARCHIVE_SHA256"] == "dfb46e23f7b397facc1a9b69b77d1440960fb846bedc90a573f2410b230255d0"
+                        && context["MRK_NORMAL_UI_PACKAGE_BYTES"] == "50964188"
+                        && context["MRK_NORMAL_UI_PACKAGE_SHA256"] == "618c873f0b841b54faceae9e5ad1ca073a94215a1a53cee0bf28c3aa17361119",
+                        "only the separately selected fixed packaged-entry case may reuse this package")
+        }
         return account
     }
 
     @MainActor
     func testLaunchCancelAndQuit() throws {
-        continueAfterFailure = false
-        // XCTest rounds to whole minutes; this is an actual 60-second setting,
-        // not a claimed exact 90-second setting that silently becomes 120.
-        executionTimeAllowance = 60
-        let account = try admitHostedAccount()
+        try launchCancelAndQuit(profile: .sameBuild)
+    }
 
-        let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
-                      isDirectory: true)
-        try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop.entry"
-                    && (Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mrk-macos-entry"
-                    && Bundle(url: url.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app"))?.bundleIdentifier == "dev.mobile-release-kit.desktop"
-                    && (Bundle(url: url.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app"))?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String) == "mobile-release-kit-desktop",
-                    "the exact ordinary entry/payload installation is missing")
-        // The preceding Installer/readback gate binds the bytes to the normal
-        // Cargo binary. A bundle identifier by itself is NOT that proof.
-        let app = XCUIApplication(url: url)
-        try require(app.state == .notRunning, "application already running; launch must not terminate an existing instance")
-        app.launchArguments = []
-        // Apple's launchEnvironment API permits removal, not just overrides.
-        // No token, project path, development runtime or observer flag is passed.
-        app.launchEnvironment = [
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": account.home, "USER": account.name, "LOGNAME": account.name,
-            "LANG": "en_US.UTF-8",
-            "LC_ALL": "en_US.UTF-8", "TZ": "UTC"
-        ]
-        // Register cleanup only AFTER the notRunning precondition. A refused
-        // occupied application is never terminated by this test's teardown.
-        let gate = GateObservation()
-        entryGateObservation = gate
-        try gate.openOnce()
-        try gate.probe(busy: false)
-        launchedApplication = app
-        app.launch() // Exactly once; no activate/relaunch/retry or external PID.
-        try require(app.wait(for: .runningForeground, timeout: 5), "ordinary app did not enter the foreground")
-        try require(app.windows.element(boundBy: 0).waitForExistence(timeout: 5), "ordinary app has no visible main window")
+    @MainActor
+    func testPackagedEntryLaunchCancelAndQuit() throws {
+        try launchCancelAndQuit(profile: .packagedEntry)
+    }
+
+    @MainActor private func launchCancelAndQuit(profile: SourceProfile) throws {
+        continueAfterFailure = false
+        // XCTest's whole-minute allowance remains exactly sixty seconds.
+        executionTimeAllowance = 60
+        try beginCase(seconds: 60) // Before any in-case account or installation admission.
+        _ = try admittedJourneyApplication(profile: profile)
+        let app = try launchOrdinaryApplication()
+        guard let gate = entryGateObservation else { throw Refusal.condition("original gate observation missing") }
+        try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "ordinary app did not enter the foreground")
+        try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "ordinary app has no visible main window")
         let window = try unique(app.windows, "ordinary main window is ambiguous")
         try require(window.isHittable, "ordinary main window is not usable")
         // Fixed renderer singleton diagnostic; no additional query or wait.
@@ -272,29 +593,27 @@ final class NormalAppUITests: XCTestCase {
         try gate.probe(busy: true)
         try click(picker.buttons.matching(identifier: "Cancel"), "native project picker Cancel is unavailable")
         let pickerDismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: picker)
-        try require(XCTWaiter.wait(for: [pickerDismissed], timeout: 5) == .completed, "native picker Cancel did not settle")
+        try require(XCTWaiter.wait(for: [pickerDismissed], timeout: try remaining(5)) == .completed, "native picker Cancel did not settle")
         try dashboard(renderer)
 
         let first = try quitSheet(app, window)
         try click(first.buttons.matching(identifier: "Cancel"), "normal Quit Cancel is unavailable")
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: first)
-        try require(XCTWaiter.wait(for: [dismissed], timeout: 5) == .completed, "Cancel did not dismiss the normal Quit sheet")
+        try require(XCTWaiter.wait(for: [dismissed], timeout: try remaining(5)) == .completed, "Cancel did not dismiss the normal Quit sheet")
         try require(app.state == .runningForeground && window.exists, "Cancel did not preserve the running application")
         try dashboard(renderer)
         // Prove renderer responsiveness after Cancel without selecting a project,
         // changing configuration or invoking a Store.
         try click(renderer.buttons.matching(identifier: "Project settings"), "post-Cancel navigation is unavailable")
         try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
-                    .element(boundBy: 0).waitForExistence(timeout: 5), "post-Cancel settings navigation failed")
+                    .element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "post-Cancel settings navigation failed")
         try click(renderer.buttons.matching(identifier: "Dashboard"), "post-Cancel Dashboard navigation is unavailable")
         try dashboard(renderer)
 
         let second = try quitSheet(app, window)
         try click(second.buttons.matching(identifier: "Quit"), "normal affirmative Quit is unavailable")
-        try require(app.wait(for: .notRunning, timeout: 10), "the genuine Quit action did not reach notRunning")
-        normalQuitObserved = true
-        try gate.probe(busy: false)
-        try gate.closeOriginal()
+        try completeNormalQuit(app)
+        try acceptFinalScenario()
         print("MRK_MACOS_ENTRY_UI=ordinary-entry-payload-picker-quit-and-gate-exclusion-observed;directPayloadPreMain=unqualified;allWorkerFinality=unavailable;maintenance=unavailable")
         // Not final until the original XCTest/xcodebuild result also succeeds.
         print("MRK_MACOS_NORMAL_UI=launch-render-cancel-navigation-quit-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
@@ -875,10 +1194,11 @@ final class NormalAppUITests: XCTestCase {
         "Encrypted storage is unavailable:", "unknown", "late-known"
     ]
     @MainActor private func remaining(_ requested: TimeInterval) throws -> TimeInterval {
-        guard let deadline = journeyDeadline else { return requested }
-        let left = deadline - ProcessInfo.processInfo.systemUptime
-        try require(left > 0, "whole journey deadline elapsed in " + journeyStage)
-        return min(requested, left)
+        guard let clock = caseClock, let deadline = journeyDeadline else {
+            throw Refusal.condition("original case deadline missing in " + journeyStage)
+        }
+        if let owner = originalLaunch { try owner.healthy() }
+        return try clock.remaining(requested, before: deadline)
     }
     @MainActor private func stage(_ name: String, _ body: () throws -> Void) throws {
         journeyStage = name
@@ -1053,8 +1373,8 @@ final class NormalAppUITests: XCTestCase {
             + (text.hasSuffix("\n") ? "" : "\\ No newline at end of file\n")
     }
 
-    @MainActor private func admittedJourneyApplication() throws -> (URL, HostedAccount) {
-        let account = try admitHostedAccount()
+    @MainActor private func admittedJourneyApplication(profile: SourceProfile = .sameBuild) throws -> (URL, HostedAccount) {
+        let account = try admitHostedAccount(profile)
 
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
@@ -1067,26 +1387,10 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {
-        let (url, account) = try admittedJourneyApplication()
-        // The preceding Installer/readback gate binds the bytes to the normal
-        // Cargo binary. A bundle identifier by itself is NOT that proof.
-        let app = XCUIApplication(url: url)
-        try require(app.state == .notRunning, "application already running; launch must not terminate an existing instance")
-        app.launchArguments = []
-        // Apple's launchEnvironment API permits removal, not just overrides.
-        // No token, project path, development runtime or observer flag is passed.
-        app.launchEnvironment = [
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": account.home, "USER": account.name, "LOGNAME": account.name,
-            "LANG": "en_US.UTF-8",
-            "LC_ALL": "en_US.UTF-8", "TZ": "UTC"
-        ]
-        // Register cleanup only AFTER the notRunning precondition. A refused
-        // occupied application is never terminated by this test's teardown.
-        launchedApplication = app
-        app.launch() // Exactly once; no activate/relaunch/retry or external PID.
-        try require(app.wait(for: .runningForeground, timeout: 5), "ordinary app did not enter the foreground")
-        try require(app.windows.element(boundBy: 0).waitForExistence(timeout: 5), "ordinary app has no visible main window")
+        _ = try admittedJourneyApplication() // Every extended journey stays same-build.
+        let app = try launchOrdinaryApplication()
+        try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "ordinary app did not enter the foreground")
+        try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "ordinary app has no visible main window")
         let window = try unique(app.windows, "ordinary main window is ambiguous")
         try require(window.isHittable, "ordinary main window is not usable")
         // Fixed renderer singleton diagnostic; no additional query or wait.
@@ -1272,7 +1576,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor func testSyntheticPersistentCredentials() throws {
         continueAfterFailure = false
         executionTimeAllowance = 300
-        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        try beginCase(seconds: 300)
         let fixture = LocalFixture()
         ownedFixture = fixture
         try stage("persistence-admission") {
@@ -1398,13 +1702,13 @@ final class NormalAppUITests: XCTestCase {
             try lockPrivateVault(storage, renderer: renderer, fixture: fixture, preservedMutation: true)
             let sheet = try quitSheet(app, window)
             try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
-            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal Quit did not reach notRunning")
-            normalQuitObserved = true
+            try completeNormalQuit(app)
             try fixture.assertStoreUnchanged()
             try fixture.closeOriginals(); ownedFixture = nil
         }
         // Original XCTest counts/exit and independent native-owner evidence are
         // still required. No app-restart, real signing or delivery claim.
+        try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete;appRestart=not-run;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
     }
 
@@ -1417,7 +1721,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func syntheticProjectJourney(includeImages: Bool) throws {
         continueAfterFailure = false
         executionTimeAllowance = 300
-        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
         try stage("launch") { launched = try launchForJourney() }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
@@ -1665,14 +1969,14 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
             let sheet = try quitSheet(app, window)
             try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
-            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal Quit did not reach notRunning")
-            normalQuitObserved = true
+            try completeNormalQuit(app)
             try fixture.assertUnchanged()
             try fixture.closeOriginals()
             ownedFixture = nil
         }
         // These markers remain conditional on original XCTest/xcodebuild exit0,
         // exactly one selected passing test and the independent native owners.
+        try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
@@ -1733,7 +2037,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor func testSyntheticProjectSavedOfflineChecks() throws {
         continueAfterFailure = false
         executionTimeAllowance = 300
-        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
         try stage("offline-launch") { launched = try launchForJourney() }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary offline launch returned no original") }
@@ -1783,7 +2087,7 @@ final class NormalAppUITests: XCTestCase {
             try reveal(acknowledgement, in: renderer)
             acknowledgement.click()
             let start = try waitElement(consent.buttons.matching(identifier: "Run saved offline checks"), in: panel,
-                                        enabled: true, timeout: 5, failures: failures)
+                                        enabled: true, timeout: try remaining(5), failures: failures)
             try require((acknowledgement.value as? String) == "1" || (acknowledgement.value as? NSNumber)?.intValue == 1,
                         "the exact offline acknowledgement was not retained")
             try reveal(start, in: renderer)
@@ -1836,21 +2140,21 @@ final class NormalAppUITests: XCTestCase {
             }
             let sheet = try quitSheet(app, window)
             try click(sheet.buttons.matching(identifier: "Quit"), "normal offline Quit unavailable")
-            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal offline Quit did not reach notRunning")
-            normalQuitObserved = true
+            try completeNormalQuit(app)
             try fixture.assertUnchanged()
             try fixture.closeOriginals()
             ownedFixture = nil
         }
         // The fixture has no configured checks/build wrapper. The shared core
         // still performs fixed Git queries; this is not zero-command evidence.
+        try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_OFFLINE_UI=ordinary-ui-observed-saved-offline-report-and-settled-projection;missing=\(missing);skipped=\(skipped);releaseReadiness=not-assessed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
     @MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {
         continueAfterFailure = false
         executionTimeAllowance = 300
-        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
         try stage("recovery-idle-launch") { launched = try launchForJourney() }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary empty-recovery launch returned no original") }
@@ -1926,14 +2230,14 @@ final class NormalAppUITests: XCTestCase {
             }
             let sheet = try quitSheet(app, window)
             try click(sheet.buttons.matching(identifier: "Quit"), "normal empty-recovery Quit unavailable")
-            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal empty-recovery Quit did not reach notRunning")
-            normalQuitObserved = true
+            try completeNormalQuit(app)
             try fixture.assertUnchanged()
             try fixture.closeOriginals()
             ownedFixture = nil
         }
         // No producer-finality receipt or pending journal is fabricated. A real
         // mutation-recovery journey still needs its own genuine eligible producer.
+        try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_RECOVERY_IDLE_UI=ordinary-ui-observed-empty-build-input-inspection-and-settled-projection;mutationRecovery=not-run;projectCleanliness=not-established;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
     // End ordinary saved offline and empty recovery journeys.
@@ -1973,7 +2277,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor func testSyntheticProjectBuildToolDiagnostics() throws {
         continueAfterFailure = false
         executionTimeAllowance = 300
-        journeyDeadline = ProcessInfo.processInfo.systemUptime + 300
+        try beginCase(seconds: 300)
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
         try stage("diagnostics-launch") { launched = try launchForJourney() }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary diagnostics launch returned no original") }
@@ -2014,7 +2318,8 @@ final class NormalAppUITests: XCTestCase {
                                         enabled: true, timeout: 10, failures: failures)
             try reveal(start, in: renderer)
             guard let wholeDeadline = journeyDeadline else { throw Refusal.condition("original journey clock missing") }
-            journeyDeadline = min(wholeDeadline, ProcessInfo.processInfo.systemUptime + 15)
+            guard let clock = caseClock else { throw Refusal.condition("original case clock missing") }
+            journeyDeadline = min(wholeDeadline, try clock.end(within: 15))
             defer { journeyDeadline = wholeDeadline } // Restore that SAME absolute outer deadline, never renew it.
             start.click() // The sole Start. Native work6/finality10 clocks are unchanged.
             let fresh = panel.staticTexts.matching(identifier: "Tool observations from this run")
@@ -2061,49 +2366,34 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
             let sheet = try quitSheet(app, window)
             try click(sheet.buttons.matching(identifier: "Quit"), "normal diagnostics Quit unavailable")
-            try require(app.wait(for: .notRunning, timeout: try remaining(10)), "normal diagnostics Quit did not reach notRunning")
-            normalQuitObserved = true
+            try completeNormalQuit(app)
             try fixture.assertUnchanged()
             try fixture.closeOriginals()
             ownedFixture = nil
         }
         // This marker alone is NOT a test-count, POSIX-exit or native-resource receipt.
+        try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_DIAGNOSTICS_UI=ordinary-ui-observed-original-diagnostics-report-and-settled-projection;commandsAttempted=\(commandsAttempted);cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
     override func tearDown() async throws {
         var cleanupFailure: Error?
-        do { try await MainActor.run { try entryGateObservation?.closeOriginal() } }
-        catch { cleanupFailure = error }
         do {
             try await MainActor.run {
-                guard let app = launchedApplication else { return }
-                if app.state != .notRunning {
-                    // Failure cleanup only, through the same launched-app proxy in
-                    // the exclusive disposable job. Never accepted as normal Quit.
-                    app.terminate()
-                    guard app.wait(for: .notRunning, timeout: 5) else {
-                        throw Refusal.condition("task-owned framework cleanup did not reach notRunning")
-                    }
-                    throw Refusal.condition("framework cleanup was required; normal Quit is not accepted")
-                }
-                guard normalQuitObserved else {
-                    throw Refusal.condition("application stopped without completing the normal Quit scenario")
-                }
+                if let owner = originalLaunch { try owner.tearDown(normalQuit: normalQuitObserved) }
             }
-        } catch { if cleanupFailure == nil { cleanupFailure = error } }
-        // Closing the fixture originals is independent of app cleanup success.
-        // No fixture deletion or replacement-owner search is performed here.
+        } catch { cleanupFailure = error }
+        // Independent consuming closes even when app cleanup/clock is unknown.
+        do { try await MainActor.run { try entryGateObservation?.closeOriginal() } }
+        catch { if cleanupFailure == nil { cleanupFailure = error } }
+        // Never delete possibly live fixture/app state or seek a replacement owner.
         do {
             try await MainActor.run {
                 if let fixture = ownedFixture { try fixture.closeOriginals(); ownedFixture = nil }
             }
-        } catch {
-            if cleanupFailure == nil { cleanupFailure = error }
-        }
-        do { try await super.tearDown() } catch {
-            if cleanupFailure == nil { cleanupFailure = error }
-        }
+        } catch { if cleanupFailure == nil { cleanupFailure = error } }
+        do { try await super.tearDown() }
+        catch { if cleanupFailure == nil { cleanupFailure = error } }
         if let cleanupFailure { throw cleanupFailure }
     }
 }

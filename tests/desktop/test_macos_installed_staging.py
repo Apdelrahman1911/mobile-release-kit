@@ -1718,11 +1718,20 @@ class MacInstallationMetadataData(unittest.TestCase):
                           'not(feature = "windows-runtime-publisher")'):
             self.assertIn(exclusion, shell)
         ui = (source / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
-        basic = ui.split("func testLaunchCancelAndQuit()", 1)[1].split("private struct FixtureSpec", 1)[0]
-        self.assertEqual(basic.count("app.launch()"), 1)
+        basic = ui.split("private func launchCancelAndQuit(profile:", 1)[1].split("private struct FixtureSpec", 1)[0]
+        launch = ui.split("private func launchOrdinaryApplication()", 1)[1].split("private func completeNormalQuit(", 1)[0]
+        terminal = ui.split("private func completeNormalQuit(", 1)[1].split("private func acceptFinalScenario()", 1)[0]
+        self.assertNotIn("app.launch()", ui)
+        self.assertEqual(basic.count("try launchOrdinaryApplication()"), 1)
+        self.assertEqual(ui.count("NSWorkspace.shared.openApplication(at: Self.outerURL"), 1)
+        self.assertIn("XCUIApplication(url: OrdinaryLaunch.payloadURL)", launch)
         self.assertIn('try nativeSheet(window, title: "Choose a mobile project folder")', basic)
         self.assertEqual(basic.count("try gate.probe(busy: true)"), 2)
-        self.assertEqual(basic.count("try gate.probe(busy: false)"), 2)
+        self.assertEqual(launch.count("try gate.probe(busy: false)"), 1)
+        self.assertEqual(terminal.count("try gate.probe(busy: false)"), 1)
+        self.assertLess(terminal.index("owner.observeNormalTermination"), terminal.index("try gate.probe(busy: false)"))
+        self.assertEqual(basic.count("try completeNormalQuit(app)"), 1)
+        self.assertEqual(basic.count("try acceptFinalScenario()"), 1)
         self.assertIn("directPayloadPreMain=unqualified;allWorkerFinality=unavailable;maintenance=unavailable", basic)
         staging = (source / "desktop/tools/stage_macos_installed.py").read_text()
         supplier = ast.parse(staging)
