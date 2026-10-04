@@ -23,7 +23,7 @@ import sys
 DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "1271fc4765e6709e8c2b7d4f6094c4437d8642f91fa140c795eb49731b8a816b"
+LOADER_SHA = "bd069b9e7150113a671b7165ca89adf36e42328656a223a2f2d077197d583e25"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
 PACKAGED_METHOD = CLASS + "testPackagedEntryLaunchCancelAndQuit"

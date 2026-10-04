@@ -850,7 +850,7 @@ class CommandContractTests(unittest.TestCase):
         engine.frozen = self.frozen(nonce=engine.nonce)
         engine.sealed = True
         fields = dict(create=True, run=True, no_target=None, wait={"kind": "exit", "code": 127},
-                      producer=True, result=True, stdout=0, stderr=0, fence=None)
+                      producer=True, result=True, stdout=0, stderr=0, fence=None, failure_mask=0)
         with self.assertRaises(owned.ProcessError): engine._terminal(command._scalar(engine.nonce, **fields))
         engine.create_route.attempted = engine.run_route.attempted = True
         engine.prepared, engine.ready = {"group": 2002, "signals": 0}, True
@@ -860,10 +860,40 @@ class CommandContractTests(unittest.TestCase):
         fields["wait"] = {"kind": "signal", "code": signal.SIGKILL}
         fields["no_target"] = "EXEC_REJECTED"
         self.assertEqual(engine._terminal(command._scalar(engine.nonce, **fields))["no_target"], "EXEC_REJECTED")
+        base = {**fields, "no_target": None, "wait": {"kind": "exit", "code": 127}}
+        for mask in (0, 32, *range(48, 64)):
+            with self.subTest(admitted_mask=mask):
+                value = {**base, "failure_mask": mask, "result": mask == 0}
+                body = command._scalar(engine.nonce, **value)
+                self.assertLessEqual(len(body), command.SCALAR_LIMIT)
+                self.assertEqual(engine._terminal(body)["failure_mask"], mask)
+        class PretendedInt(int):
+            pass
+        malformed = [
+            {name: value for name, value in base.items() if name != "failure_mask"},
+            {**base, "extra_failure": 0},
+            *({**base, "failure_mask": mask, "result": False}
+              for mask in (None, True, False, -1, 1, 2, 4, 8, 16, 31, 33, 47, 64, 1 << 63,
+                           32.0, "32", [], {})),
+            {**base, "failure_mask": 0, "result": False},
+            {**base, "failure_mask": 32, "result": True},
+            {**base, "producer": False, "result": False, "failure_mask": 0},
+            {**base, "producer": False, "result": False, "failure_mask": 48},
+        ]
+        # JSON loses an int subclass's local Python type; check its primitive
+        # rejection before serialization independently.
+        self.assertFalse(command._integer(PretendedInt(32), 0, 63))
+        for index, value in enumerate(malformed):
+            with self.subTest(malformed_mask=index):
+                with self.assertRaises(owned.ProcessError):
+                    engine._terminal(command._scalar(engine.nonce, **value))
+        engine.sealed = False
+        value = {**base, "producer": False, "result": False, "failure_mask": None}
+        self.assertIsNone(engine._terminal(command._scalar(engine.nonce, **value))["failure_mask"])
 
     def test_latched_helper_stop_cannot_be_erased_by_a_later_terminal_epoch(self):
         for role in ("A", "C"):
-            for edge in ("before-snapshot", "after-snapshot", "armed-tail"):
+            for edge in ("before-snapshot", "after-snapshot", "armed-tail", "before-error", "after-error"):
                 with self.subTest(role=role, edge=edge):
                     ctx = self.context(role)
                     wire = self.wire(ctx)
@@ -871,9 +901,13 @@ class CommandContractTests(unittest.TestCase):
                     wire.writer.close()
                     if edge == "before-snapshot":
                         ctx.helper_signal(signal.SIGTERM, None)
+                    if edge == "before-error":
+                        ctx.record(RuntimeError("inert primary"))
                     epoch = ctx.error_epoch, ctx.signal_epoch
                     if edge == "after-snapshot":
                         ctx.helper_signal(signal.SIGTERM, None)
+                    if edge == "after-error":
+                        ctx.record(RuntimeError("inert primary"))
                     if edge == "armed-tail":
                         def signalled_check():
                             ctx.helper_signal(signal.SIGTERM, None)
@@ -889,50 +923,63 @@ class CommandContractTests(unittest.TestCase):
                         # free context does not fabricate a native finality.
                         ctx.check_tail()  # Stop never cancels the required tail.
                         self.assertEqual(command._terminal_code(ctx, wire, epoch, allowed=True),
-                            command.HELPER_FAILED if edge == "before-snapshot" else command.HELPER_UNKNOWN)
+                            command.HELPER_FAILED if edge in {"before-snapshot", "before-error"} else command.HELPER_UNKNOWN)
 
     def test_c_result_and_terminal_status_preserve_signal_during_fence_or_publication(self):
         # Inert orchestration only: native producer/fence prerequisites are
         # isolated here, never presented as original process or disk evidence.
-        for edge in ("none", "failed-anchor", "fence", "serialization", "publication"):
+        expected_masks = {"none": 0, "failed-anchor": 52, "anchor-result": 49,
+                          "output-limit": 50, "relay": 56, "primary": 48, "all-failed": 63,
+                          "fence": 32, "serialization": 0, "publication": 0,
+                          "serialization-error": 0, "publication-error": 0, "unsettled": None}
+        late = {"serialization", "publication", "serialization-error", "publication-error"}
+        for edge, expected_mask in expected_masks.items():
             with self.subTest(edge=edge):
                 ctx = self.context("C")
                 owner = command._Custodian.__new__(command._Custodian)
                 owner.ctx, owner.upstream = ctx, self.wire(ctx)
                 owner.relay, owner.producer, owner.account = (ctx.acquisition() for _ in range(3))
                 owner._settle_producers = lambda: None
-                owner._producer_settled = lambda: True
+                owner._producer_settled = lambda: edge != "unsettled"
                 owner.seal_descendants = lambda: None
                 def fence(_seal):
                     if edge == "fence": ctx.helper_signal(signal.SIGTERM, None)
-                owner.writer = SimpleNamespace(publish=fence, close=lambda: True, complete=True)
+                owner.writer = SimpleNamespace(publish=fence, close=lambda: True, complete=edge != "unsettled")
                 owner.writer_prepared = True
-                owner._relay_output = lambda: True
-                owner.anchor_work = dict(result=True, no_child=False, run=True, rejected=None,
+                owner._relay_output = lambda: edge not in {"relay", "all-failed"}
+                owner.anchor_work = dict(result=edge not in {"anchor-result", "all-failed"},
+                                         no_child=False, run=True, rejected=None,
                                          wait={"kind": "exit", "code": 0})
-                owner.wait = SimpleNamespace(status_code=(command.HELPER_FAILED if edge == "failed-anchor"
-                                                         else command.HELPER_OK))
-                owner.output_overflow = owner.source_failed = False
+                owner.wait = SimpleNamespace(status_code=(command.HELPER_FAILED
+                    if edge in {"failed-anchor", "all-failed"} else command.HELPER_OK))
+                owner.output_overflow = edge in {"output-limit", "all-failed"}
+                owner.source_failed = False
                 owner.output = [b"", b""]
                 owner.create_route = owner.run_route = SimpleNamespace(attempted=True)
+                if edge == "primary":
+                    ctx.record(RuntimeError("inert primary"))
                 frames = []
                 encode = command._scalar
                 def scalar(nonce, **fields):
-                    if edge == "serialization" and "fence" in fields:
-                        ctx.helper_signal(signal.SIGTERM, None)
+                    if "fence" in fields:
+                        if edge == "serialization": ctx.helper_signal(signal.SIGTERM, None)
+                        if edge == "serialization-error": ctx.record(RuntimeError("inert serialization"))
                     return encode(nonce, **fields)
                 def send(wire, tag, content, *_args, **_kwargs):
                     wire.sent.append(tag)
                     if tag is command.Tag.TERMINAL:
                         frames.append(owned._parse(content))
                         if edge == "publication": ctx.helper_signal(signal.SIGTERM, None)
+                        if edge == "publication-error": ctx.record(RuntimeError("inert publication"))
                 with patch.object(command, "_scalar", new=scalar), patch.object(command, "_send", new=send):
                     result = owner.finish()
                 self.assertEqual(len(frames), 1)
-                self.assertIs(frames[0]["result"], edge not in {"fence", "failed-anchor"})
-                self.assertTrue(frames[0]["producer"] and frames[0]["fence"])
-                self.assertEqual(result, command.HELPER_OK if edge == "none" else
-                                 command.HELPER_FAILED if edge in {"fence", "failed-anchor"} else command.HELPER_UNKNOWN)
+                self.assertEqual(frames[0]["failure_mask"], expected_mask)
+                self.assertIs(frames[0]["result"], expected_mask == 0)
+                self.assertIs(frames[0]["producer"], edge != "unsettled")
+                self.assertIs(frames[0]["fence"], edge != "unsettled")
+                self.assertEqual(result, command.HELPER_UNKNOWN if edge in late or edge == "unsettled"
+                                 else command.HELPER_OK if edge == "none" else command.HELPER_FAILED)
 
     def event(self, ordinal, operation, edge, *, written=0, flags=0, outcome=None, identity=True):
         if outcome is None:
@@ -1598,6 +1645,7 @@ class OwnedProcessTests(unittest.TestCase):
         with self.assertRaises(owned.ProcessError) as raised:
             owned.run_owned(binary, cwd=self.root)
         self.assertTrue(raised.exception.contained and raised.exception.cleanup_complete)
+        self.assertIsNone(raised.exception.owner_failure_mask)
         self.assertEqual(self.outcomes[-1].result_integrity, "incomplete")
         result = owned.run_owned(self.command('print("not captured")'), cwd=self.root,
                                  capture=False, text=False)
@@ -1605,7 +1653,15 @@ class OwnedProcessTests(unittest.TestCase):
         with self.assertRaises(owned.ProcessError) as raised:
             owned.run_owned(self.command('import os; os.write(1,b"private-canary"*1000)'),
                             cwd=self.root, output_limit=256, text=False)
-        self.assertTrue(raised.exception.dispatched and raised.exception.contained)
+        self.assertEqual(raised.exception.args, ("owned command produced incomplete output",))
+        self.assertTrue(raised.exception.dispatched and raised.exception.contained
+                        and raised.exception.cleanup_complete)
+        mask = raised.exception.owner_failure_mask
+        self.assertIs(type(mask), int)
+        self.assertIn(mask, range(48, 64))
+        self.assertEqual(mask & 2, 2)  # Actual C overflow, not an inferred full buffer.
+        self.assertEqual(self.outcomes[-1].result_integrity, "incomplete")
+        self.assertIsNotNone(self.outcomes[-1].original_finality)
         self.assertNotIn("private-canary", str(raised.exception))
 
     def test_callback_cancellation_and_exec_rejection_are_not_normal_127(self):

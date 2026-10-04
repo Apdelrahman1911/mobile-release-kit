@@ -69,7 +69,7 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '0244561aea379d6277b597a9c651229bfae9b9aa4bea6efc9f18b411e7e3b99b'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b26529e5e39e86939116f6246c0312824e03aff528318396a9aafdff94a8eb0d'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-source-admission
       - name: Select the fixed frontend compiler
         if: steps.route.outputs.native == 'true'
@@ -632,7 +632,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '0244561aea379d6277b597a9c651229bfae9b9aa4bea6efc9f18b411e7e3b99b'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b26529e5e39e86939116f6246c0312824e03aff528318396a9aafdff94a8eb0d'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain the compiler artifact or typed private-transport summary
         id: upload
@@ -758,7 +758,7 @@ jobs:
           MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256: ${{ steps.compile.outputs.shell_local_transport_sha256 }}
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '0244561aea379d6277b597a9c651229bfae9b9aa4bea6efc9f18b411e7e3b99b'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b26529e5e39e86939116f6246c0312824e03aff528318396a9aafdff94a8eb0d'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
@@ -833,7 +833,7 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '0244561aea379d6277b597a9c651229bfae9b9aa4bea6efc9f18b411e7e3b99b'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b26529e5e39e86939116f6246c0312824e03aff528318396a9aafdff94a8eb0d'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-source-admission
       - name: Prepare shared Ubuntu shell inputs only on this disposable runner
         timeout-minutes: 8
@@ -945,7 +945,7 @@ jobs:
           MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256: ''
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '0244561aea379d6277b597a9c651229bfae9b9aa4bea6efc9f18b411e7e3b99b'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b26529e5e39e86939116f6246c0312824e03aff528318396a9aafdff94a8eb0d'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

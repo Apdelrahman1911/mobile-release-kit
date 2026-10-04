@@ -2981,7 +2981,19 @@ class _Custodian:
         # latched cannot produce success, and a later signal invalidates this
         # original epoch rather than inheriting an already-built success frame.
         epoch = (ctx.error_epoch, ctx.signal_epoch)
-        valid = valid and ctx.primary is None and not ctx.stopped
+        primary, stopped = ctx.primary is not None, ctx.stopped
+        valid = valid and not primary and not stopped
+        # Simultaneous failed gates, not a chronological cause. The existing
+        # fallback record above can itself account for primary/stopped bits.
+        # Any later error/signal still invalidates this SAME terminal epoch.
+        failure_mask = None
+        if producer:
+            failure_mask = ((0 if anchor["result"] else 1)
+                            | (2 if self.output_overflow else 0)
+                            | (0 if self.wait.status_code == HELPER_OK else 4)
+                            | (0 if relay else 8)
+                            | (16 if primary else 0)
+                            | (32 if stopped else 0))
         no_target = None
         if producer and anchor is not None:
             if anchor["no_child"]:
@@ -2993,7 +3005,7 @@ class _Custodian:
         terminal = _scalar(ctx.nonce, create=self.create_route.attempted, run=self.run_route.attempted,
                             no_target=no_target, wait=None if anchor is None else anchor["wait"],
                             producer=producer, result=valid, stdout=len(self.output[0]), stderr=len(self.output[1]),
-                            fence=None if self.writer is None else self.writer.complete)
+                            fence=None if self.writer is None else self.writer.complete, failure_mask=failure_mask)
         try:
             _send(parent, Tag.TERMINAL, terminal, lambda: None, normal=False)
         except BaseException as error:
@@ -3155,7 +3167,8 @@ class _Outer:
 
     def _terminal(self, content: bytes) -> dict[str, Any]:
         fields = _scalar_fields(content, self.nonce,
-                                {"create", "run", "no_target", "wait", "producer", "result", "stdout", "stderr", "fence"})
+                                {"create", "run", "no_target", "wait", "producer", "result", "stdout", "stderr", "fence",
+                                 "failure_mask"})
         _require(all(type(fields[name]) is bool for name in ("create", "run", "producer", "result"))
                  and fields["no_target"] in (None, "NO_W_CREATION", "CLOSED_BEFORE_RUN", "EXEC_REJECTED")
                  and (fields["wait"] is None or _valid_receipt(fields["wait"]))
@@ -3171,6 +3184,12 @@ class _Outer:
                  and (not fields["result"] or fields["producer"] and fields["wait"] is not None
                       and fields["run"] and self.ready
                       and (self.binding is None or fields["fence"] is True)))
+        mask = fields["failure_mask"]
+        # A primary implies stopped; a failed base gate records a primary.
+        # Unsealed terminals carry no diagnostic and cannot mint finality.
+        _require(mask is None if not fields["producer"] else
+                 _integer(mask, 0, 63) and (mask in (0, 32) or mask >= 48)
+                 and fields["result"] is (mask == 0))
         _require(self.frozen is not None
                  and fields["stdout"] + fields["stderr"] <= self.frozen.manifest.limit
                  and (self.frozen.manifest.capture or fields["stdout"] == fields["stderr"] == 0))
@@ -3531,6 +3550,12 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
         raise ProcessError("owned command executable could not be started" if outcome.no_target.kind == "EXEC_REJECTED"
                            else "owned command was stopped before execution", dispatched=False)
     if outcome.result_integrity != "complete" or outcome.returncode is None or engine.decoded is None:
-        raise ProcessError("owned command produced incomplete output", dispatched=dispatched)
+        mask = None
+        if outcome.result_integrity != "complete" and engine.terminal is not None:
+            observed = engine.terminal["failure_mask"]
+            if observed is not None and observed != 0:
+                mask = observed
+        raise ProcessError("owned command produced incomplete output", dispatched=dispatched,
+                           owner_failure_mask=mask)
     assert engine.frozen is not None
     return subprocess.CompletedProcess(list(engine.frozen.args), outcome.returncode, *engine.decoded)

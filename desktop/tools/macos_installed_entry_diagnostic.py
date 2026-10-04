@@ -43,17 +43,17 @@ STAGER = "desktop/tools/stage_macos_installed.py"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
 NATIVE = "desktop/native/macos-installed-entry-diagnostic/observe.m"
 PINS = {
-    UI_HELPER: "207e473f346c4643e7e56d343625cd86eb99ecdfc44256676e558cecbeaa68e2",
+    UI_HELPER: "8c18f77974b393fd8cdf237932ca22b1a08057c50f82f6c025ff40a0f8cd2338",
     STAGER: "03a400dd9ba5086762ff06535004a56f8828592a38ae564d96ef0e46b6109490",
-    LOADER: "1271fc4765e6709e8c2b7d4f6094c4437d8642f91fa140c795eb49731b8a816b",
+    LOADER: "bd069b9e7150113a671b7165ca89adf36e42328656a223a2f2d077197d583e25",
     "desktop/macos-installed-inputs/build-release.json": "a71990f4eba76fb6c05e011799999decf8620c5ad8ea0471fb13cada37646630",
     "desktop/macos-installed-inputs/postinstall": "902be9b2b136b84bae89e50b140535459fa62bb0b4da82098b1a7152740d4121",
     "desktop/native/macos-installed-entry/gate.c": "68c8212448bcab2fccf2b530d8f7eda2aa41e245e81cb6545c9d67424bca3e8f",
     "desktop/native/macos-installed-entry/gate.h": "871ec5bc062975901322e0ef55a2de417ec61a9ea2ce7fdd3d1091a490b8e390",
     "desktop/native/macos-installed-entry/fixed_paths.h": "8a2e46a3543d476c1b90e30e87a5fdb5c07bbec27f275485a0e8f98b06540af3",
     "desktop/native/macos-installed-native/src/native.m": "75a6f06f7d29626883a864be4d827a4682a71f8eb58334166a2def377dd0ea59",
-    "src/mobile_release/owned_process.py": "d832b81894372f3c48b110f6e381fe00f6d71b75940f63a3d7eb5d61c1e2fad1",
-    "src/mobile_release/_command_process.py": "1ea5035578ae8ba0da31367f018d02b3669529077a65e2970cf92d1cc084b1c5",
+    "src/mobile_release/owned_process.py": "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8",
+    "src/mobile_release/_command_process.py": "30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69",
     "src/mobile_release/_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
     "src/mobile_release/cancellation.py": "5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35",
 }
@@ -106,6 +106,21 @@ def owner_failure_kind(error, owner):
         "owned command produced incomplete output": "incomplete-output",
         "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
     }.get(message, "other-or-unobserved")
+
+
+def owner_failed_predicates(error, owner):
+    """Only six original C/A predicates; no output, cause traversal or authority."""
+    if (type(error) is not getattr(owner, "ProcessError", None)
+            or owner_failure_kind(error, owner) != "incomplete-output"):
+        return None
+    mask = getattr(error, "owner_failure_mask", None)
+    if type(mask) is not int or not (mask == 32 or 48 <= mask <= 63):
+        return None
+    return [name for bit, name in (
+        (1, "anchor-result-incomplete"), (2, "custodian-output-limit"),
+        (4, "anchor-helper-failed"), (8, "custodian-relay-failed"),
+        (16, "custodian-primary"), (32, "custodian-stopped"),
+    ) if mask & bit]
 
 
 def digest(body):
@@ -1020,6 +1035,7 @@ class Context:
             self.report["ownerFailure"] = {name: value if type(value := getattr(error, attr, None)) is bool else None
                 for name, attr in (("dispatched", "dispatched"), ("contained", "contained"), ("cleanupComplete", "cleanup_complete"))}
             self.report["ownerFailure"]["diagnosticKind"] = owner_failure_kind(error, self.owner)
+            self.report["ownerFailure"]["failedPredicates"] = owner_failed_predicates(error, self.owner)
         self.report["cleanup"]["unknownStateRetained"] = self.inflight or not self.report["diagnosticComplete"]
 
     def cleanup(self):

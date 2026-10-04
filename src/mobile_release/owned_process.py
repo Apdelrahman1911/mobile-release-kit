@@ -28,10 +28,13 @@ class ProcessError(ValidationError, CredentialError):
     """No complete command result; dispatch/containment must not be guessed."""
 
     def __init__(self, message: str, *, dispatched: bool = False, contained: bool = True,
-                 cleanup_complete: bool = True):
+                 cleanup_complete: bool = True, owner_failure_mask: int | None = None):
         super().__init__(message)
         self.dispatched, self.contained = dispatched, contained
         self.cleanup_complete = cleanup_complete
+        # Optional closed predicate DATA from this original owner's final
+        # incomplete-result exception, never output or a lifetime capability.
+        self.owner_failure_mask = owner_failure_mask
 
     @property
     def fatal(self) -> bool:

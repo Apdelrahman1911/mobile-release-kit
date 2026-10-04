@@ -857,6 +857,7 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
     def test_owner_failure_kind_preserves_unreturned_facts_without_private_text(self):
         class ProcessError(Exception):
             dispatched, contained, cleanup_complete = True, True, True
+            owner_failure_mask = None
         class ProcessCleanupError(ProcessError):
             pass
         class ProcessOutcomeUnknown(ProcessError):
@@ -864,19 +865,28 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
         class ProcessInterrupted(KeyboardInterrupt):
             dispatched, contained, cleanup_complete = True, True, True
         class UntrustedSubclass(ProcessError):
+            def __getattribute__(self, name):
+                if name == "owner_failure_mask":
+                    raise AssertionError("Do not inspect an unrecognized owner mask")
+                return super().__getattribute__(name)
             def __str__(self):
                 self.fail_if_stringified = True
                 raise AssertionError("Do not stringify an unrecognized owner error")
         class UntrustedText(str):
             def __hash__(self):
                 raise AssertionError("Do not look up an unrecognized string subclass")
+        class UntrustedMask(int):
+            def __and__(self, other):
+                raise AssertionError("Do not decode an integer subclass")
+            def __eq__(self, other):
+                raise AssertionError("Do not compare an integer subclass")
         class LyingExceptionMeta(type):
             def __eq__(cls, other):
                 return True
         class PretendedKnownError(ProcessError, metaclass=LyingExceptionMeta):
             def __getattribute__(self, name):
-                if name == "args":
-                    raise AssertionError("Unrecognized class must not reach error args")
+                if name in ("args", "owner_failure_mask"):
+                    raise AssertionError("Unrecognized class must not reach error args or mask")
                 return super().__getattribute__(name)
         owner = SimpleNamespace(ProcessError=ProcessError, ProcessCleanupError=ProcessCleanupError,
             ProcessOutcomeUnknown=ProcessOutcomeUnknown, ProcessInterrupted=ProcessInterrupted)
@@ -892,20 +902,41 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
             "owned command produced incomplete output": "incomplete-output",
             "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
         }
-        cases = [(ProcessError(message), kind) for message, kind in known.items()]
-        cases += [(ProcessCleanupError("owned command cleanup could not be confirmed"), "cleanup-unconfirmed"),
-            (ProcessOutcomeUnknown("fixture-secret"), "other-or-unobserved"),
-            (ProcessInterrupted(), "interrupted"),
-            (ProcessError(), "other-or-unobserved"),
-            (ProcessError("fixture-secret", "second argument"), "other-or-unobserved"),
-            (ProcessError("fixture-secret /Users/private/path"), "other-or-unobserved"),
-            (ProcessError("owned command output exceeds its bound\n"), "other-or-unobserved"),
-            (ProcessError("fixture-secret" * 128), "other-or-unobserved"),
-            (ProcessError("fixture-secret\u00e9"), "other-or-unobserved"),
-            (ProcessError(UntrustedText("fixture-secret")), "other-or-unobserved"),
-            (UntrustedSubclass("owned command output exceeds its bound"), "other-or-unobserved"),
-            (PretendedKnownError("owned command output exceeds its bound"), "other-or-unobserved")]
-        for index, (error, kind) in enumerate(cases):
+        cases = [(ProcessError(message), kind, None) for message, kind in known.items()]
+        cases += [(ProcessCleanupError("owned command cleanup could not be confirmed"), "cleanup-unconfirmed", None),
+            (ProcessOutcomeUnknown("fixture-secret"), "other-or-unobserved", None),
+            (ProcessInterrupted(), "interrupted", None),
+            (ProcessError(), "other-or-unobserved", None),
+            (ProcessError("fixture-secret", "second argument"), "other-or-unobserved", None),
+            (ProcessError("fixture-secret /Users/private/path"), "other-or-unobserved", None),
+            (ProcessError("owned command output exceeds its bound\n"), "other-or-unobserved", None),
+            (ProcessError("fixture-secret" * 128), "other-or-unobserved", None),
+            (ProcessError("fixture-secret\u00e9"), "other-or-unobserved", None),
+            (ProcessError(UntrustedText("fixture-secret")), "other-or-unobserved", None),
+            (UntrustedSubclass("owned command output exceeds its bound"), "other-or-unobserved", None),
+            (PretendedKnownError("owned command output exceeds its bound"), "other-or-unobserved", None)]
+        predicates = ((1, "anchor-result-incomplete"), (2, "custodian-output-limit"),
+                      (4, "anchor-helper-failed"), (8, "custodian-relay-failed"),
+                      (16, "custodian-primary"), (32, "custodian-stopped"))
+        for mask in (32, *range(48, 64)):
+            error = ProcessError("owned command produced incomplete output")
+            error.owner_failure_mask = mask
+            cases.append((error, "incomplete-output", [name for bit, name in predicates if mask & bit]))
+        for mask in (None, 0, True, False, -1, 1, 2, 4, 8, 16, 31, 33, 47, 64, 1 << 63,
+                     32.0, "fixture-secret", [], {}, UntrustedMask(32), UntrustedText("32")):
+            error = ProcessError("owned command produced incomplete output")
+            error.owner_failure_mask = mask
+            cases.append((error, "incomplete-output", None))
+        for error, kind in (
+                (ProcessError("owned command output exceeds its bound"), "output-limit"),
+                (ProcessCleanupError("owned command produced incomplete output"), "incomplete-output"),
+                (ProcessOutcomeUnknown("owned command produced incomplete output"), "incomplete-output"),
+                (ProcessInterrupted(), "interrupted"),
+                (UntrustedSubclass("owned command produced incomplete output"), "other-or-unobserved"),
+                (PretendedKnownError("owned command produced incomplete output"), "other-or-unobserved")):
+            error.owner_failure_mask = 50
+            cases.append((error, kind, None))
+        for index, (error, kind, failed_predicates) in enumerate(cases):
             with self.subTest(index=index):
                 context, _, _ = self.ui_failure_context(None)
                 context.owner, context.inflight, context.last_returned = owner, True, False
@@ -913,7 +944,8 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                     context.failure(error)
                     formatter.assert_not_called()
                 self.assertEqual(context.report["ownerFailure"], {
-                    "dispatched": True, "contained": True, "cleanupComplete": True, "diagnosticKind": kind})
+                    "dispatched": True, "contained": True, "cleanupComplete": True, "diagnosticKind": kind,
+                    "failedPredicates": failed_predicates})
                 self.assertEqual(context.report["error"], "interrupted" if type(error) is ProcessInterrupted
                                  else "diagnostic-or-owner-error")
                 self.assertFalse(context.report["originalCallReturned"])
@@ -927,17 +959,25 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                              "fullUIQualified", "fullM2Qualified", "productReady"):
                     self.assertFalse(context.report[flag])
         # A diagnostic reason never repairs false or unknown lifecycle facts.
-        for facts, expected in [((False, False, False), (False, False, False)),
-                                ((1, "yes", None), (None, None, None))]:
-            error = ProcessError("owned command output exceeds its bound")
-            error.dispatched, error.contained, error.cleanup_complete = facts
-            context, _, _ = self.ui_failure_context(None)
-            context.owner, context.inflight, context.last_returned = owner, True, False
-            context.failure(error)
-            self.assertEqual(context.report["ownerFailure"], dict(zip(
-                ("dispatched", "contained", "cleanupComplete", "diagnosticKind"), (*expected, "output-limit"))))
-            self.assertTrue(context.report["cleanup"]["unknownStateRetained"])
-            self.assertFalse(context.report["originalCallReturned"])
+        for message, kind, failed_predicates in (
+                ("owned command output exceeds its bound", "output-limit", None),
+                ("owned command produced incomplete output", "incomplete-output",
+                 ["custodian-output-limit", "custodian-primary", "custodian-stopped"])):
+            for facts, expected in [((False, False, False), (False, False, False)),
+                                    ((1, "yes", None), (None, None, None))]:
+                error = ProcessError(message)
+                error.owner_failure_mask = 50
+                error.dispatched, error.contained, error.cleanup_complete = facts
+                context, _, _ = self.ui_failure_context(None)
+                context.owner, context.inflight, context.last_returned = owner, True, False
+                context.failure(error)
+                self.assertEqual(context.report["ownerFailure"], dict(zip(
+                    ("dispatched", "contained", "cleanupComplete", "diagnosticKind", "failedPredicates"),
+                    (*expected, kind, failed_predicates))))
+                self.assertTrue(context.report["cleanup"]["unknownStateRetained"])
+                self.assertFalse(context.report["originalCallReturned"])
+                self.assertEqual(context.report["allWorkerFinality"], "not-established")
+                self.assertFalse(context.report["diagnosticComplete"])
 
     def test_fixed_two_host_workflow_and_original_only_native_route(self):
         workflow = (ROOT / MODULE.WORKFLOW).read_text()

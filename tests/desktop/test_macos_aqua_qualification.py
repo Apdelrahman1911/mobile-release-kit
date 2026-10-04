@@ -323,6 +323,40 @@ class AquaDataTests(unittest.TestCase):
             self.assertLessEqual(info.st_size, 256 * 1024, name)
             self.assertEqual(M.digest(path.read_bytes()), expected, name)
 
+        # Follow the live parent pins as SOURCE DATA, without importing helpers.
+        def assigned(tree, name):
+            values = [node.value for node in tree.body
+                      if isinstance(node, ast.Assign) and len(node.targets) == 1
+                      and isinstance(node.targets[0], ast.Name)
+                      and node.targets[0].id == name]
+            self.assertEqual(len(values), 1, name)
+            return values[0]
+
+        loader_relative = "desktop/tools/macos_aqua_qualification.py"
+        runner_relative = "desktop/tools/macos_normal_ui_runner.py"
+        runner_tree = ast.parse((root / runner_relative).read_bytes())
+        self.assertEqual(ast.literal_eval(assigned(runner_tree, "LOADER")), loader_relative)
+        self.assertEqual(ast.literal_eval(assigned(runner_tree, "LOADER_SHA")),
+                         M.digest((root / loader_relative).read_bytes()))
+
+        # This harness requires its diagnostic; absence is not an optional skip.
+        diagnostic_tree = ast.parse((root / "desktop/tools/macos_installed_entry_diagnostic.py").read_bytes())
+        self.assertEqual(ast.literal_eval(assigned(diagnostic_tree, "LOADER")), loader_relative)
+        self.assertEqual(ast.literal_eval(assigned(diagnostic_tree, "UI_HELPER")), runner_relative)
+        diagnostic_pins = assigned(diagnostic_tree, "PINS")
+        self.assertIsInstance(diagnostic_pins, ast.Dict)
+        relevant = {"LOADER": loader_relative, "UI_HELPER": runner_relative,
+                    "src/mobile_release/owned_process.py": "src/mobile_release/owned_process.py",
+                    "src/mobile_release/_command_process.py": "src/mobile_release/_command_process.py"}
+        observed = {}
+        for key, value in zip(diagnostic_pins.keys, diagnostic_pins.values):
+            name = key.id if isinstance(key, ast.Name) else ast.literal_eval(key)
+            if name in relevant:
+                self.assertNotIn(name, observed)
+                observed[name] = ast.literal_eval(value)
+        self.assertEqual(observed, {name: M.digest((root / relative).read_bytes())
+                                    for name, relative in relevant.items()})
+
         # The positive check above reads only DATA. The actual loader is entered
         # only with the known stale pin, under a blocker installed before entry.
         def core_modules():
