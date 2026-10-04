@@ -419,6 +419,9 @@ fn persistence_helper_pins(hash: Option<&str>, size: Option<&str>) -> bool {
 // Project registration and signing-file selection do not qualify the separate
 // project-relative field picker. Actual AppKit/APFS acceptance remains owed.
 pub(crate) const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = false;
+// Android tool folders have a separate native purpose and qualification.
+// Project-field or catalogue acceptance cannot authorize this source picker.
+pub(crate) const INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED: bool = false;
 // Windows original session/source/dialog qualification is separate from Linux
 // and Mac acceptance. Keep closed until its actual native evidence is accepted.
 pub(crate) const INSTALLED_WINDOWS_SESSION_INPUTS_QUALIFIED: bool = false;
@@ -1380,6 +1383,14 @@ impl RuntimeConfig {
         { INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && self.project_selection_profile_available() }
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
             all(target_os = "macos", target_arch = "aarch64"))))]
+        { false }
+    }
+    /// Android JDK/SDK/Gradle source folders are not project-relative fields.
+    /// Only their own qualification may select this fixed installed profile.
+    pub(crate) fn android_source_selection_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        { INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && self.project_selection_profile_available() }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         { false }
     }
     /// Separate documents-only picker DATA. DocumentBinding also checks the
@@ -2350,7 +2361,8 @@ pub(crate) fn installed_macos_evidence_profile_data_check() -> bool {
     let selected = macos_bindings();
     if runtime.project_selection_profile_available() != selected
         || runtime.evidence_selection_profile_available() != selected
-        || runtime.project_path_selection_profile_available() != (INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && selected) { return false; }
+        || runtime.project_path_selection_profile_available() != (INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && selected)
+        || runtime.android_source_selection_profile_available() != (INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && selected) { return false; }
     for method in ["artifacts.candidate.observe", "release.evidence.observe"] {
         if !macos_installed_passive_method(method) { return false; }
         #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
@@ -2448,6 +2460,7 @@ mod tests {
         assert_eq!(runtime.metadata_images_edit_profile_available(), admitted);
         assert_eq!(runtime.metadata_images_selection_profile_available(), admitted);
         assert_eq!(runtime.project_path_selection_profile_available(), INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && admitted);
+        assert_eq!(runtime.android_source_selection_profile_available(), INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && admitted);
         assert_eq!(runtime.evidence_selection_profile_available(), admitted);
     }
     #[cfg(target_os = "macos")]
@@ -2457,6 +2470,8 @@ mod tests {
         assert_eq!(runtime.project_path_selection_profile_available(),
             INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && runtime.project_selection_profile_available());
         assert_eq!(runtime.evidence_selection_profile_available(), runtime.project_selection_profile_available());
+        assert_eq!(runtime.android_source_selection_profile_available(),
+            INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && runtime.project_selection_profile_available());
         #[cfg(target_arch = "aarch64")]
         {
             assert_eq!(runtime.evidence_selection_profile_available(), macos_bindings());
@@ -3600,6 +3615,7 @@ pub(crate) mod windows_version {
                 "artifacts.candidate.observe", "release.evidence.observe", "android.build"] { assert!(!runtime.passive_method_available(method)); }
             assert!(!runtime.configuration_edit_profile_available());
             assert!(!runtime.project_path_selection_profile_available());
+            assert!(!runtime.android_source_selection_profile_available());
             assert!(!runtime.evidence_selection_profile_available());
             assert!(runtime.resolve(Instant::now()).is_err());
         }

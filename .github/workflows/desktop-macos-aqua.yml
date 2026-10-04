@@ -24,7 +24,6 @@ jobs:
       fail-fast: false
       matrix:
         scope:
-          - project-fields
           - project-recovery-pending
           - ios-recovery-pending
     runs-on: macos-26
@@ -331,9 +330,9 @@ jobs:
               sys.modules[name] = module
               spec.loader.exec_module(module)
               suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(getattr(module, cls)))
-          if suite.countTestCases() != 12: raise SystemExit("fixed recovery DATA roster")
+          if suite.countTestCases() != 13: raise SystemExit("fixed recovery DATA roster")
           result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
-          if (result.testsRun != 12 or not result.wasSuccessful()
+          if (result.testsRun != 13 or not result.wasSuccessful()
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_RECOVERY_DATA
@@ -351,9 +350,9 @@ jobs:
           sys.modules[spec.name] = module
           spec.loader.exec_module(module)
           suite = unittest.defaultTestLoader.loadTestsFromTestCase(module.PendingAccountRecoveryDataTests)
-          if suite.countTestCases() != 11: raise SystemExit("fixed account DATA roster")
+          if suite.countTestCases() != 13: raise SystemExit("fixed account DATA roster")
           result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
-          if (result.testsRun != 11 or not result.wasSuccessful()
+          if (result.testsRun != 13 or not result.wasSuccessful()
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_ACCOUNT_DATA

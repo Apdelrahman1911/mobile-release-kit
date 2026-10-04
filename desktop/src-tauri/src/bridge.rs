@@ -213,6 +213,7 @@ pub struct DesktopBridge {
     pub(crate) ios_archive: crate::ios_archive_owner::IOSArchiveOwner,
     installed_project_selection_available: bool,
     installed_project_path_selection_available: bool,
+    installed_android_source_selection_available: bool,
     installed_evidence_selection_available: bool,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
@@ -261,6 +262,7 @@ impl DesktopBridge {
     fn from_runtime(runtime: RuntimeConfig) -> Self {
         let installed_project_selection_available = runtime.project_selection_profile_available();
         let installed_project_path_selection_available = runtime.project_path_selection_profile_available();
+        let installed_android_source_selection_available = runtime.android_source_selection_profile_available();
         let installed_evidence_selection_available = runtime.evidence_selection_profile_available();
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
@@ -273,6 +275,7 @@ impl DesktopBridge {
             ios_archive: crate::ios_archive_owner::IOSArchiveOwner::new(runtime),
             installed_project_selection_available,
             installed_project_path_selection_available,
+            installed_android_source_selection_available,
             installed_evidence_selection_available,
             projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -281,6 +284,7 @@ impl DesktopBridge {
     }
     pub(crate) fn installed_project_selection_available(&self) -> bool { self.installed_project_selection_available }
     pub(crate) fn installed_project_path_selection_available(&self) -> bool { self.installed_project_path_selection_available }
+    pub(crate) fn installed_android_source_selection_available(&self) -> bool { self.installed_android_source_selection_available }
     pub(crate) fn installed_evidence_selection_available(&self) -> bool { self.installed_evidence_selection_available }
     pub(crate) fn installed_session_available(&self, document: &Arc<()>) -> bool { self.supervisor.installed_session_available(document) }
     pub(crate) fn installed_persistence_available(&self, document: &Arc<()>) -> bool { self.supervisor.installed_persistence_available(document) }

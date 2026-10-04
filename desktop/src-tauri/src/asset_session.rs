@@ -5110,7 +5110,7 @@ impl DocumentBinding {
             // rfd compatibility, credential qualification and catalog selection
             // do not independently authorize this source purpose.
             if gate != crate::android_build_protocol::Availability::Available
-                || !self.inner.bridge.installed_project_path_selection_available() {
+                || !self.inner.bridge.installed_android_source_selection_available() {
                 return Err(crate::android_tool_sources::unavailable());
             }
             idle(&state).map_err(|_| crate::android_tool_sources::unavailable())?;

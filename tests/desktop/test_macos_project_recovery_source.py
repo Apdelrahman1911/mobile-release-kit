@@ -21,7 +21,17 @@ def literal(path, name):
 class MacProjectRecoverySourceTests(unittest.TestCase):
     def test_authentic_producer_literal_is_exact_source_not_a_historical_runner_import(self):
         adapter = ROOT / "desktop/tools/macos_aqua_qualification.py"
-        source = literal(adapter, "SHELL_RECOVERY_PRODUCER").encode()
+        wrapped = literal(adapter, "SHELL_RECOVERY_PRODUCER")
+        self.assertTrue(wrapped.startswith("try:\n"))
+        handler_marker = "except BaseException as _failure_error:\n"
+        self.assertEqual(wrapped.count("\n" + handler_marker), 1)
+        indented, boundary, handler = wrapped[len("try:\n"):].partition(handler_marker)
+        self.assertEqual(boundary, handler_marker)
+        body_lines = indented.splitlines(keepends=True)
+        self.assertTrue(body_lines and all(line.startswith("    ") for line in body_lines))
+        # The new closed footer wraps, but never replaces/rewrites, the original body.
+        source = "".join(line[4:] for line in body_lines).encode()
+        self.assertTrue(handler.endswith("    raise SystemExit(1) from None\n"))
         self.assertEqual(source, literal(ROOT / "desktop/tools/ubuntu_publication_lifecycle.py", "SHELL_RECOVERY_PRODUCER").encode())
         self.assertEqual(len(source), 5919)
         self.assertEqual(hashlib.sha256(source).hexdigest(), "32ccb0e534e1021442e8620b0cbcdf73c8a7f6bb4799d8f791b2d9282ffb23fd")
@@ -107,6 +117,57 @@ class MacProjectRecoverySourceTests(unittest.TestCase):
         for name in ('desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift',
                      '.github/workflows/desktop-macos-installed.yml'):
             self.assertNotIn('project-recovery-pending', (ROOT / name).read_text())
+
+        # Keep actual whole-class census and BOTH CI gates connected. Extending
+        # this existing method deliberately does not add another counted case.
+        self.assertEqual(unittest.defaultTestLoader.testMethodPrefix, "test")
+        class_specs = (
+            ("test_macos_aqua_qualification.py", "PendingProjectRecoveryAquaDataTests", 9),
+            ("test_macos_project_recovery_source.py", "MacProjectRecoverySourceTests", 4),
+            ("test_macos_ios_pending_account.py", "PendingAccountRecoveryDataTests", 13),
+        )
+        counts = {}
+        for filename, class_name, expected in class_specs:
+            tree = ast.parse((ROOT / "tests/desktop" / filename).read_bytes())
+            classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+            self.assertEqual(len(classes), 1)
+            selected = classes[0]
+            self.assertEqual(len(selected.bases), 1)
+            self.assertIsInstance(selected.bases[0], ast.Attribute)
+            self.assertIsInstance(selected.bases[0].value, ast.Name)
+            self.assertEqual((selected.bases[0].value.id, selected.bases[0].attr), ("unittest", "TestCase"))
+            names = [node.name for node in selected.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and node.name.startswith("test")]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertEqual(len(names), expected)
+            counts[class_name] = len(names)
+        workflow = (ROOT / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
+        project_title = "Check pending recovery SOURCE and DATA contracts before native preparation"
+        account_title = "Check pending account SOURCE and DATA contracts before native preparation"
+        project, account = blocks[project_title], blocks[account_title]
+        for block, scope, count, label in (
+            (project, "project-recovery-pending", counts["PendingProjectRecoveryAquaDataTests"] + counts["MacProjectRecoverySourceTests"], "recovery"),
+            (account, "ios-recovery-pending", counts["PendingAccountRecoveryDataTests"], "account"),
+        ):
+            self.assertEqual(count, 13)
+            self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == '" + scope + "'", block)
+            self.assertIn(f'if suite.countTestCases() != {count}: raise SystemExit("fixed {label} DATA roster")', block)
+            self.assertEqual(re.findall(r"suite\.countTestCases\(\) != ([0-9]+)", block), [str(count)])
+            self.assertEqual(re.findall(r"result\.testsRun != ([0-9]+)", block), [str(count)])
+            self.assertIn("unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)", block)
+            self.assertIn("or not result.wasSuccessful()", block)
+            self.assertIn("any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))", block)
+            self.assertNotIn("continue-on-error", block)
+        for selector in (
+            '("_mrk_pending_recovery_data", "test_macos_aqua_qualification.py", "PendingProjectRecoveryAquaDataTests")',
+            '("_mrk_pending_recovery_source", "test_macos_project_recovery_source.py", "MacProjectRecoverySourceTests")',
+        ):
+            self.assertIn(selector, project)
+        self.assertIn('path = pathlib.Path("tests/desktop") / filename', project)
+        self.assertIn("suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(getattr(module, cls)))", project)
+        self.assertIn('path = pathlib.Path("tests/desktop/test_macos_ios_pending_account.py").absolute()', account)
+        self.assertIn("suite = unittest.defaultTestLoader.loadTestsFromTestCase(module.PendingAccountRecoveryDataTests)", account)
 
 
 if __name__ == "__main__":

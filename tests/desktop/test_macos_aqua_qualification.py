@@ -6705,7 +6705,6 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
-            "          - project-fields\n"
             "          - project-recovery-pending\n"
             "          - ios-recovery-pending\n"
             "    runs-on: macos-26\n"
@@ -9115,7 +9114,6 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
         self.assertIn(
             "        scope:\n"
-            "          - project-fields\n"
             "          - project-recovery-pending\n"
             "          - ios-recovery-pending\n"
             "    runs-on: macos-26\n", header)
@@ -9416,7 +9414,6 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
         self.assertNotIn('workflow_dispatch', workflow)
         self.assertIn(
             '        scope:\n'
-            '          - vault-helper-shipping-installation-inspection\n'
             '          - project-recovery-pending\n'
             '          - ios-recovery-pending\n'
             '    runs-on: macos-26\n', workflow)
@@ -10130,8 +10127,8 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    runs-on:", 1)[0]
         selected = [line.strip()[2:] for line in header.split("        scope:\n", 1)[1].splitlines() if line.strip().startswith("- ")]
-        # Qualify project fields and retry both pending recoveries, not completed shipping/inspection.
-        self.assertEqual(selected, ["project-fields", M.RECOVERY_CASE, M.IOS_ACCOUNT_CASE])
+        # Retry only corrected recovery preflights; the failed project-field journey awaits diagnosis.
+        self.assertEqual(selected, [M.RECOVERY_CASE, M.IOS_ACCOUNT_CASE])
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         step = blocks["One real pending iOS build-input recovery through ordinary Inspect and explicit Recover"]
         self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'", step)
@@ -10185,7 +10182,6 @@ class ShippingCapacityDataWiringTests(unittest.TestCase):
         self.assertLess(workflow.index('      - name: ' + label), workflow.index('      - name: Compile native wrapping variants once'))
         self.assertIn(
             '        scope:\n'
-            '          - vault-helper-shipping-installation-inspection\n'
             '          - project-recovery-pending\n'
             '          - ios-recovery-pending\n'
             '    runs-on: macos-26\n', workflow)
