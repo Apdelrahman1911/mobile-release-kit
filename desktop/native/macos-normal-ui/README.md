@@ -1,91 +1,135 @@
 # Ordinary macOS application: external UI scenario
 
-This is one **external XCTest UI target**, not a second application engine or an
-in-process observer. It uses the ordinary Rust app's real runtime profile,
-confirmations, owners and cleanup policy, not a test-only route around them.
+This is one external XCTest UI target, not a second engine, application hook
+or in-process observer. It uses the unchanged ordinary app's real runtime,
+confirmations, owners and cleanup policy.
 
-## Admitted environment
+## Admitted environment and original launch
 
-Only the existing reviewed normal-package job on a **fresh exclusive
-GitHub-hosted macOS 26 ARM64 runner** is supported. The same job must first
-bind the ordinary Cargo binary, package it, install through the standard
-Installer and pass the independent nonroot byte/mode readback. Never point
-this scenario at a shared/personal desktop: XCTest launch may terminate an
-already-running application. A non-running precondition is mandatory.
+Only a **fresh exclusive GitHub-hosted macOS26 ARM64 runner** is supported.
+The normal route binds its same-build Cargo binary, package, standard Installer
+and independent nonroot byte/mode readback. The separately selected reuse route
+below binds its older app and current harness independently. Never point either
+route at a shared/personal desktop.
 
-Account admission uses one bounded `getpwuid_r` lookup of the original UID,
-requiring its matching UID/GID, `runner` name and `/Users/runner` account home.
-Foundation's sandbox home is diagnostic, not account authority. Both app-launch
-paths use those admitted account values and do not forward the test runner's
-`TMPDIR` or `CFFIXED_USER_HOME`. Persistent fixture preparation still requires
-account admission before inspecting the default vault namespace. The separate
-account-only native pass does not qualify app launch, persistence or finality.
+Account admission uses one bounded getpwuid_r lookup of the original UID,
+requiring matching UID/GID, runner name and /Users/runner account home.
+Foundation's sandbox home is diagnostic, not account authority. Both launch
+callers share the same owner; no runner TMPDIR/CFFIXED_USER_HOME is forwarded.
+Persistent fixture preparation still admits the account before inspecting the
+default vault namespace. The account-only native pass is not app qualification.
 
-The tiny target has no package dependencies and no app-under-test build target.
-It uses ad-hoc local signing for its test runner only; no signing account,
-provisioning profile or production credential is needed. The workflow selects
-Xcode only for these steps; it does not change the machine-wide developer
-directory. Missing Xcode/UI broker/GUI/permission support is a failure, not
-permission to modify TCC, Accessibility, Gatekeeper or user credentials.
+The fixed outer app is
+/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app.
+Both its and its nested payload's URL proxies must initially be notRunning,
+and the permanent gate must be free. Bundle IDs are routing checks, not
+substitutes for Installer/readback/source receipts. No occupied app is adopted.
 
-The selected application URL is fixed:
-`/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`.
-The bundle ID check is a routing check, not a substitute for the original
-Installer/readback and normal-binary source receipts.
+One NSWorkspace request opens the outer URL with empty arguments, activation
+enabled and running-app substitution disabled. The unchanged entry constructs
+its clean eight-entry environment. The first callback's NSRunningApplication
+is retained before validation. Require its exact payload bundle, executable
+and identifier, active/finished/live state, and the same gate busy.
+The payload-URL XCUIApplication is monitoring/UI-only, **not a documented
+original-PID attachment**. Never launch, activate, open or terminate that proxy.
 
-## Exact scenario and claim
+The tiny target has no app-under-test build target or package dependencies.
+Full Xcode is selected only for UI steps, never via a machine-wide switch.
+Missing Xcode/UI broker/GUI/permission support fails; it does not authorize TCC,
+Accessibility, Gatekeeper, credential or entitlement repairs.
 
-`MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit`:
+## Exact basic scenario and claim
 
-1. Launch the exact, initially stopped ordinary app once, with an explicit
-   credential-free environment and no project or observer arguments.
-2. Observe its unique main window, first-party renderer, dashboard heading and
-   enabled **Open project folder** control.
-3. Use its own **File → Quit** menu. Require the exact native confirmation
-   sheet and its unique **Cancel** and **Quit** buttons.
-4. Click **Cancel**. Confirm the app and dashboard remain usable; navigate to
-   Project settings and back to Dashboard without selecting any project.
-5. Use File → Quit again and click the genuine affirmative **Quit** button.
-   Wait for the same application proxy to report `notRunning`.
+The old testLaunchCancelAndQuit remains same-build-only:
 
-No skip, expected failure, automatic rerun, arbitrary app path, global
-keystroke, permission change or live service operation is included.
-Framework `terminate()` is failure-only cleanup after this test's own launch;
-if cleanup is needed the test fails, even when that cleanup succeeds.
-An occupied preexisting app is never assigned to the cleanup slot.
+1. Perform the single ordinary launch and original/payload admission above.
+2. Require the unique main window, first-party renderer, dashboard heading and
+   enabled Open project folder control.
+3. Exercise the real native project picker and Cancel without selecting a project.
+4. Use the app's own File → Quit. Require the exact native confirmation and its
+   unique Cancel/Quit buttons. Cancel, then prove dashboard responsiveness by
+   navigating to Project settings and back without project/Store operations.
+5. Use File → Quit again and click the real affirmative Quit. Require payload
+   proxy notRunning AND the retained original isTerminated, then the same gate
+   free and consuming gate close. Both termination observations share the
+   existing ten-second interval.
 
-XCTest enforces a **60-second** scenario allowance with timeouts enabled.
-The workflow separately bounds runner build and execution; execution has a
-three-minute outer step. Apple rounds `executionTimeAllowance` up to whole
-minutes, so this is not a falsely claimed precise 90-second timeout.
+Only that first original may receive failure-cleanup terminate and, at most
+once if necessary, forceTerminate. Boolean request returns are not termination
+observations. Any cleanup means a failed scenario; unknown state is retained.
+Late callbacks are cleanup-only; duplicate/error/absent/wrong identity latches
+failure. There is no proxy/PID/bundle lookup, relaunch or replacement receiver.
 
-The original `xcodebuild` test result must succeed, with exactly one total and
-passed test and zero failed/skipped tests. The structured UI result and bounded
-diagnostics are separate evidence, never a rewritten preview-package receipt.
+A monotonic clock starts before any in-case admission. The existing60s XCTest
+allowance and every per-wait maximum remain; all waits consume that same case
+budget. Launch/identity is at most15s. All failure cleanup shares at most5s,
+capped by the original case end. No helper, callback or restored stage limit
+resets it. Every final scenario marker, including extended journeys, requires
+original termination and gate acceptance. Build4min/test3min outer ceilings
+remain. Apple's whole-minute allowance is not a claimed precise90s timeout.
 
-**Not proved by the first scenario:** original POSIX application exit status, every internal or
-external worker/descriptor's finality, Finder/Installer interaction, Gatekeeper
-or notarization, Intel/older macOS, project selection, editing, signing, Store
-operations, release readiness or complete Desktop feature acceptance.
-`cleanExitStatus` remains null and `allWorkerFinality` remains unestablished.
+Original xcodebuild0, exactly one selected passed test and zero failed/skipped/
+expected failures are required. A marker, restart or zero-test framework result
+is not success. No skip, automatic rerun, app-path switch, global keystroke,
+permission change or live service operation is admitted.
 
-## Resource/evidence handling
+**Not proved:** POSIX app exit status, every worker/descriptor's finality,
+Finder/Installer UI, Gatekeeper/notarization, Intel/older macOS, real signing,
+Store operations, release readiness or complete Desktop feature acceptance.
+cleanExitStatus remains null; allWorkerFinality remains unestablished.
 
-Build this small runner once, then use `test-without-building`; batch it with an
-actual changed normal-app build rather than rebuilding the whole application
-for this scenario alone. Application and harness source commits are both
-recorded; this initial integration requires the same commit.
+## Actual generated runner and evidence
 
-Raw `.xcresult` and full logs stay in this job's task-owned temporary directory.
-Only the closed summary and bounded credential-free diagnostic tails enter the
-separate engineering evidence artifact. The user-preview package roster stays
-exactly `.pkg`, `README.md`, `PREVIEW.json`. Its unexecuted UI fields describe
-the package export stage, not a later independent XCTest result.
+Build this small runner once, then use test-without-building on its exact
+generated xctestrun products. macos_normal_ui_runner.py authenticates the
+bounded Build/Products roster, retains critical originals, strictly verifies
+the actual generated .xctrunner signature and parses its actual entitlements
+before any app request. Empty/malformed/unknown inspection or app-sandbox=true/
+non-Boolean refuses launch. Absent and explicit false are reported distinctly,
+not as proof of no OS restrictions. Project ENABLE_APP_SANDBOX=NO and the old
+standalone observer are not substitutes for inspecting this runner.
+No re-signing or permission repair is attempted. The same products are checked
+before/after the original command; all owned closes must complete.
 
-After a completed accepted test/evidence upload, remove only this task's
-DerivedData, result bundle and disposable full logs. Do not stop shared macOS/
-Xcode services or delete shared caches. Failure/timeout is not worker-finality
-evidence; retain unresolved task outputs until the disposable job is retired.
+All five existing normal-workflow selections use this admission and remain
+same-build-only. Closed runner receipts accompany their existing UI results.
+Raw xcresult/full logs stay task-local; only closed facts and existing bounded
+credential-free diagnostic tails enter the engineering artifact. The user
+preview still contains only its pkg, README.md and PREVIEW.json; export-stage
+unexecuted UI fields are never rewritten into later XCTest receipts.
+
+Only after accepted results/upload may the existing normal job retire its
+settled compiler outputs. No shared service/cache is stopped/deleted. Failed,
+unknown or possibly-live app/fixture/installation/journal state is retained
+until the disposable job is retired.
+
+## Fixed reused-package first-case selection
+
+Only testPackagedEntryLaunchCancelAndQuit selects the private reuse profile.
+It shares every basic picker/Cancel/navigation/normal-Quit assertion above.
+The old basic method and all extended methods stay same-build-only; there is
+no generic environment override for source equality.
+
+The exact verify/desktop-macos-packaged-ui PUSH selects only packaged_ui in
+desktop-macos-entry-diagnostic.yml. Both old diagnostic jobs remain confined
+to the old push/ref. No direct-entry dependency/rerun, default-branch edit or
+generic dispatcher is required.
+
+Reuse application source53850a9fd94768a2521f2634db6121550dbdd71c,
+artifact11281078057 (50972943 bytes; SHA256
+dfb46e23f7b397facc1a9b69b77d1440960fb846bedc90a573f2410b230255d0),
+and inner package50964188 bytes (SHA256
+618c873f0b841b54faceae9e5ad1ca073a94215a1a53cee0bf28c3aa17361119).
+Fresh-only Installer/readback, actual current harness source/roster and actual
+runner admission are separate bindings. No app/runtime rebuild, package
+mutation or fake same-source receipt is permitted.
+
+Only this new diagnostic UI profile uses /Applications/Xcode.app/Contents/Developer;
+old diagnostics retain CommandLineTools. The closed ui-test.json requires
+original xcodebuild0, one selected pass without retry, and original+gate terminal
+observations. Raw results and possibly-live state stay task-local. This SOURCE
+correction neither explains the prior XCTest failure nor claims a native pass,
+same-build qualification, POSIX/all-worker finality, full UI/M2 or product readiness.
 
 ## Synthetic local-project journey (separate second gate)
 
@@ -120,8 +164,9 @@ The external test uses only ordinary accessible controls on the original app:
    selection. Inspect actual names/digests/header dimensions and target order;
    require fresh local-copy consent. Preserve both sources and other content.
 7. Verify the finite final file roster and absence of all twelve fixed
-   transaction controls and .git. Use actual File → Quit and the same proxy's
-   notRunning, then complete final readback and consuming descriptor closes.
+   transaction controls and .git. Use actual File → Quit, require the same
+   original terminated, payload proxy notRunning and gate free/closed, then
+   complete final readback and consuming descriptor closes before publication.
 
 The fixed bundled `Fixtures/normal-project-v1.json` is under64KiB. It
 contains only credential-free fixture and expected bytes. Runtime fixture
@@ -160,7 +205,7 @@ A broker/query refusal does not justify changing the application speculatively.
 Only completed stages print passed markers; the first failing stage is failed
 and later stages remain not-run. The markers are not replacements for the
 original XCTest result or independent native-owner finality evidence.
-Framework terminate remains failure-only even after a partial journey.
+Original-reference terminate/forceTerminate remain failure-only after a partial journey.
 Original fixture descriptors are consumed once on success or failure; no
 other task's process, directory or shared cache is touched.
 

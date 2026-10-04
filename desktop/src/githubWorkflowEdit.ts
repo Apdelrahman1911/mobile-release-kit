@@ -3,7 +3,7 @@
 import { sameJson } from './catalog.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { githubSetupRequestFits } from './githubSetupProtocol.ts';
-import { normalWorkflowResult, workflowProjectionProgress, workflowStatusProgress } from './githubWorkflowEditProtocol.ts';
+import { normalWorkflowRecovery, normalWorkflowResult, workflowProjectionProgress, workflowStatusProgress } from './githubWorkflowEditProtocol.ts';
 import type { Tone } from './certainty.ts';
 import type { ProjectSession } from './drafts.ts';
 import type { GitHubSetupState } from './githubSetupController.ts';
@@ -11,6 +11,7 @@ import type { BridgeMode, CoreEditReason, EditAvailability, HelpContent, JsonObj
 import type { GitHubWorkflowEditProjection, GitHubWorkflowEditStatus, WorkflowPreparedFile, WorkflowPreparedView } from './githubWorkflowEditTypes.ts';
 
 export interface WorkflowDraftBinding {
+  intent?: never;
   projectId: string;
   windowGeneration: string;
   startStatusRevision: number;
@@ -25,6 +26,12 @@ export interface WorkflowDraftBinding {
   toolingRepository: string;
   toolingSha: string;
 }
+export interface WorkflowRecoveryBinding {
+  intent: 'recover'; projectId: string; windowGeneration: string;
+  startStatusRevision: number; previousTerminalId: string | null;
+}
+export type WorkflowBinding = WorkflowDraftBinding | WorkflowRecoveryBinding;
+export interface WorkflowRecoveryApplyBinding { sessionId: string; planToken: string; revision: string }
 export interface WorkflowApplyBinding {
   sessionId: string;
   planToken: string;
@@ -32,7 +39,7 @@ export interface WorkflowApplyBinding {
   baselineGeneration: number;
 }
 export interface WorkflowAttempt {
-  binding: WorkflowDraftBinding;
+  binding: WorkflowBinding;
   sessionId: string | null;
   projection: GitHubWorkflowEditProjection | null;
   projectionRevision: number;
@@ -71,9 +78,10 @@ export type WorkflowEditAction =
   | { type: 'read-start' }
   | { type: 'observe'; status: GitHubWorkflowEditStatus; source: 'read' | 'event' | 'reply' }
   | { type: 'observation-failed'; protocol?: boolean }
-  | { type: 'begin'; binding: WorkflowDraftBinding }
+  | { type: 'begin'; binding: WorkflowBinding }
   | { type: 'prepare-claim'; sessionId: string }
   | { type: 'apply-claim'; binding: WorkflowApplyBinding }
+  | { type: 'recover-claim'; binding: WorkflowRecoveryApplyBinding }
   | { type: 'close-request'; reason: 'user' | 'context_changed' | 'invoke_failed' }
   | { type: 'close-claim'; sessionId: string }
   | { type: 'handled'; sessionId: string };
@@ -101,6 +109,9 @@ function retainAttention(state: GitHubWorkflowEditState, status: GitHubWorkflowE
       const evidence = old && (old.sessionId !== owner.sessionId || !workflowProjectionProgress(old, owner)) ? old : owner;
       state = { ...state, nativeBlocked: true, unknownEvidence: evidence };
     }
+    // Stale earlier pending projections cannot resurrect attention after an
+    // exact fresh recovery cleared it. Unknown evidence above stays absorbing.
+    if (state.status && status.windowGeneration === state.status.windowGeneration && status.statusRevision < state.status.statusRevision) continue;
     if (owner?.phase !== 'final' || owner.nativeFinality !== 'settled' || owner.coreOutcome?.journal !== 'recovery_required' ||
         owner.coreOutcome.resources !== 'settled' || state.recoveryProjects.some((item) => item.projectId === owner.projectId)) continue;
     if (state.recoveryProjects.length >= 64) return { ...state, integrityFailed: true, observationIssue: 'protocol' };
@@ -133,6 +144,9 @@ function observe(state: GitHubWorkflowEditState, status: GitHubWorkflowEditStatu
       item.projectId === retained.binding.projectId && item.ownerGeneration === retained.binding.windowGeneration &&
       (retained.sessionId ? item.sessionId === retained.sessionId : status.statusRevision > retained.binding.startStatusRevision && item.sessionId !== retained.binding.previousTerminalId));
     if (owner) {
+      if (Boolean(owner.recovery) !== (attempt.binding.intent === 'recover')) {
+        return { ...state, readPending, generationLost, integrityFailed: true, observationIssue: 'protocol' };
+      }
       const older = status.statusRevision < attempt.projectionRevision;
       if (attempt.projection && !(older ? workflowProjectionProgress(owner, attempt.projection) : workflowProjectionProgress(attempt.projection, owner))) {
         return { ...state, readPending, generationLost, integrityFailed: true, observationIssue: 'protocol' };
@@ -148,6 +162,16 @@ function observe(state: GitHubWorkflowEditState, status: GitHubWorkflowEditStatu
   }
   if (state.status && !workflowStatusProgress(state.status, status)) return { ...state, readPending, generationLost, integrityFailed: true, observationIssue: 'protocol' };
   status = minimumTimers(state.status, status);
+  // Only this fresh explicitly submitted recovery and an accepted monotone
+  // original Final/Settled can clear its project's earlier attention.
+  if (!state.integrityFailed && !state.nativeBlocked && !generationLost && attempt?.binding.intent === 'recover' &&
+      attempt.applyClaimed && attempt.submittedPlanToken !== null && attempt.projection &&
+      status.lastTerminal?.sessionId === attempt.sessionId && normalWorkflowRecovery(attempt.projection) &&
+      attempt.submittedPlanToken === attempt.projection.recovery?.prepared?.planToken) {
+    const recoveredProject = attempt.binding.projectId; const recoveredSession = attempt.sessionId;
+    state = { ...state, recoveryProjects: state.recoveryProjects.filter((item) =>
+      item.projectId !== recoveredProject || item.sessionId === recoveredSession) };
+  }
   return { ...state, initialized: true, readPending, status, buffered: null, attempt, generationLost, observationIssue: state.integrityFailed ? 'protocol' : null };
 }
 
@@ -166,19 +190,24 @@ export function githubWorkflowEditReducer(state: GitHubWorkflowEditState, action
     case 'begin': {
       if (workflowNativeStartReason(state) || !state.status || action.binding.windowGeneration !== state.status.windowGeneration ||
           action.binding.startStatusRevision !== state.status.statusRevision ||
-          ![action.binding.draftRevision, action.binding.baselineGeneration, action.binding.serviceGeneration, action.binding.selectionGeneration, action.binding.coordinateGeneration].every((counter) => isU32(counter) && counter < U32_MAX)) return state;
+          action.binding.intent !== 'recover' && ![action.binding.draftRevision, action.binding.baselineGeneration, action.binding.serviceGeneration, action.binding.selectionGeneration, action.binding.coordinateGeneration].every((counter) => isU32(counter) && counter < U32_MAX)) return state;
       return { ...state, attempt: { binding: action.binding, sessionId: null, projection: null, projectionRevision: state.status.statusRevision,
         prepareClaimed: false, applyClaimed: false, submittedPlanToken: null, closeRequested: false, closeClaimed: false, invalidated: false, handled: false } };
     }
     case 'prepare-claim': {
       const attempt = state.attempt;
       if (!attempt || attempt.sessionId !== action.sessionId || attempt.prepareClaimed || attempt.applyClaimed || attempt.closeRequested || attempt.invalidated ||
-          attempt.projection?.phase !== 'editing' || !attempt.projection.checkout || !usable(state)) return state;
+          attempt.projection?.phase !== 'editing' || !attempt.projection.checkout && !attempt.projection.recovery?.checkout || !usable(state)) return state;
       return { ...state, attempt: { ...attempt, prepareClaimed: true } };
     }
     case 'apply-claim': {
       const binding = currentWorkflowApplyBinding(state);
       if (!binding || !sameWorkflowApplyBinding(binding, action.binding) || !state.attempt) return state;
+      return { ...state, attempt: { ...state.attempt, applyClaimed: true, submittedPlanToken: action.binding.planToken } };
+    }
+    case 'recover-claim': {
+      const binding = currentWorkflowRecoveryBinding(state);
+      if (!binding || !sameWorkflowRecoveryBinding(binding, action.binding) || !state.attempt) return state;
       return { ...state, attempt: { ...state.attempt, applyClaimed: true, submittedPlanToken: action.binding.planToken } };
     }
     case 'close-request': {
@@ -222,7 +251,7 @@ export function workflowStartReason(state: GitHubWorkflowEditState, session: Pro
   if (native) return native;
   if (otherEditReason) return otherEditReason;
   if (setup.mode !== 'native') return 'The current service/runtime context is unavailable. Reload it before opening a native workflow review.';
-  if (session?.saveRecoveryRequired || session && state.recoveryProjects.some((item) => item.projectId === session.project.id)) return 'This project needs separate transaction recovery. This screen cannot reset a journal, resume persisted recovery or bypass the block.';
+  if (session?.saveRecoveryRequired || session && state.recoveryProjects.some((item) => item.projectId === session.project.id)) return 'This project needs transaction recovery. Use the separate Inspect workflow recovery action for a qualified workflow journal; ordinary Apply cannot bypass the block.';
   if (!session?.draft) return 'Choose a project and prepare an in-memory configuration draft. Saving it to disk is not required for local workflow review.';
   if (setup.project?.projectId !== session.project.id || setup.project.draftRevision !== session.revision || setup.project.baselineGeneration !== session.baselineGeneration || !setup.project.hasDraft) return 'The selected draft context is changing. Wait for its synchronous binding before opening a native review.';
   if (![session.revision, session.baselineGeneration, setup.serviceGeneration, setup.selectionGeneration, setup.coordinateGeneration].every((counter) => isU32(counter) && counter < U32_MAX)) return 'An in-memory binding counter is exhausted. No review or generation will be reused.';
@@ -230,7 +259,16 @@ export function workflowStartReason(state: GitHubWorkflowEditState, session: Pro
   if (!githubSetupRequestFits({ draft: session.draft, toolingRepository: setup.inputs.toolingRepository, toolingSha: setup.inputs.toolingSha, suppliedSnapshot: null })) return 'The draft or toolkit inputs exceed the bounded JSON/text contract. No values were truncated or submitted.';
   return null;
 }
-export function workflowContextMatches(binding: WorkflowDraftBinding, session: ProjectSession | null, setup: GitHubSetupState): boolean {
+export function workflowRecoveryStartReason(state: GitHubWorkflowEditState, session: ProjectSession | null, otherEditReason: string | null = null): string | null {
+  const native = workflowNativeStartReason(state);
+  if (native) return native;
+  if (otherEditReason) return otherEditReason;
+  if (!session) return 'Choose the registered project whose interrupted workflow journal should be inspected.';
+  if (session.saveRecoveryRequired) return 'This project has separate configuration recovery attention. Workflow recovery cannot clear another domain’s journal.';
+  return null; // No draft validation, toolkit pin, templates or remote service are needed.
+}
+export function workflowContextMatches(binding: WorkflowBinding, session: ProjectSession | null, setup: GitHubSetupState): boolean {
+  if (binding.intent === 'recover') return session !== null && session.project.id === binding.projectId;
   return setup.mode === 'native' && session !== null && session.project.id === binding.projectId && session.draft !== null &&
     session.revision === binding.draftRevision && session.baselineGeneration === binding.baselineGeneration &&
     sameJson(session.draft, binding.draft) && sameJson(session.baseline, binding.baseline) &&
@@ -238,15 +276,22 @@ export function workflowContextMatches(binding: WorkflowDraftBinding, session: P
     setup.inputs.toolingRepository === binding.toolingRepository && setup.inputs.toolingSha === binding.toolingSha;
 }
 export function workflowPreparedMatches(attempt: WorkflowAttempt): boolean {
-  const owner = attempt.projection; const plan = owner?.prepared;
-  return Boolean(owner?.checkout && plan && owner.domain === 'github_workflows' && owner.projectId === attempt.binding.projectId &&
-    owner.ownerGeneration === attempt.binding.windowGeneration && owner.sessionId === attempt.sessionId && plan.revision === owner.checkout.revision &&
-    plan.draftRevision === attempt.binding.draftRevision && plan.baselineGeneration === attempt.binding.baselineGeneration &&
-    plan.view.tooling.repository === attempt.binding.toolingRepository && plan.view.tooling.sha === attempt.binding.toolingSha.toLowerCase());
+  const owner = attempt.projection; const binding = attempt.binding;
+  if (!owner || owner.domain !== 'github_workflows' || owner.projectId !== binding.projectId ||
+      owner.ownerGeneration !== binding.windowGeneration || owner.sessionId !== attempt.sessionId) return false;
+  if (binding.intent === 'recover') {
+    const recovery = owner.recovery;
+    return Boolean(recovery?.checkout && recovery.prepared && recovery.prepared.revision === recovery.checkout.revision &&
+      recovery.prepared.view.state === 'recoverable' && sameJson(recovery.prepared.view as unknown as JsonObject, recovery.checkout.view as unknown as JsonObject));
+  }
+  const plan = owner.prepared;
+  return Boolean(!owner.recovery && owner.checkout && plan && plan.revision === owner.checkout.revision &&
+    plan.draftRevision === binding.draftRevision && plan.baselineGeneration === binding.baselineGeneration &&
+    plan.view.tooling.repository === binding.toolingRepository && plan.view.tooling.sha === binding.toolingSha.toLowerCase());
 }
 export function currentWorkflowApplyBinding(state: GitHubWorkflowEditState): WorkflowApplyBinding | null {
   const attempt = state.attempt; const owner = attempt?.projection;
-  if (!usable(state) || !attempt || !owner?.prepared || !attempt.prepareClaimed || attempt.applyClaimed || attempt.closeRequested || attempt.invalidated || attempt.handled ||
+  if (!usable(state) || !attempt || attempt.binding.intent === 'recover' || !owner?.prepared || !attempt.prepareClaimed || attempt.applyClaimed || attempt.closeRequested || attempt.invalidated || attempt.handled ||
       owner.phase !== 'reviewing' || owner.nativeReason !== 'none' || owner.nativeFinality !== 'pending' || owner.reviewRemainingMs === 0 || owner.applySubmitted || owner.conflict ||
       !workflowPreparedMatches(attempt) || state.status?.active?.sessionId !== owner.sessionId || owner.ownerGeneration !== state.status.windowGeneration) return null;
   return { sessionId: owner.sessionId, planToken: owner.prepared.planToken, draftRevision: attempt.binding.draftRevision, baselineGeneration: attempt.binding.baselineGeneration };
@@ -258,6 +303,25 @@ export function canApplyWorkflows(state: GitHubWorkflowEditState, session: Proje
   const current = currentWorkflowApplyBinding(state);
   return current !== null && state.attempt !== null && workflowContextMatches(state.attempt.binding, session, setup) && (!confirmation || sameWorkflowApplyBinding(current, confirmation));
 }
+
+export function currentWorkflowRecoveryBinding(state: GitHubWorkflowEditState): WorkflowRecoveryApplyBinding | null {
+  const attempt = state.attempt; const owner = attempt?.projection; const prepared = owner?.recovery?.prepared;
+  if (!usable(state) || !attempt || attempt.binding.intent !== 'recover' || !owner || !prepared || !attempt.prepareClaimed ||
+      attempt.applyClaimed || attempt.closeRequested || attempt.invalidated || attempt.handled ||
+      owner.phase !== 'reviewing' || owner.nativeReason !== 'none' || owner.nativeFinality !== 'pending' ||
+      owner.reviewRemainingMs === 0 || owner.applySubmitted || !workflowPreparedMatches(attempt) ||
+      state.status?.active?.sessionId !== owner.sessionId || owner.ownerGeneration !== state.status.windowGeneration) return null;
+  return { sessionId: owner.sessionId, planToken: prepared.planToken, revision: prepared.revision };
+}
+export function sameWorkflowRecoveryBinding(first: WorkflowRecoveryApplyBinding, next: WorkflowRecoveryApplyBinding): boolean {
+  return first.sessionId === next.sessionId && first.planToken === next.planToken && first.revision === next.revision;
+}
+export function canRecoverWorkflows(state: GitHubWorkflowEditState, session: ProjectSession | null, confirmation?: WorkflowRecoveryApplyBinding): boolean {
+  const current = currentWorkflowRecoveryBinding(state);
+  return current !== null && session !== null && session.project.id === state.attempt?.binding.projectId &&
+    (!confirmation || sameWorkflowRecoveryBinding(current, confirmation));
+}
+
 export function confirmedWorkflowResult(state: GitHubWorkflowEditState): 'installed' | 'unchanged' | null {
   const attempt = state.attempt;
   if (!attempt?.projection || !attempt.applyClaimed || state.integrityFailed || state.observationIssue || !workflowPreparedMatches(attempt) ||
@@ -315,7 +379,7 @@ const coreCopy: Record<CoreEditReason, string> = {
   invalid_config: 'The draft failed core format/policy validation. Review Project settings; no rejected values or invented plan are shown.',
   ignore_conflict: 'A foreign configuration reason cannot authorize a workflow edit.',
   stale_revision: 'An original root, ancestor, file or absence binding changed. Reconcile outside this attempt, then explicitly review afresh only after settlement.',
-  pending_state: 'Pre-existing transaction state requires separate attention. This operation does not reset or delete its journal.',
+  pending_state: 'Pre-existing transaction state needs explicit current inspection. Never delete or reset controls by hand.',
   busy: 'Another owner is using the project. Observe settlement; there is no automatic retry.',
   cancelled: 'Cancellation was observed; the transaction facts, not the request, determine what happened.',
   filesystem_error: 'A filesystem operation did not finish normally. Retain evidence and follow the effect/journal/resource facts; do not repeat Apply.',
@@ -337,7 +401,39 @@ const nativeCopy: Record<NativeEditReason, string> = {
   output_limit: 'The bounded native output limit was exceeded. Nothing was truncated into a successful result.',
   cleanup_unknown: 'Native settlement is unverified. Further edits remain disabled.',
 };
+
+function workflowRecoveryProjectionNotice(owner: GitHubWorkflowEditProjection): WorkflowNotice {
+  const core = owner.coreOutcome; const recovery = owner.recovery;
+  const view = recovery?.prepared?.view ?? recovery?.checkout?.view;
+  const code = core && core.reason !== 'none' ? core.reason : owner.nativeReason !== 'none' ? owner.nativeReason : undefined;
+  const reason = core && core.reason !== 'none' ? coreCopy[core.reason] : nativeCopy[owner.nativeReason];
+  if (unknown(owner)) return { title: 'Workflow recovery or native cleanup is unverified', tone: 'danger', code,
+    detail: (core?.effect === 'committed' ? 'The previously inspected commit fact is retained. ' : '') +
+      'Keep the remaining journal and original outcome. Do not repeat Recover, reopen an uncertain owner or assume that late settlement cleared the first failure. ' + reason };
+  if (normalWorkflowRecovery(owner)) return { title: core?.effect === 'rolled_back' ? 'Interrupted workflow changes recovered' : 'Inspected workflow journal cleaned', tone: 'info',
+    detail: core?.effect === 'rolled_back' ? 'The original recovery owner confirmed rollback and clean journal cleanup, then fully settled. Unrelated files and configuration drafts were preserved; no Apply was retried.' :
+      core?.effect === 'committed' ? 'The prior commit was preserved. Only the inspected private journal was cleaned; later public caller edits were not read or reversed. The original native owner fully settled.' :
+      'The complete preparation journal was cleaned without installing workflow callers. Original native resources fully settled; configuration and remote state were unchanged.' };
+  if (owner.phase === 'final') {
+    if (view?.state === 'idle' && core?.journal === 'not_created') return { title: 'No workflow journal found', tone: 'info',
+      detail: 'This was a read-only current inspection, not a recovered Apply or an installation check. No caller files or journal controls were changed.' };
+    if (view?.state === 'conflict') return { title: 'Unclassified journal preserved', tone: 'warning', code,
+      detail: 'The journal could not be completely qualified as this four-caller workflow transaction. No recovery token or guessed cleanup was offered. Preserve its controls and obtain separate attention. ' + reason };
+    return { title: 'Workflow recovery not confirmed', tone: 'warning', code,
+      detail: 'The original result and remaining journal are retained. Settling a review alone does not clear recovery attention. No automatic Recover or Apply retry will run. ' + reason };
+  }
+  if (owner.phase === 'reviewing') return { title: 'Review the inspected workflow recovery', tone: 'info',
+    detail: 'Inspection and preparation were read-only. Review the fixed paths, journal summaries and exact rollback/private-cleanup action; a separate explicit confirmation authorizes one Recover only.' };
+  if (owner.phase === 'applying') return { title: 'Recovering the inspected workflow journal…', tone: 'info',
+    detail: 'Recover was submitted once. This does not reapply a workflow plan. Wait for the original effect, journal cleanup and native finality; a lost response never authorizes a retry.' };
+  if (owner.phase === 'finalizing') return { title: 'Waiting for original recovery settlement…', tone: 'warning', code,
+    detail: 'The original child and native resources still own finality. No completed recovery is inferred from Close, cancellation or a terminal-looking message. ' + reason };
+  return { title: 'Inspecting the current workflow journal…', tone: 'info',
+    detail: 'The same guarded registered root is borrowed for read-only inspection and preparation. No draft, toolkit pin, template rendering, CLI recovery subprocess or GitHub request is used.' };
+}
+
 export function workflowProjectionNotice(owner: GitHubWorkflowEditProjection): WorkflowNotice {
+  if (owner.recovery) return workflowRecoveryProjectionNotice(owner);
   const core = owner.coreOutcome;
   const code = core && core.reason !== 'none' ? core.reason : owner.nativeReason !== 'none' ? owner.nativeReason : undefined;
   const reason = core && core.reason !== 'none' ? coreCopy[core.reason] : nativeCopy[owner.nativeReason];
@@ -348,7 +444,7 @@ export function workflowProjectionNotice(owner: GitHubWorkflowEditProjection): W
     detail: result === 'installed' ? 'The original native owner confirmed commit, clean journal cleanup and full settlement. Exact-preserved files were not rewritten. Configuration was not saved; GitHub was not contacted and release readiness is unknown.' : 'The native owner rechecked all four exact originals, confirmed no journal was created and fully settled. Original bytes and file identity were preserved. Configuration was not saved; remote state remains unknown.' };
   if (owner.phase === 'final') {
     if (core?.journal === 'recovery_required') return { title: core.effect === 'committed' ? 'Workflows committed; recovery attention required' : 'Workflow transaction needs recovery attention', tone: 'danger', code,
-      detail: `Retain the journal and original operation evidence. Only the original in-session recovery attempt was available; persisted recovery is not implemented here. Do not reset or delete controls, repeat Apply or assume rollback. ${reason}` };
+      detail: `Retain the journal and original operation evidence. Use Inspect workflow recovery for a fresh read-only classification after this owner settles, then confirm only the specifically qualified recovery. Do not reset or delete controls, repeat Apply or assume rollback. ${reason}` };
     if (core?.effect === 'committed') return { title: 'Workflows committed; installation did not finish normally', tone: 'danger', code, detail: `Do not Apply again. The original commit is retained, but interruption or cleanup needs attention. ${reason}` };
     if (core?.effect === 'rolled_back' && core.journal === 'clean' && core.resources === 'settled') return { title: 'Not installed; original transaction changes rolled back', tone: 'warning', code, detail: `The native owner confirmed clean rollback of this operation’s own effects, not unrelated state. Your configuration draft is unchanged. ${reason}` };
     if (owner.conflict) return { title: 'Local workflow bundle refused', tone: 'warning', code: owner.conflict.reason,

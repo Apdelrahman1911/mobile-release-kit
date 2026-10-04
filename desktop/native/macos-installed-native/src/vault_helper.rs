@@ -265,14 +265,29 @@ impl Work{
 }
 /// Caller is only helpers/macos-vault-helper/src/main.rs. Ordinary application
 /// add_only/lookup remain unsupported even though it shares the DATA types.
+unsafe extern "C"{fn mrk_vault_helper_gate_admit(descriptor:i32,parent_pid:i32)->i32;}
+// Conservative closed startup-control allowance, including the <=1024B C gate
+// book (C static assertion), fixed ancestors/scalars and bounded gate bytes.
+// This is not a bound on opaque allocator/native/process-RSS storage.
+const GATE_STARTUP_CONTROL_BYTES:usize=8192;
+const _:()=assert!(GATE_STARTUP_CONTROL_BYTES+std::mem::size_of::<Work>()
+    +wire::REQUEST_BYTES+wire::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
 pub fn main_entry()->i32{
     std::panic::set_hook(Box::new(|_|{})); // Before any credentials; no panic output.
     // Keep empty parent-supplied env; only the bounded same-real-UID CF
     // preference is admitted after framework startup, never arbitrary entries.
     // std snapshots/copies remain unbounded by iterator/value limits; neither
     // this parsed-input hygiene nor a CF name establishes origin or auth.
-    if let Some(code)=startup::refusal(std::env::args_os().take(2).count(),
-        ||std::env::vars_os(), ||unistd::getuid().as_raw()){return code;}
+    // Shape refusal precedes environment/UID and never constructs FD ownership.
+    let Some(handoff)=startup::gate_handoff(std::env::args_os())else{return 64;};
+    if let Some(code)=startup::refusal(4,||std::env::vars_os(),||unistd::getuid().as_raw()){return code;}
+    if std::env::current_exe().ok().as_deref()!=Some(std::path::Path::new(crate::vault_helper_filesystem::HELPER_BINARY)){
+        return 67;
+    }
+    // SAFETY: bounded scalar handoff, not an OwnedFd conversion. C validates
+    // the real main/account/parent and exact original gate before retaining it;
+    // no unadmitted descriptor is closed or cloned. It remains until kernel exit.
+    if unsafe{mrk_vault_helper_gate_admit(handoff.descriptor,handoff.parent_pid)}!=0{return 67;}
     let mut work=Work::new();
     let ran=match catch_unwind(AssertUnwindSafe(||work.run())){
         Ok(value)=>value,Err(payload)=>{work.panic[0]=Some(payload);fail();false}

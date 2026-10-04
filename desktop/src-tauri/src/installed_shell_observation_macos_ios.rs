@@ -1,26 +1,29 @@
 //! Finite iOS observations inside the original installed Mac relay.
 //! This module owns only comparison DATA and one final-observer hold. The real
 //! document, saved-command owner, native books and invocation keep all effects.
-use std::{ffi::OsStr, sync::{Arc, Mutex, OnceLock, Weak, atomic::{AtomicBool, Ordering}}, time::Instant};
+use std::{ffi::OsStr, sync::{Arc, Mutex, OnceLock, Weak, atomic::{AtomicBool, AtomicU8, Ordering}}, time::Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use crate::{asset_session::DocumentBinding, error::BridgeError, ios_archive_owner::IOSArchiveOwner,
     ios_archive_protocol as wire};
 use super::{Case as ShellCase, Observation};
+#[path = "installed_shell_observation_macos_ios_pending.rs"]
+mod pending;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Case { ToolchainPrerequisite, VersionStale, UnsignedArchive, Cancel, Finality,
-    SigningInputs, SignedRefusal, SignedCancel, RecoveryEmpty, AndroidInputs }
+    SigningInputs, SignedRefusal, SignedCancel, RecoveryEmpty, RecoveryPending, AndroidInputs }
 impl Case {
-    pub(super) const ALL: [Self; 10] = [Self::ToolchainPrerequisite, Self::VersionStale,
+    pub(super) const ALL: [Self; 11] = [Self::ToolchainPrerequisite, Self::VersionStale,
         Self::UnsignedArchive, Self::Cancel, Self::Finality, Self::SigningInputs, Self::SignedRefusal,
-        Self::SignedCancel, Self::RecoveryEmpty, Self::AndroidInputs];
+        Self::SignedCancel, Self::RecoveryEmpty, Self::RecoveryPending, Self::AndroidInputs];
     pub(super) fn name(self) -> &'static str { match self {
         Self::ToolchainPrerequisite => "ios-toolchain-prerequisite", Self::VersionStale => "ios-version-stale",
         Self::UnsignedArchive => "ios-unsigned-archive", Self::Cancel => "ios-cancel", Self::Finality => "ios-finality",
         Self::SigningInputs => "ios-signing-inputs", Self::SignedRefusal => "ios-signed-refusal",
-        Self::SignedCancel => "ios-signed-cancel", Self::RecoveryEmpty => "ios-recovery-empty", Self::AndroidInputs => "android-inputs",
+        Self::SignedCancel => "ios-signed-cancel", Self::RecoveryEmpty => "ios-recovery-empty",
+        Self::RecoveryPending => "ios-recovery-pending", Self::AndroidInputs => "android-inputs",
     } }
     pub(super) fn parse(value: &OsStr) -> Option<Self> { Self::ALL.into_iter().find(|case| value == OsStr::new(case.name())) }
     pub(crate) fn session_final_original(self) -> Option<u32> { match self {
@@ -33,8 +36,9 @@ impl Case {
     pub(super) fn signed(self) -> bool { matches!(self, Self::SignedRefusal | Self::SignedCancel) }
     pub(super) fn operation(self) -> Option<wire::Operation> { match self {
         Self::SigningInputs | Self::AndroidInputs => None, Self::SignedRefusal | Self::SignedCancel => Some(wire::Operation::IOSSignedExport),
-        Self::RecoveryEmpty => Some(wire::Operation::IOSLocalRecovery), _ => Some(wire::Operation::IOSUnsignedArchive),
+        Self::RecoveryEmpty | Self::RecoveryPending => Some(wire::Operation::IOSLocalRecovery), _ => Some(wire::Operation::IOSUnsignedArchive),
     } }
+    pub(super) fn recovery(self) -> bool { matches!(self, Self::RecoveryEmpty | Self::RecoveryPending) }
     pub(super) fn holds_finality(self) -> bool { matches!(self, Self::Finality | Self::SignedRefusal) }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +74,7 @@ impl OriginalFacts {
             && !self.resource_unknown
     }
     fn clocks_for(&self, case: Case) -> bool {
-        if case.signed() || case == Case::RecoveryEmpty {
+        if case.signed() || case.recovery() {
             (self.work_ms, self.hard_ms, self.cleanup_ms) == (120_000, 250_000, Some(240_000))
         } else { !case.input_only() && (self.work_ms, self.hard_ms, self.cleanup_ms) == (300_000, 310_000, None)
             && self.material_loan_present.is_none() && self.material_loan_retired.is_none() }
@@ -80,7 +84,7 @@ impl OriginalFacts {
         && (!case.signed() || self.material_loan_present == Some(true) && self.material_loan_retired == Some(false)) }
     fn final_for(&self, case: Case) -> bool { self.settled_body() && self.clocks_for(case) && self.observer_joined && self.watchdog_joined
         && self.retired_before_cutoff && !self.active_retained
-        && (!(case.signed() || case == Case::RecoveryEmpty) || self.material_loan_present == Some(false) && self.material_loan_retired == Some(true)) }
+        && (!(case.signed() || case.recovery()) || self.material_loan_present == Some(false) && self.material_loan_retired == Some(true)) }
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct Snapshot { pub(crate) facts: OriginalFacts, pub(crate) terminal: wire::Terminal }
@@ -133,8 +137,18 @@ struct Hold {
 pub(crate) struct Control {
     pub(crate) case: Case, original: OnceLock<Weak<Observation>>, document: OnceLock<Weak<()>>, owner: OnceLock<Weak<()>>,
     normal_selection_observed: OnceLock<()>, normal_session_registration_returned: OnceLock<()>,
-    admitted: AtomicBool, session_registered: AtomicBool, claimed: AtomicBool, failed: AtomicBool, hold: Mutex<Hold>,
+    admitted: AtomicBool, session_registered: AtomicBool, claimed: AtomicU8, failed: AtomicBool, hold: Mutex<Hold>,
     signed_boundary: Mutex<Option<(String, String, Instant)>>,
+}
+// Observation history only. A successful DATA transition grants no operation;
+// claim_slot still requires the same live document/owner/observation admission.
+fn claim_observation_slot(case: Case, claimed: &AtomicU8, index: usize) -> bool {
+    let (before, after) = match index {
+        0 if case.operation().is_some() => (0, 1),
+        1 if case == Case::RecoveryPending => (1, 3),
+        _ => return false,
+    };
+    claimed.compare_exchange(before, after, Ordering::SeqCst, Ordering::SeqCst).is_ok()
 }
 impl Control {
     pub(super) fn new(case: Case) -> Arc<Self> {
@@ -142,7 +156,7 @@ impl Control {
         let (sender, receiver) = oneshot::channel();
         Arc::new(Self { case, original: OnceLock::new(), document: OnceLock::new(), owner: OnceLock::new(),
             normal_selection_observed: OnceLock::new(), normal_session_registration_returned: OnceLock::new(),
-            admitted: AtomicBool::new(false), session_registered: AtomicBool::new(false), claimed: AtomicBool::new(false), failed: AtomicBool::new(false),
+            admitted: AtomicBool::new(false), session_registered: AtomicBool::new(false), claimed: AtomicU8::new(0), failed: AtomicBool::new(false),
             signed_boundary: Mutex::new(None),
             hold: Mutex::new(Hold { snapshot: None, entered: false, released: false, sender: Some(sender), receiver: Some(receiver) }) })
     }
@@ -185,11 +199,30 @@ impl Control {
                 && q.case == ShellCase::Ios(self.case)
                 && q.ios.as_ref().is_some_and(|control| std::ptr::eq(control.as_ref(), self)))
     }
-    pub(crate) fn claim(&self) -> Result<(), BridgeError> {
-        if self.case.operation().is_none() || !self.permits() || self.claimed.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    pub(crate) fn claim(&self) -> Result<(), BridgeError> { self.claim_slot(0) }
+    pub(crate) fn slot_for(&self, context: &wire::Context) -> Option<usize> {
+        if self.case.operation() != Some(context.operation) { return None; }
+        if self.case == Case::RecoveryPending {
+            return match context.recovery.as_ref()? {
+                wire::RecoveryIntent { action: wire::RecoveryAction::Inspect, session: None } => Some(0),
+                wire::RecoveryIntent { action: wire::RecoveryAction::Account, session: Some(token) }
+                    if crate::edit_protocol::token(token) => Some(1),
+                _ => None,
+            };
+        }
+        if self.case == Case::RecoveryEmpty && context.recovery != Some(wire::RecoveryIntent {
+            action: wire::RecoveryAction::Inspect, session: None }) { return None; }
+        Some(0)
+    }
+    pub(crate) fn claim_slot(&self, index: usize) -> Result<(), BridgeError> {
+        if !self.permits() || !claim_observation_slot(self.case, &self.claimed, index) {
             return Err(BridgeError::invalid());
         }
         Ok(())
+    }
+    pub(crate) fn slot_claimed(&self, index: usize) -> bool {
+        match index { 0 => self.claimed.load(Ordering::SeqCst) == 1,
+            1 => self.case == Case::RecoveryPending && self.claimed.load(Ordering::SeqCst) == 3, _ => false }
     }
     pub(crate) fn permits_mode(&self, operation: wire::Operation) -> bool {
         self.case.operation() == Some(operation) && self.permits()
@@ -198,7 +231,7 @@ impl Control {
     pub(crate) fn signed_cancel_boundary(&self, operation: &str, generation: &str) {
         let Ok(mut original) = self.signed_boundary.lock() else { self.unavailable_witness(); return; };
         if self.case != Case::SignedCancel || !self.permits_mode(wire::Operation::IOSSignedExport)
-            || !self.claimed.load(Ordering::SeqCst) || original.is_some()
+            || self.claimed.load(Ordering::SeqCst) == 0 || original.is_some()
             || !crate::edit_protocol::token(operation) || !crate::edit_protocol::token(generation) {
             self.unavailable_witness(); return;
         }
@@ -210,7 +243,7 @@ impl Control {
     }
     pub(crate) fn prepare_hold(&self, snapshot: Snapshot) -> bool {
         let Ok(mut hold) = self.hold.lock() else { self.unavailable_witness(); return false; };
-        if !self.holds_finality() || !self.permits() || !self.claimed.load(Ordering::SeqCst)
+        if !self.holds_finality() || !self.permits() || self.claimed.load(Ordering::SeqCst) == 0
             || hold.snapshot.is_some() || hold.entered || hold.released || !snapshot.facts.held(self.case)
             || !terminal_for(self.case, &snapshot) {
             self.unavailable_witness(); return false;
@@ -584,11 +617,11 @@ const ANDROID_DIRS: &[(&str, u32, &[&str])] = &[
     ("app", 0o700, &["build.gradle.kts"]), ("release", 0o755, &["mobile-release.json"]),
 ];
 fn directories(case: Case) -> &'static [(&'static str, u32, &'static [&'static str])] {
-    if case == Case::RecoveryEmpty { &[] } else if case == Case::AndroidInputs { ANDROID_DIRS } else { DIRS }
+    if case.recovery() { &[] } else if case == Case::AndroidInputs { ANDROID_DIRS } else { DIRS }
 }
 fn files(case: Case, stale: bool) -> Vec<(&'static str, &'static [u8])> {
     let ignore = b"# MRK Mac Aqua user ignore\nuser-output/\n.mobile-release/\n".as_slice();
-    if case == Case::RecoveryEmpty { return vec![(".gitignore", ignore), ("keep.txt", super::KEEP)]; }
+    if case.recovery() { return vec![(".gitignore", ignore), ("keep.txt", super::KEEP)]; }
     if case == Case::AndroidInputs { return vec![(".gitignore", ignore), ("keep.txt", super::KEEP),
         ("version.properties", super::VERSION), ("release/mobile-release.json", config(case)),
         ("app/build.gradle.kts", super::SOURCE), ("overlap.jks", super::session::JKS)]; }
@@ -622,7 +655,7 @@ impl Fixture {
         Ok(Self { case, files, directories, inputs, stale: false, output: None, finalized: false })
     }
     pub(super) fn root_entries(&self) -> Vec<&str> {
-        let mut entries = if self.case == Case::RecoveryEmpty { vec![".gitignore", "keep.txt"] }
+        let mut entries = if self.case.recovery() { vec![".gitignore", "keep.txt"] }
             else if self.case == Case::AndroidInputs { vec![".gitignore", "app", "keep.txt", "overlap.jks", "release", "version.properties"] }
             else { vec![".gitignore", "ios", "keep.txt", "release", "version.properties"] };
         if self.case == Case::SigningInputs { entries.push("overlap.p12"); }
@@ -689,7 +722,7 @@ impl Fixture {
         if self.finalized || !snapshot.facts.final_for(self.case) || !terminal_for(self.case, snapshot)
             || self.stale != (self.case == Case::VersionStale) { return Err(()); }
         use wire::OutputDisposition as O;
-        if self.case == Case::RecoveryEmpty {
+        if self.case.recovery() {
             if snapshot.terminal.disposition.is_some() { return Err(()); }
             self.verify(root, uid)?; self.finalized = true; return Ok(());
         }
@@ -706,9 +739,11 @@ impl Fixture {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step { Navigate, SignedMode, ReadVersion, VersionRead, Prepare, Review, Acknowledge, Acknowledged,
-    MutateVersion, Start, Running, Cancel, Hold, ReleaseHold, Final }
+    MutateVersion, Start, Running, Cancel, Hold, ReleaseHold, Final,
+    AccountPrepare, AccountReview, AccountAcknowledge, AccountAcknowledged, AccountStart, AccountRunning, AccountFinal }
 #[derive(Clone, Default)]
 pub(super) struct Record {
+    pending: Option<pending::Record>,
     version_requested: bool, version: Option<Value>, context: Option<wire::Context>,
     version_mutated: bool,
     prepare_requested: bool, prepare_returned: bool, review_visible: bool, acknowledged: bool,
@@ -730,10 +765,16 @@ fn version_value(case: Case) -> Value {
 }
 fn context_matches(case: Case, project: &str, context: &wire::Context, signing: Option<&wire::SigningPolicy>) -> bool {
     if context.project_id != project || context.platform != wire::Platform::Ios || Some(context.operation) != case.operation() { return false; }
-    if case == Case::RecoveryEmpty {
+    if case.recovery() {
+        let intent = match context.recovery.as_ref() {
+            Some(wire::RecoveryIntent { action: wire::RecoveryAction::Inspect, session: None }) => true,
+            Some(wire::RecoveryIntent { action: wire::RecoveryAction::Account, session: Some(token) }) =>
+                case == Case::RecoveryPending && crate::edit_protocol::token(token),
+            _ => false,
+        };
         return context.draft_revision.is_none() && context.baseline_generation.is_none()
             && context.saved_config.is_none() && context.saved_version.is_none() && context.signing.is_none() && signing.is_none()
-            && context.recovery == Some(wire::RecoveryIntent { action: wire::RecoveryAction::Inspect, session: None });
+            && intent;
     }
     let (Some(saved_config), Some(saved_version)) = (&context.saved_config, &context.saved_version) else { return false; };
     context.signing.as_ref() == signing && case.signed() == signing.is_some() && context.recovery.is_none()
@@ -746,6 +787,7 @@ fn terminal_for(case: Case, snapshot: &Snapshot) -> bool {
     if Some(t.context.operation) != case.operation() || t.context.platform != wire::Platform::Ios || !t.settled()
         || !context_matches(case, &t.context.project_id, &t.context, t.context.signing.as_ref()) { return false; }
     use wire::{CommandOutcome as C, Outcome as O, Reason as R, OutputDisposition as D};
+    if case == Case::RecoveryPending { return pending::terminal_for(snapshot); }
     if case == Case::RecoveryEmpty {
         return t.outcome == O::Complete && t.reason == R::None && t.disposition.is_none() && t.result.is_none()
             && t.activity.archive_activity().is_none() && t.activity.stage == wire::Stage::DisposingWork
@@ -800,10 +842,16 @@ fn terminal_for(case: Case, snapshot: &Snapshot) -> bool {
             && commands.prepare.outcome == C::NotConfigured && commands.prepare.exit_code.is_none()
             && activity.selection.as_ref().is_some_and(|s| s.symbols_policy == wire::SymbolsPolicy::Required)
             && t.result.is_some() && disposition.output == D::RetainedLocalResult,
-        Case::SigningInputs | Case::AndroidInputs | Case::SignedRefusal | Case::SignedCancel | Case::RecoveryEmpty => false,
+        Case::SigningInputs | Case::AndroidInputs | Case::SignedRefusal | Case::SignedCancel | Case::RecoveryEmpty | Case::RecoveryPending => false,
     }
 }
 impl Record {
+    pub(super) fn new(case: Case) -> Self {
+        Self { pending: (case == Case::RecoveryPending).then(pending::Record::default), ..Self::default() }
+    }
+    fn start_returned_for(&self, status: &wire::Status) -> bool {
+        self.pending.as_ref().map_or(self.start_returned, |pair| pair.start_returned_for(status))
+    }
     pub(super) fn bind_signing(&mut self, policy: wire::SigningPolicy) -> bool {
         if self.signed_policy.is_some() || self.version_requested || self.prepare_requested || self.start_requested { return false; }
         self.signed_policy = Some(policy); true
@@ -813,6 +861,8 @@ impl Record {
         self.version_mutated = true; true
     }
     fn request(&mut self, case: Case, step: Step, command: Command, value: &Value, project: Option<&str>) -> bool {
+        if case == Case::RecoveryPending { return self.pending.as_mut().is_some_and(|pair| pair.request(step, command, value, project)); }
+        if self.pending.is_some() { return false; }
         match command {
             Command::Status => {
                 if wire::status_request(value).is_err() || self.status_requested >= 64 { return false; }
@@ -843,6 +893,7 @@ impl Record {
         }
     }
     fn status(&mut self, status: &wire::Status) -> bool {
+        if let Some(pair) = &mut self.pending { return pair.status(status); }
         if wire::status_bytes(status).is_err() { return false; }
         if let Some(op) = &status.operation {
             if self.context.as_ref() != Some(&op.context) || op.phase == wire::Phase::Unknown { return false; }
@@ -860,6 +911,7 @@ impl Record {
         self.status = Some(status.clone()); true
     }
     fn result(&mut self, command: Command, result: &Result<wire::Status, BridgeError>) -> bool {
+        if let Some(pair) = &mut self.pending { return pair.result(command, result); }
         let Ok(status) = result else { return false; };
         let valid = match command {
             Command::Prepare => self.prepare_requested && !self.prepare_returned
@@ -874,6 +926,7 @@ impl Record {
         true
     }
     fn original(&mut self, case: Case, snapshot: Snapshot) -> bool {
+        if case == Case::RecoveryPending { return self.pending.as_mut().is_some_and(|pair| pair.original(snapshot)); }
         let Some(op) = self.status.as_ref().and_then(|s| s.operation.as_ref()) else { return false; };
         if !self.start_requested || !self.start_returned || op.phase != wire::Phase::Terminal || !snapshot.facts.final_for(case)
             || snapshot.facts.operation_id != op.operation_id || snapshot.facts.owner_generation != op.owner_generation
@@ -886,8 +939,11 @@ impl Record {
         if let Some(previous) = &self.terminal { return previous == &snapshot; }
         self.terminal = Some(snapshot); true
     }
-    pub(super) fn terminal(&self) -> Option<&Snapshot> { self.terminal.as_ref().filter(|_| self.final_dom) }
+    pub(super) fn terminal(&self) -> Option<&Snapshot> {
+        if let Some(pair) = &self.pending { pair.terminal() } else { self.terminal.as_ref().filter(|_| self.final_dom) }
+    }
     pub(super) fn advance(&mut self, step: Step, control: &Control, document: &DocumentBinding) -> Option<Step> {
+        if control.case == Case::RecoveryPending { return self.pending.as_ref()?.advance(step); }
         match step {
             Step::VersionRead if self.version.is_none() => None,
             Step::Review if !self.prepare_returned => None,
@@ -948,7 +1004,7 @@ pub(super) fn data_checks() -> bool {
         || control.claim().is_ok() || token.consume(&owner).is_ok() { return false; }
     let dead = Arc::downgrade(&foreign); drop(foreign);
     let token = Admission { control: control.clone(), document: dead, owner: Arc::downgrade(&owner) };
-    if token.document_matches(&document) || token.consume(&owner).is_ok() || control.claimed.load(Ordering::SeqCst) { return false; }
+    if token.document_matches(&document) || token.consume(&owner).is_ok() || control.claimed.load(Ordering::SeqCst) != 0 { return false; }
 
     let case = Case::UnsignedArchive;
     let observed = version_value(case);
@@ -1046,7 +1102,7 @@ pub(super) fn data_checks() -> bool {
     let mut held_record = record.clone(); held_record.held = Some(Snapshot { facts: held, terminal: snapshot.terminal.clone() });
     if !held_record.original(Case::Finality, snapshot.clone()) { return false; }
     held_record.held.as_mut().unwrap().terminal.activity.stage = wire::Stage::Inspecting;
-    !held_record.original(Case::Finality, snapshot.clone()) && current_data_checks(&snapshot)
+    !held_record.original(Case::Finality, snapshot.clone()) && current_data_checks(&snapshot) && pending::data_checks(&snapshot)
 }
 
 fn current_data_checks(unsigned: &Snapshot) -> bool {
@@ -1181,7 +1237,7 @@ pub(super) fn snapshot_failure(value: &Value, root: &std::path::Path, case: Case
     if config_value["path"] != "release/mobile-release.json" { return Some("snapshot-config-path"); }
     if !super::assurance(value, "static-text") { return Some("snapshot-value-assurance"); }
     if !value["issues"].as_array().is_some_and(Vec::is_empty) { return Some("snapshot-value-issues"); }
-    if case == Case::RecoveryEmpty {
+    if case.recovery() {
         if hints != &json!({}) { return Some("ios-fixture-contract"); }
         if value["discovery"]["partial"] != false || value["discovery"]["state"] != "unverified" { return Some("snapshot-discovery-state"); }
         if config_value["state"] != "missing" || !config_value["data"].is_null() || !config_value["content"].is_null()
@@ -1270,11 +1326,13 @@ impl Observation {
         // Read the actual original owner without holding this observer Record.
         // Busy native guards yield no sample, never a guessed join or fallback.
         let terminal = status.operation.as_ref().is_some_and(|op| op.phase == wire::Phase::Terminal);
-        let snapshot = terminal.then(|| owner.installed_ios_snapshot()).flatten();
+        let snapshot = terminal.then(|| owner.installed_ios_snapshot()).flatten().filter(|snapshot|
+            status.operation.as_ref().is_some_and(|op| op.operation_id == snapshot.facts.operation_id
+                && op.owner_generation == snapshot.facts.owner_generation));
         let Some(mut r) = self.record() else { return; };
         let Some(ios) = r.ios_record.as_mut() else { self.fail_with("ios-status-contract"); return; };
         if !self.timely() || !ios.status(status) { self.fail_with("ios-status-contract"); return; }
-        if terminal && ios.start_returned {
+        if terminal && ios.start_returned_for(status) {
             // A transient borrow refusal can be retried by this SAME ordinary
             // relay. It is not positive evidence and never changes the cutoff.
             if let Some(snapshot) = snapshot {
@@ -1285,6 +1343,7 @@ impl Observation {
 }
 
 pub(super) fn script(case: Case, step: Step) -> Option<&'static str> {
+    if case == Case::RecoveryPending { return pending::script(step); }
     if case == Case::RecoveryEmpty { return recovery_script(step); }
     if case.signed() {
         match step {
@@ -1340,7 +1399,9 @@ pub(super) fn script(case: Case, step: Step) -> Option<&'static str> {
         if(!p)return wait();show(p);return {state:'ready',phase:r.dataset.phase,outcome:r.dataset.outcome,
             commands:[...p.querySelectorAll(':scope > ul > li')].map(text),resultPresent:!!report,
             archive:report?text(report.querySelector('p > code')):null};"#,
-    Step::SignedMode | Step::Running | Step::MutateVersion | Step::ReleaseHold => return None,
+    Step::SignedMode | Step::Running | Step::MutateVersion | Step::ReleaseHold
+        | Step::AccountPrepare | Step::AccountReview | Step::AccountAcknowledge | Step::AccountAcknowledged
+        | Step::AccountStart | Step::AccountRunning | Step::AccountFinal => return None,
 }) }
 fn recovery_script(step: Step) -> Option<&'static str> { Some(match step {
     Step::Navigate => "return nav('Recovery');",
@@ -1366,6 +1427,7 @@ fn recovery_script(step: Step) -> Option<&'static str> { Some(match step {
 }) }
 impl Record {
     pub(super) fn dom(&mut self, case: Case, step: Step, value: &Value) -> Result<Option<Step>, ()> {
+        if case == Case::RecoveryPending { return self.pending.as_mut().ok_or(())?.dom(step, value); }
         let only_ready = || value == &json!({"state":"ready"});
         let next = match step {
             Step::Navigate if only_ready() => if case == Case::RecoveryEmpty { Step::Prepare } else if case.signed() { Step::SignedMode } else { Step::ReadVersion },
@@ -1425,6 +1487,7 @@ impl Record {
         Ok(Some(next))
     }
     pub(super) fn report(&self, case: Case) -> Option<Value> {
+        if case == Case::RecoveryPending { return self.pending.as_ref()?.report(); }
         let terminal = self.terminal()?;
         if !self.prepare_requested || !self.prepare_returned || !self.review_visible || !self.acknowledged
             || !self.start_requested || !self.start_returned || self.status_requested != self.status_returned
@@ -1445,7 +1508,7 @@ impl Record {
                 "trigger":"original-inputs-bound","boundary":{"stage":"inputs-bound","operationId":operation,
                     "ownerGeneration":generation,"originalTypedFrame":true},"activeCommandKillClaimed":false}))
         } else { None };
-        let account = case.signed() || case == Case::RecoveryEmpty;
+        let account = case.signed() || case.recovery();
         let mut report = json!({"protocol":if case == Case::RecoveryEmpty { wire::RECOVERY_PROTOCOL } else if case.signed() { wire::SIGNED_PROTOCOL } else { wire::PROTOCOL },
             "savedVersionObservation":self.version,"context":self.context,
             "prepareRequestedOnce":true,"prepareReturned":true,"reviewVisible":true,"acknowledged":true,

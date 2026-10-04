@@ -811,10 +811,13 @@ async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, 
 async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = edit_commands::open(request_body(&request)?)?;
+    let args = edit_commands::workflow_open(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.workflow_open_request(&args.project_id); }
-    let result = state.bridge.open_workflow_edit(&state.document, window, args.project_id);
+    if let Some(q) = &state.observation { q.workflow_open_request(args.project_id()); }
+    let result = match args {
+        edit_commands::WorkflowOpen::Edit(args) => state.bridge.open_workflow_edit(&state.document, window, args.project_id),
+        edit_commands::WorkflowOpen::Recover(args) => state.bridge.open_workflow_recovery(&state.document, window, args),
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(q) = &state.observation { q.workflow_open_result(&result, &state.bridge.edits); }
     result
@@ -823,10 +826,13 @@ async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Reques
 async fn github_workflow_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = edit_commands::workflow_prepare(request_body(&request)?)?;
+    let args = edit_commands::workflow_prepare_request(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.workflow_prepare_request(&args); }
-    let result = state.bridge.prepare_workflow_edit(&state.document, window, args);
+    if let (Some(q), edit_commands::WorkflowPrepare::Edit(args)) = (&state.observation, &args) { q.workflow_prepare_request(args); }
+    let result = match args {
+        edit_commands::WorkflowPrepare::Edit(args) => state.bridge.prepare_workflow_edit(&state.document, window, args),
+        edit_commands::WorkflowPrepare::Recover(args) => state.bridge.prepare_workflow_recovery(&state.document, window, args),
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(q) = &state.observation { q.workflow_prepare_result(&result, &state.bridge.edits); }
     result
@@ -835,10 +841,13 @@ async fn github_workflow_edit_prepare(webview: Webview, request: tauri::ipc::Req
 async fn github_workflow_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = edit_commands::apply(request_body(&request)?)?;
+    let args = edit_commands::workflow_apply(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.workflow_apply_request(&args.session_id, &args.plan_token); }
-    let result = state.bridge.apply_workflow_edit(&state.document, window, &args.session_id, &args.plan_token);
+    if let Some(q) = &state.observation { q.workflow_apply_request(args.session_id(), args.plan_token()); }
+    let result = match args {
+        edit_commands::WorkflowApply::Edit(args) => state.bridge.apply_workflow_edit(&state.document, window, &args.session_id, &args.plan_token),
+        edit_commands::WorkflowApply::Recover(args) => state.bridge.apply_workflow_recovery(&state.document, window, args),
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(q) = &state.observation { q.workflow_apply_result(&result, &state.bridge.edits); }
     result

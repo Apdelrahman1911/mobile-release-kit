@@ -1,11 +1,11 @@
 //! One OriginalWork-owned Mac helper attempt. No detached runner, launch retry,
 //! selector, ambient environment, discovery cleanup, secret logging or UI key API.
 #![forbid(unsafe_code)]
-use std::{mem::ManuallyDrop,os::fd::OwnedFd,process::{Child,Command,ExitStatus,Stdio},time::{Duration,Instant}};
+use std::{mem::ManuallyDrop,os::fd::OwnedFd,process::{Child,ExitStatus},time::{Duration,Instant}};
 use nix::{fcntl::{fcntl,FcntlArg,OFlag},unistd};
 use zeroize::{Zeroize,Zeroizing};
 use mrk_macos_installed_native::{vault_helper_wire::{self as wire,ClockBridge,Request,Terminal},
-    vault_helper_filesystem::{HELPER_BINARY,FIXED_CWD},wrapping_keychain::{Outcome}};
+    wrapping_keychain::{Outcome}};
 use crate::{asset_session::KeyringMemoryAdmission,installed_runtime::VaultHelperSlots,vault_format as format};
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -60,7 +60,7 @@ impl Pipe{
 pub(crate) struct LookupBook{
     entered:bool,driver_entered:bool,driver_returned:bool,joined:bool,driver_result:Option<Result<(),Problem>>,
     charge:Option<KeyringMemoryAdmission>,input:Option<LookupInput>,slots:Option<VaultHelperSlots>,
-    command:Option<Command>,launch:Launch,child:Option<ManuallyDrop<Child>>,exit:Option<ExitStatus>,
+    launch:Launch,child:Option<ManuallyDrop<Child>>,exit:Option<ExitStatus>,
     wait_entered:bool,wait_failed:bool,kill_attempted:bool,kill_failed:bool,pipes:[Pipe;3],
     clock:Option<ClockBridge>,request:Option<Request>,request_bytes:Zeroizing<[u8;wire::REQUEST_BYTES]>,
     go:bool,write_attempted:bool,request_sent:bool,stop_attempted:bool,stop_sent:bool,
@@ -82,7 +82,7 @@ pub(crate) const LOOKUP_WIRE_BYTES:usize=2*wire::RESPONSE_LIMIT+2*wire::REQUEST_
     +2*16*1024+8192+wire::HELPER_CONTROL_ALLOWANCE;
 impl LookupBook{
     pub(crate) fn new()->Self{Self{entered:false,driver_entered:false,driver_returned:false,joined:false,driver_result:None,
-        charge:None,input:None,slots:None,command:None,launch:Launch::Unstarted,child:None,exit:None,wait_entered:false,wait_failed:false,
+        charge:None,input:None,slots:None,launch:Launch::Unstarted,child:None,exit:None,wait_entered:false,wait_failed:false,
         kill_attempted:false,kill_failed:false,pipes:std::array::from_fn(|_|Pipe::new()),clock:None,request:None,request_bytes:Zeroizing::new([0;wire::REQUEST_BYTES]),
         go:false,write_attempted:false,request_sent:false,stop_attempted:false,stop_sent:false,output:Zeroizing::new([0;wire::RESPONSE_LIMIT+1]),
         used:0,notice_seen:false,terminal_start:0,terminal:None,terminal_seen:false,output_failed:false,stderr_seen:false,
@@ -129,7 +129,7 @@ impl LookupBook{
         self.driver_entered=true;Ok(())
     }
     pub(crate) fn prepare(&mut self,stop:&mut dyn FnMut()->bool)->Result<(),Problem>{
-        if !self.driver_entered || self.command.is_some() || self.first.is_some(){return Err(Problem::CleanupUnknown);}
+        if !self.driver_entered || self.slots.as_ref().is_some_and(VaultHelperSlots::command_ready) || self.first.is_some(){return Err(Problem::CleanupUnknown);}
         let result=(||{
             self.slots.as_mut().ok_or(Problem::CleanupUnknown)?.inspect_once(stop).map_err(|_|Problem::UnsupportedProvider)?;
             if stop(){return Err(Problem::Interrupted);}
@@ -146,9 +146,8 @@ impl LookupBook{
                 work,maximum_cleanup,initial_key};
             self.clock=Some(clock);self.request=Some(request);
             if !self.request.as_ref().unwrap().encode(&mut self.request_bytes){return Err(Problem::InvalidInput);}
-            let mut command=Command::new(HELPER_BINARY);
-            command.env_clear().current_dir(FIXED_CWD).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-            self.command=Some(command);Ok(())
+            self.slots.as_mut().ok_or(Problem::CleanupUnknown)?.prepare_command().map_err(|_|Problem::CleanupUnknown)?;
+            Ok(())
         })();
         if let Err(p)=result{
             let at=self.slots.as_ref().and_then(VaultHelperSlots::first_failure).map(|(_,at)|at).unwrap_or_else(Instant::now);
@@ -157,7 +156,7 @@ impl LookupBook{
     }
     /// Called only under the actual document/current-slot gate. No IO here.
     pub(crate) fn claim_launch(&mut self)->Result<(),Problem>{
-        if self.first.is_some() || self.launch!=Launch::Unstarted || !self.driver_entered || self.command.is_none()
+        if self.first.is_some() || self.launch!=Launch::Unstarted || !self.driver_entered || !self.slots.as_ref().is_some_and(VaultHelperSlots::command_ready)
             || self.work.is_none_or(|end|Instant::now()>=end){return Err(Problem::Interrupted);}
         self.slots.as_mut().ok_or(Problem::CleanupUnknown)?.claim_once().map_err(|_|Problem::CleanupUnknown)?;
         self.launch=Launch::Claimed;Ok(())
@@ -166,9 +165,12 @@ impl LookupBook{
         if self.launch!=Launch::Claimed{return Err(Problem::CleanupUnknown);}self.launch=Launch::Entered;
         // Registration/state precedes the synchronous spawn. Unreturned launch
         //or Err is Unknown, never a fabricated no-child/implicit-close receipt.
-        let result=self.command.as_mut().ok_or(Problem::CleanupUnknown)?.spawn();
+        let result=self.slots.as_mut().ok_or(Problem::CleanupUnknown)
+            .and_then(|slots|slots.spawn_original().map_err(|_|Problem::CleanupUnknown));
         match result{
-            Err(_)=>{self.launch=Launch::Failed;self.fail(Problem::CleanupUnknown);return Err(Problem::CleanupUnknown);}
+            Err(_)=>{self.launch=Launch::Failed;
+                let at=self.slots.as_ref().and_then(VaultHelperSlots::first_failure).map_or_else(Instant::now,|(_,at)|at);
+                self.fail_at(Problem::CleanupUnknown,at);return Err(Problem::CleanupUnknown);}
             Ok(child)=>{self.child=Some(ManuallyDrop::new(child));self.launch=Launch::Returned;}
         }
         let child=self.child.as_mut().unwrap();
@@ -369,6 +371,19 @@ impl LookupBook{
             }
         }
         Self::project_cleanup(&mut self.first,&mut self.cleanup,&mut self.uncertain,None,project);
+        // Cleanup-specific gate correspondence must precede ACL/ancestor close.
+        // A prior application F/STOP still permits it under the projected cleanup
+        // endpoint; ordinary work recheck above retains its stricter semantics.
+        if self.launch==Launch::Returned && self.child.is_some() && self.exit.is_some() && !self.wait_failed{
+            if let Some(slots)=self.slots.as_mut(){
+                let (first,cleanup,uncertain)=(&mut self.first,&mut self.cleanup,&mut self.uncertain);
+                let checked=slots.check_gate_after_exit(&mut ||
+                    !Self::project_cleanup(first,cleanup,uncertain,None,project));
+                let failure=slots.first_failure().map(|(_,at)|(Problem::UnsupportedProvider,at));
+                Self::project_cleanup(first,cleanup,uncertain,failure,project);
+                if checked.is_err(){*uncertain=true;}
+            }
+        }
         if let Some(slots)=self.slots.as_mut(){
             let (first,cleanup,uncertain)=(&mut self.first,&mut self.cleanup,&mut self.uncertain);
             let settled=slots.settle_originals(&mut |failure|!Self::project_cleanup(first,cleanup,uncertain,
@@ -376,6 +391,7 @@ impl LookupBook{
             if !settled{*uncertain=true;}
             let failure=slots.first_failure().map(|(_,at)|(Problem::UnsupportedProvider,at));
             Self::project_cleanup(first,cleanup,uncertain,failure,project);
+            slots.retire_command_storage(); // No hook/pipe original remains in the spent builder.
         }
         for i in 0..3{
             if Self::project_cleanup(&mut self.first,&mut self.cleanup,&mut self.uncertain,None,project){
@@ -384,6 +400,19 @@ impl LookupBook{
                 if !self.pipes[i].close(){self.fail(Problem::CleanupUnknown);}
                 Self::project_cleanup(&mut self.first,&mut self.cleanup,&mut self.uncertain,None,project);
             }else if self.pipes[i].state!=PipeState::Closed{self.uncertain=true;}
+        }
+        // The helper participant is last. A decoded terminal, EOF, timeout or
+        // ordinary success flag is not child exit/native/pipe/code settlement.
+        let eligible=self.worker_gate_close_ready();
+        if let Some(slots)=self.slots.as_mut(){
+            let (first,cleanup,uncertain)=(&mut self.first,&mut self.cleanup,&mut self.uncertain);
+            if eligible && Self::project_cleanup(first,cleanup,uncertain,None,project){
+                let settled=slots.settle_gate(&mut |failure|!Self::project_cleanup(first,cleanup,uncertain,
+                    failure.map(|(_,at)|(Problem::UnsupportedProvider,at)),project));
+                let failure=slots.first_failure().map(|(_,at)|(Problem::UnsupportedProvider,at));
+                Self::project_cleanup(first,cleanup,uncertain,failure,project);
+                if !settled{*uncertain=true;}
+            }else if !slots.settled(){*uncertain=true;}
         }
         if let Some((p,at))=self.first{self.fail_at(p,at);} // Retire private forward inputs too.
         if self.request_sent && (!self.terminal_seen || self.output_failed || !self.pipes[1].eof || !self.pipes[2].eof || self.stderr_seen){self.fail(Problem::Protocol);}
@@ -395,6 +424,20 @@ impl LookupBook{
         self.driver_returned=true;
         let result=if self.uncertain{Err(Problem::CleanupUnknown)}else if let Some(p)=self.problem(){Err(p)}else{Ok(())};
         self.driver_result=Some(result);result
+    }
+    fn gate_child_settlement(launch:Launch,child:bool,exit:bool,wait_failed:bool,kill_failed:bool,
+        write_attempted:bool,native_settled:bool)->bool{
+        if wait_failed || kill_failed{return false;}
+        match launch{
+            Launch::Unstarted|Launch::Claimed=>!child && !exit && !write_attempted,
+            Launch::Returned=>child && exit && native_settled,
+            Launch::Entered|Launch::Failed=>false,
+        }
+    }
+    fn worker_gate_close_ready(&self)->bool{
+        !self.uncertain && Self::gate_child_settlement(self.launch,self.child.is_some(),self.exit.is_some(),
+            self.wait_failed,self.kill_failed,self.write_attempted,self.native_settled())
+            && self.pipes.iter().all(Pipe::settled) && self.slots.as_ref().is_some_and(VaultHelperSlots::code_settled)
     }
     fn native_settled(&self)->bool{
         if !self.write_attempted{return true;}
@@ -448,7 +491,7 @@ impl LookupBook{
     pub(crate) fn local_cleanup_unknown(&self)->bool{self.cleanup_unknown()}
     pub(crate) fn document_cleanup_unknown(&self)->bool{self.cleanup_unknown()}
     pub(crate) fn allocations_released(&self)->bool{self.charge.is_none() && self.input.is_none() && self.request.is_none()
-        && self.slots.is_none() && self.command.is_none() && self.child.is_none() && self.candidate.is_none()}
+        && self.slots.is_none() && self.child.is_none() && self.candidate.is_none()}
     pub(crate) fn consume_settled_key<R>(&mut self,authenticate:impl FnOnce(WrappingKeyCandidate)->R)->Result<R,Problem>{
         if !self.resources_settled() || !self.memory_held() || self.first.is_some() || !self.joined
             || self.work.is_none_or(|end|Instant::now()>=end){return Err(self.problem().unwrap_or(Problem::CleanupUnknown));}
@@ -464,7 +507,7 @@ impl LookupBook{
         if self.disposed || !self.memory_held() || !self.resources_settled(){return false;}
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         { self.qualification.saved = self.qualification_snapshot(); }
-        self.input=None;self.request=None;self.command=None;self.slots=None;
+        self.input=None;self.request=None;self.slots=None;
         if let Some(child)=self.child.take(){drop(ManuallyDrop::into_inner(child));}
         self.candidate=None;self.output.zeroize();self.request_bytes.zeroize();
         self.charge.take();self.disposed=true;true
@@ -600,6 +643,38 @@ mod tests {
         }
     }
     #[test]
+    fn a_known_native_failure_projection_does_not_invent_cleanup_uncertainty(){
+        let now=Instant::now();let mut first=Some((Problem::Interrupted,now));
+        let mut cleanup=Some(now+Duration::from_secs(2));let mut uncertain=false;
+        let mut original_projection=|_:Option<(Problem,Instant)>|Ok(Some(now+Duration::from_secs(2)));
+        assert!(LookupBook::project_cleanup(&mut first,&mut cleanup,&mut uncertain,
+            Some((Problem::UnsupportedProvider,now+Duration::from_millis(1))),&mut original_projection));
+        assert_eq!(first,Some((Problem::Interrupted,now)));assert!(!uncertain);
+        LookupBook::latch_failure(&mut first,&mut cleanup,&mut uncertain,Problem::CleanupUnknown,now+Duration::from_millis(2));
+        assert!(uncertain);assert_eq!(first,Some((Problem::Interrupted,now)));
+    }
+    #[test]
+    fn participant_never_uses_terminal_or_missing_child_as_exit_finality(){
+        // Pure launch/native-result DATA only; no Child or descriptor is minted.
+        for launch in [Launch::Entered,Launch::Failed]{
+            for child in [false,true]{for exit in [false,true]{
+                assert!(!LookupBook::gate_child_settlement(launch,child,exit,false,false,false,true));
+            }}
+        }
+        for (child,exit,native) in [(false,true,true),(true,false,true),(true,true,false)]{
+            assert!(!LookupBook::gate_child_settlement(Launch::Returned,child,exit,false,false,true,native));
+        }
+        assert!(LookupBook::gate_child_settlement(Launch::Returned,true,true,false,false,true,true));
+        assert!(!LookupBook::gate_child_settlement(Launch::Returned,true,true,true,false,true,true));
+        assert!(!LookupBook::gate_child_settlement(Launch::Returned,true,true,false,true,true,true));
+        for launch in [Launch::Unstarted,Launch::Claimed]{
+            assert!(LookupBook::gate_child_settlement(launch,false,false,false,false,false,true));
+            assert!(!LookupBook::gate_child_settlement(launch,false,false,false,false,true,true));
+            assert!(!LookupBook::gate_child_settlement(launch,true,false,false,false,false,true));
+        }
+        let book=LookupBook::new();assert!(!book.worker_gate_close_ready());
+    }
+    #[test]
     fn initialization_attempt_ambiguity_is_not_a_fabricated_added_effect(){
         let mut book=LookupBook::new();book.request=Some(request(wire::Operation::Initialize));
         assert!(!book.creation_possible());book.write_attempted=true;
@@ -646,6 +721,7 @@ mod qualification {
         pub(crate) native_candidate_consumed: Option<bool>,
         try_wait_entered: bool, try_wait_returned: bool, wait_entered: bool, exit_observed: bool, exit_success: Option<bool>, wait_failed: bool, kill_attempted: bool, kill_failed: bool,
         stdout_eof: bool, stderr_eof: bool, pipe_closed: [bool; 3], helper_slots_settled: bool,
+        helper_gate_acquired:bool,helper_gate_spawn_entered:bool,helper_gate_postchecked:bool,helper_gate_closed:bool,helper_gate_unknown:bool,
         driver_returned: bool, driver_before_cleanup: bool, blocking_child_joined: bool, resources_settled: bool, allocations_released: bool,
         first_failure: Option<&'static str>, cleanup_contracted: bool, cleanup_unknown: bool,
         pub(crate) application_candidate_constructed: bool, application_candidate_taken: bool, application_callback_returned: bool,
@@ -678,6 +754,8 @@ mod qualification {
                 && self.allocations_released && self.exit_observed && self.try_wait_entered && self.try_wait_returned
                 && !self.wait_entered && !self.wait_failed && !self.kill_attempted && !self.kill_failed && !self.output_failed && !self.stderr_seen
                 && self.stdout_eof && self.stderr_eof && self.pipe_closed == [true;3] && self.helper_slots_settled && !self.cleanup_unknown
+                && self.helper_gate_acquired && self.helper_gate_spawn_entered && self.helper_gate_postchecked
+                && self.helper_gate_closed && !self.helper_gate_unknown
                 && (!self.write_attempted || self.terminal && self.auth_settled == Some(true) && self.filesystem_settled == Some(true)
                     && self.native_input_closed == Some(true) && self.add_settled.is_none_or(|v|v) && self.lookup_settled.is_none_or(|v|v))
         }
@@ -709,18 +787,21 @@ mod qualification {
             add_item_calls_absent:Some(false),add_prerequisite_refused:Some(false),native_candidate_consumed:Some(true),
             try_wait_entered:true,try_wait_returned:true,wait_entered:false,exit_observed:true,exit_success:Some(true),
             wait_failed:false,kill_attempted:false,kill_failed:false,stdout_eof:true,stderr_eof:true,pipe_closed:[true;3],
-            helper_slots_settled:true,driver_returned:true,driver_before_cleanup:true,blocking_child_joined:true,
+            helper_slots_settled:true,helper_gate_acquired:true,helper_gate_spawn_entered:true,helper_gate_postchecked:true,
+            helper_gate_closed:true,helper_gate_unknown:false,driver_returned:true,driver_before_cleanup:true,blocking_child_joined:true,
             resources_settled:true,allocations_released:true,first_failure:None,cleanup_contracted:false,cleanup_unknown:false,
             application_candidate_constructed:true,application_candidate_taken:true,application_callback_returned:true };
         if !settled.successful_consumption() { return false; }
-        for field in 0..16 {
+        for field in 0..21 {
             let mut s=settled;
             match field {
                 0=>s.try_wait_entered=false,1=>s.try_wait_returned=false,2=>s.exit_observed=false,
                 3=>s.wait_entered=true,4=>s.wait_failed=true,5=>s.stdout_eof=false,6=>s.stderr_eof=false,
                 7=>s.pipe_closed[0]=false,8=>s.helper_slots_settled=false,9=>s.driver_returned=false,
                 10=>s.driver_before_cleanup=false,11=>s.blocking_child_joined=false,12=>s.resources_settled=false,
-                13=>s.allocations_released=false,14=>s.output_failed=true,_=>s.stderr_seen=true,
+                13=>s.allocations_released=false,14=>s.output_failed=true,15=>s.stderr_seen=true,
+                16=>s.helper_gate_acquired=false,17=>s.helper_gate_spawn_entered=false,18=>s.helper_gate_postchecked=false,
+                19=>s.helper_gate_closed=false,_=>s.helper_gate_unknown=true,
             }
             if s.final_settlement() || s.successful_consumption() { return false; }
         }
@@ -797,6 +878,7 @@ mod qualification {
                 return Some(saved);
             }
             let terminal = self.terminal.as_ref();
+            let gate=self.slots.as_ref().map(VaultHelperSlots::gate_facts).unwrap_or_default();
             Some(Snapshot { go:self.go,request_sent:self.request_sent,write_attempted:self.write_attempted,
                 stop_attempted:self.stop_attempted,stop_sent:self.stop_sent,notice:self.notice_seen,terminal:self.terminal_seen,
                 output_failed:self.output_failed,stderr_seen:self.stderr_seen,
@@ -817,6 +899,8 @@ mod qualification {
                 wait_failed:self.wait_failed,kill_attempted:self.kill_attempted,kill_failed:self.kill_failed,
                 stdout_eof:self.pipes[1].eof,stderr_eof:self.pipes[2].eof,pipe_closed:self.pipes.each_ref().map(|p|p.settled()),
                 helper_slots_settled:self.slots.as_ref().is_some_and(VaultHelperSlots::settled),
+                helper_gate_acquired:gate.acquired,helper_gate_spawn_entered:gate.spawn_entered,
+                helper_gate_postchecked:gate.postchecked,helper_gate_closed:gate.closed,helper_gate_unknown:gate.unknown,
                 driver_returned:self.driver_returned,driver_before_cleanup:self.qualification.driver_before_cleanup,
                 blocking_child_joined:self.joined,resources_settled:self.resources_settled(),allocations_released:self.allocations_released(),
                 first_failure:self.first.map(|(p,_)|problem(p)),

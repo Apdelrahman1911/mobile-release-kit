@@ -595,7 +595,7 @@ struct Reservation {whole:usize,source:usize}
 struct Operation {
     owner:Weak<Inner>,document:Weak<()>,source:Arc<SourceSnapshot>,data:wire::Operation,
     saved:crate::asset_session::ValidatedSavedInput,cohort:AdmissionCohort,
-    review_id:String,instance:String,control:Arc<Control>,supplier_reservation:usize,
+    review_id:String,instance:String,control:Arc<Control>,
     reservation:std::sync::OnceLock<Reservation>,settling:AtomicBool,
     source_handle:AsyncMutex<Option<JoinHandle<SourceReturn>>>,
     source_return:Mutex<Option<Result<SourceReturn,tokio::task::JoinError>>>,source_join_seen:AtomicBool,
@@ -861,7 +861,7 @@ fn inspect_source(original:Arc<Operation>,enter:oneshot::Receiver<()>)->SourceRe
         && original.data.kind==wire::Kind::Inspection && entered_at<original.control.work;
     if entered{
         let mut publish=|failure,at|source_failure(&original.control,failure,at);
-        if let Err(failure)=sources.inspect_once(original.source.roots(),&original.instance,original.supplier_reservation,
+        if let Err(failure)=sources.inspect_once(original.source.roots(),&original.instance,
             original.control.work,&original.control.stop.subscribe(),&mut publish){
             // SourceSlots normally already published its earlier original F.
             // Preserve that point; never substitute time of owner projection.
@@ -1270,9 +1270,9 @@ impl SavedCommandOwner {
         {let _=(census,checked);Err(wire::unavailable())}
         #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
         {
-            let supplier_reservation=crate::android_supplier_macos::max_working_reservation_bytes().map_err(|_|wire::unavailable())?;
-            let source_reservation=AndroidRegistrationSourceSlots::working_reservation_bytes()
-                .and_then(|bytes|bytes.checked_add(supplier_reservation)).ok_or_else(wire::unavailable)?;
+            let source_budget=AndroidRegistrationSourceSlots::reservation(crate::android_supplier_macos_source::SourcePhase::Inspection)
+                .ok_or_else(wire::unavailable)?;
+            let source_reservation=source_budget.bytes();
             let work=snapshot.at.checked_add(WORK).ok_or_else(wire::unavailable)?;
             let hard=snapshot.at.checked_add(HARD).ok_or_else(wire::unavailable)?;
             let observed=Instant::now();
@@ -1297,22 +1297,15 @@ impl SavedCommandOwner {
                 latches:std::sync::atomic::AtomicUsize::new(0),stop,audit});
             let data=wire::Operation{operation_id:checked.id.clone(),registration_generation:generation,
                 source_generation:snapshot.source.generation,kind:wire::Kind::Inspection,context:snapshot.request.context().clone()};
-            let new_charge=arc_bytes::<Operation>().and_then(|bytes|bytes.checked_add(operation_projection_bytes(&data)?))
-                .ok_or_else(wire::unavailable)?
-                .checked_add(checked.review_id.capacity()).and_then(|bytes|bytes.checked_add(checked.instance.capacity()))
-                .and_then(|bytes|bytes.checked_add(control.retained_bytes()?))
-                .and_then(|bytes|bytes.checked_add(source_reservation))
-                .and_then(|bytes|bytes.checked_add(3usize.checked_mul(wire::STATUS_LIMIT)?))
-                .and_then(|bytes|bytes.checked_add(3usize.checked_mul(wire::REQUEST_LIMIT)?))
+            let total=operation_admission_bytes(previous,&data,&checked.review_id,&checked.instance,&control,source_reservation)
                 .ok_or_else(wire::unavailable)?;
-            let total=previous.checked_add(new_charge).filter(|bytes|*bytes<=OWNED_LIMIT).ok_or_else(wire::unavailable)?;
             let original=Arc::new(Operation{owner:Arc::downgrade(&self.inner),document:Arc::downgrade(document),
                 source:snapshot.source.clone(),data,saved:current,cohort,review_id:checked.review_id.clone(),instance:checked.instance.clone(),
-                control:control.clone(),supplier_reservation,reservation:std::sync::OnceLock::new(),settling:AtomicBool::new(false),
+                control:control.clone(),reservation:std::sync::OnceLock::new(),settling:AtomicBool::new(false),
                 source_handle:AsyncMutex::new(None),source_return:Mutex::new(None),source_join_seen:AtomicBool::new(false),
                 coordinator:Mutex::new(None),coordinator_return:Mutex::new(None),final_seen:AtomicBool::new(false),joined_at:std::sync::OnceLock::new(),accepted:AtomicBool::new(false),
                 client:None,sources:Mutex::new(AndroidRegistrationSourceSlots::new_registered(audit_read,
-                    WorkGate{slot:self.inner.android_registration_control.clone(),control:control.clone()}))});
+                    WorkGate{slot:self.inner.android_registration_control.clone(),control:control.clone()},source_budget))});
             let (release,enter)=oneshot::channel();let (source_release,source_enter)=oneshot::channel();
             let source_worker={let original=original.clone();move||inspect_source(original,source_enter)};
             let coordinator=coordinate_inspection(original.clone(),enter,source_release);
@@ -1320,7 +1313,7 @@ impl SavedCommandOwner {
                 .and_then(|bytes|bytes.checked_add(2usize.checked_mul(std::mem::size_of::<SourceReturn>())?))
                 .and_then(|bytes|bytes.checked_add(std::mem::size_of::<Finalization>()))
                 .and_then(|bytes|bytes.checked_add(2usize.checked_mul(SIGNAL_STORAGE)?)).ok_or_else(wire::unavailable)?;
-            let whole=total.checked_add(task_storage).filter(|bytes|*bytes<=OWNED_LIMIT).ok_or_else(wire::unavailable)?;
+            let whole=bounded_operation_sum(total,task_storage).ok_or_else(wire::unavailable)?;
             original.reservation.set(Reservation{whole,source:source_reservation}).map_err(|_|wire::unavailable())?;
             // All typed original slots, comparison operands and whole retained
             // census have been charged BEFORE either task or payload GO exists.
@@ -1369,6 +1362,22 @@ impl SavedCommandOwner {
         self.registration_status_locked(&mut registry,gate,observed).map_err(|_|wire::unconfirmed())
     }
 }
+/// Shared checked whole-owner expression for both production paths and the
+/// catalogue DATA budget gate. `previous` is always the actual current
+/// census, including an old full Review AND its retained closed-source original.
+fn operation_admission_bytes(previous:usize,data:&wire::Operation,review_id:&String,instance:&String,
+    control:&Control,phase_storage:usize)->Option<usize>{
+    let added=arc_bytes::<Operation>()?.checked_add(operation_projection_bytes(data)?)?
+        .checked_add(review_id.capacity())?.checked_add(instance.capacity())?
+        .checked_add(control.retained_bytes()?)?.checked_add(phase_storage)?
+        .checked_add(3usize.checked_mul(wire::STATUS_LIMIT)?)?
+        .checked_add(3usize.checked_mul(wire::REQUEST_LIMIT)?)?;
+    bounded_operation_sum(previous,added)
+}
+fn bounded_operation_sum(previous:usize,added:usize)->Option<usize>{
+    previous.checked_add(added).filter(|bytes|*bytes<=OWNED_LIMIT)
+}
+
 #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
 fn registration_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>,checked:&Checked,
     census:&crate::asset_session::AndroidRegistrationCensus<'_>)->Option<usize>{
@@ -1418,6 +1427,35 @@ mod lifecycle_book_tests {
     // Inert control DATA and scoped std WAIT workers only. No Document, runtime,
     // source/native book, Review or positive production qualification is made.
     use super::*;
+
+    #[test]
+    fn whole_operation_budget_keeps_previous_charge_and_rejects_cap_or_overflow() {
+        // Arithmetic only: neither these scalar inputs nor a Linux sizeof
+        // prove the complete real-catalogue macOS admission high-water.
+        assert_eq!(bounded_operation_sum(OWNED_LIMIT - 1, 1), Some(OWNED_LIMIT));
+        assert_eq!(bounded_operation_sum(OWNED_LIMIT - 1, 2), None);
+        assert_eq!(bounded_operation_sum(OWNED_LIMIT, 1), None);
+        assert_eq!(bounded_operation_sum(usize::MAX, 1), None);
+        assert_eq!(bounded_operation_sum(1, usize::MAX), None);
+        assert_eq!(bounded_operation_sum(27, 53), Some(80));
+        let (_slot, control, _cohort, _gate) = control_at(Instant::now());
+        let data = wire::Operation { operation_id: "inert-budget-operation".to_owned(), registration_generation: 7,
+            source_generation: 3, kind: wire::Kind::Inspection, context: android_wire::Prepare {
+                project_id: "inert-budget-project".to_owned(), draft_revision: 1, baseline_generation: 1,
+                saved_config: android_wire::Content { bytes: 32, sha256: "a".repeat(64) },
+                saved_version: android_wire::SavedVersion { source: "version.properties".to_owned(), bytes: 20,
+                    sha256: "b".repeat(64), name: "1.0.0".to_owned(), build: 1 },
+                artifact_validation: android_wire::ArtifactValidation { mode: android_wire::ValidationMode::StructureAndVersion,
+                    upload_certificate_sha256: None }, signing: None } };
+        let review_id = "inert-review".to_owned(); let instance = "c".repeat(32);
+        let added = arc_bytes::<Operation>().unwrap() + operation_projection_bytes(&data).unwrap()
+            + review_id.capacity() + instance.capacity() + control.retained_bytes().unwrap()
+            + 53 + 3 * wire::STATUS_LIMIT + 3 * wire::REQUEST_LIMIT;
+        assert_eq!(operation_admission_bytes(27, &data, &review_id, &instance, &control, 53), Some(27 + added));
+        assert_eq!(operation_admission_bytes(OWNED_LIMIT - added, &data, &review_id, &instance, &control, 53), Some(OWNED_LIMIT));
+        assert_eq!(operation_admission_bytes(OWNED_LIMIT - added + 1, &data, &review_id, &instance, &control, 53), None);
+        assert_eq!(operation_admission_bytes(27, &data, &review_id, &instance, &control, usize::MAX), None);
+    }
 
     pub(super) fn control_at(admitted:Instant)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate) {
         control_in_lane(admitted,ControlLane::Sources)

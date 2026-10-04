@@ -23,7 +23,7 @@ spec.loader.exec_module(adapter)
 
 
 class StartupAdapterData(unittest.TestCase):
-    def exercise(self, codes=(64, 1, 65, 66, 1), *, failure=None):
+    def exercise(self, codes=(64, 67, 65, 66, 67), *, failure=None):
         calls, checks = [], []
         state = adapter.Run()
 
@@ -41,7 +41,8 @@ class StartupAdapterData(unittest.TestCase):
         result, calls, checks, state = self.exercise()
         self.assertTrue(result)
         self.assertEqual(len(checks), 10)
-        self.assertEqual([call[0] for call in calls], [["/inert/helper", "mrk-startup-fixture"]] + [["/inert/helper"]] * 4)
+        self.assertEqual([call[0] for call in calls], [["/inert/helper", "mrk-startup-fixture"]]
+                         + [["/inert/helper", "--mrk-vault-worker-gate-v1", "3", "2"]] * 4)
         self.assertEqual([call[1]["environ"] for call in calls], [{}, {"__CF_USER_TEXT_ENCODING": "0x1F5:0:0"},
                             {"__CF_USER_TEXT_ENCODING": "0x1F5:not-an-encoding"},
                             {"MRK_STARTUP_DIAGNOSTIC": "synthetic"}, {}])
@@ -54,14 +55,15 @@ class StartupAdapterData(unittest.TestCase):
         self.assertFalse(state.inflight)
         self.assertTrue(all(row["originalCallSettled"] and row["outputEmpty"] for row in state.rows))
 
-    def test_canonical_and_empty_parent_cases_require_eof_not_a_startup_refusal(self):
+    def test_canonical_and_empty_parent_cases_require_noninstalled_refusal_not_go(self):
         result, _, _, state = self.exercise()
         self.assertTrue(result)
-        self.assertEqual([row["exitCode"] for row in state.rows], [64, 1, 65, 66, 1])
+        self.assertEqual([row["exitCode"] for row in state.rows], [64, 67, 65, 66, 67])
         self.assertEqual(state.rows[2]["category"], "cf-encoding-refused")
         for index in (1, 4):
-            for code in (64, 65, 66, 99):
-                codes = [64, 1, 65, 66, 1]
+            self.assertEqual(state.rows[index]["category"], "installed-gate-handoff-required")
+            for code in (1, 64, 65, 66, 99):
+                codes = [64, 67, 65, 66, 67]
                 codes[index] = code
                 result, calls, _, state = self.exercise(codes)
                 self.assertFalse(result)
@@ -76,7 +78,7 @@ class StartupAdapterData(unittest.TestCase):
             def fake_owner(argv, **kwargs):
                 index = len(calls)
                 calls.append(argv)
-                code = 0 if index == stop_at else (64, 1, 65, 66, 1)[index]
+                code = 0 if index == stop_at else (64, 67, 65, 66, 67)[index]
                 return subprocess.CompletedProcess(argv, code, b"", b"")
 
             with self.assertRaisesRegex(adapter.Refused, "unexpected-success"):
@@ -88,7 +90,7 @@ class StartupAdapterData(unittest.TestCase):
             self.assertTrue(state.inflight)  # main cannot close originals or authorize cleanup.
 
     def test_settled_mismatch_continues_but_never_repairs_aggregate_failure(self):
-        result, calls, checks, state = self.exercise((64, 66, 65, 66, 1))
+        result, calls, checks, state = self.exercise((64, 66, 65, 66, 67))
         self.assertFalse(result)
         self.assertEqual((len(calls), len(checks)), (5, 10))
         self.assertEqual([row["matched"] for row in state.rows], [True, False, True, True, True])
@@ -254,9 +256,14 @@ class StartupAdapterData(unittest.TestCase):
         self.assertIn("run_cases(owner.run_owned", source)
         helper = (ROOT / "desktop/native/macos-installed-native/src/vault_helper.rs").read_text()
         self.assertEqual(helper.count("std::env::vars_os()"), 1)
-        self.assertIn("startup::refusal(std::env::args_os().take(2).count(),", helper)
-        self.assertIn("||std::env::vars_os(), ||unistd::getuid().as_raw()", helper)
-        self.assertLess(helper.index("if let Some(code)=startup::refusal"), helper.index("let mut work=Work::new()"))
+        self.assertIn("startup::gate_handoff(std::env::args_os())", helper)
+        self.assertIn("startup::refusal(4,||std::env::vars_os(),||unistd::getuid().as_raw())", helper)
+        self.assertLess(helper.index("startup::gate_handoff"), helper.index("if let Some(code)=startup::refusal"))
+        self.assertLess(helper.index("if let Some(code)=startup::refusal"), helper.index("std::env::current_exe()"))
+        self.assertLess(helper.index("std::env::current_exe()"), helper.index("if unsafe{mrk_vault_helper_gate_admit"))
+        self.assertLess(helper.index("if unsafe{mrk_vault_helper_gate_admit"), helper.index("let mut work=Work::new()"))
+        self.assertIn('"installedCallerQualified": False', source)
+        self.assertNotIn("pass_fds", source)
 
 
 if __name__ == "__main__":

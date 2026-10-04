@@ -70,6 +70,54 @@ pub(crate) fn close(body: &Value) -> Result<Close, BridgeError> {
 
 pub(crate) fn status(body: &Value) -> Result<Status, BridgeError> { decode(body, 2) }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WorkflowRecoveryOpen {
+    pub project_id: String,
+    pub intent: crate::github_workflow_edit_protocol::RecoveryIntent,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WorkflowRecoveryApply {
+    pub session_id: String, pub plan_token: String,
+    pub intent: crate::github_workflow_edit_protocol::RecoveryIntent,
+}
+pub(crate) enum WorkflowOpen { Edit(Open), Recover(WorkflowRecoveryOpen) }
+impl WorkflowOpen {
+    pub(crate) fn project_id(&self) -> &str { match self { Self::Edit(a) => &a.project_id, Self::Recover(a) => &a.project_id } }
+}
+pub(crate) enum WorkflowPrepare {
+    Edit(crate::github_workflow_edit_protocol::PrepareWorkflowEdit),
+    Recover(crate::github_workflow_edit_protocol::PrepareWorkflowRecovery),
+}
+pub(crate) enum WorkflowApply { Edit(Apply), Recover(WorkflowRecoveryApply) }
+impl WorkflowApply {
+    pub(crate) fn session_id(&self) -> &str { match self { Self::Edit(a) => &a.session_id, Self::Recover(a) => &a.session_id } }
+    pub(crate) fn plan_token(&self) -> &str { match self { Self::Edit(a) => &a.plan_token, Self::Recover(a) => &a.plan_token } }
+}
+pub(crate) fn workflow_open(body: &Value) -> Result<WorkflowOpen, BridgeError> {
+    if body.get("intent").is_some() {
+        let value: WorkflowRecoveryOpen = decode(body, 256)?;
+        if !crate::protocol::valid_id(&value.project_id) { return Err(BridgeError::invalid()); }
+        Ok(WorkflowOpen::Recover(value))
+    } else { open(body).map(WorkflowOpen::Edit) }
+}
+pub(crate) fn workflow_prepare_request(body: &Value) -> Result<WorkflowPrepare, BridgeError> {
+    if body.get("intent").is_some() {
+        let value: crate::github_workflow_edit_protocol::PrepareWorkflowRecovery = decode(body, 256)?;
+        if !token(&value.session_id) || !token(&value.revision) { return Err(BridgeError::invalid()); }
+        Ok(WorkflowPrepare::Recover(value))
+    } else { workflow_prepare(body).map(WorkflowPrepare::Edit) }
+}
+pub(crate) fn workflow_apply(body: &Value) -> Result<WorkflowApply, BridgeError> {
+    if body.get("intent").is_some() {
+        let value: WorkflowRecoveryApply = decode(body, 256)?;
+        if !token(&value.session_id) || !token(&value.plan_token) { return Err(BridgeError::invalid()); }
+        Ok(WorkflowApply::Recover(value))
+    } else { apply(body).map(WorkflowApply::Edit) }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +180,24 @@ mod tests {
         assert!(workflow_prepare(&bad).is_err());
         let mut bad = body; bad["toolingRepository"] = json!("é".repeat(71));
         assert!(workflow_prepare(&bad).is_err());
+    }
+
+    #[test]
+    fn workflow_recovery_commands_are_disjoint_closed_intent_not_new_ipc() {
+        assert!(matches!(workflow_open(&json!({"projectId":"project-1","intent":"recover"})),Ok(WorkflowOpen::Recover(_))));
+        assert!(matches!(workflow_open(&json!({"projectId":"project-1"})),Ok(WorkflowOpen::Edit(_))));
+        assert!(matches!(workflow_prepare_request(&json!({"sessionId":SESSION,"revision":REVISION,"intent":"recover"})),Ok(WorkflowPrepare::Recover(_))));
+        assert!(matches!(workflow_apply(&json!({"sessionId":SESSION,"planToken":REVISION,"intent":"recover"})),Ok(WorkflowApply::Recover(_))));
+        for intent in [json!("edit"),json!("rollback"),json!("Recover"),json!(false),Value::Null] {
+            assert!(workflow_open(&json!({"projectId":"project-1","intent":intent.clone()})).is_err());
+            assert!(workflow_prepare_request(&json!({"sessionId":SESSION,"revision":REVISION,"intent":intent.clone()})).is_err());
+            assert!(workflow_apply(&json!({"sessionId":SESSION,"planToken":REVISION,"intent":intent})).is_err());
+        }
+        for key in ["draft","toolingRepository","toolingSha","draftRevision","baselineGeneration","path","files","force"] {
+            let mut body = json!({"sessionId":SESSION,"revision":REVISION,"intent":"recover"}); body[key] = Value::Null;
+            assert!(workflow_prepare_request(&body).is_err());
+        }
+        assert!(open(&json!({"projectId":"project-1","intent":"recover"})).is_err());
+        assert!(apply(&json!({"sessionId":SESSION,"planToken":REVISION,"intent":"recover"})).is_err());
     }
 }

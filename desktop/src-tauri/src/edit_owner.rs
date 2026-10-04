@@ -397,6 +397,20 @@ fn exact_apply_receipt(projection: &EditProjection, domain: EditDomain, generati
     projection.domain == domain && projection.owner_generation == generation && projection.session_id == session
         && projection.apply_submitted && projection.plan_token() == Some(plan)
 }
+fn workflow_intent_matches(projection: &EditProjection, recovery: bool) -> bool {
+    projection.domain == EditDomain::GitHubWorkflows
+        && projection.workflow.as_ref().is_some_and(|detail| detail.recovery.is_some() == recovery)
+}
+fn workflow_recovery_complete(projection: &EditProjection) -> bool {
+    if !workflow_intent_matches(projection, true) || !projection.apply_submitted || projection.phase != Phase::Final
+        || projection.native_reason != Reason::None || projection.native_finality != NativeFinality::Settled || projection.late_settled { return false; }
+    let Some(recovery) = projection.workflow.as_ref().and_then(|detail| detail.recovery.as_ref()) else { return false; };
+    let Some(core) = &projection.core_outcome else { return false; };
+    core.reason == CoreReason::None && core.resources == ResourceState::Settled
+        && recovery.terminal_admissible(true, core)
+        && recovery.prepared.as_ref().and_then(|prepared| prepared.view.expected_success())
+            .is_some_and(|(effect, journal)| core.effect == effect && core.journal == journal)
+}
 fn image_recovery_complete(projection: &EditProjection) -> bool {
     if projection.domain != EditDomain::MetadataImages || !projection.apply_submitted || projection.phase != Phase::Final
         || projection.native_reason != Reason::None || projection.native_finality != NativeFinality::Settled || projection.late_settled { return false; }
@@ -441,7 +455,7 @@ impl DomainStatus {
         match self { Self::MetadataImages(status) => Ok(status), _ => Err(BridgeError::protocol()) }
     }
 }
-enum SavedTextSubmission { MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission) }
+enum SavedTextSubmission { MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission), WorkflowRecovery }
 enum ImageOpen { Import(images_wire::ImportData), Recover }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredEditRoot {
@@ -450,7 +464,7 @@ pub(crate) struct RegisteredEditRoot {
 // Keep existing workflow callers/fixtures bound to their original API. The
 // shared root proof is not a domain permit; admission and tickets remain tagged.
 pub(crate) type WorkflowRegistration = RegisteredEditRoot;
-pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle }
+pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool }
 pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
 
 // Only the ignored headless workflow fixture can construct this private value,
@@ -718,6 +732,7 @@ struct Registry {
     generation: String, loss_generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
     revision: u32, exhausted: bool, stopping: bool, disabled: bool,
     active: Option<ActiveOwner>, last: Option<EditProjection>, blocked_projects: BTreeSet<String>, image_recovery_projects: BTreeSet<String>,
+    workflow_recovery_projects: BTreeSet<String>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -1452,7 +1467,7 @@ impl EditOwner {
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_next_schedule: Mutex::new(None),
             registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
-                revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new(), image_recovery_projects: BTreeSet::new(),
+                revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new(), image_recovery_projects: BTreeSet::new(), workflow_recovery_projects: BTreeSet::new(),
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
                     not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -1641,6 +1656,11 @@ impl EditOwner {
     pub(crate) fn workflow_open_ticket(&self, window: &str) -> Result<WorkflowOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::GitHubWorkflows)
     }
+    pub(crate) fn workflow_recovery_open_ticket(&self, window: &str) -> Result<WorkflowOpenTicket, BridgeError> {
+        let mut ticket = self.workflow_open_ticket(window)?;
+        ticket.workflow_recovery = true;
+        Ok(ticket)
+    }
     pub(crate) fn metadata_text_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::MetadataText)
     }
@@ -1656,7 +1676,7 @@ impl EditOwner {
         // Entropy is obtained before the real document/selection mutex. This
         // private ticket performs no observation, registration, claim or spawn.
         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor })
+        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false })
     }
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
         ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
@@ -1748,20 +1768,21 @@ impl EditOwner {
         } else { None };
         if project_id.is_empty() || project_id.len() > 128 { return Err(BridgeError::invalid()); }
         let root = root.to_str().filter(|s| s.len() <= 4096).ok_or_else(BridgeError::invalid)?;
-        let (id, executor) = match (domain, ticket) {
+        let (id, executor, workflow_recovery) = match (domain, ticket) {
             (EditDomain::Configuration, None) => {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-                (nonce()?, executor)
+                (nonce()?, executor, false)
             },
             (EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages, Some(ticket))
-                if ticket.domain == domain && Arc::ptr_eq(&self.inner, &ticket.owner) => (ticket.id, ticket.executor),
+                if ticket.domain == domain && Arc::ptr_eq(&self.inner, &ticket.owner)
+                    && (!ticket.workflow_recovery || domain == EditDomain::GitHubWorkflows) => (ticket.id, ticket.executor, ticket.workflow_recovery),
             _ => return Err(invalid_owner()),
         };
         let image_details = match images.as_ref() {
             Some(ImageOpen::Import(data)) => Some(data.details()), Some(ImageOpen::Recover) => Some(images_wire::Details::recovery()), None => None,
         };
         let image_recovery = image_details.as_ref().is_some_and(|detail| detail.intent == images_wire::Intent::Recover);
-        let params = match (domain, registration.as_ref(), metadata.as_ref(), images) {
+        let mut params = match (domain, registration.as_ref(), metadata.as_ref(), images) {
             (EditDomain::Configuration, None, None, None) => json!({"root": root}),
             (EditDomain::GitHubWorkflows | EditDomain::ReleaseVersion, Some(binding), None, None) => json!({"root":root,"registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
             (EditDomain::MetadataText, Some(binding), Some(context), None) if context.valid() => json!({"root":root,
@@ -1772,6 +1793,7 @@ impl EditOwner {
                 "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"intent":"recover"}),
             _ => return Err(invalid_owner()),
         };
+        if workflow_recovery { params["intent"] = json!("recover"); }
         let bytes = request_bytes(domain, &id, 0, "open", params)?;
         let (commands, receiver) = mpsc::channel(1);
         let (stop, _) = watch::channel(false);
@@ -1816,7 +1838,8 @@ impl EditOwner {
             self.inner.admission(&r, window, domain)?;
             if r.active.is_some() { return Err(BridgeError::new("busy", "One original edit owner is already active.")); }
             if r.blocked_projects.contains(&project_id)
-                && !(domain == EditDomain::MetadataImages && image_recovery && r.image_recovery_projects.contains(&project_id)) {
+                && !(domain == EditDomain::MetadataImages && image_recovery && r.image_recovery_projects.contains(&project_id)
+                    || domain == EditDomain::GitHubWorkflows && workflow_recovery && r.workflow_recovery_projects.contains(&project_id)) {
                 return Err(BridgeError::new("pending_state", "This project requires its separately authorized recovery; an import cannot retry it."));
             }
             let now = Instant::now();
@@ -1826,7 +1849,8 @@ impl EditOwner {
             *claimed = true;
             r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
-                projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(workflow_wire::Details::default),
+                projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(||
+                    if workflow_recovery { workflow_wire::Details::recovery() } else { workflow_wire::Details::default() }),
                     metadata_text: metadata.map(metadata_wire::Details::new),
                     release_version: (domain == EditDomain::ReleaseVersion).then(version_wire::Details::default),
                     metadata_images: image_details,
@@ -1867,6 +1891,15 @@ impl EditOwner {
         self.prepare_domain(Some(publisher), window, EditDomain::GitHubWorkflows, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation), json!({"revision":&args.revision,"draft":&args.draft,
                 "toolingRepository":&args.tooling_repository,"toolingSha":&args.tooling_sha}), Some(registration), None)?.workflows()
+    }
+    pub(crate) fn prepare_workflow_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        args: workflow_wire::PrepareWorkflowRecovery, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
+        self.prepare_domain(Some(publisher), window, EditDomain::GitHubWorkflows, &args.session_id, &args.revision,
+            (0, 0), json!({"revision":&args.revision,"intent":"recover"}), Some(registration), Some(SavedTextSubmission::WorkflowRecovery))?.workflows()
+    }
+    pub(crate) fn apply_workflow_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        session_id: &str, plan_token: &str, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
+        self.apply_domain_intent(Some(publisher), window, EditDomain::GitHubWorkflows, session_id, plan_token, Some(registration), true)?.workflows()
     }
     pub(crate) fn prepare_metadata_text(&self, window: &str, args: PrepareMetadataTextEdit,
         registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
@@ -1958,7 +1991,12 @@ impl EditOwner {
                     }
                     if let Some(detail) = a.projection.metadata_images.as_mut() { detail.submission = Some(submission); }
                 },
-                (EditDomain::Configuration | EditDomain::GitHubWorkflows, None) => {},
+                (EditDomain::Configuration, None) => {},
+                (EditDomain::GitHubWorkflows, None) if workflow_intent_matches(&a.projection, false) => {},
+                (EditDomain::GitHubWorkflows, Some(SavedTextSubmission::WorkflowRecovery))
+                    if workflow_intent_matches(&a.projection, true) && a.projection.workflow.as_ref()
+                        .and_then(|detail| detail.recovery.as_ref()).and_then(|recovery| recovery.checkout.as_ref())
+                        .is_some_and(|checkout| checkout.view.state == workflow_wire::RecoveryState::Recoverable) => {},
                 _ => return Err(invalid_owner()),
             }
             a.prepare_counters = Some(counters);
@@ -2020,16 +2058,25 @@ impl EditOwner {
     }
     fn apply_domain(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
         registration: Option<WorkflowRegistration>) -> Result<DomainStatus, BridgeError> {
+        self.apply_domain_intent(supplied, window, domain, session_id, plan_token, registration, false)
+    }
+    fn apply_domain_intent(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
+        registration: Option<WorkflowRegistration>, workflow_recovery: bool) -> Result<DomainStatus, BridgeError> {
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
-        let bytes = request_bytes(domain, session_id, 2, "apply", json!({"planToken": plan_token}))?;
+        if workflow_recovery && domain != EditDomain::GitHubWorkflows { return Err(invalid_owner()); }
+        let params = if workflow_recovery { json!({"planToken": plan_token, "intent":"recover"}) } else { json!({"planToken": plan_token}) };
+        let bytes = request_bytes(domain, session_id, 2, "apply", params)?;
         let (session, reply) = {
             let mut r = self.inner.lock();
             if r.window.as_deref() != Some(window) || r.document_lost { return Err(invalid_owner()); }
             // Repeated exact Apply is observation only, including terminal/Unknown.
             let existing = r.active.as_ref().map(|a| &a.projection).filter(|p| p.domain == domain && p.session_id == session_id)
                 .or_else(|| r.last.as_ref().filter(|p| p.domain == domain && p.session_id == session_id));
+            if domain == EditDomain::GitHubWorkflows && existing.is_some_and(|p| !workflow_intent_matches(p, workflow_recovery)) {
+                return Err(invalid_owner()); // Even exact repeated tokens cannot cross intent.
+            }
             if existing.is_some_and(|p| exact_apply_receipt(p, domain, &r.generation, session_id, plan_token)) {
                 return self.inner.snapshot_for(&r, domain);
             }
@@ -2396,6 +2443,11 @@ fn terminal_sequence(seq: u32, claimed: u32, prepared: bool, cleaning: bool) -> 
     if cleaning { seq >= lowest && seq <= claimed } else { seq == claimed }
 }
 fn terminal_projection_admissible(projection: &EditProjection, plan_token: Option<&str>, core: &wire::CoreEditOutcome) -> bool {
+    if projection.domain == EditDomain::GitHubWorkflows {
+        if let Some(recovery) = projection.workflow.as_ref().and_then(|detail| detail.recovery.as_ref()) {
+            return plan_token == projection.plan_token() && recovery.terminal_admissible(projection.apply_submitted, core);
+        }
+    }
     if projection.domain == EditDomain::MetadataImages {
         return plan_token == projection.plan_token() && projection.metadata_images.as_ref()
             .is_some_and(|detail| detail.terminal_admissible(projection.apply_submitted, core));
@@ -2475,9 +2527,29 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                     owner.fixture_schedule.accepted_terminal(seq);
                 }
             }
+            ChildFrame::WorkflowRecoveryOpened(opened) => {
+                if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
+                else if let Some(recovery) = a.projection.workflow.as_mut().and_then(|detail| detail.recovery.as_mut()) {
+                    recovery.checkout = Some(workflow_wire::RecoveryCheckout { revision: opened.revision, view: opened.recovery });
+                    a.opened = true;
+                    if a.cleanup_start.is_none() { a.projection.phase = Phase::Editing; a.phase_end = None; }
+                } else { invalid = true; }
+            }
+            ChildFrame::WorkflowRecoveryPrepared(prepared) => {
+                if !a.opened || a.prepared || a.claimed_seq != 1 || a.projection.revision() != Some(prepared.revision.as_str()) { invalid = true; }
+                else if let Some(recovery) = a.projection.workflow.as_mut().and_then(|detail| detail.recovery.as_mut()) {
+                    if !recovery.checkout.as_ref().is_some_and(|checkout| checkout.view == prepared.recovery) { invalid = true; }
+                    else {
+                        recovery.prepared = Some(workflow_wire::RecoveryPrepared { revision: prepared.revision,
+                            plan_token: prepared.plan_token, view: prepared.recovery });
+                        a.prepared = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Reviewing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
+            }
             ChildFrame::WorkflowOpened(opened) => {
                 if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
-                else if let Some(detail) = a.projection.workflow.as_mut() {
+                else if let Some(detail) = a.projection.workflow.as_mut().filter(|detail| detail.recovery.is_none()) {
                     detail.checkout = Some(workflow_wire::Checkout { revision: opened.revision, observed: opened.observed });
                     a.opened = true;
                     if a.cleanup_start.is_none() { a.projection.phase = Phase::Editing; a.phase_end = None; }
@@ -3596,6 +3668,10 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                     && a.projection.core_outcome.as_ref().is_some_and(|core| core.resources == ResourceState::Settled) {
                     r.image_recovery_projects.insert(a.projection.project_id.clone());
                 }
+                if a.projection.domain == EditDomain::GitHubWorkflows && !a.unknown
+                    && a.projection.core_outcome.as_ref().is_some_and(|core| core.resources == ResourceState::Settled) {
+                    r.workflow_recovery_projects.insert(a.projection.project_id.clone());
+                }
             }
             else { r.disabled = true; }
         }
@@ -3606,6 +3682,10 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         } else {
             a.projection.phase = Phase::Final;
             a.projection.native_finality = NativeFinality::Settled;
+        }
+        if r.workflow_recovery_projects.contains(&a.projection.project_id) && workflow_recovery_complete(&a.projection) {
+            r.workflow_recovery_projects.remove(&a.projection.project_id);
+            r.blocked_projects.remove(&a.projection.project_id);
         }
         if r.image_recovery_projects.contains(&a.projection.project_id) && image_recovery_complete(&a.projection) {
             r.image_recovery_projects.remove(&a.projection.project_id);
@@ -4186,7 +4266,7 @@ mod workflow_domain_tests {
                 schema_reference:format!("https://raw.githubusercontent.com/example/toolkit/{}/schemas/project.schema.json","0".repeat(40)),state:"format-only".into() } };
         EditProjection { domain:EditDomain::GitHubWorkflows,metadata_text:None,release_version:None,metadata_images:None,workflow:Some(workflow_wire::Details {
             checkout:Some(workflow_wire::Checkout { revision:REVISION.into(),observed }),
-            prepared:Some(workflow_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),conflict:None }),
+            prepared:Some(workflow_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),conflict:None,recovery:None }),
             project_id:"project-1".into(),session_id:SESSION.into(),owner_generation:GENERATION.into(),phase:Phase::Reviewing,
             review_remaining_ms:900000,checkout:None,prepared:None,apply_submitted:false,core_outcome:None,
             native_reason:Reason::None,native_finality:NativeFinality::Pending,late_settled:false }
@@ -4490,6 +4570,84 @@ mod workflow_domain_tests {
         assert_eq!(installed_bootstrap_argument(EditDomain::MetadataImages),Some("metadata_images"));
         assert!(request_bytes(EditDomain::MetadataImages,SESSION,0,"open",json!({"root":"/inert/project"})).is_err());
     }
+
+    fn recovery_projection(action: workflow_wire::RecoveryAction) -> EditProjection {
+        // Inert DATA only; reuse the original production admission predicates.
+        let mut value = projection(false);
+        let old = value.workflow.as_ref().unwrap().prepared.as_ref().unwrap();
+        let files = old.view.files.iter().map(|file| workflow_wire::RecoveryFile {
+            id:file.id,path:file.path.clone(),
+            action:if action == workflow_wire::RecoveryAction::Rollback { workflow_wire::RecoveryFileAction::Remove }
+                else { workflow_wire::RecoveryFileAction::Preserve },
+            before:None,after:Some(workflow_wire::RecoverySummary { size:file.generated.byte_length,
+                mode:0o644,sha256:file.generated.sha256.clone() }),
+        }).collect();
+        let view = workflow_wire::RecoveryView { schema_version:1,kind:"recovery".into(),
+            state:workflow_wire::RecoveryState::Recoverable,action:Some(action),transaction_id:Some("c".repeat(32)),files,
+            private_cleanup:workflow_wire::RecoveryCleanup { file_count:6,directory_count:1,scope:"inspected-workflow-journal-only".into() } };
+        assert!(view.valid());
+        value.workflow = Some(workflow_wire::Details { recovery:Some(workflow_wire::RecoveryDetails {
+            checkout:Some(workflow_wire::RecoveryCheckout { revision:REVISION.into(),view:view.clone() }),
+            prepared:Some(workflow_wire::RecoveryPrepared { revision:REVISION.into(),plan_token:PLAN.into(),view }),
+        }),..workflow_wire::Details::default() });
+        value
+    }
+    #[test]
+    fn recovery_retains_inspected_terminal_facts_without_resuming_apply_authority() {
+        use workflow_wire::RecoveryAction::*;
+        for (action,effect) in [(Rollback,Effect::NotStarted),(CommittedCleanup,Effect::Committed),
+            (RolledBackCleanup,Effect::RolledBack),(PreparingCleanup,Effect::NotStarted)] {
+            let mut value = recovery_projection(action);
+            assert!(workflow_intent_matches(&value,true));
+            assert!(!workflow_intent_matches(&value,false)); // Ordinary Apply, including duplicate receipt, must refuse.
+            let pending = outcome(effect,Journal::RecoveryRequired,CoreReason::PendingState);
+            value.core_outcome = Some(pending.clone());
+            assert!(terminal_projection_admissible(&value,Some(PLAN),&pending));
+            assert!(!terminal_projection_admissible(&value,None,&pending));
+            assert!(!workflow_recovery_complete(&value));
+            value.workflow.as_mut().unwrap().recovery.as_mut().unwrap().prepared = None;
+            assert_eq!(value.revision(),Some(REVISION));
+            assert_eq!(value.plan_token(),None);
+            assert!(terminal_projection_admissible(&value,None,&pending));
+            let mut clean = pending; clean.journal = Journal::Clean; clean.reason = CoreReason::None;
+            assert!(!terminal_projection_admissible(&value,None,&clean));
+            if action == CommittedCleanup {
+                let downgraded = outcome(Effect::NotStarted,Journal::RecoveryRequired,CoreReason::FilesystemError);
+                assert!(!terminal_projection_admissible(&value,None,&downgraded));
+            }
+        }
+        assert!(!workflow_intent_matches(&projection(false),true));
+    }
+    #[test]
+    fn recovery_attention_clears_only_for_explicit_clean_original_final_without_any_failure() {
+        use workflow_wire::RecoveryAction::*;
+        for (action,effect) in [(Rollback,Effect::RolledBack),(CommittedCleanup,Effect::Committed),
+            (RolledBackCleanup,Effect::RolledBack),(PreparingCleanup,Effect::NotStarted)] {
+            let mut success = recovery_projection(action);
+            success.phase = Phase::Final; success.native_finality = NativeFinality::Settled;
+            success.apply_submitted = true;
+            success.core_outcome = Some(outcome(effect,Journal::Clean,CoreReason::None));
+            assert!(workflow_recovery_complete(&success));
+            assert!(terminal_projection_admissible(&success,Some(PLAN),success.core_outcome.as_ref().unwrap()));
+            assert!(!terminal_projection_admissible(&success,Some(SESSION),success.core_outcome.as_ref().unwrap()));
+            for change in 0..9 {
+                let mut bad = success.clone();
+                match change {
+                    0 => bad.apply_submitted = false,
+                    1 => bad.native_reason = Reason::Discarded,
+                    2 => bad.native_finality = NativeFinality::Pending,
+                    3 => { bad.phase = Phase::Unknown; bad.native_finality = NativeFinality::Unknown; },
+                    4 => bad.late_settled = true,
+                    5 => bad.core_outcome.as_mut().unwrap().reason = CoreReason::FilesystemError,
+                    6 => { let core = bad.core_outcome.as_mut().unwrap(); core.resources = ResourceState::Unknown; core.reason = CoreReason::CustodyUnknown; },
+                    7 => { let core = bad.core_outcome.as_mut().unwrap(); core.journal = Journal::RecoveryRequired; core.reason = CoreReason::PendingState; },
+                    _ => bad.workflow.as_mut().unwrap().recovery.as_mut().unwrap().prepared = None,
+                }
+                assert!(!workflow_recovery_complete(&bad),"action={action:?}; mutation={change}");
+            }
+        }
+    }
+
     pub(super) fn version_installed_selection_keeps_the_general_gate_closed() {
         assert!(!NATIVE_RELEASE_VERSION_EDIT_QUALIFIED);
         for domain in [EditDomain::Configuration,EditDomain::GitHubWorkflows,EditDomain::MetadataText,EditDomain::ReleaseVersion,EditDomain::MetadataImages] {

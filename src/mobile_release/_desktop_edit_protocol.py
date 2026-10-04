@@ -113,11 +113,15 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
             names = {"root", "registeredIdentity", "platform", "locale"}
         elif protocol in {WORKFLOW_PROTOCOL, VERSION_PROTOCOL}:
             names = {"root", "registeredIdentity"}
+            if protocol == WORKFLOW_PROTOCOL and "intent" in params:
+                names.add("intent")
         else:
             names = {"root"}
         valid = op == "open" and set(params) == names and type(params["root"]) is str
         if valid and protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
             registered_identity(params["registeredIdentity"])
+        if valid and protocol == WORKFLOW_PROTOCOL and "intent" in params:
+            valid = params["intent"] == "recover"
         if valid and protocol == METADATA_PROTOCOL:
             try:
                 platform_value(params["platform"])
@@ -151,18 +155,25 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
             except MetadataTextInputError:
                 valid = False
     elif sequence == 1 and protocol == WORKFLOW_PROTOCOL:
-        valid = (op == "prepare" and set(params) == {"revision", "draft", "toolingRepository", "toolingSha"}
-                 and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
-                 and type(params["draft"]) is dict
-                 and type(params["toolingRepository"]) is str and len(params["toolingRepository"].encode("utf-8")) <= 140
-                 and type(params["toolingSha"]) is str and len(params["toolingSha"].encode("utf-8")) <= 40)
-        if valid:
-            _workflow_value(params["draft"], depth_limit=28, byte_limit=512 * 1024)
+        if "intent" in params:
+            valid = (op == "prepare" and set(params) == {"revision", "intent"} and params["intent"] == "recover"
+                     and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None)
+        else:
+            valid = (op == "prepare" and set(params) == {"revision", "draft", "toolingRepository", "toolingSha"}
+                     and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
+                     and type(params["draft"]) is dict
+                     and type(params["toolingRepository"]) is str and len(params["toolingRepository"].encode("utf-8")) <= 140
+                     and type(params["toolingSha"]) is str and len(params["toolingSha"].encode("utf-8")) <= 40)
+            if valid:
+                _workflow_value(params["draft"], depth_limit=28, byte_limit=512 * 1024)
     elif sequence == 1 and protocol == PROTOCOL:
         valid = (op == "prepare" and set(params) == {"revision", "expectedBase", "draft"}
                  and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
                  and (params["expectedBase"] is None or type(params["expectedBase"]) is dict)
                  and type(params["draft"]) is dict)
+    elif sequence == 2 and protocol == WORKFLOW_PROTOCOL and "intent" in params:
+        valid = (op == "apply" and set(params) == {"planToken", "intent"} and params["intent"] == "recover"
+                 and type(params["planToken"]) is str and TOKEN.fullmatch(params["planToken"]) is not None)
     else:
         valid = (op == "apply" and set(params) == {"planToken"}
                  and type(params["planToken"]) is str and TOKEN.fullmatch(params["planToken"]) is not None)

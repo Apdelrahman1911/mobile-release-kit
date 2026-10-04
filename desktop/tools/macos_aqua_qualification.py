@@ -24,6 +24,8 @@ from types import FunctionType, ModuleType
 # Fixed synthetic literals only. The producer below is byte-identical to the
 # reviewed core-failure fixture; the historical Linux runner is never imported.
 RECOVERY_CASE = "project-recovery-pending"
+IOS_ACCOUNT_CASE = "ios-recovery-pending"
+IOS_ACCOUNT_LOCK_NAME = ".fl" + hashlib.sha1(b"signing.keychain-db", usedforsecurity=False).hexdigest()[:8].upper()
 RECOVERY_FILES = {"project/.gitignore": b".mobile-release/\n", "project/unrelated.txt": b"unrelated synthetic file; preserve\n",
                   "project/google-services.json": b"synthetic original Android input\n",
                   "project/GoogleService-Info.plist": b"synthetic original iOS input\n"}
@@ -345,6 +347,199 @@ sys.stdout.buffer.write(raw)
 sys.stdout.buffer.flush()
 '''
 
+IOS_ACCOUNT_CORE_PROGRAM = r'''
+import hashlib, json, os, re, stat, subprocess, sys, time
+from pathlib import Path
+class Refused(Exception): pass
+def need(ok, label):
+    if not ok: raise Refused(label)
+def pairs(items):
+    out={}
+    for key,value in items:
+        need(key not in out,"duplicate-private-key");out[key]=value
+    return out
+def encoded(value): return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True,allow_nan=False).encode("ascii")
+def ident(info): return [info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink]
+def main():
+    need(len(sys.argv)==7 and sys.platform=="darwin","native-account-entry")
+    core,mode,state,work,final,expected_sha=sys.argv[1:]
+    need(mode in ("produce","observe") and re.fullmatch(r"[1-9][0-9]{1,19}",work) and re.fullmatch(r"[1-9][0-9]{1,19}",final),"entry-bounds")
+    work,final=int(work),int(final)
+    need(final-work==25_000_000_000 and time.monotonic_ns()<work<final<2**63,"original-clock")
+    need(re.fullmatch(r"/private/tmp/mrk-macos-aqua-[0-9a-f]{40}-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}/state/ios-recovery-pending",state)
+         and os.getcwd()==state,"state-route")
+    need(expected_sha=="-" if mode=="produce" else re.fullmatch(r"[0-9a-f]{64}",expected_sha),"private-comparison-binding")
+    sys.path.insert(0,core)
+    from mobile_release import local_signing as signing
+    from mobile_release.owned_process import run_owned, ProcessCleanupError
+    from mobile_release.cancellation import DefaultCancellation, CleanupScope
+    from mobile_release._command_process import OriginalCommandOutcome, OriginalCommandFinality
+    uid,gid=os.getuid(),os.getgid()
+    need(uid>0 and uid==os.geteuid() and gid==os.getegid(),"native-account-user")
+    os.umask(0o077)
+    guard=DefaultCancellation(ProcessCleanupError,"fixture original close is unconfirmed")
+    fds=[];held=[];parents={};calls=[];closed=0;close_error=None;session=None;lease=None;private=None
+    def timely(): need(time.monotonic_ns()<work,"original-work-expired")
+    def final_time(): need(time.monotonic_ns()<final,"original-finality-expired")
+    def close_one(fd):
+        nonlocal closed,close_error
+        need(fd in fds,"descriptor-not-original")
+        fds.remove(fd)
+        try:
+            with guard.deferred(check_on_exit=False): os.close(fd)
+        except BaseException as error:
+            if close_error is None:close_error=error
+            raise
+        closed+=1
+    def close_owned():
+        for fd in tuple(reversed(fds)):
+            try:close_one(fd)
+            except BaseException:pass
+        if close_error is not None:raise close_error
+    def opening(name,parent=None,directory=False):
+        timely();need(len(fds)<32,"descriptor-limit")
+        flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC|(os.O_DIRECTORY if directory else 0)
+        with guard.deferred():
+            fd=os.open(name,flags,dir_fd=parent);fds.append(fd)
+        need(not os.get_inheritable(fd),"descriptor-inheritance");return fd
+    def check_held():
+        timely()
+        for parent,name,fd,before,directory in held:
+            current=ident(os.fstat(fd));named=ident(os.stat(name,dir_fd=parent,follow_symlinks=False))
+            n=5 if directory else 6
+            need(current[:n]==before[:n] and named[:n]==before[:n],"baseline-original-changed")
+    def directory(path):
+        path=Path(path)
+        need(path.is_absolute() and len(str(path).encode())<=512 and len(path.parts)-1<=8
+             and all(p not in (".","..") and len(p.encode())<=255 for p in path.parts[1:]),"directory-route")
+        if str(path) in parents:return parents[str(path)]
+        parent=None if path==Path("/") else directory(path.parent)
+        name="/" if parent is None else path.name
+        fd=opening(name,parent,True);info=ident(os.fstat(fd))
+        need(info==ident(os.stat(name,dir_fd=parent,follow_symlinks=False)) and stat.S_ISDIR(info[2])
+             and info[3] in (0,uid) and (info[2]&0o7022==0 or str(path)=="/private/tmp" and info[2]==stat.S_IFDIR|0o1777 and info[3]==0),"directory-original")
+        held.append((parent,name,fd,info,True));parents[str(path)]=fd;return fd
+    def native_baseline(home,baseline,expected=None):
+        need(type(baseline) is dict and set(baseline)=={"default","search"} and type(baseline["search"]) is list
+             and 1<=len(baseline["search"])<=8 and type(baseline["default"]) is str
+             and baseline["default"] in baseline["search"] and len(set(baseline["search"]))==len(baseline["search"]),"baseline-not-eligible")
+        members=[];seen=set();root=home/"Library/Keychains"
+        for raw in baseline["search"]:
+            timely();need(type(raw) is str and "\x00" not in raw and "\\" not in raw and len(raw.encode())<=512,"baseline-path")
+            path=Path(raw)
+            need(path.is_absolute() and str(path)==raw and path.is_relative_to(root) and path!=root
+                 and len(path.parts)-1<=8 and all(p not in (".","..") and 0<len(p.encode())<=255 for p in path.parts[1:]),"baseline-path")
+            parent=directory(path.parent);fd=opening(path.name,parent);before=ident(os.fstat(fd))
+            need(before==ident(os.stat(path.name,dir_fd=parent,follow_symlinks=False)) and stat.S_ISREG(before[2])
+                 and before[3]==uid and before[5]==1 and before[2]&0o7022==0 and before[0]==os.fstat(directory(home)).st_dev
+                 and tuple(before[:2]) not in seen,"baseline-member-original")
+            seen.add(tuple(before[:2]));held.append((parent,path.name,fd,before,False));members.append({"path":raw,"identity":before})
+        need(expected is None or members==expected,"baseline-member-substitution")
+        check_held();return members
+    def original_runner(argv,**options):
+        timely();need(session is not None and lease is not None and len(calls)<64,"command-owner")
+        allowed=[["/usr/bin/security",name,"-d","user"] for name in ("default-keychain","list-keychains")]
+        if mode=="produce":
+            allowed.extend([["/usr/bin/security",name,"-d","user","-s",str(session.keychain)] for name in ("default-keychain","list-keychains")])
+            allowed.append(["/usr/bin/security","create-keychain","-p","MRK-disposable-empty-keychain",str(session.keychain)])
+        need(type(argv) is list and argv in allowed and options.get("cancellation") is guard,"fixed-native-command")
+        scope=options.get("execution_scope");binding=options.get("journal_binding")
+        need(scope is not None and scope._source._lease is lease,"original-account-command-source")
+        # Remaining allowance is always derived from the original pre-entry T.
+        # Reserve the unchanged core's3s command cleanup plus2s scheduling margin.
+        timeout=min(options["timeout"],(work-time.monotonic_ns())//1_000_000_000-5)
+        need(type(timeout) is int and 1<=timeout<=30,"command-deadline")
+        options["timeout"]=timeout;options["output_limit"]=16*1024
+        row=[scope,binding,None];calls.append(row)
+        result=run_owned(argv,**options);row[2]=result
+        timely()
+        need(type(result) is subprocess.CompletedProcess and result.args==argv and type(result.returncode) is int
+             and result.returncode==0 and type(result.stdout) is str and result.stderr=="","native-original-return")
+        return result
+    def command_finality():
+        for scope,binding,result in calls:
+            outcome=scope.outcome.read()
+            need(result is not None and type(outcome) is OriginalCommandOutcome and outcome.matches(scope,binding)
+                 and type(outcome.original_finality) is OriginalCommandFinality
+                 and outcome.original_finality._engine is outcome._engine and outcome.create_w.retired and outcome.run_tool.retired
+                 and outcome.result_integrity=="complete" and outcome.termination=="normal-exit" and outcome.returncode==0
+                 and not outcome.execution_unknown and outcome.no_target is None,"native-original-finality")
+    scope=CleanupScope(guard,close_owned,owns_cancellation=True,first_primary=True)
+    try:
+        try:
+            with scope:
+                guard.install();guard.activate();timely()
+                home=signing.account_home();directory(home);state_fd=directory(state)
+                if mode=="observe":
+                    fd=opening("account-baseline.json",state_fd)
+                    before=os.fstat(fd)
+                    need(stat.S_ISREG(before.st_mode) and before.st_uid==uid and before.st_nlink==1 and stat.S_IMODE(before.st_mode)==0o600
+                         and 0<before.st_size<=12*1024,"private-comparison-file")
+                    body=os.read(fd,12*1024+1)
+                    need(len(body)==before.st_size and hashlib.sha256(body).hexdigest()==expected_sha
+                         and ident(os.fstat(fd))==ident(before) and ident(os.stat("account-baseline.json",dir_fd=state_fd,follow_symlinks=False))==ident(before),"private-comparison-original")
+                    private=json.loads(body,object_pairs_hook=pairs)
+                    need(type(private) is dict and set(private)=={"home","homeIdentity","leaseIdentity","sessionIdentity","nativeIdentity","token","baseline","members","controls","native"}
+                         and private["home"]==str(home) and ident(os.fstat(directory(home)))[:5]==private["homeIdentity"],"private-account-binding")
+                    native_baseline(home,private["baseline"],private["members"])
+                with signing.local_signing_lease(cancellation=guard) as original_lease:
+                    lease=original_lease;session=lease.session();session.bind_runner(original_runner)
+                    if mode=="produce":
+                        session.open(create=True)
+                        # An uninstalled canary for ownership bookkeeping only,
+                        # never a claim of Apple profile/certificate validity.
+                        session.prepare(b"MRK empty-account recovery bookkeeping; not an Apple profile\n","D91B5701-B147-4B82-A33A-760E5C110006")
+                        timely();need(session.intent["profile"]["before"] is None,"profile-destination-occupied")
+                        members=native_baseline(home,session.intent["baseline"])
+                        session.run(["security","create-keychain","-p","MRK-disposable-empty-keychain",str(session.keychain)],kind="create")
+                        session.activate();timely();command_finality();check_held()
+                        need(not session.unresolved and not session.journal_failed and session.state["inflight"] is None
+                             and session.completed is None and session.state["profile"]["phase"]=="not-started"
+                             and session.inventory()==session.state["native"] and signing.DB_NAME in session.state["native"]
+                             and signing._names(session.fd)=={"keychain","intent.json","state.json"},"pending-boundary-unsettled")
+                        controls={name:{"bytes":len(session._committed_controls[name]),"sha256":hashlib.sha256(session._committed_controls[name]).hexdigest()}
+                                  for name in ("intent.json","state.json")}
+                        private={"home":str(home),"homeIdentity":ident(os.fstat(lease.home_fd))[:5],"leaseIdentity":ident(os.fstat(lease.fd))[:5],
+                            "sessionIdentity":ident(os.fstat(session.fd))[:5],"nativeIdentity":ident(os.fstat(session.native_fd))[:5],
+                            "token":session.token,"baseline":session.intent["baseline"],"members":members,"controls":controls,"native":session.state["native"]}
+                        need(len(encoded(private))<=12*1024,"private-comparison-bound")
+                        # Deliberately stop here. This exact normal context
+                        # closes descriptors/lease, not native cleanup or finish.
+                    else:
+                        need(ident(os.fstat(lease.fd))[:5]==private["leaseIdentity"],"persistent-lease-substitution")
+                        need(session.observe(journal=False)==private["baseline"],"native-baseline-not-restored")
+                        need(not signing._names(lease.fd),"pending-session-remains")
+                        command_finality();check_held();timely()
+                need(session.closed and session.fd is None and session.native_fd is None and lease.active is None
+                     and lease.fd is None and lease.home_fd is None and not lease.locked,"account-original-close")
+                need(not session._disposal_complete and not session.unresolved and not session.journal_failed,"account-close-state")
+                command_finality();check_held();final_time()
+        finally:scope.__exit__(*sys.exc_info())
+    except BaseException:
+        raise
+    final_time();ledger=guard.lifetime_ledger
+    need(guard.handler_state=="RESTORED" and not ledger.fatal and ledger._command is None and ledger._profile is None
+         and ledger._profile_calls==0 and ledger._commands==len(calls) and not fds and close_error is None and closed>0,"producer-original-finality")
+    if mode=="produce":
+        # The original lease records deliberate unfinished-session revocation.
+        need(lease._normal_execution_revoked and not session._disposal_complete and 3<=len(calls)<=64,"pending-origin")
+    else:need(len(calls)==2 and not session._open_attempted,"readback-only")
+    report={"schemaVersion":1,"scope":"real-core-pending-account-fixture-v1" if mode=="produce" else "real-core-account-baseline-readback-v1",
+        "case":"ios-recovery-pending","commands":len(calls),"profileCalls":0,"commandFinalities":True,"leaseClosed":True,"sessionClosed":True,
+        "handlersRestored":True,"fixtureDescriptorsClosed":True,"originalDeadlineMet":True,"keychainContentsRead":False}
+    if mode=="produce":report.update(pendingLeft=True,private=private)
+    else:report.update(pendingAbsent=True,baselinePreferencesMatched=True,baselineMemberIdentitiesMatched=True)
+    raw=encoded(report)+b"\n";need(len(raw)<=16*1024 if mode=="produce" else len(raw)<=2048,"receipt-bound")
+    final_time();sys.stdout.buffer.write(raw);sys.stdout.buffer.flush()
+try:main()
+except BaseException as error:
+    label=str(error) if type(error) is Refused else "original-operation-failed"
+    if re.fullmatch(r"[a-z][a-z0-9-]{0,63}",label) is None:label="original-operation-failed"
+    sys.stderr.write("MRK_IOS_ACCOUNT_FIXTURE_FAILURE="+label+"\n")
+    raise SystemExit(1)
+'''
+
+
 CASES = ("first-save", "noop-stale", "picker-loss", "save-loss")
 IOS_CASES = ("ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality")
 IOS_SIGNED_CASES = ("ios-signed-refusal", "ios-signed-cancel")
@@ -357,7 +552,7 @@ INPUT_IDS = {**IOS_INPUT_IDS, ANDROID_INPUT_CASE: (2, 7, 12, 14, 15, 16, 17)}
 FILE_NATIVE_PANELS = {case: {f"Session(Native({index}))": identifier for index, identifier in enumerate(ids)}
                       for case, ids in INPUT_IDS.items()}
 IOS_CURRENT_CASES = IOS_CASES + ("ios-signing-inputs", *IOS_SIGNED_CASES, "ios-recovery-empty")
-IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty",)
+IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty", IOS_ACCOUNT_CASE)
 PROJECT_FIELDS_CASE = "project-fields"
 INSTALLATION_INSPECTION_CASE = "installation-inspection"
 VAULT_HELPER_SCOPE = "vault-helper-shipping"
@@ -376,7 +571,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE,)
+ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,)
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -398,7 +593,8 @@ FAILURE_STEPS = frozenset((
 ).split()) | frozenset(f"{name}({number})" for name in (
     "Prepare", "Review", "OpenConfirmation", "Confirmation", "Acknowledge", "Acknowledged", "Apply", "Applied") for number in (0, 1))
 FAILURE_STEPS |= frozenset(f"Ios({name})" for name in (
-    "Navigate SignedMode ReadVersion VersionRead Prepare Review Acknowledge Acknowledged MutateVersion Start Running Cancel Hold ReleaseHold Final"
+    "Navigate SignedMode ReadVersion VersionRead Prepare Review Acknowledge Acknowledged MutateVersion Start Running Cancel Hold ReleaseHold Final "
+    "AccountPrepare AccountReview AccountAcknowledge AccountAcknowledged AccountStart AccountRunning AccountFinal"
 ).split())
 FAILURE_STEPS |= frozenset(f"Session({name})" for name in (
     "Navigate Platform Purpose Open Ready ChangeStage StageChanged Archive LockPage Lock ConfirmLock Locked Done"
@@ -967,10 +1163,10 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE), "scope-not-supported")
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE), "scope-not-supported")
     if scope == VAULT_HELPER_SCOPE:
         return VAULT_HELPER_CASES
-    if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE):
+    if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE):
         return (scope,)
     if scope == "ios-current-synthetic":
         return IOS_CURRENT_CASES
@@ -985,13 +1181,14 @@ def argument_scope(argv):
                                or argv == ["--scope", ANDROID_INPUT_CASE]
                                or argv == ["--scope", VAULT_HELPER_SCOPE]
                                or argv == ["--scope", INSTALLATION_INSPECTION_CASE]
-                               or argv == ["--scope", RECOVERY_CASE]), "arguments-not-supported")
+                               or argv == ["--scope", RECOVERY_CASE]
+                               or argv == ["--scope", IOS_ACCOUNT_CASE]), "arguments-not-supported")
     return argv[1] if argv else None
 
 
 def case_timeout(case):
     need(type(case) is str and case in ALL_CASES, "case-binding")
-    return 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
+    return 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
 
 
 def ios_config(case):
@@ -1099,6 +1296,8 @@ IOS_LIMITATIONS = ["saved-inputs-not-atomic", "project-build-code-is-trusted", "
 
 
 def _expected_ios_report(case):
+    if case == IOS_ACCOUNT_CASE:
+        return _expected_ios_pending_report()
     """Literal parser-test DATA, never a native receipt or a success producer."""
     if case in IOS_SIGNED_CASES or case == "ios-recovery-empty":
         return _expected_ios_account_report(case)
@@ -1217,6 +1416,182 @@ def _expected_ios_account_report(case):
     return expected
 
 
+def _expected_ios_pending_report():
+    """Inert exact comparison DATA; never native observation/finality."""
+    originals, prepared = [], []
+    token = "e" * 32
+    for i, action in enumerate(("inspect", "account")):
+        base = _expected_ios_account_report("ios-recovery-empty")
+        original = base["original"]
+        operation, generation = ("a" if i == 0 else "c") * 32, ("b" if i == 0 else "d") * 32
+        context = {"projectId": "inert-ios-parser", "platform": "ios", "operation": "ios-local-recovery",
+                   "recovery": {"action": action, **({"session": token} if i else {})}}
+        original["facts"].update(operationId=operation, ownerGeneration=generation)
+        original["terminal"]["context"] = context
+        original["terminal"]["report"]["account"] = {"status": "recovered" if i else "pending", "session": token,
+                                                    "next": "none" if i else "ordinary"}
+        if i:
+            original["terminal"]["report"]["project"] = None
+            original["terminal"]["lifetime"].update(commands=17, commandDispatched=True)
+        prepared.append({"operationId": operation, "ownerGeneration": generation, "context": context,
+                         "phase": "awaiting-consent", "intentUsable": True, "outcome": None, "reason": "none",
+                         "stage": None, "activity": None, "report": None})
+        originals.append(original)
+    return {"protocol": "mrk-ios-archive/3", "scope": "native-account-recovery-original-pair-v1", "case": IOS_ACCOUNT_CASE,
+            "prepared": prepared, "originals": originals, "requests": [1, 1, 1, 1], "replies": [1, 1, 1, 1],
+            "statusCallsReturned": 0, "freshUncheckedReviews": True, "explicitAcknowledgements": True,
+            "exactInspectedSession": True, "bothFinalResultsVisible": True, "projectRecoveryRequested": False,
+            "archiveOrExportRequested": False, "workMs": 120000, "cleanupMs": 240000, "hardMs": 250000,
+            "observationMs": 515000, "outerInvocationMs": 525000, "shippingBinaryQualified": False}
+
+
+def _ios_pending_report(value):
+    expected = _expected_ios_pending_report()
+    try:
+        need(type(value) is dict and type(value["originals"]) is list and len(value["originals"]) == 2
+             and type(value["prepared"]) is list and len(value["prepared"]) == 2, "ios-account-original-pair")
+        project = value["prepared"][0]["context"]["projectId"]
+        token = value["originals"][0]["terminal"]["report"]["account"]["session"]
+        need(type(project) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", project)
+             and type(token) is str and re.fullmatch(r"[0-9a-f]{32}", token), "ios-account-session")
+        ids, generations = [], []
+        for i in range(2):
+            operation, generation = value["prepared"][i]["operationId"], value["prepared"][i]["ownerGeneration"]
+            need(all(type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) for v in (operation, generation)), "ios-account-original-id")
+            ids.append(operation); generations.append(generation)
+            expected["prepared"][i].update(operationId=operation, ownerGeneration=generation)
+            expected["prepared"][i]["context"]["projectId"] = project
+            expected["originals"][i]["facts"].update(operationId=operation, ownerGeneration=generation)
+            expected["originals"][i]["terminal"]["report"]["account"]["session"] = token
+            if i:
+                expected["prepared"][i]["context"]["recovery"]["session"] = token
+        need(ids[0] != ids[1] and generations[0] != generations[1], "ios-account-original-reused")
+        calls = value["statusCallsReturned"]
+        count = value["originals"][1]["terminal"]["lifetime"]["commands"]
+        need(type(calls) is int and 0 <= calls <= 128 and type(count) is int and 1 <= count <= 32, "ios-account-command-count")
+        expected["statusCallsReturned"] = calls
+        expected["originals"][1]["terminal"]["lifetime"]["commands"] = count
+    except (KeyError, TypeError, IndexError) as error:
+        raise Refused("ios-account-pair-shape") from error
+    _exact(value, expected, ("iosArchive",))
+    return value
+
+
+def _ios_account_private(value, uid, home):
+    """Private bounded producer DATA; paths cannot select another account."""
+    need(type(uid) is int and uid > 0 and type(home) is str and home.startswith("/")
+         and type(value) is dict and set(value) == {"home", "homeIdentity", "leaseIdentity", "sessionIdentity", "nativeIdentity",
+             "token", "baseline", "members", "controls", "native"} and value["home"] == home, "ios-account-private-shape")
+    need(len(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")) <= 12*1024,
+         "ios-account-private-bound")
+    need(type(value["token"]) is str and re.fullmatch(r"[0-9a-f]{32}", value["token"]), "ios-account-private-token")
+    def identity(row, size):
+        need(type(row) is list and len(row) == size and all(type(n) is int and 0 <= n < 2**64 for n in row)
+             and row[0] > 0 and row[1] > 0, "ios-account-private-identity")
+    for key in ("homeIdentity", "leaseIdentity", "sessionIdentity", "nativeIdentity"):
+        row = value[key]; identity(row, 5)
+        need(stat.S_ISDIR(row[2]) and row[3] == uid and row[2] & 0o7022 == 0
+             and (key == "homeIdentity" or row[2] == stat.S_IFDIR | 0o700)
+             and row[0] == value["homeIdentity"][0], "ios-account-private-directory")
+    baseline, members = value["baseline"], value["members"]
+    need(type(baseline) is dict and set(baseline) == {"default", "search"} and type(baseline["search"]) is list
+         and 1 <= len(baseline["search"]) <= 8 and type(members) is list and len(members) == len(baseline["search"])
+         and type(baseline["default"]) is str and baseline["default"] in baseline["search"], "ios-account-private-baseline")
+    names, identities = set(), set()
+    root = Path(home) / "Library/Keychains"
+    for raw, row in zip(baseline["search"], members):
+        need(type(raw) is str and "\x00" not in raw and "\\" not in raw and len(raw.encode("utf-8")) <= 512, "ios-account-private-path")
+        path = Path(raw)
+        need(path.is_absolute() and str(path) == raw and path.is_relative_to(root) and path != root
+             and len(path.parts)-1 <= 8 and all(part not in (".", "..") and 0 < len(part.encode()) <= 255 for part in path.parts[1:])
+             and raw not in names and type(row) is dict and set(row) == {"path", "identity"} and row["path"] == raw, "ios-account-private-path")
+        identity(row["identity"], 6); original = row["identity"]
+        need(stat.S_ISREG(original[2]) and original[3] == uid and original[5] == 1 and original[2] & 0o7022 == 0
+             and original[0] == value["homeIdentity"][0] and tuple(original[:2]) not in identities, "ios-account-private-member")
+        names.add(raw); identities.add(tuple(original[:2]))
+    controls = value["controls"]
+    need(type(controls) is dict and set(controls) == {"intent.json", "state.json"}, "ios-account-private-controls")
+    for row in controls.values():
+        need(type(row) is dict and set(row) == {"bytes", "sha256"} and type(row["bytes"]) is int and 0 < row["bytes"] <= 512*1024
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]), "ios-account-private-control")
+    native = value["native"]
+    need(type(native) is dict and "signing.keychain-db" in native and set(native) <= {"signing.keychain-db", IOS_ACCOUNT_LOCK_NAME},
+         "ios-account-private-native")
+    for row in native.values():
+        need(type(row) is dict and set(row) == {"device", "inode"}
+             and all(type(n) is int and 0 < n < 2**64 for n in row.values()) and row["device"] == value["homeIdentity"][0]
+             and (row["device"], row["inode"]) not in identities, "ios-account-private-native-identity")
+        identities.add((row["device"], row["inode"]))
+    return value
+
+
+def _ios_account_child_result(result, mode, uid=None, home=None):
+    limit = 16*1024 if mode == "produce" else 2048
+    need(mode in ("produce", "observe") and type(result) is subprocess.CompletedProcess
+         and type(result.returncode) is int and result.returncode == 0 and result.stderr == b"" and type(result.stdout) is bytes
+         and 0 < len(result.stdout) <= limit and result.stdout.endswith(b"\n") and b"\n" not in result.stdout[:-1], "ios-account-child-failed")
+    try:
+        value = json.loads(result.stdout, object_pairs_hook=_pairs, parse_constant=lambda _: (_ for _ in ()).throw(Refused("ios-account-json")))
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise Refused("ios-account-json") from error
+    expected = {"schemaVersion": 1, "scope": "real-core-pending-account-fixture-v1" if mode == "produce" else "real-core-account-baseline-readback-v1",
+                "case": IOS_ACCOUNT_CASE, "commands": 2, "profileCalls": 0, "commandFinalities": True,
+                "leaseClosed": True, "sessionClosed": True, "handlersRestored": True, "fixtureDescriptorsClosed": True,
+                "originalDeadlineMet": True, "keychainContentsRead": False}
+    if mode == "produce":
+        need(type(value) is dict and type(value.get("commands")) is int and 3 <= value["commands"] <= 64, "ios-account-producer-command-count")
+        expected.update(commands=value["commands"], pendingLeft=True, private=_ios_account_private(value.get("private"), uid, home))
+    else:
+        expected.update(pendingAbsent=True, baselinePreferencesMatched=True, baselineMemberIdentitiesMatched=True)
+    _exact(value, expected)
+    return value
+
+
+def _account_environment(state, uid, username):
+    value = app_environment(state, uid, username)
+    # The native core itself selects/verifies pwd's real account home. A fake
+    # Aqua HOME must never redirect or conflict with account admission.
+    del value["HOME"]
+    return value
+
+
+def _run_ios_account_child(fixtures, run_owned, uid, username, mode):
+    import time
+    need(fixtures.cases == (IOS_ACCOUNT_CASE,) and not fixtures.inflight and mode in ("produce", "observe")
+         and (not fixtures.account_produced if mode == "produce" else fixtures.account_produced and fixtures.account_app_returned
+              and not fixtures.account_readback), "ios-account-child-order")
+    need(not fixtures.account_attempts[mode], "ios-account-child-reused")
+    fixtures.account_attempts[mode] = True
+    executable, core = fixtures.recovery_runtime_paths()
+    if mode == "observe":
+        fixtures._account_current(after=True)
+    state = fixtures.path / "state" / IOS_ACCOUNT_CASE
+    start = time.monotonic_ns()
+    work = start + (150 if mode == "produce" else 60)*1_000_000_000
+    final = work + 25*1_000_000_000
+    argv = [executable, "-I", "-S", "-B", "-c", IOS_ACCOUNT_CORE_PROGRAM, core, mode, str(state), str(work), str(final),
+            "-" if mode == "produce" else fixtures.account_private_sha]
+    fixtures.case, fixtures.stage, fixtures.inflight, fixtures.last_returned = IOS_ACCOUNT_CASE, "account-" + mode, True, False
+    limit = 16*1024 if mode == "produce" else 2048
+    result = run_owned(argv, environ=_account_environment(state, uid, username), cwd=state,
+                       timeout=180 if mode == "produce" else 90, capture=True, text=False, output_limit=limit)
+    need(type(result) is subprocess.CompletedProcess and type(result.args) is list and result.args == argv
+         and all(type(arg) is str for arg in result.args) and type(result.returncode) is int
+         and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout)+len(result.stderr) <= limit,
+         "ios-account-child-return-contract")
+    fixtures.inflight, fixtures.last_returned = False, True
+    need(time.monotonic_ns() < final, "ios-account-child-finality-late")
+    value = _ios_account_child_result(result, mode, uid, fixtures.account_home)
+    if mode == "produce":
+        fixtures.accept_account_producer(value)
+    else:
+        fixtures._account_current(after=True)
+        fixtures.account_readback = True
+        fixtures.account_readback_attestation = value
+    need(time.monotonic_ns() < final, "ios-account-child-finality-late")
+    return value
+
+
 def _ios_account_facts(value, expected, case, operation, generation):
     """Admit actual bounded varying counters; never accept unknown finality."""
     terminal, out = value["original"]["terminal"], expected["original"]["terminal"]
@@ -1286,6 +1661,8 @@ def _ios_account_facts(value, expected, case, operation, generation):
 
 def _ios_report(value, case):
     """Closed independent DATA parser. Only bounded actual varying facts vary."""
+    if case == IOS_ACCOUNT_CASE:
+        return _ios_pending_report(value)
     need(type(value) is dict and case in IOS_OPERATION_CASES, "ios-report")
     expected = _expected_ios_report(case)
     try:
@@ -1381,6 +1758,8 @@ def _expected_vault_original(kind, *, negative=False):
         "exitObserved": True, "exitSuccess": not (before or negative),
         "waitFailed": False, "killAttempted": False, "killFailed": False,
         "stdoutEof": True, "stderrEof": True, "pipeClosed": [True, True, True], "helperSlotsSettled": True,
+        "helperGateAcquired": True, "helperGateSpawnEntered": True, "helperGatePostchecked": True,
+        "helperGateClosed": True, "helperGateUnknown": False,
         "driverReturned": True, "driverBeforeCleanup": True, "blockingChildJoined": True,
         "resourcesSettled": True, "allocationsReleased": True,
         "firstFailure": "locked" if negative else "interrupted" if failed else None,
@@ -1525,7 +1904,7 @@ def expected_result(binding, case):
         value["native"]["panelAttachments"] = [False, True, False, False]
         value["reload"] = dict.fromkeys(value["reload"], False)
         return value
-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE) or case in VAULT_HELPER_CASES:
+    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
         if case in IOS_OPERATION_CASES:
@@ -1672,7 +2051,8 @@ RESULT_LOCATION_KEYS |= frozenset((
     "prepare archive exitCode containerKind container scheme bundleId symbolsPolicy preparationConfigured findings "
     "check status disposition snapshot work output relativeDirectory usedConfig usedVersion entries limitations "
     "lifetime complete fatal contained commandDispatched profileCalls stopObserved inputClosed handlersRestored "
-    "invocationClosed snapshotClosed filesClosed namespaceClosed"
+    "invocationClosed snapshotClosed filesClosed namespaceClosed requests replies freshUncheckedReviews explicitAcknowledgements "
+    "exactInspectedSession bothFinalResultsVisible projectRecoveryRequested archiveOrExportRequested"
 ).split())
 RESULT_LOCATION_KEYS |= frozenset((
     "projectFields normalProfileAvailable field initialRootAndOptions nameFieldPreparation laterSyntheticNavigation "
@@ -2814,6 +3194,7 @@ def _vault_original_failure_data(value):
              "successfulAddTerminal", "terminalSuccess", "outputFailed", "stderrSeen", "tryWaitEntered",
              "tryWaitReturned", "waitEntered", "exitObserved", "waitFailed", "killAttempted", "killFailed",
              "stdoutEof", "stderrEof", "helperSlotsSettled", "driverReturned", "driverBeforeCleanup",
+             "helperGateAcquired", "helperGateSpawnEntered", "helperGatePostchecked", "helperGateClosed", "helperGateUnknown",
              "blockingChildJoined", "resourcesSettled", "allocationsReleased", "cleanupContracted", "cleanupUnknown",
              "applicationCandidateConstructed", "applicationCandidateTaken", "applicationCallbackReturned"}
     nullable = {"authSettled", "filesystemSettled", "nativeInputClosed", "addSettled", "lookupSettled",
@@ -3110,7 +3491,7 @@ def fixture_data(case, final, *, ios_output_created=None):
             directories["."] = (0o700, tuple(sorted((*files, ".mobile-release"))))
             directories[".mobile-release"] = (0o700, ())
         return files, directories
-    if case in IOS_CURRENT_CASES:
+    if case in IOS_CURRENT_CASES or case == IOS_ACCOUNT_CASE:
         return ios_fixture_data(case, final, output_created=ios_output_created)
     need(ios_output_created is None, "fixture-output-kind")
     if case == ANDROID_INPUT_CASE:
@@ -3141,10 +3522,10 @@ def fixture_data(case, final, *, ios_output_created=None):
 
 
 def ios_fixture_data(case, final, *, output_created=None):
-    need(case in IOS_CURRENT_CASES and type(final) is bool, "fixture-case")
+    need((case in IOS_CURRENT_CASES or case == IOS_ACCOUNT_CASE) and type(final) is bool, "fixture-case")
     need(output_created is None or type(output_created) is bool and final and case in IOS_SIGNED_CASES,
          "fixture-output-kind")
-    if case == "ios-recovery-empty":
+    if case in ("ios-recovery-empty", IOS_ACCOUNT_CASE):
         return {".gitignore": IGNORE_PREFIX + b".mobile-release/\n", "keep.txt": KEEP}, {
             ".": (0o700, (".gitignore", "keep.txt"))}
     if final and case in IOS_SIGNED_CASES:
@@ -3275,6 +3656,14 @@ class Fixtures:
         self.recovery_produced = False
         self.recovery_attestation = self.recovery_session = self.recovery_runtime = None
         self.recovery_runtime_originals, self.recovery_inventories = [], {}
+        self.account_home = self.account_private = self.account_private_sha = self.account_private_file = None
+        self.account_produced = self.account_app_returned = self.account_readback = False
+        self.account_attempts = {"produce": False, "observe": False}
+        self.account_producer_attestation = self.account_readback_attestation = self.account_lease = None
+        self.account_fds, self.account_directories = set(), {}
+        self.account_baseline_files, self.account_native_files, self.account_control_files = [], [], []
+        self.gate_files, self.gate_directories = [], []
+        self.gate_work = self.gate_artifact = None
 
     def _open(self, name, parent=None, *, directory=False, create=False):
         flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -3289,6 +3678,8 @@ class Fixtures:
     def _close(self, fd):
         need(fd in self.fds, "fixture-close-not-original")
         self.fds.remove(fd)  # This original close is never repeated on error.
+        if hasattr(self, "account_fds"):
+            self.account_fds.discard(fd)
         try:
             os.close(fd)
             return True
@@ -3406,6 +3797,8 @@ class Fixtures:
         self._namespace()
         if self.cases == VAULT_HELPER_CASES:
             self._prepare_vault_parents()
+        if self.cases == (IOS_ACCOUNT_CASE,):
+            self._prepare_account()
 
     def _namespace(self):
         need(signature(os.stat("/private/tmp", follow_symlinks=False))[:6] == signature(os.fstat(self.parent))[:6], "temporary-parent-replaced")
@@ -3549,10 +3942,14 @@ class Fixtures:
             need(self._capture_recovery() == self.recovery_inventories["before"], "recovery-before-app-changed")
         else:
             validate_snapshot(self.originals[case], self._capture(case, False), case, False, self.uid, self.gid)
+        if case == IOS_ACCOUNT_CASE:
+            need(self.account_produced and not self.account_app_returned, "ios-account-app-before-producer")
+            self._account_current(after=False)
         state = self.states[case]
         self._roster(state, ("home", "tmp", "inputs") if case in SESSION_CASES
                      else ("home", "tmp", "outside") if case == PROJECT_FIELDS_CASE
                      else ("home", "tmp", "recovery-initial.json", "recovery-generated.json", "recovery-before.json") if case == RECOVERY_CASE
+                     else ("account-baseline.json", "home", "tmp") if case == IOS_ACCOUNT_CASE
                      else ("home", "tmp"), "fresh-state-roster")
         self._inputs_unchanged(case)
         if case in VAULT_HELPER_CASES:
@@ -3709,7 +4106,7 @@ class Fixtures:
             return read_original()
 
     def admit_recovery_runtime(self, source, work):
-        need(self.cases == (RECOVERY_CASE,) and not self.inflight and self.recovery_runtime is None, "recovery-runtime-reused")
+        need(self.cases in ((RECOVERY_CASE,), (IOS_ACCOUNT_CASE,)) and not self.inflight and self.recovery_runtime is None, "recovery-runtime-reused")
         need(type(work) is Path or isinstance(work, Path), "recovery-runtime-work")
         need(work.parent == Path("/Users/runner/work/_temp") and re.fullmatch(r"mrk-macos-aqua\.[A-Za-z0-9]{8}", work.name), "recovery-runtime-work-route")
         def private_json(path, limit):
@@ -3779,6 +4176,170 @@ class Fixtures:
             need(signature(os.fstat(fd)) == original and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == original,
                  "recovery-runtime-original-changed")
         return self.recovery_runtime
+
+    def _account_open(self, name, parent=None, *, directory=False):
+        need(not self.inflight and len(self.account_fds) < 32, "ios-account-descriptor-bound")
+        fd = self._open(name, parent, directory=directory)
+        self.account_fds.add(fd)
+        return fd
+
+    def _account_directory(self, path):
+        path = Path(path)
+        need(path.is_absolute() and len(str(path).encode()) <= 512 and len(path.parts)-1 <= 8
+             and all(part not in (".", "..") and 0 < len(part.encode()) <= 255 for part in path.parts[1:]), "ios-account-directory-path")
+        if str(path) in self.account_directories:
+            return self.account_directories[str(path)][2]
+        parent = None if path == Path("/") else self._account_directory(path.parent)
+        name = "/" if parent is None else path.name
+        fd = self._account_open(name, parent, directory=True)
+        before = signature(os.fstat(fd))
+        need(before == signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) and stat.S_ISDIR(before[2])
+             and before[3] in (0, self.uid) and before[2] & 0o7022 == 0, "ios-account-directory-original")
+        self.account_directories[str(path)] = (parent, name, fd, before)
+        return fd
+
+    def _prepare_account(self):
+        import pwd
+        need(self.cases == (IOS_ACCOUNT_CASE,) and self.account_home is None and not self.inflight, "ios-account-prepare-order")
+        account = pwd.getpwuid(self.uid)
+        home = Path(account.pw_dir).resolve(strict=True)
+        need(account.pw_uid == self.uid and self.uid > 0 and home.is_absolute()
+             and len(str(home).encode()) <= 512 and len(home.parts)-1 <= 5, "ios-account-home")
+        self.account_home = str(home)
+        fd = self._account_directory(home)
+        need(os.fstat(fd).st_uid == self.uid, "ios-account-home-owner")
+        # Do not create/repair/adopt a pending namespace. The genuine producer
+        # must acquire the ordinary core lease and refuse any existing session.
+
+    def _account_file(self, parent, name, *, body_hash=None, limit=512*1024, identity=None):
+        fd = self._account_open(name, parent)
+        before = signature(os.fstat(fd))
+        need(before == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
+             and before[2] == stat.S_IFREG | 0o600 and before[3] == self.uid and before[5] == 1
+             and 0 <= before[6] <= limit, "ios-account-owned-file")
+        if identity is not None:
+            need(before[:2] == (identity["device"], identity["inode"]), "ios-account-owned-file-identity")
+        row = (parent, name, fd, before, body_hash)
+        if body_hash is not None:
+            self._account_hash(row)
+        return row
+
+    def _account_hash(self, row):
+        parent, name, fd, before, expected = row
+        need(not self.inflight and expected is not None and signature(os.fstat(fd)) == before
+             and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "ios-account-control-original")
+        sha, offset = hashlib.sha256(), 0
+        while offset < before[6]:
+            chunk = os.pread(fd, min(64*1024, before[6]-offset), offset)
+            need(bool(chunk), "ios-account-control-read")
+            sha.update(chunk); offset += len(chunk)
+        need(offset == before[6] and sha.hexdigest() == expected and signature(os.fstat(fd)) == before
+             and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == before, "ios-account-control-changed")
+
+    def accept_account_producer(self, value):
+        need(not self.inflight and self.last_returned and not self.account_produced and self.account_private is None,
+             "ios-account-producer-reused")
+        private = _ios_account_private(value["private"], self.uid, self.account_home)
+        self.account_private = private
+        home = Path(self.account_home)
+        for path, key in ((home, "homeIdentity"), (home/".mobile-release-signing", "leaseIdentity"),
+                          (home/".mobile-release-signing"/("session-"+private["token"]), "sessionIdentity"),
+                          (home/".mobile-release-signing"/("session-"+private["token"])/"keychain", "nativeIdentity")):
+            fd = self._account_directory(path)
+            need(list(signature(os.fstat(fd))[:5]) == private[key], "ios-account-producer-directory-substitution")
+        lease_path = home/".mobile-release-signing"
+        session_path = lease_path/("session-"+private["token"])
+        lease, session, native = (self.account_directories[str(path)][2] for path in (lease_path, session_path, session_path/"keychain"))
+        self.account_lease = lease
+        self._roster(lease, ("session-"+private["token"],), "ios-account-session-roster")
+        self._roster(session, ("intent.json", "keychain", "state.json"), "ios-account-control-roster")
+        self._roster(native, tuple(sorted(private["native"])), "ios-account-native-roster")
+        for row in private["members"]:
+            path = Path(row["path"])
+            parent = self._account_directory(path.parent)
+            fd = self._account_open(path.name, parent)
+            before = signature(os.fstat(fd))
+            need(list(before[:6]) == row["identity"] and signature(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == before,
+                 "ios-account-baseline-original")
+            self.account_baseline_files.append((parent, path.name, fd, before))
+        for name, identity in private["native"].items():
+            self.account_native_files.append(self._account_file(native, name, identity=identity, limit=64*1024*1024))
+        for name, expected in private["controls"].items():
+            row = self._account_file(session, name, body_hash=expected["sha256"])
+            need(row[3][6] == expected["bytes"], "ios-account-control-size")
+            self.account_control_files.append(row)
+        body = json.dumps(private, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
+        need(len(body) <= 12*1024, "ios-account-private-bound")
+        # The existing exclusive writer briefly owns one more original FD.
+        # Admit that slot before opening, even though it closes before return.
+        need(len(self.account_fds) < 32, "ios-account-descriptor-bound")
+        self._write(self.states[IOS_ACCOUNT_CASE], "account-baseline.json", body)
+        self.account_private_sha = digest(body)
+        self.account_private_file = self._account_file(self.states[IOS_ACCOUNT_CASE], "account-baseline.json",
+                                                      body_hash=self.account_private_sha, limit=12*1024)
+        self.account_producer_attestation = {key: item for key, item in value.items() if key != "private"}
+        self._account_current(after=False)
+        self.account_produced = True
+
+    def _account_current(self, *, after):
+        need(type(after) is bool and not self.inflight and self.account_private is not None, "ios-account-readback-order")
+        private = self.account_private
+        session_path = Path(self.account_home)/".mobile-release-signing"/("session-"+private["token"])
+        def absent(parent, name):
+            try:
+                os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            raise Refused("ios-account-owned-state-remains")
+        for path, (parent, name, fd, before) in self.account_directories.items():
+            need(signature(os.fstat(fd))[:5] == before[:5], "ios-account-directory-replaced")
+            if after and Path(path).is_relative_to(session_path):
+                absent(parent, name)
+            else:
+                need(signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5] == before[:5], "ios-account-directory-replaced")
+        for parent, name, fd, before in self.account_baseline_files:
+            need(signature(os.fstat(fd))[:6] == before[:6]
+                 and signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:6] == before[:6], "ios-account-baseline-changed")
+        for row in (*self.account_native_files, *self.account_control_files):
+            parent, name, fd, before, sha = row
+            current = signature(os.fstat(fd))
+            if after:
+                need(current[:5] == before[:5] and current[5] == 0, "ios-account-original-not-unlinked")
+                absent(parent, name)
+            else:
+                need(current[:6] == before[:6]
+                     and signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:6] == before[:6], "ios-account-owned-file-changed")
+                if sha is not None:
+                    self._account_hash(row)
+        self._roster(self.account_lease, () if after else ("session-"+private["token"],), "ios-account-lease-roster")
+        if self.account_private_file is not None:
+            self._account_hash(self.account_private_file)
+
+    def accept_account_app(self, report):
+        need(not self.inflight and self.last_returned and self.account_produced and not self.account_app_returned,
+             "ios-account-app-order")
+        _ios_pending_report(report)
+        need(report["originals"][0]["terminal"]["report"]["account"]["session"] == self.account_private["token"],
+             "ios-account-app-session")
+        self._account_current(after=True)
+        self.account_app_returned = True
+
+    def readback_account(self, report):
+        need(not self.inflight and self.last_returned and self.account_produced and self.account_app_returned and self.account_readback,
+             "ios-account-final-readback-order")
+        self.stage = "independent-account-readback"
+        _ios_pending_report(report)
+        self._account_current(after=True)
+        account = {
+            "producer": self.account_producer_attestation, "nativeReadback": self.account_readback_attestation,
+            "exactPendingSessionRecovered": True, "originalOwnedNativeAndControlsRemoved": True,
+            "persistentOriginalLeaseRetained": True, "nativeBaselineMembers": len(self.account_baseline_files),
+            "baselineIdentitiesMatched": True, "baselinePreferencesMatched": True, "projectMarkerUnchanged": True,
+            "privateContentsExported": False, "foreignPreferenceConflictInjected": False,
+            "appleSigningMaterialUsed": False, "signedExportQualified": False}
+        need(len(json.dumps(account, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")) <= 8192,
+             "ios-account-public-bound")
+        return {**self.readback(IOS_ACCOUNT_CASE), "iosAccountRecovery": account}
 
     def _prepare_vault_parents(self):
         import pwd
@@ -4042,6 +4603,8 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     not_executed = []
     if scope == RECOVERY_CASE:
         produce_pending_recovery(fixtures, run_owned, uid, username)
+    if scope == IOS_ACCOUNT_CASE:
+        _run_ios_account_child(fixtures, run_owned, uid, username, "produce")
     for case in cases:
         fixtures.before_call(case)
         state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
@@ -4079,7 +4642,11 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         fixtures.inner_diagnostic_source = "completed-output"
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
-        if case == RECOVERY_CASE:
+        if case == IOS_ACCOUNT_CASE:
+            fixtures.accept_account_app(report["iosArchive"])
+            _run_ios_account_child(fixtures, run_owned, uid, username, "observe")
+            readback = fixtures.readback_account(report["iosArchive"])
+        elif case == RECOVERY_CASE:
             readback = fixtures.readback_recovery(report["projectRecovery"])
         elif case in VAULT_HELPER_CASES:
             readback = fixtures.readback_vault(case, report["vaultHelper"])
@@ -4131,6 +4698,692 @@ def load_owner(root):
     need(Path(owned_process.__file__).absolute() == root / "src" / "mobile_release" / "owned_process.py", "owner-source-route")
     return owned_process
 
+
+# Fixed existing shipping scopes only; DATA selection is separate from ignored1.
+SHIPPING_GATE_SCOPES = ("vault-helper-shipping", "vault-helper-shipping-installation-inspection")
+SHIPPING_GATE_DATA_SCOPE = "six-main-and-seven-native-macos-shipping-gate-data-regressions"
+SHIPPING_GATE_MAIN_TESTS = tuple("vault_keyring_macos::tests::" + name for name in (
+    "a_known_native_failure_projection_does_not_invent_cleanup_uncertainty",
+    "participant_never_uses_terminal_or_missing_child_as_exit_finality",
+    "failed_pipe_close_publishes_first_before_the_next_original_consume",
+    "refusal_never_fabricates_driver_return_join_native_cleanup_or_refund",
+    "cleanup_projection_observes_a_stop_arriving_during_original_settlement",
+    "an_unknown_original_projection_cannot_reopen_cleanup_on_a_later_callback",
+))
+SHIPPING_GATE_NATIVE_TESTS = tuple("vault_helper_filesystem::tests::" + name for name in (
+    "prearm_and_pre_go_stop_have_no_native_allocation",
+    "parent_pre_stop_retires_only_an_inert_gate_and_cannot_reenter",
+    "prepare_and_spawn_are_distinct_one_shot_state_claims",
+    "code_settlement_never_implies_gate_postcheck_or_unknown_close_finality",
+    "even_a_closed_spawned_gate_requires_its_actual_postcheck",
+    "cleanup_gate_correspondence_does_not_erase_a_previous_failure",
+    "an_entered_unreturned_native_arm_is_never_empty_or_settled",
+))
+SHIPPING_GATE_TEST = "vault_helper_filesystem::gate_custody_control::shipping_helper_retains_gate_after_parent_reference_close_until_actual_exit"
+SHIPPING_GATE_COMPILER_ARGV = ["cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
+    "--target", "aarch64-apple-darwin", "--package", "mobile-release-kit-desktop",
+    "--package", "mrk-macos-installed-native", "--lib", "--no-run", "--message-format=json",
+    "--features", "mrk-macos-installed-native/installed-observation"]
+SHIPPING_GATE_SOURCE_PINS = {
+    "desktop/tools/stage_macos_installed.py": "03a400dd9ba5086762ff06535004a56f8828592a38ae564d96ef0e46b6109490",
+    "desktop/macos-installed-inputs/build-release.json": "a71990f4eba76fb6c05e011799999decf8620c5ad8ea0471fb13cada37646630",
+}
+SHIPPING_GATE_REPORT = "shipping-gate-control.receipt.json"
+SHIPPING_GATE_STATUS = "shipping-gate-control.status"
+
+
+def _gate_json(body, limit=24 * 1024):
+    need(type(body) is bytes and 0 < len(body) <= limit, "gate-json-bound")
+    value = json.loads(body.decode("utf-8", "strict"), object_pairs_hook=_pairs,
+                       parse_constant=lambda _: (_ for _ in ()).throw(Refused("gate-json-number")))
+    need(type(value) is dict, "gate-json-object")
+    return value
+
+
+def _gate_sha(value):
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _gate_integers(value, count):
+    need(type(value) is list and len(value) == count and all(type(v) is str
+         and re.fullmatch(r"-?(0|[1-9][0-9]{0,19})", v) and str(int(v)) == v for v in value), "gate-integer-data")
+    result = tuple(int(v) for v in value)
+    need(all(-(1 << 63) <= v < 1 << 64 for v in result), "gate-integer-bound")
+    return result
+
+
+def _gate_libtest(stdout, stderr, returncode, names):
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= 64 * 1024
+         and type(returncode) is int and returncode == 0 and not stderr, "gate-libtest-original-result")
+    count = len(names)
+    lines = [line for line in stdout.decode("utf-8", "strict").splitlines() if line]
+    expected = {"test " + name + " ... ok" for name in names}
+    need(len(expected) == count and len(lines) == count + 2
+         and lines[0] == f"running {count} " + ("test" if count == 1 else "tests")
+         and len(set(lines[1:-1])) == count and set(lines[1:-1]) == expected, "gate-exact-named-results")
+    summary = re.fullmatch(rf"test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; ([0-9]{{1,8}}) filtered out; finished in [0-9]{{1,6}}\.[0-9]{{1,9}}s", lines[-1])
+    need(summary is not None, "gate-exact-summary")
+    return int(summary[1])
+
+
+def _gate_artifact(value, work, library):
+    need(type(value) is dict and set(value) == {"path", "sha256", "identity", "full9"}
+         and type(value["path"]) is str and len(value["path"]) <= 4096 and _gate_sha(value["sha256"]), "gate-artifact-shape")
+    path = Path(value["path"])
+    need(path.parent == work / "cargo-target/aarch64-apple-darwin/debug/deps"
+         and re.fullmatch(re.escape(library) + r"-[0-9a-f]{1,64}", path.name), "gate-artifact-route")
+    full = _gate_integers(value["full9"], 9)
+    need(full[0] >= 0 and full[1] > 0 and stat.S_ISREG(full[2]) and full[2] & 0o111
+         and not full[2] & 0o7022 and full[3] > 0 and full[4] >= 0 and full[5] == 1
+         and 0 < full[6] <= 1024 * 1024 * 1024, "gate-artifact-identity")
+    # Existing headless identity is legacy dev,ino,mode,nlink,uid,gid,... .
+    _exact(value["identity"], [full[0], full[1], full[2], full[5], full[3], full[4], *full[6:]])
+    return value
+
+
+def _gate_headless(bodies, binding, checkout, work):
+    value = _gate_json(bodies["headless-tests.receipt.json"], 16384)
+    fixed = {"schemaVersion": 1, "scope": SHIPPING_GATE_DATA_SCOPE, "source": binding.source,
+        "workflowSource": binding.source, "workflow": WORKFLOW, "runId": binding.run, "runAttempt": binding.attempt,
+        "names": list(SHIPPING_GATE_MAIN_TESTS + SHIPPING_GATE_NATIVE_TESTS),
+        "originalReturned": True, "artifactOriginalUnchanged": True, "artifactOriginalClosed": True,
+        "passed": True, "shippingBinaryQualified": False, "distributionQualified": False,
+        "compilerOriginalReturned": True, "cargoTargetRetired": False, "cargoTargetOriginalClosed": True,
+        "workOriginalClosed": True, "genuineServiceQualified": False, "protectedCopyQualified": False,
+        "compilerArgv": SHIPPING_GATE_COMPILER_ARGV, "ownerCallsEntered": 3, "ownerCallsReturned": 3,
+        "headlessCustodyRetained": False, "cargoTargetRetentionReason": "required-follow-on-build-and-gate-control",
+        "tests": 13, "failed": 0, "ignored": 0, "measured": 0}
+    need(set(value) == set(fixed) | {"targets", "cargoTargetOriginal", "workOriginal", "compilerJsonSha256"}, "gate-headless-keys")
+    for key, expected in fixed.items():
+        _exact(value[key], expected)
+    for key in ("cargoTargetOriginal", "workOriginal"):
+        original = _gate_integers(value[key], 5)
+        need(original[0] >= 0 and original[1] > 0 and original[2] == stat.S_IFDIR | 0o700
+             and original[3] > 0 and original[4] >= 0, "gate-headless-directory")
+    need(bodies["headless-build.status"] == b"0\n" and _gate_sha(value["compilerJsonSha256"])
+         and digest(bodies["headless-build.jsonl"]) == value["compilerJsonSha256"], "gate-original-compiler-binding")
+    raw = bodies["headless-build.jsonl"]
+    need(type(raw) is bytes and 0 < len(raw) <= 4 * 1024 * 1024, "gate-compiler-bound")
+    rows = [_gate_json(line, 4 * 1024 * 1024) for line in raw.splitlines()]
+    finished = [row.get("success") for row in rows if row.get("reason") == "build-finished"]
+    need(len(finished) == 1 and finished[0] is True, "gate-compiler-finished")
+    targets = [row for row in rows if row.get("reason") == "compiler-artifact" and row.get("executable") is not None]
+    need(type(value["targets"]) is list and len(value["targets"]) == len(targets) == 2, "gate-two-libraries")
+    libraries = (
+        ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], SHIPPING_GATE_MAIN_TESTS, "headless"),
+        ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",
+         ["default", "installed-observation"], SHIPPING_GATE_NATIVE_TESTS, "headless-native"),
+    )
+    native = None
+    for record, (role, directory, package, library, features, names, prefix) in zip(value["targets"], libraries):
+        need(type(record) is dict, "gate-library-record")
+        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"
+        expected = {"role": role, "packageId": package_id, "features": features, "names": list(names),
+            "originalReturned": True, "artifactOriginalUnchanged": True, "artifactOriginalClosed": True,
+            "testsPassed": True, "returncode": 0, "tests": len(names), "failed": 0, "ignored": 0, "measured": 0}
+        need(set(record) == set(expected) | {"artifact", "stdoutSha256", "stderrSha256", "filtered"}, "gate-library-keys")
+        for key, selected in expected.items():
+            _exact(record[key], selected)
+        stdout, stderr = bodies[prefix + "-tests.stdout"], bodies[prefix + "-tests.stderr"]
+        need(bodies[prefix + "-tests.status"] == b"0\n" and record["stdoutSha256"] == digest(stdout)
+             and record["stderrSha256"] == digest(stderr), "gate-data-output-binding")
+        _exact(record["filtered"], _gate_libtest(stdout, stderr, 0, names))
+        artifact = _gate_artifact(record["artifact"], work, library)
+        matching = [row for row in targets if type(row.get("target")) is dict and row["target"].get("name") == library]
+        need(len(matching) == 1, "gate-one-library")
+        target = matching[0]
+        for actual, selected in ((target.get("package_id"), package_id),
+            (target.get("manifest_path"), str(checkout / directory / "Cargo.toml")),
+            (target["target"].get("kind"), ["lib"]), (target["target"].get("crate_types"), ["lib"]),
+            (target["target"].get("src_path"), str(checkout / directory / "src/lib.rs")),
+            (target.get("features"), features), (target.get("executable"), artifact["path"])):
+            _exact(actual, selected)
+        need(type(target.get("profile")) is dict and target["profile"].get("test") is True, "gate-test-profile")
+        if role == "native":
+            native = artifact
+    return value, native
+
+
+def _gate_installation(body, status, binding, environment, stage):
+    value = _gate_json(body, 65536)
+    inventory, manifest = environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256"), environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
+    need(_gate_sha(inventory) and _gate_sha(manifest) and status == b"0\n", "gate-installer-status-binding")
+    fixed = {"schemaVersion": 1, "sourceCommit": binding.source, "inventorySha256": inventory,
+        "runtimeManifestSha256": manifest, "release": stage.RELEASE, "installerDeadlineMetAfterFinalCloses": True,
+        "installerReportedOriginalsSettled": True, "applicationLaunched": False, "guiSaveQualified": False,
+        "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
+    need(set(value) == set(fixed) | {"nonrootReadbackFileCount", "originalInstallerResult", "installerResultExport",
+         "installationMetadata", "maintenanceGate"}, "gate-installation-keys")
+    for key, expected in fixed.items():
+        _exact(value[key], expected)
+    need(type(value["nonrootReadbackFileCount"]) is int and 0 < value["nonrootReadbackFileCount"] <= 2048, "gate-installation-count")
+    original = value["originalInstallerResult"]
+    # Reuse the current pinned nested contract, never invoke observation_command.
+    stage.bound_original_result(original, (None, "confirmed", "confirmed", "installed", True, 0), binding.source, inventory, manifest)
+    need(type(original["staging"]) is str and re.fullmatch(r"\.install-[0-9a-f]{32}", original["staging"])
+         and original["staging"][9:] != "0" * 32, "gate-installation-instance")
+    metadata = value["installationMetadata"]
+    need(type(metadata) is dict and set(metadata) == {"state", "instance", "inventoryBytes", "descriptorBytes", "originalFinality"}
+         and metadata["state"] == "recorded-current-data-correspondence" and metadata["instance"] == original["staging"][9:]
+         and metadata["originalFinality"] == "separate-Installer-status"
+         and type(metadata["inventoryBytes"]) is int and 0 < metadata["inventoryBytes"] <= 1024 * 1024
+         and type(metadata["descriptorBytes"]) is int and 0 < metadata["descriptorBytes"] <= stage.INSTALLATION_RECORD_LIMIT
+         and metadata["inventoryBytes"] + metadata["descriptorBytes"] == original["installationMetadata"]["plannedBytes"]
+             == original["installationMetadata"]["writtenBytes"], "gate-installation-metadata")
+    _exact(value["maintenanceGate"], {"state": "protected-permanent-gate-data-correspondence", "bytes": len(stage.MAINTENANCE_GATE_BYTES),
+                                    "exclusionObserved": False, "workerFinalityEstablished": False})
+    exported = value["installerResultExport"]
+    need(type(exported) is dict and set(exported) == {"bytes", "sha256", "identity", "finalityBasis"}
+         and type(exported["bytes"]) is int and 0 < exported["bytes"] <= 65536 and _gate_sha(exported["sha256"])
+         and exported["finalityBasis"] == "original-successful-Installer-return-and-checked-readback", "gate-installer-export")
+    identity = exported["identity"]  # Stager's explicitly legacy order, not new full9.
+    need(type(identity) is list and len(identity) == 9 and all(type(v) is int and 0 <= v < 1 << 64 for v in identity)
+         and identity[1] > 0 and identity[2:7] == [stat.S_IFREG | 0o444, 1, 0, 0, exported["bytes"]], "gate-installer-export-identity")
+    return value
+
+
+def _gate_file(fixtures, name, parent, limit, *, capture=True):
+    fd = fixtures._open(name, parent)
+    before = signature(os.fstat(fd))
+    need(stat.S_ISREG(before[2]) and before[3] == fixtures.uid and before[4] == fixtures.gid and before[5] == 1
+         and not before[2] & 0o7022 and 0 <= before[6] <= limit, "gate-original-file")
+    record = {"fd": fd, "parent": parent, "name": name, "full9": before, "sha256": None}
+    fixtures.gate_files.append(record)
+    body, hashed = _gate_file_read(record, capture)
+    record["sha256"] = hashed
+    return body, record
+
+
+def _gate_file_read(record, capture=False):
+    fd, parent, name, before = record["fd"], record["parent"], record["name"], record["full9"]
+    need(signature(os.fstat(fd)) == before == signature(os.stat(name, dir_fd=parent, follow_symlinks=False)), "gate-original-file-changed")
+    hashed, pieces, count = hashlib.sha256(), [], 0
+    while count < before[6]:
+        part = os.pread(fd, min(65536, before[6] - count), count)
+        need(bool(part), "gate-original-short-read")
+        hashed.update(part); count += len(part)
+        if capture:
+            pieces.append(part)
+    need(not os.pread(fd, 1, count) and signature(os.fstat(fd)) == before
+         == signature(os.stat(name, dir_fd=parent, follow_symlinks=False)), "gate-original-readback-changed")
+    return b"".join(pieces), hashed.hexdigest()
+
+
+def _gate_directory(fixtures, name, parent=None, *, create=False, private=False):
+    fd = fixtures._mkdir(parent, name) if create else fixtures._open(name, parent, directory=True)
+    before = signature(os.fstat(fd))[:5]
+    need(stat.S_ISDIR(before[2]) and before[3:] == (fixtures.uid, fixtures.gid) and not before[2] & 0o7022
+         and (not private or before[2] == stat.S_IFDIR | 0o700)
+         and signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5] == before, "gate-original-directory")
+    fixtures.gate_directories.append((fd, parent, name, before, create))
+    return fd
+
+
+def _gate_recheck(fixtures):
+    need(not fixtures.inflight, "gate-owner-finality-unknown")
+    for fd, parent, name, original, _created in fixtures.gate_directories:
+        need(signature(os.fstat(fd))[:5] == original
+             == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5], "gate-directory-changed")
+    for record in fixtures.gate_files:
+        need(_gate_file_read(record)[1] == record["sha256"], "gate-original-hash-changed")
+
+
+def _gate_load_stager(fixtures, checkout):
+    import importlib.util
+    selected = []
+    for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
+        body, original = _gate_file(fixtures, str(checkout / relative), None, 256 * 1024)
+        need(digest(body) == expected, "gate-stager-source-pin")
+        selected.append(original)
+    name = "_mrk_shipping_gate_stager"
+    need(name not in sys.modules, "gate-stager-already-imported")
+    spec = importlib.util.spec_from_file_location(name, checkout / "desktop/tools/stage_macos_installed.py")
+    need(spec is not None and spec.loader is not None, "gate-stager-loader")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    # Import reads only pinned build-release SOURCE through the existing bounded
+    # stager reader (including its read-only source xattr check on Darwin).
+    # No Installer, protected-installation readback or payload command is called.
+    spec.loader.exec_module(module)
+    for original in selected:
+        need(_gate_file_read(original)[1] == original["sha256"], "gate-stager-source-changed")
+    return module
+
+
+def _gate_dependencies(fixtures, binding, checkout, work, environment):
+    need(work.parent == Path("/Users/runner/work/_temp") and re.fullmatch(r"mrk-macos-aqua\.[A-Za-z0-9]{8}", work.name)
+         and environment.get("CARGO_TARGET_DIR") == str(work / "cargo-target")
+         and environment.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "gate-fixed-work-route")
+    fixtures.gate_work = _gate_directory(fixtures, str(work), private=True)
+    limits = {"headless-tests.receipt.json": 16384, "headless-build.jsonl": 4 * 1024 * 1024, "headless-build.status": 4,
+              "installation-observation.json": 65536, "installer-output.status": 4}
+    for prefix in ("headless", "headless-native"):
+        limits.update({prefix + "-tests.stdout": 65536, prefix + "-tests.stderr": 65536, prefix + "-tests.status": 4})
+    bodies = {name: _gate_file(fixtures, name, fixtures.gate_work, limit)[0] for name, limit in limits.items()}
+    headless, native = _gate_headless(bodies, binding, checkout, work)
+    need(_gate_integers(headless["workOriginal"], 5) == signature(os.fstat(fixtures.gate_work))[:5], "gate-original-work-binding")
+    stage = _gate_load_stager(fixtures, checkout)
+    _gate_installation(bodies["installation-observation.json"], bodies["installer-output.status"], binding, environment, stage)
+    return bodies, headless, native
+
+
+def _gate_new_report(binding, scope):
+    return {"schemaVersion": 1, "type": "macos-installed-shipping-gate-control", **binding.public(),
+        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": "macOS26-arm64",
+        "toolchain": "1.98.1", "testName": SHIPPING_GATE_TEST, "headlessReceiptSha256": None,
+        "compilerJsonSha256": None, "installationReadbackSha256": None, "artifact": None,
+        "ownerEntered": False, "originalCallReturned": False, "ownerReturncode": None, "ownerElapsedNanoseconds": None,
+        "stdoutSha256": None, "stderrSha256": None, "stdoutBytes": None, "stderrBytes": None, "namedTestPassed": False,
+        "sourceReadbacksUnchanged": False, "artifactOriginalUnchanged": False, "artifactCloseAttempts": 0,
+        "artifactOriginalClosed": False, "artifactRetired": False, "fixtureDirectoriesRetired": False,
+        "fixtureHandlesClosed": False, "failure": None, "cleanupErrors": [], "passed": False,
+        "actualParentProcessDisappearanceEstablished": False, "allWorkerPopulationsQualified": False,
+        "directLoaderQualified": False, "shippingBinaryQualified": False, "distributionQualified": False}
+
+
+def _gate_error(error, stage):
+    label = str(error) if type(error) is Refused else "original-operation-error"
+    if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", label) is None:
+        label = "original-operation-error"
+    return {"stage": stage, "reason": label, "type": type(error).__name__[:64]}
+
+
+def _gate_settle(fixtures, report, error):
+    # Entered-but-unreturned owner means no readback, close, deletion or next call.
+    if fixtures.inflight:
+        return error
+    try:
+        _gate_recheck(fixtures)
+        report["sourceReadbacksUnchanged"] = True
+        report["artifactOriginalUnchanged"] = fixtures.gate_artifact is not None
+    except BaseException as caught:
+        if error is None:
+            error = caught; report["failure"] = _gate_error(caught, "original-readback")
+        else:
+            report["cleanupErrors"].append(_gate_error(caught, "original-readback"))
+    attempted_closes = set()
+    file_closes_known = True
+    for original in fixtures.gate_files:
+        fd = original["fd"]
+        attempted_closes.add(fd)  # Even an unexpected consuming-call exception is never retried.
+        if original is fixtures.gate_artifact:
+            report["artifactCloseAttempts"] += 1
+        try:
+            closed = fixtures._close(fd)
+        except BaseException as caught:
+            closed = False
+            report["cleanupErrors"].append(_gate_error(caught, "original-file-close-call"))
+        if closed is not True:
+            file_closes_known = False
+        if original is fixtures.gate_artifact:
+            report["artifactOriginalClosed"] = closed
+        if not closed and fixtures.first_close_error is not None:
+            report["cleanupErrors"].append(_gate_error(fixtures.first_close_error, "original-file-close"))
+    created = [row for row in fixtures.gate_directories if row[4]]
+    if file_closes_known and not fixtures.close_errors:
+        retired = 0
+        for fd, parent, name, expected, _created in reversed(created):
+            try:
+                need(signature(os.fstat(fd))[:5] == expected
+                     == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5], "gate-fixture-retirement-original")
+                os.rmdir(name, dir_fd=parent)  # Empty only; never recursive or adopted paths.
+                retired += 1
+            except BaseException as caught:
+                report["cleanupErrors"].append(_gate_error(caught, "empty-fixture-retirement"))
+        report["fixtureDirectoriesRetired"] = len(created) == retired == 3
+    # Preserve failed/unknown binary outputs for diagnosis. Successful original
+    # test code is no longer needed by the remaining observer/Installer outputs.
+    if error is None and not report["cleanupErrors"] and report["namedTestPassed"] and report["artifactOriginalClosed"] and report["fixtureDirectoriesRetired"]:
+        try:
+            original = fixtures.gate_artifact
+            need(signature(os.stat(original["name"], dir_fd=original["parent"], follow_symlinks=False)) == original["full9"], "gate-retirement-original")
+            for fd, parent, name, expected, created in fixtures.gate_directories:
+                if created:
+                    continue  # These proven empty originals were just removed.
+                need(signature(os.fstat(fd))[:5] == expected
+                     == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5], "gate-retirement-directory")
+            os.unlink(original["name"], dir_fd=original["parent"])
+            try:
+                os.stat(original["name"], dir_fd=original["parent"], follow_symlinks=False)
+            except FileNotFoundError:
+                report["artifactRetired"] = True
+            else:
+                raise Refused("gate-retirement-incomplete")
+        except BaseException as caught:
+            report["cleanupErrors"].append(_gate_error(caught, "native-test-binary-retirement"))
+    for fd in tuple(fixtures.fds):
+        if fd in attempted_closes:
+            continue
+        attempted_closes.add(fd)
+        try:
+            if not fixtures._close(fd):
+                report["cleanupErrors"].append(_gate_error(fixtures.first_close_error, "original-descriptor-close"))
+        except BaseException as caught:
+            report["cleanupErrors"].append(_gate_error(caught, "original-descriptor-close-call"))
+    report["fixtureHandlesClosed"] = not fixtures.fds and fixtures.close_errors == 0
+    return error
+
+
+def run_shipping_gate_control(binding, fixtures, run_owned, checkout, work, environment, *, clock=None):
+    """One fixed existing-owner call; tests inject only an inert callable/clock."""
+    import time
+    if clock is None:
+        clock = time.monotonic_ns
+    report = _gate_new_report(binding, environment.get("MRK_MACOS_AQUA_SCOPE"))
+    error, phase = None, "dependency-admission"
+    try:
+        bodies, headless, native = _gate_dependencies(fixtures, binding, checkout, work, environment)
+        report.update(headlessReceiptSha256=digest(bodies["headless-tests.receipt.json"]),
+                      compilerJsonSha256=headless["compilerJsonSha256"],
+                      installationReadbackSha256=digest(bodies["installation-observation.json"]), artifact=native)
+        target = _gate_directory(fixtures, "cargo-target", fixtures.gate_work, private=True)
+        need(signature(os.fstat(target))[:5] == _gate_integers(headless["cargoTargetOriginal"], 5), "gate-original-target-binding")
+        parent = target
+        for name in ("aarch64-apple-darwin", "debug", "deps"):
+            parent = _gate_directory(fixtures, name, parent)
+        binary = Path(native["path"])
+        _body, original = _gate_file(fixtures, binary.name, parent, 1024 * 1024 * 1024, capture=False)
+        fixtures.gate_artifact = original
+        need(original["full9"] == _gate_integers(native["full9"], 9) and original["sha256"] == native["sha256"], "gate-live-native-artifact")
+        cwd = _gate_directory(fixtures, "shipping-gate-control", fixtures.gate_work, create=True)
+        _gate_directory(fixtures, "home", cwd, create=True)
+        _gate_directory(fixtures, "tmp", cwd, create=True)
+        _gate_recheck(fixtures)
+        argv = [str(binary), "--exact", "--ignored", "--test-threads=1", "--color=never", "--format=pretty", SHIPPING_GATE_TEST]
+        private = work / "shipping-gate-control"
+        phase = "original-native-invocation"
+        start = clock()
+        need(type(start) is int and start >= 0, "gate-owner-clock")
+        fixtures.inflight, report["ownerEntered"] = True, True
+        returned = run_owned(argv, environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(private / "home"),
+            "TMPDIR": str(private / "tmp"), "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}, cwd=private,
+            timeout=30, capture=True, text=False, output_limit=64 * 1024)
+        need(type(returned) is subprocess.CompletedProcess and type(returned.args) is list and returned.args == argv
+             and type(returned.returncode) is int and type(returned.stdout) is bytes and type(returned.stderr) is bytes
+             and len(returned.stdout) + len(returned.stderr) <= 64 * 1024, "gate-owner-return-contract")
+        fixtures.inflight, report["originalCallReturned"] = False, True
+        report.update(ownerReturncode=returned.returncode, stdoutSha256=digest(returned.stdout), stderrSha256=digest(returned.stderr),
+                      stdoutBytes=len(returned.stdout), stderrBytes=len(returned.stderr))
+        end = clock()
+        need(type(end) is int and start <= end, "gate-owner-clock")
+        report["ownerElapsedNanoseconds"] = str(end - start)
+        need(end - start < 30_000_000_000, "gate-owner-deadline")
+        phase = "exact-native-result"
+        _gate_libtest(returned.stdout, returned.stderr, returned.returncode, (SHIPPING_GATE_TEST,))
+        report["namedTestPassed"] = True
+    except BaseException as caught:
+        error = caught; report["failure"] = _gate_error(caught, phase)
+    error = _gate_settle(fixtures, report, error)
+    report["passed"] = (error is None and not report["cleanupErrors"] and report["ownerEntered"]
+        and report["originalCallReturned"] and report["ownerReturncode"] == 0 and report["namedTestPassed"]
+        and report["sourceReadbacksUnchanged"] and report["artifactOriginalUnchanged"]
+        and report["artifactCloseAttempts"] == 1 and report["artifactOriginalClosed"] and report["artifactRetired"]
+        and report["fixtureDirectoriesRetired"] and report["fixtureHandlesClosed"])
+    return report
+
+
+def _gate_completion(body, binding, scope, bodies, headless, native):
+    value = _gate_json(body)
+    expected = _gate_new_report(binding, scope)
+    need(set(value) == set(expected), "gate-control-receipt-keys")
+    elapsed = _gate_integers([value["ownerElapsedNanoseconds"]], 1)[0]
+    need(0 <= elapsed < 30_000_000_000 and _gate_sha(value["stdoutSha256"]), "gate-control-result-binding")
+    need(type(value["stdoutBytes"]) is int and type(value["stderrBytes"]) is int
+         and 0 <= value["stdoutBytes"] <= 64 * 1024 and value["stderrBytes"] == 0
+         and value["stdoutBytes"] + value["stderrBytes"] <= 64 * 1024, "gate-control-output-byte-counts")
+    expected.update(headlessReceiptSha256=digest(bodies["headless-tests.receipt.json"]),
+        compilerJsonSha256=headless["compilerJsonSha256"], installationReadbackSha256=digest(bodies["installation-observation.json"]),
+        artifact=native, ownerEntered=True, originalCallReturned=True, ownerReturncode=0,
+        ownerElapsedNanoseconds=str(elapsed), stdoutSha256=value["stdoutSha256"], stderrSha256=digest(b""),
+        stdoutBytes=value["stdoutBytes"], stderrBytes=0,
+        namedTestPassed=True, sourceReadbacksUnchanged=True, artifactOriginalUnchanged=True, artifactCloseAttempts=1,
+        artifactOriginalClosed=True, artifactRetired=True, fixtureDirectoriesRetired=True, fixtureHandlesClosed=True, passed=True)
+    _exact(value, expected)
+    return {"receiptSha256": digest(body), "parentReferenceCloseNoGoGateControlPassed": True,
+            "testName": SHIPPING_GATE_TEST, "actualParentProcessDisappearanceEstablished": False,
+            "allWorkerPopulationsQualified": False, "directLoaderQualified": False}
+
+
+def require_shipping_gate_receipt(binding, uid, gid, checkout, work, environment):
+    fixtures = Fixtures(binding, uid, gid, VAULT_HELPER_SCOPE)
+    error, result = None, None
+    try:
+        bodies, headless, native = _gate_dependencies(fixtures, binding, checkout, work, environment)
+        body = _gate_file(fixtures, SHIPPING_GATE_REPORT, fixtures.gate_work, 24 * 1024)[0]
+        status = _gate_file(fixtures, SHIPPING_GATE_STATUS, fixtures.gate_work, 4)[0]
+        need(status == b"0\n", "gate-control-original-status")
+        result = _gate_completion(body, binding, environment["MRK_MACOS_AQUA_SCOPE"], bodies, headless, native)
+        _gate_recheck(fixtures)
+    except BaseException as caught:
+        error = caught
+    cleanup_error = None
+    try:
+        fixtures.close()  # No native owner was entered here; consume each original once.
+    except BaseException as caught:
+        cleanup_error = caught
+        if error is None:
+            error = caught
+    if error is not None:
+        if cleanup_error is not None and cleanup_error is not error:
+            raise error from cleanup_error  # Same primary object, separate actual cleanup error.
+        raise error
+    return result
+
+
+def shipping_gate_control_main():
+    binding = None
+    try:
+        root = Path(__file__).absolute().parents[2]
+        binding, uid, gid, _username = admit(os.environ, root)
+        need(os.environ.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "gate-fixed-shipping-scope")
+        owner = load_owner(root)
+        os.umask(0o077)
+        fixtures = Fixtures(binding, uid, gid, VAULT_HELPER_SCOPE)
+        result = run_shipping_gate_control(binding, fixtures, owner.run_owned, root, Path(os.environ["MRK_MACOS_WORK"]), os.environ)
+        emit_record(result, sys.stdout)
+        return 0 if result["passed"] else 1
+    except BaseException as error:
+        # Admission/publication failure remains nonzero; no fallback owner,
+        # unbounded traceback, fabricated receipt or native retry is offered.
+        try:
+            emit_record({"schemaVersion": 1, "type": "macos-shipping-gate-control-admission-failure",
+                         "failure": _gate_error(error, "admission-or-publication"), "passed": False}, sys.stdout)
+        except BaseException:
+            pass
+        return 130 if isinstance(error, KeyboardInterrupt) else 1
+
+
+# Independent capacity DATA3 from the already compiled ordinary app library.
+# Never widen DATA13, its owner-call count, or the installed ignored1 contract.
+SHIPPING_CAPACITY_TESTS = tuple("installed_runtime::android_registration_source::storage_capacity_tests::" + name for name in (
+    "phase_checked_allocation_uses_exact_admitted_records_without_native_entry",
+    "source_heap_formula_keeps_fourth_alias_string_and_checked_limits",
+    "observed_sha_text_has_exact_charged_capacity",
+))
+SHIPPING_CAPACITY_REPORT = "shipping-capacity-data.receipt.json"
+SHIPPING_CAPACITY_STATUS = "shipping-capacity-data.status"
+
+
+def _capacity_dependencies(fixtures, binding, checkout, work, environment):
+    need(work.parent == Path("/Users/runner/work/_temp") and re.fullmatch(r"mrk-macos-aqua\.[A-Za-z0-9]{8}", work.name)
+         and environment.get("CARGO_TARGET_DIR") == str(work / "cargo-target")
+         and environment.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "capacity-fixed-work-route")
+    fixtures.gate_work = _gate_directory(fixtures, str(work), private=True)
+    limits = {"headless-tests.receipt.json": 16384, "headless-build.jsonl": 4 * 1024 * 1024, "headless-build.status": 4}
+    for prefix in ("headless", "headless-native"):
+        limits.update({prefix + "-tests.stdout": 65536, prefix + "-tests.stderr": 65536, prefix + "-tests.status": 4})
+    bodies = {name: _gate_file(fixtures, name, fixtures.gate_work, limit)[0] for name, limit in limits.items()}
+    # This unchanged validator still requires exactly two libraries, DATA13 and
+    # three returned original calls. No Installer/readback dependency belongs here.
+    headless, _native = _gate_headless(bodies, binding, checkout, work)
+    need(_gate_integers(headless["workOriginal"], 5) == signature(os.fstat(fixtures.gate_work))[:5], "capacity-original-work-binding")
+    return bodies, headless, headless["targets"][0]["artifact"]
+
+
+def _capacity_new_report(binding, scope):
+    return {"schemaVersion": 1, "type": "macos-shipping-capacity-data", **binding.public(),
+        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": "macOS26-arm64",
+        "toolchain": "1.98.1", "names": list(SHIPPING_CAPACITY_TESTS), "features": [],
+        "headlessReceiptSha256": None, "compilerJsonSha256": None, "artifact": None,
+        "ownerCallsEntered": 0, "ownerCallsReturned": 0, "originalCallReturned": False, "ownerReturncode": None,
+        "ownerElapsedNanoseconds": None, "finalElapsedNanoseconds": None, "deadlineMetAfterFinalCloses": False,
+        "stdoutSha256": None, "stderrSha256": None, "stdoutBytes": None, "stderrBytes": None, "namedTestsPassed": False,
+        "tests": None, "failed": None, "ignored": None, "measured": None, "filtered": None,
+        "sourceReadbacksUnchanged": False, "artifactOriginalUnchanged": False, "artifactCloseAttempts": 0,
+        "artifactOriginalClosed": False, "artifactRetired": False, "cargoTargetRetired": False,
+        "fixtureDirectoriesRetired": False, "fixtureHandlesClosed": False, "failure": None, "cleanupErrors": [], "passed": False,
+        "qualification": "native-layout-and-inert-allocation-data-only", "nativeSourceOperationQualified": False,
+        "genuineCatalogueQualified": False, "combinedBudgetFitEstablished": False,
+        "shippingBinaryQualified": False, "distributionQualified": False}
+
+
+def _capacity_settle(fixtures, report, error):
+    # Same original-owner boundary as ignored1, but no binary or target retirement.
+    # Unknown original return forbids readback, consuming close and empty-dir work.
+    if fixtures.inflight:
+        return error
+    try:
+        _gate_recheck(fixtures)
+        report["sourceReadbacksUnchanged"] = True
+        report["artifactOriginalUnchanged"] = fixtures.gate_artifact is not None
+    except BaseException as caught:
+        if error is None:
+            error = caught; report["failure"] = _gate_error(caught, "original-readback")
+        else:
+            report["cleanupErrors"].append(_gate_error(caught, "original-readback"))
+    attempted_closes, file_closes_known = set(), True
+    for original in fixtures.gate_files:
+        fd = original["fd"]
+        attempted_closes.add(fd)  # A consuming exception never permits a retry.
+        if original is fixtures.gate_artifact:
+            report["artifactCloseAttempts"] += 1
+        try:
+            closed = fixtures._close(fd)
+        except BaseException as caught:
+            closed = False
+            report["cleanupErrors"].append(_gate_error(caught, "original-file-close-call"))
+        if closed is not True:
+            file_closes_known = False
+        if original is fixtures.gate_artifact:
+            report["artifactOriginalClosed"] = closed is True
+        if closed is not True and fixtures.first_close_error is not None:
+            report["cleanupErrors"].append(_gate_error(fixtures.first_close_error, "original-file-close"))
+    created = [row for row in fixtures.gate_directories if row[4]]
+    if file_closes_known and not fixtures.close_errors:
+        retired = 0
+        for fd, parent, name, expected, _created in reversed(created):
+            try:
+                need(signature(os.fstat(fd))[:5] == expected
+                     == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5], "capacity-fixture-retirement-original")
+                os.rmdir(name, dir_fd=parent)  # Only these fresh empty originals.
+                retired += 1
+            except BaseException as caught:
+                report["cleanupErrors"].append(_gate_error(caught, "empty-fixture-retirement"))
+        report["fixtureDirectoriesRetired"] = len(created) == retired == 3
+    # Keep SAME app/native binaries and cargo-target. Later builds and ignored1
+    # retain their existing ownership and independent live identity admission.
+    for fd in tuple(fixtures.fds):
+        if fd in attempted_closes:
+            continue
+        attempted_closes.add(fd)
+        try:
+            if fixtures._close(fd) is not True:
+                report["cleanupErrors"].append(_gate_error(fixtures.first_close_error, "original-descriptor-close"))
+        except BaseException as caught:
+            report["cleanupErrors"].append(_gate_error(caught, "original-descriptor-close-call"))
+    report["fixtureHandlesClosed"] = not fixtures.fds and fixtures.close_errors == 0
+    return error
+
+
+def run_shipping_capacity_data(binding, fixtures, run_owned, checkout, work, environment, *, clock=None):
+    """One fixed existing-owner DATA call; no compile, Installer or native probe."""
+    import time
+    if clock is None:
+        clock = time.monotonic_ns
+    report = _capacity_new_report(binding, environment.get("MRK_MACOS_AQUA_SCOPE"))
+    error, phase, start, end = None, "dependency-admission", None, None
+    try:
+        bodies, headless, app = _capacity_dependencies(fixtures, binding, checkout, work, environment)
+        report.update(headlessReceiptSha256=digest(bodies["headless-tests.receipt.json"]),
+                      compilerJsonSha256=headless["compilerJsonSha256"], artifact=app)
+        target = _gate_directory(fixtures, "cargo-target", fixtures.gate_work, private=True)
+        need(signature(os.fstat(target))[:5] == _gate_integers(headless["cargoTargetOriginal"], 5), "capacity-original-target-binding")
+        parent = target
+        for name in ("aarch64-apple-darwin", "debug", "deps"):
+            parent = _gate_directory(fixtures, name, parent)
+        binary = Path(app["path"])
+        _body, original = _gate_file(fixtures, binary.name, parent, 1024 * 1024 * 1024, capture=False)
+        fixtures.gate_artifact = original
+        need(original["full9"] == _gate_integers(app["full9"], 9) and original["sha256"] == app["sha256"], "capacity-live-main-artifact")
+        cwd = _gate_directory(fixtures, "shipping-capacity-data", fixtures.gate_work, create=True)
+        _gate_directory(fixtures, "home", cwd, create=True)
+        _gate_directory(fixtures, "tmp", cwd, create=True)
+        _gate_recheck(fixtures)
+        argv = [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *SHIPPING_CAPACITY_TESTS]
+        private = work / "shipping-capacity-data"
+        phase = "original-capacity-invocation"
+        start = clock()  # One start: the return and final-close gates share it.
+        need(type(start) is int and start >= 0, "capacity-owner-clock")
+        fixtures.inflight, report["ownerCallsEntered"] = True, 1
+        returned = run_owned(argv, environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(private / "home"),
+            "TMPDIR": str(private / "tmp"), "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}, cwd=private,
+            timeout=30, capture=True, text=False, output_limit=64 * 1024)
+        need(type(returned) is subprocess.CompletedProcess and type(returned.args) is list and returned.args == argv
+             and type(returned.returncode) is int and type(returned.stdout) is bytes and type(returned.stderr) is bytes
+             and len(returned.stdout) + len(returned.stderr) <= 64 * 1024, "capacity-owner-return-contract")
+        fixtures.inflight, report["originalCallReturned"], report["ownerCallsReturned"] = False, True, 1
+        report.update(ownerReturncode=returned.returncode, stdoutSha256=digest(returned.stdout), stderrSha256=digest(returned.stderr),
+                      stdoutBytes=len(returned.stdout), stderrBytes=len(returned.stderr))
+        end = clock()
+        need(type(end) is int and start <= end, "capacity-owner-clock")
+        report["ownerElapsedNanoseconds"] = str(end - start)
+        need(end - start < 30_000_000_000, "capacity-owner-deadline")
+        phase = "exact-capacity-result"
+        filtered = _gate_libtest(returned.stdout, returned.stderr, returned.returncode, SHIPPING_CAPACITY_TESTS)
+        report.update(namedTestsPassed=True, tests=3, failed=0, ignored=0, measured=0, filtered=filtered)
+    except BaseException as caught:
+        error = caught; report["failure"] = _gate_error(caught, phase)
+    # Even a late, but known, original return still consumes independent owned
+    # closes once. It cannot renew the original deadline or manufacture success.
+    error = _capacity_settle(fixtures, report, error)
+    if report["originalCallReturned"]:
+        try:
+            final = clock()
+            need(type(final) is int and type(end) is int and start <= end <= final, "capacity-final-clock")
+            report["finalElapsedNanoseconds"] = str(final - start)
+            need(final - start < 30_000_000_000, "capacity-final-deadline")
+            report["deadlineMetAfterFinalCloses"] = report["fixtureHandlesClosed"] is True
+        except BaseException as caught:
+            if error is None:
+                error = caught; report["failure"] = _gate_error(caught, "after-final-closes")
+            else:
+                report["cleanupErrors"].append(_gate_error(caught, "after-final-closes"))
+    report["passed"] = (error is None and not report["cleanupErrors"] and report["ownerCallsEntered"] == report["ownerCallsReturned"] == 1
+        and report["originalCallReturned"] and report["ownerReturncode"] == 0 and report["namedTestsPassed"]
+        and report["sourceReadbacksUnchanged"] and report["artifactOriginalUnchanged"]
+        and report["artifactCloseAttempts"] == 1 and report["artifactOriginalClosed"]
+        and report["fixtureDirectoriesRetired"] and report["fixtureHandlesClosed"] and report["deadlineMetAfterFinalCloses"])
+    return report
+
+
+def shipping_capacity_data_main():
+    try:
+        root = Path(__file__).absolute().parents[2]
+        binding, uid, gid, _username = admit(os.environ, root)
+        need(os.environ.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "capacity-fixed-shipping-scope")
+        owner = load_owner(root)
+        os.umask(0o077)
+        fixtures = Fixtures(binding, uid, gid, VAULT_HELPER_SCOPE)
+        result = run_shipping_capacity_data(binding, fixtures, owner.run_owned, root, Path(os.environ["MRK_MACOS_WORK"]), os.environ)
+        emit_record(result, sys.stdout)
+        return 0 if result["passed"] is True else 1
+    except BaseException as error:
+        try:
+            emit_record({"schemaVersion": 1, "type": "macos-shipping-capacity-data-admission-failure",
+                         "failure": _gate_error(error, "admission-or-publication"), "passed": False}, sys.stdout)
+        except BaseException:
+            pass
+        return 130 if isinstance(error, KeyboardInterrupt) else 1
 
 def diagnostic(error, owner, fixtures):
     # Preserve individual typed public lifetime facts, not a synthesized pass
@@ -4188,15 +5441,20 @@ def main():
     scope = None
     original_error = None
     not_executed = ()
+    shipping_gate = None
     try:
         scope = argument_scope(sys.argv[1:])
         root = Path(__file__).absolute().parents[2]
         binding, uid, gid, username = admit(os.environ, root)
         owner = load_owner(root)  # Native main only; no module-import-time core.
         os.umask(0o077)
+        if scope == VAULT_HELPER_SCOPE:
+            # The installed no-GO control must have actually succeeded in this
+            # same source/run/attempt before any ordinary app can hold SH.
+            shipping_gate = require_shipping_gate_receipt(binding, uid, gid, root, Path(os.environ["MRK_MACOS_WORK"]), os.environ)
         fixtures = Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
-        if scope == RECOVERY_CASE:
+        if scope in (RECOVERY_CASE, IOS_ACCOUNT_CASE):
             fixtures.admit_recovery_runtime(root, Path(os.environ["MRK_MACOS_WORK"]))
         not_executed = run_cases(binding, fixtures, owner.run_owned, uid, username, lambda value: emit_record(value, sys.stdout), scope)
     except BaseException as error:
@@ -4221,7 +5479,7 @@ def main():
                     "allOriginalCallsReturned": True, "independentReadbacks": True, "fixtureHandlesClosed": True,
                     "instrumentedEngineeringApp": True, "shippingBinaryQualified": False, "distributionQualified": False}
         if scope == VAULT_HELPER_SCOPE:
-            complete.update(notExecutedCases=list(not_executed), focusedCasesPassed=not not_executed,
+            complete.update(shippingGateControl=shipping_gate, notExecutedCases=list(not_executed), focusedCasesPassed=not not_executed,
                             normalPersistenceEnabled=True, privateFixturesRetained=True,
                             syntheticKeychainRowRetirement="disposable-hosted-account-only")
         emit_record(complete, sys.stdout)

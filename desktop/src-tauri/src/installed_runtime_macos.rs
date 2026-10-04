@@ -1192,10 +1192,15 @@ mod installed_android_data_tests {
 pub(crate) struct VaultHelperSlots{
     original:native::vault_helper_filesystem::CodeOriginals,inspected:bool,claimed:bool,postchecked:bool,
     first:Option<(AdmissionFailure,Instant)>,
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    command:native::vault_helper_launch::FixedCommand,
 }
 impl VaultHelperSlots{
     pub(crate) fn new()->Self{Self{original:native::vault_helper_filesystem::CodeOriginals::new(),
-        inspected:false,claimed:false,postchecked:false,first:None}}
+        inspected:false,claimed:false,postchecked:false,first:None,
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        command:native::vault_helper_launch::FixedCommand::new(),
+    }}
     fn fail(&mut self,problem:AdmissionFailure)->AdmissionFailure{
         if self.first.is_none(){self.first=Some((problem,Instant::now()));}problem
     }
@@ -1205,13 +1210,19 @@ impl VaultHelperSlots{
             (None,Some((_,at)))=>Some((AdmissionFailure::Native,at)),(a,_)=>a,
         }
     }
+    fn acquire_for_command(&mut self,stop:&mut dyn FnMut()->bool)->Result<()>{
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        {self.original.acquire_for_helper_launch(stop).map_err(|_|AdmissionFailure::Ownership)}
+        #[cfg(feature="macos-android-registration-helper")]
+        {let _=stop;Err(AdmissionFailure::Ownership)} // No vault transport in the Android helper role.
+    }
     pub(crate) fn inspect_once(&mut self,stop:&mut dyn FnMut()->bool)->Result<()>{
         if self.inspected || self.claimed || self.first.is_some(){return Err(self.fail(AdmissionFailure::AlreadyUsed));}
         let result=(||{
             let expected=option_env!("MRK_MACOS_VAULT_HELPER_SHA256").ok_or(AdmissionFailure::Inventory)?;
             let size=option_env!("MRK_MACOS_VAULT_HELPER_BYTES").and_then(|s|s.parse::<u64>().ok()).ok_or(AdmissionFailure::Inventory)?;
             if !sha(expected) || size==0 || size>32*1024*1024{return Err(AdmissionFailure::Inventory);}
-            self.original.acquire(stop).map_err(|_|AdmissionFailure::Ownership)?;
+            self.acquire_for_command(stop)?;
             if self.original.helper_bytes()!=Some(size){return Err(AdmissionFailure::Inventory);}
             let mut hash=Sha256::new();let mut count=0u64;let mut block=[0u8;4096];
             loop{
@@ -1226,22 +1237,69 @@ impl VaultHelperSlots{
         })();
         if let Err(p)=result{self.fail(p);}else{self.inspected=true;}result
     }
-    pub(crate) fn claim_once(&mut self)->Result<()>{
+    pub(crate) fn prepare_command(&mut self)->Result<()>{
         if !self.inspected || self.claimed || self.first_failure().is_some(){return Err(self.fail(AdmissionFailure::AlreadyUsed));}
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        let result=self.command.prepare(&mut self.original).map_err(|_|AdmissionFailure::Unknown);
+        #[cfg(feature="macos-android-registration-helper")]
+        let result=Err(AdmissionFailure::Ownership);
+        if let Err(p)=result{self.fail(p);}result
+    }
+    pub(crate) fn command_ready(&self)->bool{
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        {self.command.ready()}
+        #[cfg(feature="macos-android-registration-helper")]
+        {false}
+    }
+    fn command_storage_empty(&self)->bool{
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        {self.command.storage_empty()}
+        #[cfg(feature="macos-android-registration-helper")]
+        {true}
+    }
+    pub(crate) fn retire_command_storage(&mut self){
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        self.command.retire_prepared_storage();
+    }
+    pub(crate) fn claim_once(&mut self)->Result<()>{
+        if !self.inspected || self.claimed || !self.command_ready() || self.first_failure().is_some(){return Err(self.fail(AdmissionFailure::AlreadyUsed));}
         self.claimed=true;Ok(())
+    }
+    pub(crate) fn spawn_original(&mut self)->std::io::Result<std::process::Child>{
+        if !self.claimed || self.first_failure().is_some(){return Err(std::io::ErrorKind::PermissionDenied.into());}
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        {self.command.spawn_once(&mut self.original)}
+        #[cfg(feature="macos-android-registration-helper")]
+        {Err(std::io::ErrorKind::PermissionDenied.into())}
     }
     pub(crate) fn check_after_use(&mut self,stop:&mut dyn FnMut()->bool)->Result<()>{
         if !self.claimed || self.postchecked{return Err(self.fail(AdmissionFailure::AlreadyUsed));}
         let result=self.original.recheck(stop).map_err(|_|AdmissionFailure::Identity);
         if let Err(p)=result{self.fail(p);}else{self.postchecked=true;}result
     }
+    pub(crate) fn check_gate_after_exit(&mut self,expired:&mut dyn FnMut()->bool)->Result<()>{
+        // A prior F still permits this original cleanup operation. Native ACL
+        // ambiguity is not cleared, and the normal code recheck stays strict.
+        if !self.claimed{return Err(self.fail(AdmissionFailure::AlreadyUsed));}
+        let result=self.original.check_worker_gate_after_exit(expired).map_err(|_|AdmissionFailure::Identity);
+        if let Err(p)=result{self.fail(p);}result
+    }
     pub(crate) fn settle_originals(&mut self,expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->bool{
         let first=self.first;
-        self.original.release(&mut |failure|{
+        self.original.release_code(&mut |failure|{
             let combined=match(first,failure){(Some(a),Some((_,at))) if at<a.1=>Some((AdmissionFailure::Native,at)),
                 (None,Some((_,at)))=>Some((AdmissionFailure::Native,at)),(a,_)=>a};expired(combined)
         })
     }
-    pub(crate) fn settled(&self)->bool{self.original.settled()}
+    pub(crate) fn settle_gate(&mut self,expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->bool{
+        let first=self.first;
+        self.original.release_worker_gate(&mut |failure|{
+            let combined=match(first,failure){(Some(a),Some((_,at))) if at<a.1=>Some((AdmissionFailure::Native,at)),
+                (None,Some((_,at)))=>Some((AdmissionFailure::Native,at)),(a,_)=>a};expired(combined)
+        })
+    }
+    pub(crate) fn code_settled(&self)->bool{self.original.code_settled() && self.command_storage_empty()}
+    pub(crate) fn gate_facts(&self)->native::vault_helper_filesystem::WorkerGateFacts{self.original.worker_gate_facts()}
+    pub(crate) fn settled(&self)->bool{self.original.settled() && self.command_storage_empty()}
     pub(crate) fn retained_bytes(&self)->Option<usize>{self.original.retained_bytes()?.checked_add(std::mem::size_of::<Self>())}
 }

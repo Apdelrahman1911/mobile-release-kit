@@ -35,7 +35,7 @@ PACKAGE_SCOPES = (
     "project-fields", "ios-current-synthetic", "android-inputs",
     "project-fields-android-inputs", "vault-helper-shipping",
     "installation-inspection", "vault-helper-shipping-installation-inspection",
-    "project-recovery-pending",
+    "project-recovery-pending", "ios-recovery-pending",
 )
 PHASES = ("prepare", "verify-before", "verify-after")
 MAX_HELPER = 32 * 1024 * 1024

@@ -24,8 +24,8 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       # Exact accepted current-payload DATA; ordinary installation is not Aqua qualification.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 03ff8e1bd613a03380934f101bbff169b52ca6b010e8fa46da4c8647e6547f06
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: a5dca6d85f366d8509654ba43b2b3a4eeb093e818724948282e4b555b3c1795a
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       # Independent immutable publisher bindings; caller hashes come from build.rs.
       MRK_GITHUB_PREFLIGHT_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
@@ -44,8 +44,8 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
           # Historical archive reuse supplies the interpreter, not the current core.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 03ff8e1bd613a03380934f101bbff169b52ca6b010e8fa46da4c8647e6547f06 ]] || exit 1
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == a5dca6d85f366d8509654ba43b2b3a4eeb093e818724948282e4b555b3c1795a ]] || exit 1
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3 ]] || exit 1
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659 ]] || exit 1
           [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
           [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
           [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
@@ -1549,7 +1549,7 @@ jobs:
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
           # The XCTest 60s allowance is separate from this step's 180s ceiling.
           set +e
-          clean /usr/bin/xcodebuild test-without-building \
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
@@ -1632,6 +1632,19 @@ jobs:
               # Only key names are diagnostic; do not export an unrestricted native result.
               print("Unaccepted native result schema/counts; fields=" + (",".join(sorted(summary)) if type(summary) is dict else "non-object"))
               raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+          runner_bytes = read(root / "normal-ui/test.runner-admission.json", 32768)
+          runner = json.loads(runner_bytes, object_pairs_hook=unique)
+          if (runner.get("scope") != "actual-generated-xctrunner-admission-only"
+                  or runner.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                  or runner.get("appSandboxEntitlement") not in ("absent", "false")
+                  or runner.get("strictCodesignOriginalZero") is not True
+                  or runner.get("originalProductsPrePostMatched") is not True
+                  or runner.get("originalClosesCompleted") is not True
+                  or runner.get("sourcePrePostMatched") is not True
+                  or runner.get("originalCommandReturned") is not True
+                  or type(runner.get("originalTestReturncode")) is not int or runner["originalTestReturncode"] != 0
+                  or runner.get("reSignedOrRepaired") is not False):
+              raise ValueError("actual generated runner admission did not close successfully")
           toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
                        for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
                                          ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
@@ -1644,6 +1657,8 @@ jobs:
                     "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
                     "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
                     "signedAppBinarySha256": preview["signedAppBinarySha256"], "toolchain": toolchain,
+                    "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                    "sameOriginalApplicationTerminationAndGateClose": "observed",
                     "signedEntryBinarySha256": preview["signedEntryBinarySha256"],
                     "entryBundleIdentifier": preview["entryBundleIdentifier"], "payloadBundleIdentifier": preview["payloadBundleIdentifier"],
                     "ordinaryEntryPayloadPickerQuitAndGateExclusion": "observed",
@@ -1722,7 +1737,7 @@ jobs:
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
           # One 300s journey, after the accepted basic gate; outer ceiling420s.
           set +e
-          clean /usr/bin/xcodebuild test-without-building \
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
@@ -1894,7 +1909,7 @@ jobs:
           # The default app-data absence is admitted by the original test BEFORE launch.
           # Real ordinary controls; no observer argument, Keychain repair or retry.
           set +e
-          clean /usr/bin/xcodebuild test-without-building \
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
@@ -2122,7 +2137,7 @@ jobs:
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
           # One 300s journey, after the accepted persistence gate; outer ceiling420s.
           set +e
-          clean /usr/bin/xcodebuild test-without-building \
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
@@ -2372,7 +2387,7 @@ jobs:
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
           # Two independent 300s journeys, after the accepted diagnostics gate; outer ceiling720s.
           set +e
-          clean /usr/bin/xcodebuild test-without-building \
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15 \
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
@@ -2634,6 +2649,7 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/build.status
             ${{ steps.work.outputs.root }}/normal-ui/build.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/test.status
+            ${{ steps.work.outputs.root }}/normal-ui/test.runner-admission.json
             ${{ steps.work.outputs.root }}/normal-ui/test.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/summary.status
             ${{ steps.work.outputs.root }}/normal-ui/summary.stderr.tail.txt
@@ -2643,10 +2659,12 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/sdk-build.txt
             ${{ steps.work.outputs.root }}/normal-ui/result.json
             ${{ steps.work.outputs.root }}/normal-ui/persistence-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/persistence-test.runner-admission.json
             ${{ steps.work.outputs.root }}/normal-ui/persistence-diagnostics.json
             ${{ steps.work.outputs.root }}/normal-ui/persistence-summary.status
             ${{ steps.work.outputs.root }}/normal-ui/persistence-result.json
             ${{ steps.work.outputs.root }}/normal-ui/project-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/project-test.runner-admission.json
             ${{ steps.work.outputs.root }}/normal-ui/project-test.tail.txt
             ${{ steps.work.outputs.root }}/normal-ui/project-summary.status
             ${{ steps.work.outputs.root }}/normal-ui/project-summary.stderr.tail.txt
@@ -2655,6 +2673,7 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-budget.status
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-budget.json
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test.runner-admission.json
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-safe-facts.json
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-summary.status
             ${{ steps.work.outputs.root }}/normal-ui/diagnostics-result.json
@@ -2662,6 +2681,7 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test-file-budget.status
             ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test-file-budget.json
             ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test.runner-admission.json
             ${{ steps.work.outputs.root }}/normal-ui/saved-checks-safe-facts.json
             ${{ steps.work.outputs.root }}/normal-ui/saved-checks-summary.status
             ${{ steps.work.outputs.root }}/normal-ui/saved-checks-result.json

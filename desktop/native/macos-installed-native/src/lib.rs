@@ -8,6 +8,8 @@ pub mod wrapping_keychain;
 pub mod vault_filesystem;
 pub mod vault_helper_wire;
 pub mod vault_helper_filesystem;
+#[cfg(not(any(feature = "vault-helper", feature = "android-registration-helper")))]
+pub mod vault_helper_launch;
 #[cfg(not(any(feature = "installed-observation", feature = "vault-helper", feature = "android-registration-helper")))]
 pub mod installed_entry;
 pub mod android_lease;

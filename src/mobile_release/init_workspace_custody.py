@@ -21,7 +21,7 @@ from .build_inputs import (BuildInputError, _Directory, _FD, _attempt_all,
 from .cancellation import CleanupScope, DefaultCancellation
 from .init_transaction import (InitApplyOutcome, InitConflict, InitOperationFailure,
                                InitWorkspace, ObservedFile, TypedEditProfile, METADATA_IGNORE_LINES,
-                               ALL_STATE_NAMES, IMAGE_STATE_NAMES)
+                               ALL_STATE_NAMES, IMAGE_STATE_NAMES, STATE_NAMES)
 
 if TYPE_CHECKING:
     from .metadata_text import PublicTextSelection
@@ -280,14 +280,15 @@ class LockedInitScope:
         guard.check()
         self.check()
         try:
-            if self.lease._image_recovery_mode:
-                # Explicit image recovery still excludes every other edit and
+            if self.lease._image_recovery_mode or self.lease._workflow_recovery_mode:
+                # Explicit recovery still excludes every other edit and
                 # build-input domain. Use the existing exact-name admission;
                 # never a permissive suffix/prefix/path-based recovery search.
                 from .build_inputs import _exact_reserved_names
                 names = _exact_reserved_names(number, {".mobile-release", *ALL_STATE_NAMES})
                 pending = names & set(ALL_STATE_NAMES)
-                if len(pending) > 1 or not pending <= set(IMAGE_STATE_NAMES):
+                allowed = STATE_NAMES if self.lease._workflow_recovery_mode else IMAGE_STATE_NAMES
+                if len(pending) > 1 or not pending <= set(allowed):
                     raise _failure("pending_state")
             else:
                 names = _init_pending_names_locked(number)
@@ -323,6 +324,9 @@ class LockedInitScope:
         self.workspace = workspace
 
     def outcome(self, reason: str) -> InitApplyOutcome:
+        if self.lease._workflow_recovery_mode:
+            from .github_workflow_recovery import recovery_outcome
+            return recovery_outcome(self.lease, self.workspace, reason)
         if self.workspace is None:
             if self.lease._image_recovery_mode:
                 # A failed later scope cannot erase the original inspected
@@ -357,10 +361,13 @@ class InitRootLease:
     def __init__(self, root: Path, *, cancellation: DefaultCancellation,
                  profile: TypedEditProfile = TypedEditProfile.CONFIGURATION,
                  registered_identity: dict[str, int] | None = None,
-                 image_recovery: bool = False) -> None:
+                 image_recovery: bool = False, workflow_recovery: bool = False) -> None:
         if type(cancellation) is not DefaultCancellation or type(profile) is not TypedEditProfile:
             raise _failure("invalid_params")
         if type(image_recovery) is not bool or image_recovery and profile is not TypedEditProfile.METADATA_IMAGES:
+            raise _failure("invalid_params")
+        if (type(workflow_recovery) is not bool
+                or workflow_recovery and (image_recovery or profile is not TypedEditProfile.GITHUB_WORKFLOWS)):
             raise _failure("invalid_params")
         cancellation._check_owner()
         if threading.current_thread() is not threading.main_thread():
@@ -391,6 +398,11 @@ class InitRootLease:
         self._image_targets: ImageTargets | None = None
         self._image_recovery_mode = image_recovery
         self._image_recovery: Any = None
+        self._workflow_recovery_mode = workflow_recovery
+        self._workflow_recovery: Any = None
+        self._workflow_recovery_journal = "unknown"
+        self._workflow_recovery_effect = "not_started"
+        self._workflow_recovery_reason = "none"
         self._acquire_claimed = False
         self._acquired = False
         self._capture_claimed = False
@@ -474,6 +486,9 @@ class InitRootLease:
 
     @property
     def last_outcome(self) -> InitApplyOutcome:
+        if self._workflow_recovery_mode:
+            from .github_workflow_recovery import recovery_outcome
+            return recovery_outcome(self) if not self._scopes else self._scopes[-1].outcome("none")
         if not self._scopes:
             return InitApplyOutcome("not_started", "not_created", "settled", "none")
         return self._scopes[-1].outcome("none")
@@ -679,7 +694,7 @@ class InitRootLease:
     @contextmanager
     def workspace_scope(self, revision: RootedRevision | None = None) -> Iterator[InitWorkspace]:
         self.check()
-        if self._active is not None or self._image_recovery_mode:
+        if self._active is not None or self._image_recovery_mode or self._workflow_recovery_mode:
             raise _failure("invalid_params")
         if revision is None:
             if self._capture_claimed:
@@ -718,6 +733,55 @@ class InitRootLease:
                 outcome = owner.outcome(reason)
             unknown = self.guard.lifetime_ledger.fatal or not owner.closed
             if unknown:
+                outcome = InitApplyOutcome(outcome.effect, outcome.journal, "unknown",
+                                           outcome.reason if outcome.reason != "none" else "custody_unknown")
+            raise InitOperationFailure(outcome, error) from None
+        finally:
+            self._active = None
+
+    @contextmanager
+    def workflow_recovery_scope(self, revision: Any = None) -> Iterator[InitWorkspace]:
+        """Same original custody, disjoint current-inspection recovery intent."""
+        from .github_workflow_recovery import WorkflowRecoveryRevision
+        self.check()
+        if (not self._workflow_recovery_mode or self._profile is not TypedEditProfile.GITHUB_WORKFLOWS
+                or self._image_recovery_mode or self._active is not None or self._revision is not None):
+            raise _failure("invalid_params")
+        if revision is None:
+            if self._capture_claimed or self._workflow_recovery is not None:
+                raise _failure("invalid_params")
+            self._capture_claimed = True
+        else:
+            if (type(revision) is not WorkflowRecoveryRevision or revision is not self._workflow_recovery
+                    or getattr(revision, "_identity", None) is not revision
+                    or getattr(revision, "_lease", None) is not self or self._rechecks >= 2):
+                raise _failure("invalid_params")
+            self._rechecks += 1
+        owner = LockedInitScope(self)
+        self._scopes.append(owner)
+        self._active = owner
+        cleanup = CleanupScope(self.guard, owner.close, owns_cancellation=False, first_primary=True)
+        try:
+            try:
+                with cleanup:
+                    owner.acquire()
+                    workspace = InitWorkspace.borrowed_workflow_recovery(owner)
+                    if revision is not None:
+                        revision.recheck(workspace)
+                    yield workspace
+                    owner.check()
+                    self.guard.check()
+            finally:
+                cleanup.__exit__(*sys.exc_info())
+        except BaseException as error:
+            self._failed = True
+            if type(error) is InitOperationFailure:
+                outcome = error.outcome
+            else:
+                reason = ("cancelled" if isinstance(error, KeyboardInterrupt) else
+                          "stale_revision" if isinstance(error, InitConflict) else "filesystem_error")
+                outcome = owner.outcome(reason)
+            if self.guard.lifetime_ledger.fatal or not owner.closed:
                 outcome = InitApplyOutcome(outcome.effect, outcome.journal, "unknown",
                                            outcome.reason if outcome.reason != "none" else "custody_unknown")
             raise InitOperationFailure(outcome, error) from None

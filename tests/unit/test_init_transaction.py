@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import io
 import json
 import os
@@ -58,6 +59,82 @@ def fixture(root: Path, *, force: bool = False, platforms: tuple[str, ...] = ("a
         title.chmod(0o600)
     return ["init", "--root", str(root), "--apply", "--template-dir", str(templates),
             "--tooling-repository", "example/mobile-release-kit", "--tooling-sha", "a" * 40] + (["--force"] if force else [])
+
+
+
+def workflow_payloads() -> tuple[bytes, tuple[bytes, ...], tuple[bytes, ...]]:
+    """Same canonical mixed-update payloads as WorkflowUpdateFilesystemTests."""
+    from mobile_release.api import _github_setup as setup
+    from mobile_release.workflow_payloads import render_workflow_caller
+
+    raw, resource = setup._resource()
+    old = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "old/toolkit", "a" * 40)
+                for identity, _ in tx.WORKFLOWS)
+    new = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "new/toolkit", "b" * 40)
+                for identity, _ in tx.WORKFLOWS)
+    return raw, old, new
+
+
+def workflow_fixture(root: Path) -> tuple[bytes, ...]:
+    """Only the parent creates originals; the fixed child must never reset them."""
+    _, old, new = workflow_payloads()
+    callers = root / ".github" / "workflows"
+    callers.mkdir(parents=True)
+    initial = (old[0], None, new[2], old[3])
+    modes = (0o640, None, 0o644, 0o604)
+    for path, data, mode in zip(tx.TypedEditProfile.GITHUB_WORKFLOWS.paths, initial, modes):
+        if data is not None:
+            target = root / path
+            target.write_bytes(data)
+            target.chmod(mode)
+    (callers / "unrelated.yml").write_bytes(b"# unrelated user workflow\n")
+    return new
+
+
+def apply_workflow_fixture(root: Path) -> None:
+    """Fixed child work: actual typed custody, never fixture initialization."""
+    from mobile_release.cancellation import CleanupScope, DefaultCancellation
+    from mobile_release.init_workspace_custody import InitRootLease
+
+    raw, _, new = workflow_payloads()
+    profile = tx.TypedEditProfile.GITHUB_WORKFLOWS
+    registered = root.stat()
+    guard = DefaultCancellation(ValidationError, "workflow crash fixture cleanup failed")
+    lease = InitRootLease(root, cancellation=guard, profile=profile,
+                          registered_identity={"device": registered.st_dev, "inode": registered.st_ino,
+                                               "mode": registered.st_mode, "uid": registered.st_uid,
+                                               "gid": registered.st_gid})
+    cleanup = CleanupScope(guard, lease.close, owns_cancellation=True, first_primary=True)
+    try:
+        with cleanup:
+            guard.install()
+            guard.activate()
+            lease.acquire()
+            with lease.workspace_scope() as owner:
+                originals = tuple(owner.observe(path, limit=limit)
+                                  for path, limit in zip(profile.paths, profile.observation_limits))
+                revision = lease.bind_revision(owner, originals)
+            with lease.workspace_scope(revision) as owner:
+                outcome = owner.apply_workflows_typed(
+                    [(item, None if index == 2 else new[index]) for index, item in enumerate(originals)],
+                    resource_sha256=hashlib.sha256(raw).hexdigest())
+    finally:
+        cleanup.__exit__(*sys.exc_info())
+    if (not lease.closed or guard.lifetime_ledger.fatal or guard.handler_state != "RESTORED"
+            or (outcome.effect, outcome.journal, outcome.resources, outcome.reason)
+            != ("committed", "clean", "settled", "none")):
+        raise AssertionError("workflow child completed without settled canonical Apply")
+
+
+def workflow_full9(value: os.stat_result) -> tuple[int, ...]:
+    """No atime: reads are not content/namespace mutations."""
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def workflow_namespace_facts(root: Path) -> dict[str, tuple[int, ...]]:
+    return {path.relative_to(root).as_posix(): workflow_full9(path.lstat())
+            for path in (root, *root.rglob("*"))}
 
 
 def invoke(argv: list[str]) -> tuple[int, str, str]:
@@ -931,8 +1008,8 @@ class InitTransactionTests(unittest.TestCase):
             self.assertEqual(line, b"CHECKPOINT\n", f"child exited early: {line!r}")
             yield process
         finally:
-            # The fixed --child route only applies/recovers init filesystem
-            # work; it has no descendants. Retain the original Popen owner,
+            # The fixed --child route only applies/recovers init or typed-workflow
+            # filesystem work; it has no descendants. Retain the original Popen owner,
             # never signal or probe its reusable numeric group after waiting.
             with contextlib.ExitStack() as streams:
                 for stream in (process.stdin, process.stdout, process.stderr):
@@ -1004,6 +1081,133 @@ class InitTransactionTests(unittest.TestCase):
                     selector.register.assert_called_once_with(process.stdout, selectors.EVENT_READ)
                     selector.select.assert_called_once_with(30)
                 self.assertEqual(calls, ["kill", "wait", "stderr", "stdout", "stdin"])
+
+    def test_real_typed_workflow_termination_then_fresh_recovery_restores_mixed_inputs(self) -> None:
+        paths = tx.TypedEditProfile.GITHUB_WORKFLOWS.paths
+        first, created = (path.rsplit("/", 1)[1] for path in paths[:2])
+        for label in (f"{first}>old-0", f"new-1>{created}"):
+            with self.subTest(point=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                new = workflow_fixture(root)
+                before = snapshot(root)
+                untouched = (root / paths[2], root / ".github/workflows/unrelated.yml")
+                untouched_before = tuple(workflow_full9(path.stat()) for path in untouched)
+                self.kill_at(root, "workflow-apply", "rename", label)
+                if label == f"{first}>old-0":
+                    self.assertFalse((root / paths[0]).exists(), "the original really moved into its backup")
+                else:
+                    self.assertEqual((root / paths[0]).read_bytes(), new[0])
+                    self.assertEqual((root / paths[1]).read_bytes(), new[1])
+                result = subprocess.run(
+                    [sys.executable, "-P", "-m", "mobile_release", "init", "--root", str(root), "--recover"],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"recovery": "rolled-back", "requiresReview": True})
+                self.assertEqual(snapshot(root), before)
+                self.assertEqual(tuple(workflow_full9(path.stat()) for path in untouched), untouched_before)
+                self.assert_no_state(root)
+
+    def test_typed_workflow_committed_recovery_keeps_later_caller_edit(self) -> None:
+        paths = tx.TypedEditProfile.GITHUB_WORKFLOWS.paths
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            new = workflow_fixture(root)
+            untouched = (root / paths[2], root / ".github/workflows/unrelated.yml")
+            untouched_before = tuple(workflow_full9(path.stat()) for path in untouched)
+            self.kill_at(root, "workflow-apply", "rename", "commit.pending>COMMITTED")
+            later = root / paths[0]
+            later.write_bytes(b"# post-commit user customization\n")
+            later_before = workflow_full9(later.stat())
+            # Fresh untyped owner after the original child was killed/joined.
+            # The fixture has no configuration/templates; explicitly trap their discovery too.
+            with patch.object(cli, "_init_proposal", side_effect=AssertionError("must not rediscover")), patch.object(
+                cli, "_find_template_dir", side_effect=AssertionError("must not load templates")
+            ):
+                code, output, error = invoke(["init", "--root", str(root), "--recover"])
+            self.assertEqual(code, 0, error)
+            self.assertEqual(json.loads(output), {"recovery": "committed-cleanup", "requiresReview": True})
+            self.assertEqual(later.read_bytes(), b"# post-commit user customization\n")
+            self.assertEqual(workflow_full9(later.stat()), later_before)
+            for index, path in enumerate(paths[1:], 1):
+                self.assertEqual((root / path).read_bytes(), new[index])
+            self.assertEqual(stat.S_IMODE((root / paths[3]).stat().st_mode), 0o604)
+            self.assertEqual(tuple(workflow_full9(path.stat()) for path in untouched), untouched_before)
+            self.assert_no_state(root)
+
+    def test_typed_workflow_recovery_can_be_interrupted_and_resumed(self) -> None:
+        paths = tx.TypedEditProfile.GITHUB_WORKFLOWS.paths
+        first, created = (path.rsplit("/", 1)[1] for path in paths[:2])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            workflow_fixture(root)
+            before = snapshot(root)
+            untouched = (root / paths[2], root / ".github/workflows/unrelated.yml")
+            untouched_before = tuple(workflow_full9(path.stat()) for path in untouched)
+            self.kill_at(root, "workflow-apply", "rename", f"new-1>{created}")
+            self.kill_at(root, "recover", "rename", f"old-0>{first}")
+            result = subprocess.run(
+                [sys.executable, "-P", "-m", "mobile_release", "init", "--root", str(root), "--recover"],
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"recovery": "rolled-back", "requiresReview": True})
+            self.assertEqual(snapshot(root), before)
+            self.assertEqual(tuple(workflow_full9(path.stat()) for path in untouched), untouched_before)
+            self.assert_no_state(root)
+
+    def test_typed_workflow_recovery_conflicts_preserve_pending_state(self) -> None:
+        first = tx.TypedEditProfile.GITHUB_WORKFLOWS.paths[0]
+        leaf = first.rsplit("/", 1)[1]
+        for conflict in ("public-caller", "private-extra"):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                workflow_fixture(root)
+                original = (root / first).read_bytes()
+                self.kill_at(root, "workflow-apply", "rename", f"{leaf}>old-0")
+                journal = root / tx.READY
+                if conflict == "public-caller":
+                    (root / first).write_bytes(b"# concurrent user caller\n")
+                else:
+                    (journal / "unrelated-user-file").write_bytes(b"preserve this private extra\n")
+                public_before, private_before = snapshot(root), snapshot(journal)
+                facts_before = workflow_namespace_facts(root)
+                result = subprocess.run(
+                    [sys.executable, "-P", "-m", "mobile_release", "init", "--root", str(root), "--recover"],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("preserve", result.stderr)
+                self.assertEqual(snapshot(root), public_before)
+                self.assertEqual(snapshot(journal), private_before)
+                self.assertEqual(workflow_namespace_facts(root), facts_before)
+                self.assertEqual((journal / "old-0").read_bytes(), original)
+
+    def test_typed_workflow_lock_refuses_fresh_recovery_without_mutation(self) -> None:
+        first = tx.TypedEditProfile.GITHUB_WORKFLOWS.paths[0].rsplit("/", 1)[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            workflow_fixture(root)
+            before = snapshot(root)
+            with self.stopped_child(root, "workflow-apply", "rename", f"{first}>old-0") as process:
+                journal = root / tx.READY
+                public_before, private_before = snapshot(root), snapshot(journal)
+                facts_before = workflow_namespace_facts(root)
+                result = subprocess.run(
+                    [sys.executable, "-P", "-m", "mobile_release", "init", "--root", str(root), "--recover"],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("another init/recovery", result.stderr)
+                self.assertEqual(snapshot(root), public_before)
+                self.assertEqual(snapshot(journal), private_before)
+                self.assertEqual(workflow_namespace_facts(root), facts_before)
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+            result = subprocess.run(
+                [sys.executable, "-P", "-m", "mobile_release", "init", "--root", str(root), "--recover"],
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"recovery": "rolled-back", "requiresReview": True})
+            self.assertEqual(snapshot(root), before)
+            self.assert_no_state(root)
 
     def test_real_termination_in_each_phase_then_fresh_process_recovery(self) -> None:
         points = [
@@ -1188,6 +1392,11 @@ def child() -> None:
             stopped.append(True)
             print("CHECKPOINT", flush=True)
             sys.stdin.buffer.read(1)
+
+    if mode == "workflow-apply":
+        with boundaries(checkpoint):
+            apply_workflow_fixture(root)
+        raise SystemExit(0)
 
     arguments = ["init", "--root", str(root), "--recover"] if mode == "recover" else [
         "init", "--root", str(root), "--apply", "--force", "--template-dir", str(root / "templates"),

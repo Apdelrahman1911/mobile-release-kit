@@ -624,8 +624,16 @@ fn native_header_for(value: &NativeHeader, bytes: u64, architecture: policy::Mac
     if result.rpaths.len() > NATIVE_RPATHS { return None; }
     Some(result)
 }
+/// Small structural/digest/layout headroom is retained in BOTH phases. Reproof
+/// never creates a second inventory/proposal, but this preserves all existing
+/// fixed supplier/parser/native allowances rather than guessing a zero budget.
+fn fixed_working_bytes() -> Option<usize> {
+    262144usize.checked_add(sdk_metadata::PARSER_WORK_BYTES)?.checked_add(policy::NATIVE_WORK_BYTES)
+}
 impl Reference {
+    fn source_storage(&self) -> Option<SourceStorage> { SourceStorage::for_roster(self.source_members, self.payload) }
     fn working_bytes(&self) -> Option<usize> {
+        self.source_storage()?;
         let n = self.payload.len(); let a = self.aliases.len(); let d = self.directories.len();
         if n == 0 || n > policy::FILE_COUNT || a > policy::ALIAS_COUNT
             || n.checked_add(a)?.checked_add(d)?.checked_add(3)? > policy::ENTRY_LIMIT
@@ -643,15 +651,16 @@ impl Reference {
         let strings = self.payload.iter().try_fold(fixed, |sum, f| sum.checked_add(f.installed.path.len())?.checked_add(64))?
             .checked_add(self.aliases.iter().try_fold(0usize, |sum, a|
                 sum.checked_add(a.path.len())?.checked_add(a.target.len())?.checked_add(a.canonical.len()))?)?;
+        // ProposalDocuments borrows the compiled payload slice. There is no
+        // runtime-owned Vec<PayloadSource>; real FileSpec/Alias capacity remains.
         let dynamic = n.checked_add(policy::OS_FILES.len())?.checked_mul(size_of::<FileSpec>())?
-            .checked_add(a.checked_mul(size_of::<Alias>())?)?
-            .checked_add(n.checked_mul(size_of::<PayloadSource>())?)?.checked_mul(2)?;
+            .checked_add(a.checked_mul(size_of::<Alias>())?)?.checked_mul(2)?;
         let string_space = strings.checked_add(p)?.checked_add(directory.checked_mul(2)?)?.checked_mul(2)?;
-        let tree_entries = n.checked_mul(2)?.checked_add(a)?.checked_add(d.checked_mul(2)?)?.checked_add(3)?;
-        262144usize.checked_add(sdk_metadata::PARSER_WORK_BYTES)?.checked_add(policy::NATIVE_WORK_BYTES)?
+        let tree_bytes = policy::proposal_tree_reservation_bytes(n, a, d)?;
+        fixed_working_bytes()?
             .checked_add(policy::MANIFEST_LIMIT)?.checked_add(policy::PROVIDER_LIMIT)?
             .checked_add(policy::RECORD_LIMIT)?.checked_add(dynamic)?.checked_add(string_space)?
-            .checked_add(tree_entries.checked_mul(1024)?)?.checked_add(size_of::<ProposalDocuments>())?
+            .checked_add(tree_bytes)?.checked_add(size_of::<ProposalDocuments>())?
             .le_checked(APP_BYTES)
     }
 }
@@ -1213,15 +1222,33 @@ fn reference_digest(reference: &Reference) -> Option<[u8; 32]> {
 pub(crate) fn available() -> bool {
     !REFERENCES.is_empty() && REFERENCES.iter().all(|r| r.structural() && reference_digest(r).is_some())
 }
-/// Reserve before source observation; no runtime/local data fills the catalogue.
-pub(crate) fn max_working_reservation_bytes() -> Result<usize, Failure> {
-    let mut maximum = None;
-    for reference in REFERENCES {
+/// Pure compiled DATA, not a grant or a second64MiB pool. The app source book
+/// adds its concrete layout/capacities and the whole existing caller census.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceCatalogueBudget {
+    pub(crate) storage: SourceStorage,
+    pub(crate) proposal_work: usize,
+    pub(crate) reproof_work: usize,
+}
+fn catalogue_budget(catalogue: &[Reference]) -> Result<SourceCatalogueBudget, Failure> {
+    let mut maximum: Option<SourceCatalogueBudget> = None;
+    for reference in catalogue {
         if !reference.structural() || reference_digest(reference).is_none() { return Err(Failure::Reference); }
-        let bytes = reference.working_bytes().filter(|n| *n > 0).ok_or(Failure::Bounds)?;
-        maximum = Some(maximum.map_or(bytes, |previous: usize| previous.max(bytes)));
+        let storage = reference.source_storage().ok_or(Failure::Bounds)?;
+        let proposal_work = reference.working_bytes().filter(|n| *n > 0).ok_or(Failure::Bounds)?;
+        let reproof_work = fixed_working_bytes().ok_or(Failure::Bounds)?;
+        maximum = Some(match maximum {
+            Some(previous) => SourceCatalogueBudget { storage: previous.storage.maximum(storage),
+                proposal_work: previous.proposal_work.max(proposal_work), reproof_work: previous.reproof_work.max(reproof_work) },
+            None => SourceCatalogueBudget { storage, proposal_work, reproof_work },
+        });
     }
     maximum.ok_or(Failure::Unavailable)
+}
+pub(crate) fn source_catalogue_budget() -> Result<SourceCatalogueBudget, Failure> { catalogue_budget(REFERENCES) }
+/// Full construction validity remains required even for a read-only reproof.
+pub(crate) fn max_working_reservation_bytes() -> Result<usize, Failure> {
+    source_catalogue_budget().map(|budget| budget.proposal_work)
 }
 /// Full tuple/membership is compared in the same predicate used by canonical
 /// proposal, Publisher and installed readback. A claimed digest alone cannot
@@ -1272,6 +1299,9 @@ impl Recipe {
     /// simultaneous source/native/Review data PLUS this within the same64MiB.
     pub(crate) fn working_reservation_bytes(&self) -> Result<usize, Failure> {
         self.reference.working_bytes().ok_or(Failure::Bounds)
+    }
+    pub(crate) fn source_storage(&self) -> Result<SourceStorage, Failure> {
+        self.reference.source_storage().ok_or(Failure::Bounds)
     }
     fn observations_match(&self, observations: &SourceObservations<'_>) -> bool {
         let reference = self.reference;
@@ -1825,6 +1855,7 @@ mod tests {
             // Even a fixture with matching DATA/commitment is NOT in production.
             assert_eq!(admit(&parsed, result.supplier_record()), Err(SupplierFailure::Unavailable));
             assert_eq!(result.payload_map(), r.payload);
+            assert!(std::ptr::eq(result.payload_map(), r.payload)); // Borrow, not an uncharged Vec copy.
             assert_eq!(result.payload_map()[0].installed.path, "bundletool/bundletool.jar");
             assert_eq!(result.payload_bytes(), r.payload.iter().map(|p| p.installed.size).sum::<u64>());
             assert_eq!(result.metadata_bytes(), bytes.iter().map(|v| v.len() as u64).sum::<u64>());
@@ -2443,6 +2474,36 @@ mod tests {
         finite_nonhost_and_jdk_original_tuples_preserve_vendor_modes_data();
     }
 
+    pub(super) fn catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data() {
+        let base = fixture();
+        let linked = fixture_with_source_alias(Some(("java", "Contents/Home/bin/java")));
+        let catalogue = catalogue_budget(&[base, linked]).unwrap();
+        assert_eq!(catalogue.storage, base.source_storage().unwrap().maximum(linked.source_storage().unwrap()));
+        assert_eq!(catalogue.proposal_work, base.working_bytes().unwrap().max(linked.working_bytes().unwrap()));
+        assert_eq!(catalogue.reproof_work, 262144 + sdk_metadata::PARSER_WORK_BYTES + policy::NATIVE_WORK_BYTES);
+        assert!(catalogue.proposal_work > catalogue.reproof_work);
+        assert!(matches!(catalogue_budget(&[]), Err(Failure::Unavailable)));
+        let invalid = Reference { profile: "not-the-compiled-profile", ..base };
+        assert!(matches!(catalogue_budget(&[base, invalid]), Err(Failure::Reference)));
+
+        // Deliberately invalid duplicate DATA isolates the allocation formula,
+        // not structural acceptance or genuine-catalogue admission/fit.
+        let extra = base.payload[0];
+        let mut map = base.payload.to_vec(); map.push(extra);
+        let duplicate = Reference { payload: static_slice(map), ..base };
+        assert!(!duplicate.structural());
+        let delta = duplicate.working_bytes().unwrap() - base.working_bytes().unwrap();
+        assert_eq!(delta, 2 * size_of::<FileSpec>() + 4 * extra.installed.path.len() + 128
+            + policy::proposal_tree_reservation_bytes(1, 0, 0).unwrap()
+            - policy::proposal_tree_reservation_bytes(0, 0, 0).unwrap());
+        let layouts = SourceLayouts { jdk: JdkLayout::Bundle, jdk_vendor: "test", jdk_version: "17.0.1" };
+        assert!(matches!(choose(REFERENCES, &layouts), Err(Failure::Unavailable)));
+    }
+    #[test]
+    fn catalogue_phase_budget_preserves_validity_without_phantom_payload_copy() {
+        catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data();
+    }
+
     pub(super) fn archive_only_vendor_metadata_never_grants_filesystem_policy_data() {
         assert!(archive_mode(Component::Jdk, JDK17_ARCHIVE_SHA, 0o042755, 0o040000));
         for (component, hash, mode, kind) in [
@@ -2478,6 +2539,8 @@ mod tests {
 /// Same inert regression bodies for the repository's harness=false runner.
 #[cfg(test)]
 pub(crate) fn assert_macos_supplier_builder_data_contract() {
+    crate::android_supplier_macos_source::assert_source_storage_data_contract();
+    tests::catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data();
     tests::implicit_archive_parents_bind_complete_source_closure_data();
     tests::implicit_archive_parent_component_prefix_and_bounds_refuse_data();
     tests::implicit_archive_parent_cannot_replace_headers_payload_or_observations_data();

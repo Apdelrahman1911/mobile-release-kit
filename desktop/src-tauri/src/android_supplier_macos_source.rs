@@ -1,7 +1,7 @@
 //! Comparison DATA shared by the private macOS Android supplier builder and
 //! the original app source book. Nothing here owns or opens a path/descriptor,
 //! acknowledges a license, selects a renderer supplier, or attests finality.
-use crate::android_toolchain_macos_policy::{Alias, FileSpec};
+use crate::android_toolchain_macos_policy::{self as policy, Alias, FileSpec};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -145,6 +145,88 @@ pub(crate) struct SourceRoster {
     pub(crate) optional_sdk_metadata: &'static [OptionalSdkMetadataSpec; 2],
 }
 
+/// Admission accounting only. Neither phase is source/transfer GO or finality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourcePhase { Inspection, Reproof }
+
+pub(crate) const SOURCE_ORIGINAL_SPILL: usize = 512 + 2;
+pub(crate) const SOURCE_ORIGINAL_LIMIT: usize = 2 * policy::ENTRY_LIMIT + SOURCE_ORIGINAL_SPILL;
+
+/// Actual compiled-roster capacities. A caller must still charge the concrete
+/// native SourceSlots layout and all simultaneously retained Review/client DATA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SourceStorage {
+    pub(crate) members: usize,
+    pub(crate) aliases: usize,
+    pub(crate) originals: usize,
+    pub(crate) file_heap: usize,
+    pub(crate) alias_heap: usize,
+    pub(crate) alias_original_heap: usize,
+}
+impl SourceStorage {
+    pub(crate) fn for_roster(members: &[SourceMemberSpec], payload: &[PayloadSource]) -> Option<Self> {
+        if members.is_empty() || members.len() > policy::ENTRY_LIMIT { return None; }
+        let mut result = Self { members: members.len(), aliases: 0, originals: 0,
+            file_heap: 0, alias_heap: 0, alias_original_heap: 0 };
+        let mut files = 0usize;
+        for member in members {
+            if member.group == SourceGroup::FixedSupport || member.relative.len() > 512 { return None; }
+            match member.kind {
+                SourceKindSpec::Directory { .. } => {},
+                SourceKindSpec::File { .. } => {
+                    files = files.checked_add(1)?;
+                    result.file_heap = result.file_heap.checked_add(member.relative.len())?.checked_add(64)?;
+                },
+                SourceKindSpec::Alias { target, canonical, .. } => {
+                    if target.len() > 512 || canonical.len() > 512 { return None; }
+                    result.aliases = result.aliases.checked_add(1)?;
+                    result.alias_heap = result.alias_heap.checked_add(member.relative.len())?
+                        .checked_add(target.len())?.checked_add(canonical.len())?;
+                    // AliasOriginal retains another owned target, not this view.
+                    result.alias_original_heap = result.alias_original_heap.checked_add(target.len())?;
+                },
+            }
+        }
+        if files > policy::FILE_COUNT || result.aliases > policy::ALIAS_COUNT { return None; }
+        result.originals = members.len().checked_sub(result.aliases)?
+            .checked_add(payload_original_open_plan(payload).ok()?)?.checked_add(SOURCE_ORIGINAL_SPILL)?;
+        (result.originals <= SOURCE_ORIGINAL_LIMIT).then_some(result)
+    }
+    /// The SAME maxima must drive both actual allocation and its charge.
+    pub(crate) fn maximum(self, other: Self) -> Self {
+        Self { members: self.members.max(other.members), aliases: self.aliases.max(other.aliases),
+            originals: self.originals.max(other.originals), file_heap: self.file_heap.max(other.file_heap),
+            alias_heap: self.alias_heap.max(other.alias_heap), alias_original_heap: self.alias_original_heap.max(other.alias_original_heap) }
+    }
+    pub(crate) fn covers(self, actual: Self) -> bool {
+        self.maximum(actual) == self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PayloadPlanFailure { Bounds, Inventory }
+/// The one existing canonical-ordinal second-pass plan. Retained ancestry may
+/// reduce actual opens; it may never increase this admitted original bound.
+pub(crate) fn payload_original_open_plan(map: &[PayloadSource]) -> Result<usize, PayloadPlanFailure> {
+    if map.is_empty() || map.len() > policy::FILE_COUNT { return Err(PayloadPlanFailure::Bounds); }
+    let mut previous: Option<(SourceGroup, &str)> = None; let mut count = 0usize;
+    for payload in map {
+        if let PayloadOrigin::DirectOriginal(OriginalSource::Picked { group, relative }) = payload.origin {
+            if group == SourceGroup::FixedSupport || !policy::relative(relative) { return Err(PayloadPlanFailure::Inventory); }
+            let directory = relative.rsplit_once('/').map_or("", |(parent, _)| parent);
+            let common = previous.filter(|(before, _)| *before == group).map_or(0, |(_, before)| {
+                before.split('/').zip(directory.split('/')).take_while(|(a, b)| !a.is_empty() && a == b).count()
+            });
+            let directories = if directory.is_empty() { 0 } else { directory.split('/').count() };
+            count = count.checked_add(directories.checked_sub(common).ok_or(PayloadPlanFailure::Bounds)?)
+                .and_then(|count| count.checked_add(1)).ok_or(PayloadPlanFailure::Bounds)?;
+            previous = Some((group, directory));
+        }
+    }
+    if count > policy::ENTRY_LIMIT + 256 { return Err(PayloadPlanFailure::Bounds); }
+    Ok(count)
+}
+
 /// FileSpec.path is SOURCE-group-relative and its mode is the observed source
 /// permission bits, NOT a permission requested for the protected installation.
 /// Alias fields are similarly source-group-relative lexical comparison DATA.
@@ -190,4 +272,86 @@ pub(crate) struct SourceObservations<'a> {
     /// Platform then build-tools. Genuine absence remains None; present bytes
     /// are complete actual observations and never become generated payload.
     pub(crate) optional_sdk_metadata: [Option<PickedSdkMetadataData<'a>>; 2],
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    const HASH: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const FILE: CanonicalFile = CanonicalFile { path: "jdk/Test.jdk/Contents/release", size: 1, sha256: HASH, mode: 0o444 };
+    fn picked(group: SourceGroup, relative: &'static str) -> PayloadSource {
+        PayloadSource { installed: FILE, origin: PayloadOrigin::DirectOriginal(OriginalSource::Picked { group, relative }) }
+    }
+    const MEMBERS: &[SourceMemberSpec] = &[
+        SourceMemberSpec { group: SourceGroup::Jdk, relative: "Contents", kind: SourceKindSpec::Directory { modes: &[0o755] } },
+        SourceMemberSpec { group: SourceGroup::Jdk, relative: "Contents/release",
+            kind: SourceKindSpec::File { bytes: 1, sha256: HASH, modes: &[0o644] } },
+        SourceMemberSpec { group: SourceGroup::Jdk, relative: "Contents/release-link",
+            kind: SourceKindSpec::Alias { target: "release", canonical: "Contents/release", modes: &[0o777] } },
+    ];
+    pub(super) fn compiled_shape_charges_all_source_strings_and_shared_maxima_data() {
+        let map = [picked(SourceGroup::Jdk, "Contents/release")];
+        let shape = SourceStorage::for_roster(MEMBERS, &map).unwrap();
+        assert_eq!(shape, SourceStorage { members: 3, aliases: 1, originals: 2 + 2 + SOURCE_ORIGINAL_SPILL,
+            file_heap: "Contents/release".len() + 64,
+            alias_heap: "Contents/release-link".len() + "release".len() + "Contents/release".len(),
+            alias_original_heap: "release".len() });
+        let support = [PayloadSource { installed: FILE,
+            origin: PayloadOrigin::DirectOriginal(OriginalSource::Support(SupportAsset::BundletoolJar)) }];
+        assert_eq!(SourceStorage::for_roster(MEMBERS, &support).unwrap().originals, 2 + SOURCE_ORIGINAL_SPILL);
+        let other = SourceStorage { members: 4, aliases: 0, originals: shape.originals + 1,
+            file_heap: shape.file_heap + 9, alias_heap: 0, alias_original_heap: 0 };
+        let maximum = shape.maximum(other);
+        assert!(maximum.covers(shape) && maximum.covers(other));
+        assert!(!shape.covers(other) && !other.covers(shape));
+        assert_eq!(maximum.alias_heap, shape.alias_heap);
+        assert_eq!(maximum.alias_original_heap, shape.alias_original_heap);
+        assert_eq!(maximum.file_heap, other.file_heap);
+        // A bounded accounting fixture is not a complete compiled Reference.
+    }
+    pub(super) fn payload_plan_preserves_frontier_and_refuses_unbounded_shapes_data() {
+        let support = PayloadSource { installed: FILE,
+            origin: PayloadOrigin::DirectOriginal(OriginalSource::Support(SupportAsset::BundletoolJar)) };
+        let generated = PayloadSource { installed: FILE,
+            origin: PayloadOrigin::CompiledSdkMetadata(SdkMetadataKind::Platform35Revision2) };
+        let map = [picked(SourceGroup::Jdk, "Contents/Home/bin/java"),
+            picked(SourceGroup::Jdk, "Contents/Home/bin/javac"), support,
+            picked(SourceGroup::Jdk, "Contents/Home/lib/runtime.jar"),
+            picked(SourceGroup::Gradle, "bin/gradle"), generated,
+            picked(SourceGroup::Sdk, "platforms/android-35/android.jar")];
+        assert_eq!(payload_original_open_plan(&map), Ok(4 + 1 + 2 + 2 + 3));
+        assert_eq!(payload_original_open_plan(&[]), Err(PayloadPlanFailure::Bounds));
+        for row in [picked(SourceGroup::FixedSupport, "member"), picked(SourceGroup::Jdk, "../member")] {
+            assert_eq!(payload_original_open_plan(&[row]), Err(PayloadPlanFailure::Inventory));
+        }
+        let too_many = vec![support; policy::FILE_COUNT + 1];
+        assert_eq!(payload_original_open_plan(&too_many), Err(PayloadPlanFailure::Bounds));
+        drop(too_many);
+        let frontier: Vec<_> = (0..((policy::ENTRY_LIMIT + 256) / 4 + 1)).map(|i|
+            picked(if i % 2 == 0 { SourceGroup::Jdk } else { SourceGroup::Gradle }, "a/b/c/file")).collect();
+        assert_eq!(payload_original_open_plan(&frontier), Err(PayloadPlanFailure::Bounds));
+        let map = [picked(SourceGroup::Jdk, "Contents/release")];
+        assert!(SourceStorage::for_roster(&[], &map).is_none());
+        let too_many = vec![MEMBERS[0]; policy::ENTRY_LIMIT + 1];
+        assert!(SourceStorage::for_roster(&too_many, &map).is_none());
+        drop(too_many);
+        let too_many = vec![MEMBERS[1]; policy::FILE_COUNT + 1];
+        assert!(SourceStorage::for_roster(&too_many, &map).is_none());
+        drop(too_many);
+        let too_many = vec![MEMBERS[2]; policy::ALIAS_COUNT + 1];
+        assert!(SourceStorage::for_roster(&too_many, &map).is_none());
+    }
+    #[test]
+    fn compiled_shape_charges_all_source_strings_and_shared_maxima() {
+        compiled_shape_charges_all_source_strings_and_shared_maxima_data();
+    }
+    #[test]
+    fn payload_plan_preserves_frontier_and_refuses_unbounded_shapes() {
+        payload_plan_preserves_frontier_and_refuses_unbounded_shapes_data();
+    }
+}
+#[cfg(test)]
+pub(crate) fn assert_source_storage_data_contract() {
+    storage_tests::compiled_shape_charges_all_source_strings_and_shared_maxima_data();
+    storage_tests::payload_plan_preserves_frontier_and_refuses_unbounded_shapes_data();
 }

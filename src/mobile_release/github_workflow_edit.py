@@ -200,7 +200,8 @@ def _failure(native: _shared._NativeContract, error: BaseException,
 
 
 def _lease_matches(native: _shared._NativeContract, lease: object) -> bool:
-    return type(lease) is native.lease and getattr(lease, "profile", None) is _PROFILE
+    return (type(lease) is native.lease and getattr(lease, "profile", None) is _PROFILE
+            and not getattr(lease, "_workflow_recovery_mode", False))
 
 
 def _admit_revision(native: _shared._NativeContract, revision: object,

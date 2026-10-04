@@ -204,7 +204,7 @@ class WorkflowTransactionProfileTests(unittest.TestCase):
                                                           profile=profile, registered_identity=registered)
                             admitted = platform == "linux" or (platform == "darwin" and profile in (
                                 tx.TypedEditProfile.CONFIGURATION, PROFILE, tx.TypedEditProfile.METADATA_TEXT,
-                                tx.TypedEditProfile.RELEASE_VERSION))
+                                tx.TypedEditProfile.RELEASE_VERSION, tx.TypedEditProfile.METADATA_IMAGES))
                             if admitted:
                                 lease.acquire()
                                 self.assertTrue(lease._acquired)

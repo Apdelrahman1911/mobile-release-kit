@@ -442,6 +442,49 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertEqual(observations, [])
             self.assertFalse((work / "android-helper-target").exists())
 
+    def test_ios_recovery_admission_keeps_the_full_package_scope_closed(self):
+        module = ANDROID_HELPER
+        self.assertEqual(module.PACKAGE_SCOPES, (
+            "project-fields", "ios-current-synthetic", "android-inputs",
+            "project-fields-android-inputs", "vault-helper-shipping",
+            "installation-inspection", "vault-helper-shipping-installation-inspection",
+            "project-recovery-pending", "ios-recovery-pending",
+        ))
+        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after"))
+        sha, ref = "a" * 40, "refs/heads/verify/desktop-macos-aqua"
+        work = module.WORK_PARENT / "mrk-macos-aqua.AbC12345"
+        environment = {
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64",
+            "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+            "GITHUB_WORKSPACE": str(module.CHECKOUT), "GITHUB_SHA": sha, "GITHUB_WORKFLOW_SHA": sha,
+            "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-aqua.yml@" + ref,
+            "GITHUB_REF": ref, "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
+            "RUSTUP_TOOLCHAIN": "1.98.1", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0",
+            "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_WORK": str(work),
+            "MRK_MACOS_AQUA_SCOPE": "ios-recovery-pending",
+        }
+        # Only observation doubles: admit() must keep its real scope/source/path checks.
+        # This fixed work path is lexical DATA, never created, opened or executed.
+        with (mock.patch.object(module.sys, "platform", "darwin"),
+              mock.patch.object(module, "__file__", str(module.CHECKOUT / "desktop/tools/macos_android_helper_package.py")),
+              mock.patch.multiple(module.os, uname=mock.Mock(return_value=SimpleNamespace(machine="arm64")),
+                                  getuid=mock.Mock(return_value=501), geteuid=mock.Mock(return_value=501),
+                                  getgid=mock.Mock(return_value=20), getegid=mock.Mock(return_value=20))):
+            self.assertEqual(module.admit(environment), work)
+            for scope in ("android-registration-lifecycle", "wrapping-keychain-private", "xcode-installed-classification",
+                          "supplier", "ios-recovery-pending-extra", ""):
+                with self.subTest(scope=scope), self.assertRaisesRegex(module.Refused, "^full-package-scope-only$"):
+                    module.admit(dict(environment, MRK_MACOS_AQUA_SCOPE=scope))
+            for key, value, reason in (
+                ("GITHUB_WORKFLOW_SHA", "b" * 40, "hosted-source-bindings"),
+                ("GITHUB_EVENT_NAME", "workflow_dispatch", "hosted-source-bindings"),
+                ("MRK_MACOS_WORK", str(module.WORK_PARENT / "mrk-macos-installed.AbC12345"), "owned-work-route"),
+            ):
+                with self.subTest(binding=key), self.assertRaisesRegex(module.Refused, "^" + reason + "$"):
+                    changed = dict(environment)
+                    changed[key] = value
+                    module.admit(changed)
+
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         root = Path(__file__).absolute().parents[2]
         for filename, assembly, binding in (
@@ -476,8 +519,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 gates = lambda block: [line.strip() for line in block.splitlines() if line.startswith("        if:")]
                 self.assertEqual(gates(build), gates(app))
                 self.assertEqual(gates(build), gates(inputs))
-                self.assertIn("project-recovery-pending", ANDROID_HELPER.PACKAGE_SCOPES)
-                self.assertIn("env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'", " ".join(gates(build)))
+                for scope in ("project-recovery-pending", "ios-recovery-pending"):
+                    self.assertIn(scope, ANDROID_HELPER.PACKAGE_SCOPES)
+                    self.assertIn("env.MRK_MACOS_AQUA_SCOPE == '" + scope + "'", " ".join(gates(build)))
                 for excluded in ("android-registration-lifecycle", "wrapping-keychain-private", "xcode-installed-classification", "supplier"):
                     self.assertNotIn(excluded, " ".join(gates(build)))
 
@@ -1718,11 +1762,20 @@ class MacInstallationMetadataData(unittest.TestCase):
                           'not(feature = "windows-runtime-publisher")'):
             self.assertIn(exclusion, shell)
         ui = (source / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift").read_text()
-        basic = ui.split("func testLaunchCancelAndQuit()", 1)[1].split("private struct FixtureSpec", 1)[0]
-        self.assertEqual(basic.count("app.launch()"), 1)
+        basic = ui.split("private func launchCancelAndQuit(profile:", 1)[1].split("private struct FixtureSpec", 1)[0]
+        launch = ui.split("private func launchOrdinaryApplication()", 1)[1].split("private func completeNormalQuit(", 1)[0]
+        terminal = ui.split("private func completeNormalQuit(", 1)[1].split("private func acceptFinalScenario()", 1)[0]
+        self.assertNotIn("app.launch()", ui)
+        self.assertEqual(basic.count("try launchOrdinaryApplication()"), 1)
+        self.assertEqual(ui.count("NSWorkspace.shared.openApplication(at: Self.outerURL"), 1)
+        self.assertIn("XCUIApplication(url: OrdinaryLaunch.payloadURL)", launch)
         self.assertIn('try nativeSheet(window, title: "Choose a mobile project folder")', basic)
         self.assertEqual(basic.count("try gate.probe(busy: true)"), 2)
-        self.assertEqual(basic.count("try gate.probe(busy: false)"), 2)
+        self.assertEqual(launch.count("try gate.probe(busy: false)"), 1)
+        self.assertEqual(terminal.count("try gate.probe(busy: false)"), 1)
+        self.assertLess(terminal.index("owner.observeNormalTermination"), terminal.index("try gate.probe(busy: false)"))
+        self.assertEqual(basic.count("try completeNormalQuit(app)"), 1)
+        self.assertEqual(basic.count("try acceptFinalScenario()"), 1)
         self.assertIn("directPayloadPreMain=unqualified;allWorkerFinality=unavailable;maintenance=unavailable", basic)
         staging = (source / "desktop/tools/stage_macos_installed.py").read_text()
         supplier = ast.parse(staging)

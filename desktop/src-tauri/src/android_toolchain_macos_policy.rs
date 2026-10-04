@@ -165,6 +165,14 @@ const VALIDATE_WORK_BYTES:usize=64*1024;
 // Rust1.98.1/aarch64: insertion-only String/ZST or &str/&FileSpec node <=384.
 // Include one extra split/root node PER live tree separately, even when empty.
 const POLICY_NODE_BYTES:usize=512;
+// Three simultaneously live trees each retain a possible split/root node,
+// in addition to their exact live entry charges. Shared by validator/supplier.
+fn policy_nodes_bytes(nodes:usize)->Option<usize>{nodes.checked_mul(POLICY_NODE_BYTES)}
+pub(crate) fn proposal_tree_reservation_bytes(files:usize,aliases:usize,directories:usize)->Option<usize>{
+    let nodes=files.checked_mul(2)?.checked_add(aliases)?
+        .checked_add(directories.checked_mul(2)?)?.checked_add(3)?.checked_add(3)?;
+    policy_nodes_bytes(nodes)
+}
 fn json_tokens_bounded(raw:&[u8])->bool{
     let(mut quoted,mut escaped,mut string_bytes,mut number_bytes)=(false,false,0usize,0usize);
     for &byte in raw{
@@ -404,7 +412,7 @@ fn validate_manifest(value:Manifest,instance:&str,provider_sha256:&str)->Option<
 }
 fn validate_manifest_space(value: Manifest, instance: &str, provider_sha256: &str, cap:usize) -> Option<Inventory> {
     let mut space=value.dynamic_bytes()?.checked_add(std::mem::size_of::<Manifest>())?
-        .checked_add(VALIDATE_WORK_BYTES)?.checked_add(3*POLICY_NODE_BYTES)?;
+        .checked_add(VALIDATE_WORK_BYTES)?.checked_add(policy_nodes_bytes(3)?)?;
     if space>cap{return None;}
     if value.schema_version != 1 || value.profile != MAC_TOOLCHAIN_PROFILE || value.target != "macos-arm64"
         || value.instance != instance || value.os_provider_sha256 != provider_sha256
@@ -423,14 +431,14 @@ fn validate_manifest_space(value: Manifest, instance: &str, provider_sha256: &st
     for file in &value.files {
         if !relative(&file.path) || !file.path.split_once('/').is_some_and(|(p,_)| matches!(p,"jdk"|"gradle"|"sdk"|"bundletool"))
             || !sha(&file.sha256) || !matches!(file.mode,0o444|0o555) || file.size > FILE_LIMIT { return None; }
-        add_space(&mut space,2*POLICY_NODE_BYTES+file.path.len(),cap)?;
+        add_space(&mut space,policy_nodes_bytes(2)?.checked_add(file.path.len())?,cap)?;
         if !names.insert(file.path.to_ascii_lowercase()){return None;}
         total = total.checked_add(file.size)?; if total > TOTAL_LIMIT { return None; }
         exact.insert(file.path.as_str(), file);
     }
     for alias in &value.aliases {
         if alias_target(alias).is_none() || !exact.contains_key(alias.canonical.as_str()){return None;}
-        add_space(&mut space,POLICY_NODE_BYTES+alias.path.len(),cap)?;
+        add_space(&mut space,policy_nodes_bytes(1)?.checked_add(alias.path.len())?,cap)?;
         if !names.insert(alias.path.to_ascii_lowercase()){return None;}
     }
     for path in value.files.iter().map(|f| &f.path).chain(value.aliases.iter().map(|a| &a.path)) {
@@ -438,19 +446,19 @@ fn validate_manifest_space(value: Manifest, instance: &str, provider_sha256: &st
         while let Some((parent,_)) = part.rsplit_once('/') {
             if !directories.contains(parent){
                 if names.len().checked_add(directories.len())?.checked_add(4)?>ENTRY_LIMIT{return None;}
-                add_space(&mut space,POLICY_NODE_BYTES+parent.len(),cap)?;
+                add_space(&mut space,policy_nodes_bytes(1)?.checked_add(parent.len())?,cap)?;
                 directories.insert(parent.to_owned());
             }
             part = parent;
         }
     }
     for dir in &directories {
-        add_space(&mut space,POLICY_NODE_BYTES+dir.len(),cap)?;
+        add_space(&mut space,policy_nodes_bytes(1)?.checked_add(dir.len())?,cap)?;
         if !names.insert(dir.to_ascii_lowercase()) { return None; }
     }
     if names.len() + 3 > ENTRY_LIMIT { return None; }
     for name in [MANIFEST,RECORD,PROVIDER] {
-        add_space(&mut space,POLICY_NODE_BYTES+name.len(),cap)?;
+        add_space(&mut space,policy_nodes_bytes(1)?.checked_add(name.len())?,cap)?;
         if !names.insert(name.into()) { return None; }
     }
     let required = value.roles.launch();
@@ -755,6 +763,17 @@ pub(crate) fn local_loads(path: &str, commands: &MachCommands, inventory: &Inven
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+    pub(super) fn proposal_tree_budget_preserves_live_roots_and_overflow_data() {
+        assert_eq!(proposal_tree_reservation_bytes(0, 0, 0), Some(6 * 512));
+        assert_eq!(proposal_tree_reservation_bytes(7, 2, 4), Some(30 * 512));
+        for counts in [(usize::MAX, 0, 0), (0, usize::MAX, 0), (0, 0, usize::MAX)] {
+            assert_eq!(proposal_tree_reservation_bytes(counts.0, counts.1, counts.2), None);
+        }
+    }
+    #[test]
+    fn proposal_tree_budget_preserves_live_roots_and_overflow() {
+        proposal_tree_budget_preserves_live_roots_and_overflow_data();
+    }
     fn fixture() -> (MacToolchainSelection, Value) {
         let selected = MacToolchainSelection { instance:"a".repeat(32), owner_uid:501, catalog_generation:1,
             record_sha256:"b".repeat(64), inventory_sha256:"c".repeat(64), os_provider_sha256:"d".repeat(64) };
@@ -1264,6 +1283,7 @@ mod tests {
 // inert bodies. No native custody, task, Prepare/Start or qualification is granted.
 #[cfg(test)]
 pub(crate) fn assert_macos_toolchain_policy_data_contract() {
+    tests::proposal_tree_budget_preserves_live_roots_and_overflow_data();
     tests::closed_mac_roles_membership_and_selected_hashes_are_required_data();
     tests::aliases_cannot_escape_change_bundles_or_point_to_another_alias_data();
     tests::registration_and_os_provider_are_closed_and_account_bound_data();

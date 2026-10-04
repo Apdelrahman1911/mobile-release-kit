@@ -162,6 +162,10 @@ class RuntimePreparationTests(unittest.TestCase):
             package.mkdir(parents=True)
             (package / "__init__.py").write_bytes(b'__version__ = "0.3.0"\n')
             (package / "_desktop_engine.py").write_bytes(b"# inert protocol only\n")
+            # Current first-party modules are enumerated from the real producer's
+            # input tree, not copied into a historical supplier inventory.
+            recovery_source = b"# inert workflow recovery SOURCE data; never imported\n"
+            (package / "github_workflow_recovery.py").write_bytes(recovery_source)
             desktop = source / "desktop"
             desktop.mkdir()
             for name in (*preparation.BOOTSTRAPS, preparation.GITHUB_CA_NAME):
@@ -180,6 +184,10 @@ class RuntimePreparationTests(unittest.TestCase):
             self.assertEqual({row["path"] for row in manifest["files"]},
                 set(preparation.CURRENT_BOOTSTRAPS) | {"core.zip", "github-ca.pem", "python/bin/python3"})
             self.assertTrue(set(current_only).isdisjoint(preparation.BOOTSTRAPS))
+            with zipfile.ZipFile(current / "core.zip") as archive:
+                self.assertEqual(archive.namelist(), ["mobile_release/__init__.py",
+                    "mobile_release/_desktop_engine.py", "mobile_release/github_workflow_recovery.py"])
+                self.assertEqual(archive.read("mobile_release/github_workflow_recovery.py"), recovery_source)
 
     def test_payload_capacity_refuses_before_creating_any_generated_output(self):
         with tempfile.TemporaryDirectory() as temporary:

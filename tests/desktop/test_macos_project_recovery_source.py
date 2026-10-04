@@ -64,8 +64,9 @@ class MacProjectRecoverySourceTests(unittest.TestCase):
         for name in ('IOS_SIGNED_NATIVE_QUALIFIED', 'IOS_RECOVERY_NATIVE_QUALIFIED'):
             self.assertIn(f'const {name}: bool = false;', saved)
         ios = (MAC / "installed_shell_observation_macos_ios.rs").read_text()
-        self.assertIn('claimed: AtomicBool', ios)
-        self.assertIn('self.claimed.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)', ios)
+        self.assertIn('claimed: AtomicU8', ios)
+        self.assertIn('claimed.compare_exchange(before, after, Ordering::SeqCst, Ordering::SeqCst)', ios)
+        self.assertIn('!self.permits() || !claim_observation_slot(self.case, &self.claimed, index)', ios)
         recovery = (MAC / "installed_shell_observation_macos_recovery.rs").read_text()
         # The implementation is two modules below the shell caller, not one.
         self.assertEqual(recovery.count('    pub(crate) fn attach_recovery('), 1)

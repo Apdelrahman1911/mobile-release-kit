@@ -22,9 +22,9 @@ METHOD = "testSyntheticProjectBuildToolDiagnostics"
 SCOPE = "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"
 SOURCE_METHODS = ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
  'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result']
-# Baseline includes the independently reviewed M2-A entry/payload, gate and picker integration.
-ORIGINAL_SWIFT_SHA256 = "9657c21883ba8494679929fa2d6b36eaeba70b04a0fef4c814f196ef0afad2d1"
-DIAGNOSTICS_INSERTION_SHA256 = "7b5aeb18210ac3862362e59602adb024040b7232dee12a64e98a534ffc42b44a"
+# Baseline includes M2-A plus the reviewed ordinary original-owner/monitor-only UI correction.
+ORIGINAL_SWIFT_SHA256 = "b382c76042ce6f48a545967b98ea95548dabd447262cbc29b5078688f4a14bb9"
+DIAGNOSTICS_INSERTION_SHA256 = "d6c1730aa9c3b82467a5f6f15b549a463746e0901556174fc52a602d903b798d"
 DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; observations are non-atomic.\n'
 DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
 DASHBOARD_QUERY_ORIGINAL = '        _ = try unique(heading, "dashboard heading is ambiguous")\n'
@@ -36,21 +36,21 @@ RENDERER_QUERY_DIAGNOSTICS_SHA256 = 'dea59830e6aef376217856dc9779acffb9634aa5fd2
 ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
 ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
 # The normal result also binds M2-A entry identity without claiming full M2/maintenance readiness.
-BLOCK_PINS = {'normal_ui_result': 'e1ed6c1e52188096063c173524857fc829dbf61cdab5e2aab57767de839af6c9',
- 'normal_project_ui_test': '161d12ffaada989d866466ec297dd17ed64de10ac6b84bc9cc1973e76d7d07fb',
+BLOCK_PINS = {'normal_ui_result': '9b88586efe9d1532bf810fa3cb0ea2e9706c1edd0c6c942210b0be009048748e',
+ 'normal_project_ui_test': 'd903ce62063fd858c158a87bcc2a5532c47c043f13ddaf9147a568222b306bd2',
  'normal_project_ui_result': '20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d',
- 'normal_persistence_ui_test': '01bded1ba9c28bff4d9ce7a224665cc8e2a1bcb1327a2f097da4bde50fec390e',
+ 'normal_persistence_ui_test': '71b6c1436503ada551ca0512fc49f925a6caecfe3448daec464fc3134d49b8bc',
  'normal_persistence_ui_result': 'a90cb1adc4c4e39109b73c9cedb531e46e55e910dca1ec962f44452674b27eb9',
- 'normal_diagnostics_ui_test': '8ee2d21556928969d8fd12b5e92d4a5e7a7321df70ce224e122e76e7a0138453',
+ 'normal_diagnostics_ui_test': '633a31e2b44a1b7fb21abc05a0182e66753fcbe2508090aacac3d5ff2127a613',
  'normal_diagnostics_ui_result': '5987afe38eaac0e72dce32aed908f1276b3fe7572c831e43935f09f24896096f',
- 'normal_saved_checks_ui_test': '29f86497371526a04dd2aaad704c5b3be57b3b071560e77d1ded3a60d36c37b7',
+ 'normal_saved_checks_ui_test': 'e4fa12c713afdd5d88f62d61e943024eb821833d5182b2159f43031de5570f3c',
  'normal_saved_checks_ui_result': '7a28b53e92362616f6839d0c2dd75fe758f74ba91ff253b2830916febf3b43d0'}
 # One added source regression covers the two deliberately separate GUI scopes.
 # The workflow appends only this method after the unchanged original81 selection.
 SAVED_CHECKS_SOURCE_METHOD = 'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'
 SAVED_CHECKS_BEGIN = "    // Ordinary saved offline checks and empty project-recovery inspection only.\n"
 SAVED_CHECKS_END = "    // End ordinary saved offline and empty recovery journeys.\n\n"
-SAVED_CHECKS_INSERTION_SHA256 = "a75a2ea182b6ca1df531ffc6c3d38b4ac396e69c9966c4d7eb79fe4eaf13062e"
+SAVED_CHECKS_INSERTION_SHA256 = "f51d6f4576db08022016938624571f0b05781fdff8b66a060cc927801696e391"
 SAVED_CHECKS_SOURCE_REFS = [
     'desktop/src/components/OfflinePreflight.tsx',
     'desktop/src/components/ProjectRecovery.tsx',
@@ -221,10 +221,10 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          ['testSyntheticProjectSavedOfflineChecks', 'testSyntheticProjectEmptyBuildInputInspection'])
         for fragment, count in (
             ('executionTimeAllowance = 300', 2),
-            ('journeyDeadline = ProcessInfo.processInfo.systemUptime + 300', 2),
+            ('try beginCase(seconds: 300)', 2),
             ('launchForJourney()', 2), ('let fixture = LocalFixture()', 2), ('try fixture.prepare()', 2),
             ('start.click()', 1), ('acknowledgement.click()', 1), ('inspect.click()', 1),
-            ('let sheet = try quitSheet(app, window)', 2), ('normalQuitObserved = true', 2),
+            ('let sheet = try quitSheet(app, window)', 2), ('try completeNormalQuit(app)', 2), ('try acceptFinalScenario()', 2),
             ('try fixture.closeOriginals()', 2), ('ownedFixture = nil', 2),
         ):
             self.assertEqual(block.count(fragment), count, fragment)
@@ -255,14 +255,23 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         block = self.checked_saved_checks_block(swift)
         offline = block.split('@MainActor func testSyntheticProjectSavedOfflineChecks() throws {', 1)[1]
         offline, recovery = offline.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {', 1)
+        # Ten seconds is a helper maximum, not a renewed native wait.
+        for name, route in (
+            ("press", ("try waitElement(", "timeout: timeout")),
+            ("waitElement", ("XCTWaiter.wait(for: [expected], timeout: try remaining(timeout))",)),
+            ("remaining", ("return try clock.remaining(requested, before: deadline)",)),
+        ):
+            helper = swift.split("private func " + name + "(", 1)[1].split("\n    @MainActor ", 1)[0]
+            for fragment in route:
+                self.assertTrue(fragment in helper, "missing original-clock clamp in " + name)
         for journey, prefix in ((offline, 'offline'), (recovery, 'recovery-idle')):
             for stage in ('launch', 'fixture', 'project-open', 'original-report', 'readback-and-quit'):
                 self.assertEqual(journey.count('stage("' + prefix + '-' + stage + '")'), 1)
             for fragment in ('try goToFolder(sheet, path: fixture.projectPath)', 'try nativeOpen(sheet)',
                              'matching(identifier: fixture.projectPath)', 'matching(identifier: "org.fixture.app")',
-                             'try savedOperationComplete(panel)', 'timeout: try remaining(10)',
+                             'try savedOperationComplete(panel)', 'timeout: 10, failures: failures',
                              'cleanExitStatus=unavailable;allWorkerFinality=unavailable'):
-                self.assertIn(fragment, journey)
+                self.assertTrue(fragment in journey, prefix + ": missing " + fragment)
         for fragment in (
             'named(renderer, "Review the saved inputs and project-code effects")\n'
             '                .containing(.button, identifier: "Refresh saved configuration observation")',
@@ -274,7 +283,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             'let run = try unique(consent.buttons.matching(identifier: "Run saved offline checks")',
             'let acknowledgement = try unique(consent.checkBoxes',
             'let start = try waitElement(consent.buttons.matching(identifier: "Run saved offline checks")',
-            'enabled: true, timeout: 5, failures: failures', 'timeout: 90, failures: failures',
+            'enabled: true, timeout: try remaining(5), failures: failures', 'timeout: 90, failures: failures',
             'let report = try unique(named(panel, "Saved offline check findings")',
             'let counts = try savedOfflineCounts(report)',
             'panel.staticTexts.matching(identifier: historical).count == 0',
@@ -284,7 +293,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             'ordinary-ui-observed-saved-offline-report-and-settled-projection',
             'releaseReadiness=not-assessed', 'this is not zero-command evidence',
         ):
-            self.assertIn(fragment, offline, fragment)
+            self.assertTrue(fragment in offline, "offline: missing " + fragment)
         self.assertLess(offline.index('!run.isEnabled'), offline.index('acknowledgement.click()'))
         self.assertLess(offline.index('(acknowledgement.value as? String) == "0"'), offline.index('acknowledgement.click()'))
         self.assertLess(offline.index('(acknowledgement.value as? String) == "1"'), offline.index('start.click()'))
@@ -303,7 +312,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             'panel.staticTexts.matching(identifier: label).count == 0',
             'ordinary-ui-observed-empty-build-input-inspection-and-settled-projection',
         ):
-            self.assertIn(fragment, recovery, fragment)
+            self.assertTrue(fragment in recovery, "recovery: missing " + fragment)
         self.assertNotIn('start.click()', recovery)
         self.assertNotIn('acknowledgement.click()', recovery)
         self.assertLess(recovery.index('!review.isEnabled'), recovery.index('inspect.click()'))
@@ -315,7 +324,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          '(0...128).contains(count), value == String(count)', 'let total = counts.values.reduce(0, +)',
                          '0 omitted from that list. Counts below include every reported finding.',
                          '"Android module configuration.", "Android Gradle wrapper policy.", "Core early-exit or remaining-check policy."'):
-            self.assertIn(fragment, block)
+            self.assertTrue(fragment in block, "saved-checks: missing " + fragment)
 
         # The original fixture is unchanged; no copied recovery journal, service
         # credentials, wrapper or configured arbitrary command is added for a pass.
@@ -406,8 +415,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(swift.count(end), 1)
         insertion = start + swift.split(start, 1)[1].split(end, 1)[0]
         self.assertEqual(digest(insertion.encode()), DIAGNOSTICS_INSERTION_SHA256)
-        # Account admission, fixture, every earlier journey and teardown are exact
-        # existing source, not relaxed as a side effect of this appended journey.
+        # Fixture/content policy is unchanged; the separately reviewed common
+        # original-owner/deadline migration is included in this pinned baseline.
         self.assertEqual(digest(swift.replace(insertion, "", 1).encode()), ORIGINAL_SWIFT_SHA256)
         self.assertEqual(insertion.count("@MainActor func " + METHOD + "() throws"), 1)
         for fragment in (
@@ -431,15 +440,15 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             'commandsAttempted = try diagnosticsCoreReport(panel)',
             'context.element(boundBy: 0).label == originalContext',
             'for query in [fresh, phase, outcome, finality, provenance]',
-            'let sheet = try quitSheet(app, window)', 'normalQuitObserved = true',
+            'let sheet = try quitSheet(app, window)', 'try completeNormalQuit(app)', 'try acceptFinalScenario()',
             'try fixture.closeOriginals()', 'ownedFixture = nil', SCOPE,
         ):
             self.assertIn(fragment, insertion, fragment)
         self.assertEqual(insertion.count('start.click()'), 1)
         self.assertEqual(insertion.count('matching(identifier: "Check build tools")'), 1)
         self.assertEqual(insertion.count('executionTimeAllowance = 300'), 1)
-        self.assertEqual(insertion.count('journeyDeadline = ProcessInfo.processInfo.systemUptime + 300'), 1)
-        self.assertEqual(insertion.count('journeyDeadline = min(wholeDeadline, ProcessInfo.processInfo.systemUptime + 15)'), 1)
+        self.assertEqual(insertion.count('try beginCase(seconds: 300)'), 1)
+        self.assertEqual(insertion.count('journeyDeadline = min(wholeDeadline, try clock.end(within: 15))'), 1)
         self.assertIn('defer { journeyDeadline = wholeDeadline }', insertion)
         self.assertGreaterEqual(insertion.count('try fixture.assertUnchanged()'), 5)
         for forbidden in ('app.launch()', 'app.terminate()', 'fixture.accept(', 'evaluateJavaScript',
@@ -492,7 +501,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         result = blocks['normal_diagnostics_ui_result']
         self.assertIn("steps.normal_persistence_ui_result.outcome == 'success'", test)
         self.assertIn("steps.normal_diagnostics_ui_test.outcome == 'success'", result)
-        self.assertEqual(test.count('/usr/bin/xcodebuild test-without-building'), 1)
+        self.assertEqual(test.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 1)
         selector = '-only-testing:MRKNormalAppUITests/NormalAppUITests/' + METHOD
         self.assertEqual(workflow.count(selector), 1)
         for fragment in ('timeout-minutes: 7', 'ulimit -f 1048576', 'resource.getrlimit(resource.RLIMIT_FSIZE)',
@@ -507,7 +516,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA',
                          '[[ "$test_status" == 0 ]] || exit "$test_status"'):
             self.assertIn(fragment, test, fragment)
-        self.assertLess(test.index('[[ "$file_budget_status" == 0 ]]'), test.index('/usr/bin/xcodebuild test-without-building'))
+        self.assertLess(test.index('[[ "$file_budget_status" == 0 ]]'), test.index('desktop/tools/macos_normal_ui_runner.py test-without-building'))
         budget = inline_python(test, 'PY_UI_FILE_BUDGET')
         safe = inline_python(test, 'PY_DIAGNOSTICS_SAFE_FACTS')
         result_source = inline_python(result, 'PY_DIAGNOSTICS_RESULT')
@@ -580,8 +589,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         saved_methods = ['testSyntheticProjectSavedOfflineChecks', 'testSyntheticProjectEmptyBuildInputInspection']
         saved_identifiers = ['MRKNormalAppUITests/NormalAppUITests/' + name for name in saved_methods]
         self.assertEqual(workflow.count('/usr/bin/xcodebuild build-for-testing'), 1)
-        self.assertEqual(workflow.count('/usr/bin/xcodebuild test-without-building'), 5)
-        self.assertEqual(saved_test.count('/usr/bin/xcodebuild test-without-building'), 1)
+        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 5)
+        self.assertEqual(saved_test.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 1)
         self.assertEqual(re.findall(r'-only-testing:MRKNormalAppUITests/NormalAppUITests/(test[A-Za-z0-9_]+)', saved_test), saved_methods)
         for identifier in saved_identifiers:
             self.assertEqual(workflow.count('-only-testing:' + identifier), 1)
@@ -602,7 +611,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA',
                          '[[ "$test_status" == 0 ]] || exit "$test_status"'):
             self.assertIn(fragment, saved_test, fragment)
-        self.assertLess(saved_test.index('[[ "$file_budget_status" == 0 ]]'), saved_test.index('/usr/bin/xcodebuild test-without-building'))
+        self.assertLess(saved_test.index('[[ "$file_budget_status" == 0 ]]'), saved_test.index('desktop/tools/macos_normal_ui_runner.py test-without-building'))
         saved_budget = inline_python(saved_test, 'PY_UI_FILE_BUDGET')
         saved_safe = inline_python(saved_test, 'PY_SAVED_CHECKS_SAFE_FACTS')
         saved_result_source = inline_python(saved_result, 'PY_SAVED_CHECKS_RESULT')

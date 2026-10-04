@@ -106,7 +106,9 @@ fn main() {
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION", Some("1"));
         build.define("MRK_WRAPPING_KEYCHAIN_QUALIFICATION_DEBUG", Some("1"));
     }
-    if !helper && !android_helper && !observation {
+    // Shared fixed gate primitives also serve the shipping vault helper and
+    // observed app transport. Ordinary entry admission stays Rust-role gated.
+    if !android_helper {
         println!("cargo:rerun-if-changed=../macos-installed-entry/gate.c");
         println!("cargo:rerun-if-changed=../macos-installed-entry/gate.h");
         println!("cargo:rerun-if-changed=../macos-installed-entry/fixed_paths.h");

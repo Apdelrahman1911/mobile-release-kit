@@ -26,7 +26,11 @@ HELPER = "vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
 TIMEOUT = 10
 OUTPUT_LIMIT = 4096
 FILE_LIMIT = 32 * 1024 * 1024
-CATEGORIES = {64: "bad-argc", 65: "cf-encoding-refused", 66: "other-nonempty-environment", 1: "no-startup-refusal"}
+CATEGORIES = {64: "bad-argc", 65: "cf-encoding-refused", 66: "other-nonempty-environment", 67: "installed-gate-handoff-required"}
+# Parsed synthetic scalars only, NOT an inherited descriptor or parent receipt.
+# This workflow's actual helper is outside the fixed installation; current_exe
+# must refuse it before C gate admission. Python never passes/owns a gate FD.
+PARSED_HANDOFF = ("--mrk-vault-worker-gate-v1", "3", "2")
 
 
 class Refused(Exception):
@@ -54,10 +58,10 @@ def cases(uid):
     # history, establish today's compatibility; no case authenticates a caller.
     return (
         Case("bad-argc", ("mrk-startup-fixture",), {}, (64,)),
-        Case("canonical-cf", (), {"__CF_USER_TEXT_ENCODING": f"0x{uid:X}:0:0"}, (1,)),
-        Case("malformed-cf", (), {"__CF_USER_TEXT_ENCODING": f"0x{uid:X}:not-an-encoding"}, (65,)),
-        Case("other-name", (), {"MRK_STARTUP_DIAGNOSTIC": "synthetic"}, (66,)),
-        Case("empty-parent-env", (), {}, (1,)),
+        Case("canonical-cf", PARSED_HANDOFF, {"__CF_USER_TEXT_ENCODING": f"0x{uid:X}:0:0"}, (67,)),
+        Case("malformed-cf", PARSED_HANDOFF, {"__CF_USER_TEXT_ENCODING": f"0x{uid:X}:not-an-encoding"}, (65,)),
+        Case("other-name", PARSED_HANDOFF, {"MRK_STARTUP_DIAGNOSTIC": "synthetic"}, (66,)),
+        Case("empty-parent-env", PARSED_HANDOFF, {}, (67,)),
     )
 
 
@@ -87,7 +91,7 @@ def run_cases(run_owned, helper, cwd, uid, check_originals, state):
              and type(result.stdout) is bytes and type(result.stderr) is bytes
              and len(result.stdout) + len(result.stderr) <= OUTPUT_LIMIT, "owner-result")
         need(not result.stdout and not result.stderr, "unexpected-output")
-        # Success is outside every fixed refusal/EOF case. Do not infer
+        # Success is outside every fixed startup-refusal case. Do not infer
         # continuation, postreadback or scratch cleanup from that result.
         need(result.returncode != 0, "unexpected-success")
         state.inflight = False

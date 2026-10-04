@@ -112,7 +112,7 @@ impl EditProjection {
     pub(crate) fn revision(&self) -> Option<&str> {
         match self.domain {
             EditDomain::Configuration => self.checkout.as_ref().map(|c| c.revision.as_str()),
-            EditDomain::GitHubWorkflows => self.workflow.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
+            EditDomain::GitHubWorkflows => self.workflow.as_ref()?.revision(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::MetadataImages => self.metadata_images.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
@@ -121,7 +121,7 @@ impl EditProjection {
     pub(crate) fn plan_token(&self) -> Option<&str> {
         match self.domain {
             EditDomain::Configuration => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
-            EditDomain::GitHubWorkflows => self.workflow.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            EditDomain::GitHubWorkflows => self.workflow.as_ref()?.plan_token(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::MetadataImages => self.metadata_images.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
@@ -133,7 +133,7 @@ impl EditProjection {
         let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
-            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), conflict: detail.conflict.clone(),
+            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), conflict: detail.conflict.clone(), recovery: detail.recovery.clone(),
             apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(), native_reason: self.native_reason,
             native_finality: self.native_finality, late_settled: self.late_settled })
     }
@@ -292,6 +292,8 @@ pub enum ChildFrame {
     WorkflowOpened(crate::github_workflow_edit_protocol::Opened),
     WorkflowPrepared(crate::github_workflow_edit_protocol::PreparedReply),
     WorkflowTerminal(u32, crate::github_workflow_edit_protocol::TerminalReply),
+    WorkflowRecoveryOpened(crate::github_workflow_edit_protocol::RecoveryOpened),
+    WorkflowRecoveryPrepared(crate::github_workflow_edit_protocol::RecoveryPreparedReply),
     MetadataTextOpened(crate::metadata_text_edit_protocol::Opened),
     MetadataTextPrepared(crate::metadata_text_edit_protocol::PreparedReply),
     MetadataTextTerminal(u32, crate::metadata_text_edit_protocol::TerminalReply),
@@ -306,7 +308,8 @@ impl ChildFrame {
     pub(crate) fn domain(&self) -> EditDomain {
         match self {
             Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..) => EditDomain::Configuration,
-            Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..) => EditDomain::GitHubWorkflows,
+            Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..)
+                | Self::WorkflowRecoveryOpened(_) | Self::WorkflowRecoveryPrepared(_) => EditDomain::GitHubWorkflows,
             Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) => EditDomain::MetadataText,
             Self::ReleaseVersionOpened(_) | Self::ReleaseVersionPrepared(_) | Self::ReleaseVersionTerminal(..) => EditDomain::ReleaseVersion,
             Self::MetadataImagesOpened(_) | Self::MetadataImagesPrepared(_) | Self::MetadataImagesTerminal(..) => EditDomain::MetadataImages,

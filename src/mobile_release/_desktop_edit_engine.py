@@ -24,6 +24,9 @@ from .errors import ValidationError
 from .github_workflow_edit import (WorkflowConflict, apply_github_workflow_edit,
                                    capture_github_workflow_edit, discard_github_workflow_edit,
                                    prepare_github_workflow_edit)
+from .github_workflow_recovery import (apply_github_workflow_recovery, capture_github_workflow_recovery,
+                                       discard_github_workflow_recovery, prepare_github_workflow_recovery,
+                                       recovery_outcome as workflow_recovery_outcome)
 from .init_transaction import InitOperationFailure, TypedEditProfile
 from .init_workspace_custody import InitRootLease
 from .metadata_text_edit import (apply_metadata_text_edit, capture_metadata_text_edit,
@@ -73,6 +76,7 @@ class _Engine:
         self.outcome: CoreEditOutcome | None = None
         self.conflict: WorkflowConflict | None = None
         self.image_intent: str | None = None
+        self.workflow_intent: str | None = None
         self.first: BaseException | None = None
         self.frames = 0
         self.stdout_bytes = 0
@@ -93,6 +97,10 @@ class _Engine:
             proposed = CoreEditOutcome("not_started", "not_created", "settled",
                                        "cancelled" if isinstance(error, KeyboardInterrupt) else
                                        "invalid_params" if isinstance(error, ProtocolError) else "filesystem_error")
+        # pending_state from a read-only recovery inspection is not a first
+        # failure. Latch this actual failure without losing inspected facts.
+        if self.domain == "github_workflows" and self.workflow_intent == "recover" and self.lease is not None:
+            workflow_recovery_outcome(self.lease, reason=proposed.reason)
         native = self.lease.last_outcome if self.lease is not None else None
         current = self.outcome
         # A workspace fact survives a lost core-call return. This is retained
@@ -104,17 +112,33 @@ class _Engine:
             effect, journal, resources = current.effect, current.journal, current.resources
         else:
             effect, journal, resources = proposed.effect, proposed.journal, proposed.resources
-        reason = (current.reason if current is not None and current.reason != "none" else
-                  native.reason if native is not None and native.reason != "none" else proposed.reason)
+        if self.domain == "github_workflows" and self.workflow_intent == "recover" and native is not None:
+            reason = native.reason  # Its recovery ledger, not display pending_state, owns the first actual failure.
+        else:
+            reason = (current.reason if current is not None and current.reason != "none" else
+                      native.reason if native is not None and native.reason != "none" else proposed.reason)
         if proposed.resources == "unknown":
             resources = "unknown"
         self.outcome = CoreEditOutcome(effect, journal, resources, reason)
+
+    def _discard_outcome(self) -> CoreEditOutcome:
+        if self.domain == "github_workflows" and self.workflow_intent == "recover" and self.lease is not None:
+            observed = workflow_recovery_outcome(self.lease)
+            return CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)
+        return CoreEditOutcome("not_started", "not_created", "settled", "none")
+
+    def _check_workflow_intent(self, request: EditRequest) -> None:
+        if self.domain == "github_workflows" and request.params.get("intent", "edit") != self.workflow_intent:
+            raise ProtocolError("Workflow edit and current-inspection recovery intents cannot be exchanged")
 
     def cleanup(self) -> None:
         def retire() -> None:
             if self.authority is not None:
                 if self.domain == "github_workflows":
-                    discard_github_workflow_edit(self.authority)
+                    if self.workflow_intent == "recover":
+                        discard_github_workflow_recovery(self.authority)
+                    else:
+                        discard_github_workflow_edit(self.authority)
                 elif self.domain == "metadata_text":
                     discard_metadata_text_edit(self.authority)
                 elif self.domain == "release_version":
@@ -171,11 +195,13 @@ class _Engine:
         self.guard.check()
         root = _root(request.params["root"])
         if self.domain == "github_workflows":
+            self.workflow_intent = request.params.get("intent", "edit")
             # The closed lease compares all five facts to raw original fstat on
             # acquire and subsequent checks BEFORE any workflow observation.
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.GITHUB_WORKFLOWS,
-                registered_identity=registered_identity(request.params["registeredIdentity"]))
+                registered_identity=registered_identity(request.params["registeredIdentity"]),
+                workflow_recovery=self.workflow_intent == "recover")
         elif self.domain == "metadata_text":
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.METADATA_TEXT,
@@ -196,7 +222,8 @@ class _Engine:
             raise ProtocolError("Invalid fixed edit domain")
         self.lease.acquire()
         if self.domain == "github_workflows":
-            checkout = capture_github_workflow_edit(self.lease)
+            checkout = (capture_github_workflow_recovery(self.lease) if self.workflow_intent == "recover" else
+                        capture_github_workflow_edit(self.lease))
         elif self.domain == "metadata_text":
             checkout = capture_metadata_text_edit(self.lease, request.params["platform"], request.params["locale"])
         elif self.domain == "release_version":
@@ -219,8 +246,9 @@ class _Engine:
             raise ProtocolError("Invalid fixed edit domain")
         self.authority = checkout
         if self.domain == "github_workflows":
-            opened = response(request, "opened", {"revision": checkout.revision, "observed": checkout.observed,
-                                                  "scopeResources": "settled"})
+            details = ({"recovery": checkout.view} if self.workflow_intent == "recover" else
+                       {"observed": checkout.observed})
+            opened = response(request, "opened", {"revision": checkout.revision, **details, "scopeResources": "settled"})
         elif self.domain == "metadata_text":
             opened = response(request, "opened", {"revision": checkout.revision, "metadataRoot": checkout.metadata_root,
                                                   "baseline": checkout.baseline, "scopeResources": "settled"})
@@ -243,11 +271,14 @@ class _Engine:
         self.last_request = request
         self.guard.check()
         if request.op == "discard":
-            self.outcome = CoreEditOutcome("not_started", "not_created", "settled", "none")
+            self.outcome = self._discard_outcome()
             return
+        self._check_workflow_intent(request)
         if self.domain == "github_workflows":
-            plan = prepare_github_workflow_edit(self.lease, checkout, request.params["revision"],
-                request.params["draft"], request.params["toolingRepository"], request.params["toolingSha"])
+            plan = (prepare_github_workflow_recovery(self.lease, checkout, request.params["revision"])
+                    if self.workflow_intent == "recover" else
+                    prepare_github_workflow_edit(self.lease, checkout, request.params["revision"],
+                        request.params["draft"], request.params["toolingRepository"], request.params["toolingSha"]))
             if type(plan) is WorkflowConflict:
                 # A refused review has no token and no prepared frame. Settle
                 # the same original lease/input before the bounded terminal.
@@ -275,8 +306,9 @@ class _Engine:
         else:
             raise ProtocolError("Invalid fixed edit domain")
         self.authority = plan
+        details = {"recovery" if self.domain == "github_workflows" and self.workflow_intent == "recover" else "view": plan.view}
         prepared = response(request, "prepared", {"revision": plan.revision, "planToken": plan.token,
-                                                   "view": plan.view, "scopeResources": "settled"})
+                                                   **details, "scopeResources": "settled"})
         self.input.idle()
         # Default signals are deferred only through publication of this exact
         # frame/token receipt, not the review wait or a transaction operation.
@@ -287,12 +319,14 @@ class _Engine:
         self.last_request = request
         self.guard.check()
         if request.op == "discard":
-            self.outcome = CoreEditOutcome("not_started", "not_created", "settled", "none")
+            self.outcome = self._discard_outcome()
             return
+        self._check_workflow_intent(request)
         if request.params["planToken"] != plan.token:
             raise ProtocolError("The original plan token is required")
         if self.domain == "github_workflows":
-            self.outcome = apply_github_workflow_edit(self.lease, plan)
+            self.outcome = (apply_github_workflow_recovery(self.lease, plan) if self.workflow_intent == "recover" else
+                            apply_github_workflow_edit(self.lease, plan))
         elif self.domain == "metadata_text":
             self.outcome = apply_metadata_text_edit(self.lease, plan)
         elif self.domain == "release_version":
@@ -312,6 +346,8 @@ class _Engine:
         if self.last_request is None:
             raise ProtocolError("No accepted edit request")
         outcome = self.outcome
+        if outcome is None and self.domain == "github_workflows" and self.workflow_intent == "recover":
+            outcome = self._discard_outcome()
         if outcome is None and self.domain == "metadata_images" and self.image_intent == "recover" and self.lease is not None:
             observed = self.lease.last_outcome
             outcome = CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)

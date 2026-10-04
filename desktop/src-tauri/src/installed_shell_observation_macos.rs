@@ -1173,7 +1173,7 @@ pub(crate) struct Observation {
 impl Observation {
     fn new(case: Case, fixture: Fixture) -> Result<Self, ()> {
         let base = crate::protocol::strict_json(if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
-        let end = Instant::now() + Duration::from_secs(if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+        let end = Instant::now() + Duration::from_secs(if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
@@ -1202,7 +1202,7 @@ impl Observation {
                 quit_cancelled: false, close_count: 0, reload_requested: false, reload_returned: false, reload_navigation: false,
                 loss_seen: false, loss_settled: false, relay_joined: false, actual_exit: false, originals_final: false,
                 failure_close_requested: false, failure_quit_attempted: false,
-                ios_record: matches!(case, Case::Ios(c) if !c.input_only()).then(ios::Record::default),
+                ios_record: if let Case::Ios(c) = case { (!c.input_only()).then(|| ios::Record::new(c)) } else { None },
                 session_record: ios.as_ref().filter(|c| c.case.inputs()).map(|c| session::Record::new(c.case)),
                 project_field_record: (case == Case::ProjectFields).then(project_fields::Record::new),
                 vault_record: matches!(case, Case::Vault(_)).then(vault::Record::default),
@@ -1852,7 +1852,7 @@ impl Observation {
                     r.step = Step::Ios(next);
                     // ReleaseHold only releases its original DATA channel; no
                     // DOM call or replacement worker is allowed for Running.
-                    if next == ios::Step::Running { return; }
+                    if matches!(next, ios::Step::Running | ios::Step::AccountRunning) { return; }
                 },
                 Step::ProjectFields(step) => {
                     let Some(snapshot) = state.document.installed_macos_session_snapshot() else { return; };
@@ -2765,7 +2765,7 @@ impl Observation {
                 && v["available"].as_u64() == Some(self.case.methods() as u64) && v["unavailable"].as_u64() == Some((r.methods - self.case.methods()) as u64),
             Step::ReadCancelled => r.cancel_settled && v["unselected"] == true && v["chooseEnabled"] == true,
             Step::Snapshot => r.project_settled && r.snapshots == 1 && v["name"] == self.case.project_name()
-                && v["configuration"] == (if self.case == Case::Ios(ios::Case::RecoveryEmpty) { "Not configured" }
+                && v["configuration"] == (if matches!(self.case, Case::Ios(c) if c.recovery()) { "Not configured" }
                     else if matches!(self.case, Case::NoopStale | Case::Ios(_) | Case::ProjectFields) { "Format-valid only" } else { "Not configured" }),
             Step::Suggestion => r.suggestion.as_ref() == v.get("provenance"),
             Step::Draft => v["source"] == "version.properties" && v["saveAvailable"] == true
@@ -3540,6 +3540,7 @@ fn script(case: Case, step: Step) -> Option<String> {
 }
 
 const ANDROID_INPUT_ROSTER: &[&str] = &["android-inputs", "state"];
+const PENDING_ACCOUNT_ROSTER: &[&str] = &["ios-recovery-pending", "state"];
 const CURRENT_IOS_ROSTER: &[&str] = &["ios-toolchain-prerequisite","ios-version-stale","ios-unsigned-archive","ios-cancel","ios-finality",
     "ios-signing-inputs","ios-signed-refusal","ios-signed-cancel","ios-recovery-empty","state"];
 const UNSIGNED_IOS_ROSTER: &[&str] = &["ios-toolchain-prerequisite","ios-version-stale","ios-unsigned-archive","ios-cancel","ios-finality","state"];
@@ -3562,6 +3563,7 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
     if let Case::Ios(case) = case {
         if case == ios::Case::AndroidInputs { directory(&root,uid,0o700,ANDROID_INPUT_ROSTER).ok()?; }
+        else if case == ios::Case::RecoveryPending { directory(&root,uid,0o700,PENDING_ACCOUNT_ROSTER).ok()?; }
         else { directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None).ok()?; }
     } else if matches!(case,Case::Vault(_)) {
         directory(&root,uid,0o700,&["vault-helper-roundtrip","vault-helper-stop-before-go","vault-helper-stop-after-add","state"]).ok()?;
@@ -3915,7 +3917,8 @@ fn observer_data_checks() -> bool {
         let case = Case::Ios(ios_case);
         if case.panel_index(Step::Quit) != Some(1) || case.quit_id() != if ios_case.inputs() { session::quit_original(ios_case) } else { 2 } { return false; }
         // One captured DATA roster, not a second native scan after refusal.
-        let primary = if ios_case == ios::Case::AndroidInputs { ANDROID_INPUT_ROSTER } else { CURRENT_IOS_ROSTER };
+        let primary = if ios_case == ios::Case::AndroidInputs { ANDROID_INPUT_ROSTER }
+            else if ios_case == ios::Case::RecoveryPending { PENDING_ACCOUNT_ROSTER } else { CURRENT_IOS_ROSTER };
         let mut current: Vec<String> = primary.iter().map(|v| (*v).to_owned()).collect(); current.sort();
         let mut unsigned: Vec<String> = UNSIGNED_IOS_ROSTER.iter().map(|v| (*v).to_owned()).collect(); unsigned.sort();
         let alternate = ios_alternate_roster(ios_case);

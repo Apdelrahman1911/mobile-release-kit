@@ -222,6 +222,49 @@ independent Python/tool/helper/service lifetimes, forced-parent/unknown closure 
 M3/M4 maintenance remain unqualified. Source or DATA success is not native
 acceptance; Developer-ID/notarization and Desktop readiness are not claimed.
 
+### M2-B1 fixed vault-worker participant (source integration, native evidence pending)
+
+The existing `LookupBook` now owns a separate parent-opened SH participant
+through `VaultHelperSlots`/`CodeOriginals`, admitted before replaceable helper
+code is read. Its fixed command adapter inherits that same live original only
+in the one child immediately before exec. The parent remains CLOEXEC; there is
+no descriptor duplication, parent inheritable window, `LOCK_UN`, generic command
+API or replacement process runner. The helper admits the exact protected gate
+before Work/GO, restores CLOEXEC on its same descriptor and retains it until
+kernel exit. Gate argv is not parent authentication: original code/peer checks
+and the existing request/GO protocol are still mandatory.
+
+The parent checks gate correspondence after actual original child exit, also
+following application failure/STOP, under the original cleanup endpoint. Code,
+native and pipe originals settle independently before the gate's one consuming
+close. Unknown launch/wait/native/close/deadline or absent postcheck retains the
+participant and its charge; terminal/EOF alone never closes it or constructs a
+key candidate. The actual blocking-driver join remains a separate prerequisite.
+The observer reports five real parent-record gate facts, not fictional child
+memory or gate-close wire receipts, and validates them in both live success
+and closed partial-failure contracts.
+
+The focused nonshipping native control is the one ignored Rust test
+`vault_helper_filesystem::gate_custody_control::shipping_helper_retains_gate_after_parent_reference_close_until_actual_exit`.
+It is compiled only for debug installed-observation tests, requires the reviewed
+protected installation/original native owner and an actual independent EX-success
+baseline (no ordinary app-entry SH still held), sends no GO or credential request,
+then checks parent CLOEXEC, child-only SH after the test's parent-reference close,
+actual EOF/exit/original pipe settlement and finally EX availability. Select only
+that explicitly admitted control, not a raw/all-ignored suite. This is **not**
+actual forced-parent disappearance, arbitrary direct-loader coverage, overall
+worker finality or an available maintenance action. The separate startup-policy
+adapter still runs only the noninstalled temporary release helper: canonical/empty
+environment cases must refuse67 before C gate admission, while malformed inputs
+refuse64/65/66. Its synthetic parsed scalars are not a gate handoff or native
+custody evidence; historic argv1/EOF receipts do not qualify the new source.
+
+These source paths and DATA tests do not themselves constitute native execution.
+Fresh pinned macOS evidence is required for the affected shipping-helper journeys
+and custody control. All broader M2/M3/M4, physical-host, signing/notarization and
+Desktop-readiness limitations above remain; no qualification flag is enabled by
+this slice.
+
 This deliberately uses a protected Library location, not an `Applications`
 ancestor that might permit group replacement. It is an engineering installation,
 not drag-copy, an updater, upgrade support, Developer ID distribution, a
@@ -502,13 +545,13 @@ with historical protocol
 Those facts remain supplier provenance, not current-core or native acceptance.
 The unchanged historical `runtime` subcommand still enforces that old profile.
 
-The ordinary installed workflow now binds the already independently accepted
-current-payload DATA:
-- M (manifest): `bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37`.
-- S (source inputs): `f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371`.
+The ordinary installed and Aqua product workflows both bind the independently
+reviewed current-payload DATA:
+- M (manifest): `2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3`.
+- S (source inputs): `13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659`.
 - Q (protocol): `083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5`.
 
-Its existing `current-runtime` action reuses only the accepted interpreter
+Their existing `current-runtime` actions reuse only the accepted interpreter
 supplier and the two pinned notices, and prepares the current core/bootstrap/CA
 bytes from the reviewed source. The fixed private
 `$MRK_MACOS_WORK/current-runtime-preparation` path must be absent; the action
@@ -516,12 +559,12 @@ requires explicit S/M before publishing the fresh final runtime. The subsequent
 `input --current-runtime` selects the current protocol/roster rather than the
 historical default. Both packages use that one completed app/runtime inventory.
 
-The combined source requires a new independently accepted correspondence for
-its 139 source inputs and 142 descriptor inputs: the canonical core changes
-invalidate the earlier source digest, core ZIP and runtime manifest. The M/S
-values above bind that new descriptor. The workflow/test/guide-only consumer
-pin updates do not alter its payload closure. The accepted interpreter supplier
-is unchanged, so no interpreter source acquisition or CPython rebuild is needed.
+The captured current-source roster is 151 inputs (139 core files, ten bootstraps,
+the committed CA and the preparation tool), totaling 3,764,765 bytes. The reviewed
+manifest is 82,988 bytes with 590 runtime-file records. The M/S values above bind
+that descriptor; workflow/guide-only consumer pin updates do not alter its payload
+closure. The accepted interpreter supplier is unchanged, so no interpreter source
+acquisition or CPython rebuild is needed.
 These DATA bindings do not sign the runtime or grant native/GUI/distribution
 acceptance. `build.rs` never discovers an anchor from an adjacent file.
 

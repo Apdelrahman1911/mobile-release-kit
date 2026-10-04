@@ -1,5 +1,5 @@
 /* C/libSystem-only installed gate admission. The same source is linked into
- * the entry and ordinary payload. No allocation owner, destructor or unlock.
+ * the entry, payload and fixed vault helper. No destructor or unlock.
  * Pure metadata primitives are shared with native.m's metadata-only build. */
 #include "gate.h"
 #include <sys/mount.h>
@@ -10,6 +10,7 @@
 #include <string.h>
 
 _Static_assert(sizeof(MRK_MAINTENANCE_GATE_BYTES) == 31, "fixed30B permanent gate required");
+_Static_assert(sizeof(mrk_entry_book) <= 1024, "bounded fixed gate startup book");
 
 static const char *const ancestors[MRK_ENTRY_ANCESTORS] = {
     "/", "Library", "Application Support", "MobileReleaseKit"
@@ -129,4 +130,44 @@ int mrk_installed_entry_admit(int descriptor, int32_t entry_pid) {
 }
 int mrk_installed_entry_retained(void) {
     return pthread_main_np() == 1 && original_gate >= 3 && original_process == getpid();
+}
+
+/* This callback is reachable only through the private, fixed Rust command.
+ * Descriptor flags are private to the child after fork; flock state is not.
+ * No lock/unlock, allocation, log, environment, pathname or cleanup here. */
+int mrk_vault_gate_child_inherit(int descriptor, int32_t parent_pid) {
+    if (descriptor < 3 || parent_pid <= 1 || getpid() == parent_pid || getppid() != parent_pid) return EPERM;
+    int flags = fcntl(descriptor, F_GETFD);
+    if (flags < 0) return errno ? errno : EIO;
+    if (flags != FD_CLOEXEC) return EPERM;
+    if (fcntl(descriptor, F_SETFD, 0)) return errno ? errno : EIO;
+    flags = fcntl(descriptor, F_GETFD);
+    if (flags < 0) return errno ? errno : EIO;
+    return flags == 0 ? 0 : EPERM;
+}
+
+static int vault_original_gate = -1;
+static pid_t vault_original_process = 0;
+static unsigned vault_admission_entered = 0;
+int mrk_vault_helper_gate_admit(int descriptor, int32_t parent_pid) {
+    uint32_t uid = 0;
+    if (pthread_main_np() != 1 || vault_admission_entered || vault_original_gate >= 0) return EPERM;
+    vault_admission_entered = 1;
+    if (mrk_user(&uid) || descriptor < 3 || parent_pid <= 1 || getppid() != parent_pid) return EPERM;
+    mrk_entry_book book; mrk_entry_init(&book);
+    book.gate = descriptor; /* Borrowed until admitted; never close argv's FD. */
+    int accepted = mrk_entry_root(&book) && mrk_entry_gate_matches(&book, 0);
+    if (accepted) {
+        int flags = fcntl(descriptor, F_GETFL);
+        accepted = flags >= 0 && (flags & O_ACCMODE) == O_RDONLY && (flags & O_NONBLOCK)
+            && !(flags & (O_APPEND | O_ASYNC));
+    }
+    if (accepted) accepted = fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0
+        && mrk_entry_gate_matches(&book, FD_CLOEXEC) && getppid() == parent_pid;
+    int closed = mrk_entry_close_ancestors(&book);
+    if (!accepted || !closed) return EPERM;
+    vault_original_gate = descriptor; vault_original_process = getpid();
+    return vault_original_gate >= 3 && vault_original_process == getpid() ? 0 : EPERM;
+    /* No LOCK_UN, close, dup, lock reacquisition or destructor. Kernel exit is
+     * the lifetime boundary; GO and authenticated parent checks are separate. */
 }

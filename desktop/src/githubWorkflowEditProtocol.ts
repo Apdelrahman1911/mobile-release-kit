@@ -5,7 +5,7 @@ import { sameJson } from './catalog.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { GITHUB_WORKFLOWS, githubSetupRequestFits } from './githubSetupProtocol.ts';
 import type { ApiError, CoreEditOutcome, JsonValue } from './types.ts';
-import type { GitHubWorkflowEditProjection, GitHubWorkflowEditStatus, WorkflowConflict, WorkflowContent, WorkflowObservation, WorkflowPreparedView } from './githubWorkflowEditTypes.ts';
+import type { GitHubWorkflowEditProjection, GitHubWorkflowEditStatus, WorkflowConflict, WorkflowContent, WorkflowObservation, WorkflowPreparedView, WorkflowRecoveryView } from './githubWorkflowEditTypes.ts';
 
 const encoder = new TextEncoder();
 const phases = ['opening', 'editing', 'preparing', 'reviewing', 'applying', 'finalizing', 'final', 'unknown'] as const;
@@ -87,11 +87,15 @@ export function workflowEditRequestFits(command: GitHubWorkflowEditCommand, valu
   try {
     if (!boundedJson(value, 768 * 1024, 9000, 32)) return false;
     switch (command) {
-      case 'github_workflow_edit_open': return keys(value, ['projectId']) && text(value.projectId, 128);
+      case 'github_workflow_edit_open': return (keys(value, ['projectId']) || keys(value, ['projectId', 'intent']) && value.intent === 'recover') && text(value.projectId, 128);
       case 'github_workflow_edit_close': return keys(value, ['sessionId']) && token(value.sessionId);
-      case 'github_workflow_edit_apply': return keys(value, ['sessionId', 'planToken']) && token(value.sessionId) && token(value.planToken);
+      case 'github_workflow_edit_apply': return (keys(value, ['sessionId', 'planToken']) ||
+        keys(value, ['sessionId', 'planToken', 'intent']) && value.intent === 'recover') && token(value.sessionId) && token(value.planToken);
       case 'github_workflow_edit_status': return keys(value, []);
-      case 'github_workflow_edit_prepare': return keys(value, ['sessionId', 'revision', 'draft', 'toolingRepository', 'toolingSha', 'draftRevision', 'baselineGeneration']) &&
+      case 'github_workflow_edit_prepare':
+        if (record(value) && Object.hasOwn(value, 'intent')) return keys(value, ['sessionId', 'revision', 'intent']) &&
+          value.intent === 'recover' && token(value.sessionId) && token(value.revision);
+        return keys(value, ['sessionId', 'revision', 'draft', 'toolingRepository', 'toolingSha', 'draftRevision', 'baselineGeneration']) &&
         token(value.sessionId) && token(value.revision) && isU32(value.draftRevision) && value.draftRevision < U32_MAX &&
         isU32(value.baselineGeneration) && value.baselineGeneration < U32_MAX &&
         githubSetupRequestFits({ draft: value.draft, toolingRepository: value.toolingRepository, toolingSha: value.toolingSha, suppliedSnapshot: null });
@@ -169,12 +173,98 @@ function outcome(value: unknown): value is CoreEditOutcome {
     value.effect !== 'unknown' && value.journal !== 'unknown' && value.journal !== 'recovery_required';
 }
 
+
+function recoverySummary(value: unknown, staged: boolean): boolean {
+  return value === null || keys(value, ['size', 'mode', 'sha256']) && length(value.size, staged ? 16384 : 1048576) &&
+    (!staged || value.size > 0) && length(value.mode, 0o7777) && digest(value.sha256);
+}
+export function workflowRecoveryView(value: unknown): value is WorkflowRecoveryView {
+  if (!boundedJson(value, 4096, 512, 8) || !keys(value, ['schemaVersion', 'kind', 'state', 'action', 'transactionId', 'files', 'privateCleanup']) ||
+      value.schemaVersion !== 1 || value.kind !== 'recovery' || !oneOf(value.state, ['idle', 'conflict', 'recoverable']) ||
+      !Array.isArray(value.files) || !keys(value.privateCleanup, ['fileCount', 'directoryCount', 'scope']) ||
+      value.privateCleanup.scope !== 'inspected-workflow-journal-only' || !length(value.privateCleanup.fileCount, 16) ||
+      !length(value.privateCleanup.directoryCount, 2) || value.privateCleanup.fileCount + value.privateCleanup.directoryCount > 16) return false;
+  if (value.state !== 'recoverable') return value.action === null && value.transactionId === null &&
+    value.files.length === 0 && value.privateCleanup.fileCount === 0 && value.privateCleanup.directoryCount === 0;
+  if (!oneOf(value.action, ['rollback', 'committed_cleanup', 'rolled_back_cleanup', 'preparing_cleanup']) ||
+      !token(value.transactionId) || value.files.length !== 4 || value.privateCleanup.fileCount < 2) return false;
+  return value.files.every((file, index) => {
+    if (!keys(file, ['id', 'path', 'action', 'before', 'after']) || file.id !== GITHUB_WORKFLOWS[index]?.id ||
+        file.path !== GITHUB_WORKFLOWS[index]?.path || !recoverySummary(file.before, false) || !recoverySummary(file.after, true) ||
+        file.before === null && file.after === null) return false;
+    const expected = value.action !== 'rollback' || file.after === null ? 'preserve' : file.before === null ? 'remove' : 'restore';
+    return file.action === expected && (!record(file.before) || !record(file.after) || file.before.mode === file.after.mode);
+  });
+}
+function recoveryExpected(view: WorkflowRecoveryView): CoreEditOutcome['effect'] | null {
+  if (view.state !== 'recoverable') return null;
+  switch (view.action) {
+    case 'committed_cleanup': return 'committed';
+    case 'rollback': case 'rolled_back_cleanup': return 'rolled_back';
+    case 'preparing_cleanup': return 'not_started';
+    default: return null;
+  }
+}
+function recoveryTerminal(owner: GitHubWorkflowEditProjection): boolean {
+  const core = owner.coreOutcome; const recovery = owner.recovery;
+  if (!core || !recovery) return true;
+  if (core.effect === 'unchanged' || owner.applySubmitted && !recovery.prepared || !owner.applySubmitted && core.journal === 'clean') return false;
+  const view = recovery.checkout?.view;
+  if (view) {
+    let effectValid = false;
+    switch (view.action) {
+      case 'committed_cleanup': effectValid = core.effect === 'committed'; break;
+      case 'rolled_back_cleanup': effectValid = core.effect === 'rolled_back'; break;
+      case 'preparing_cleanup': effectValid = core.effect === 'not_started'; break;
+      case 'rollback': effectValid = core.effect === 'not_started' || owner.applySubmitted && ['rolled_back', 'unknown'].includes(core.effect); break;
+      case null: effectValid = core.effect === 'not_started'; break;
+    }
+    if (!effectValid || view.state === 'recoverable' && core.journal === 'not_created') return false;
+  }
+  return !owner.applySubmitted || core.reason !== 'none' || Boolean(recovery.prepared && core.resources === 'settled' &&
+    core.journal === 'clean' && core.effect === recoveryExpected(recovery.prepared.view));
+}
+function recoveryProjection(value: Record<string, unknown>): boolean {
+  const recovery = value.recovery;
+  if (value.checkout !== null || value.prepared !== null || value.conflict !== null || !keys(recovery, ['checkout', 'prepared'])) return false;
+  const checkout = recovery.checkout; const prepared = recovery.prepared;
+  if (checkout !== null && (!keys(checkout, ['revision', 'view']) || !token(checkout.revision) || !workflowRecoveryView(checkout.view))) return false;
+  if (prepared !== null && (!keys(prepared, ['revision', 'planToken', 'view']) || !token(prepared.revision) || !token(prepared.planToken) ||
+      prepared.revision === prepared.planToken || !workflowRecoveryView(prepared.view) || prepared.view.state !== 'recoverable' ||
+      !record(checkout) || prepared.revision !== checkout.revision || !equal(prepared.view, checkout.view))) return false;
+  const owner = value as unknown as GitHubWorkflowEditProjection;
+  if (owner.phase === 'final') {
+    if (owner.nativeFinality !== 'settled' || owner.lateSettled) return false;
+    if (owner.coreOutcome === null) {
+      if (checkout || prepared || owner.applySubmitted || owner.nativeReason === 'none') return false;
+    } else if (owner.coreOutcome.resources === 'unknown' || owner.coreOutcome.effect === 'unknown' || owner.coreOutcome.journal === 'unknown') return false;
+  } else if (owner.phase === 'unknown') {
+    if (owner.nativeFinality !== 'unknown') return false;
+  } else if (owner.nativeFinality !== 'pending' || owner.lateSettled) return false;
+  if (owner.phase === 'opening' && (checkout || prepared || owner.applySubmitted)) return false;
+  if (['editing', 'preparing', 'reviewing', 'applying'].includes(owner.phase) && !checkout) return false;
+  if (['editing', 'preparing'].includes(owner.phase) && (prepared || owner.applySubmitted)) return false;
+  if (['reviewing', 'applying'].includes(owner.phase) && !prepared) return false;
+  if (owner.phase === 'reviewing' && owner.applySubmitted || owner.phase === 'applying' && !owner.applySubmitted || owner.applySubmitted && !prepared) return false;
+  if (['opening', 'editing', 'preparing', 'reviewing'].includes(owner.phase) && owner.coreOutcome !== null) return false;
+  return recoveryTerminal(owner);
+}
+export function normalWorkflowRecovery(owner: GitHubWorkflowEditProjection): boolean {
+  const core = owner.coreOutcome; const recovery = owner.recovery;
+  return owner.domain === 'github_workflows' && owner.phase === 'final' && owner.nativeFinality === 'settled' && owner.nativeReason === 'none' &&
+    !owner.lateSettled && owner.applySubmitted && Boolean(core && core.resources === 'settled' && core.reason === 'none' && core.journal === 'clean' &&
+    recovery?.checkout && recovery.prepared && recovery.prepared.revision === recovery.checkout.revision &&
+    equal(recovery.prepared.view, recovery.checkout.view) && core.effect === recoveryExpected(recovery.prepared.view));
+}
+
 function projection(value: unknown): value is GitHubWorkflowEditProjection {
-  if (!keys(value, ['domain', 'projectId', 'sessionId', 'ownerGeneration', 'phase', 'reviewRemainingMs', 'checkout', 'prepared', 'conflict', 'applySubmitted', 'coreOutcome', 'nativeReason', 'nativeFinality', 'lateSettled']) ||
+  const isRecovery = record(value) && Object.hasOwn(value, 'recovery');
+  if (!keys(value, ['domain', 'projectId', 'sessionId', 'ownerGeneration', 'phase', 'reviewRemainingMs', 'checkout', 'prepared', 'conflict', 'applySubmitted', 'coreOutcome', 'nativeReason', 'nativeFinality', 'lateSettled', ...(isRecovery ? ['recovery'] : [])]) ||
       value.domain !== 'github_workflows' || !text(value.projectId, 128) || !token(value.sessionId) || !token(value.ownerGeneration) ||
       !oneOf(value.phase, phases) || !length(value.reviewRemainingMs, 900000) || typeof value.applySubmitted !== 'boolean' || typeof value.lateSettled !== 'boolean' ||
       !oneOf(value.nativeReason, nativeReasons) || !oneOf(value.nativeFinality, ['pending', 'settled', 'unknown']) ||
       !(value.coreOutcome === null || outcome(value.coreOutcome)) || !(value.conflict === null || conflict(value.conflict))) return false;
+  if (isRecovery) return recoveryProjection(value);
   const checkout = value.checkout;
   if (checkout !== null && (!keys(checkout, ['revision', 'observed']) || !token(checkout.revision) || !Array.isArray(checkout.observed) ||
       checkout.observed.length !== 4 || !checkout.observed.every((row, index) => {
@@ -242,6 +332,9 @@ function sameFacts(first: GitHubWorkflowEditProjection, next: GitHubWorkflowEdit
   return equal({ ...first, reviewRemainingMs: 0 }, { ...next, reviewRemainingMs: 0 });
 }
 export function workflowProjectionProgress(first: GitHubWorkflowEditProjection, next: GitHubWorkflowEditProjection): boolean {
+  if (Boolean(first.recovery) !== Boolean(next.recovery) ||
+      first.recovery?.checkout && !equal(first.recovery.checkout, next.recovery?.checkout) ||
+      first.recovery?.prepared && !equal(first.recovery.prepared, next.recovery?.prepared)) return false;
   if (first.domain !== next.domain || first.sessionId !== next.sessionId || first.projectId !== next.projectId || first.ownerGeneration !== next.ownerGeneration ||
       first.checkout !== null && !equal(first.checkout, next.checkout) || first.prepared !== null && !equal(first.prepared, next.prepared) ||
       first.conflict !== null && !equal(first.conflict, next.conflict) || first.applySubmitted && !next.applySubmitted || first.lateSettled && !next.lateSettled) return false;

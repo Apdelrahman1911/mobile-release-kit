@@ -65,7 +65,8 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         journey = journey.split("@MainActor func testSyntheticProjectLocalEdits()", 1)[0]
         self.assertLess(journey.index("fixture.admitDefaultVault()"), journey.index("launchForJourney()"))
         self.assertIn("executionTimeAllowance = 300", journey)
-        self.assertIn("journeyDeadline = ProcessInfo.processInfo.systemUptime + 300", journey)
+        self.assertIn("try beginCase(seconds: 300)", journey)
+        self.assertLess(journey.index("try beginCase(seconds: 300)"), journey.index("fixture.admitDefaultVault()"))
         self.assertLess(journey.index('"Create encrypted vault"'), journey.index("explicitlySubmit: true"))
         self.assertIn('privateStatus(storage, action: "initialize", mutation: true)', journey)
         self.assertIn('reviewTarget: "New \\(input.rawValue.lowercased()) encrypted record"', journey)
@@ -110,25 +111,26 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
         basic = source.split("func testLaunchCancelAndQuit() throws {", 1)[1]
         basic = basic.split("// Finite synthetic files only.", 1)[0]
-        admission = source.split("private func admittedJourneyApplication() throws -> (URL, HostedAccount) {", 1)[1]
+        admission = source.split("private func admittedJourneyApplication(profile: SourceProfile = .sameBuild)", 1)[1]
         admission = admission.split("@MainActor private func launchForJourney()", 1)[0]
         launch = source.split("@MainActor private func launchForJourney()", 1)[1]
         launch = launch.split("private enum PrivateInput", 1)[0]
-        for block in (basic, admission):
-            self.assertEqual(block.count("let account = try admitHostedAccount()"), 1)
+        self.assertEqual(admission.count("let account = try admitHostedAccount(profile)"), 1)
         self.assertIn("return (url, account)", admission)
-        self.assertIn("let (url, account) = try admittedJourneyApplication()", launch)
-        self.assertNotIn("admitHostedAccount()", launch)
-        environments = re.findall(r"app\.launchEnvironment = \[(.*?)\n        \]", source, re.S)
-        self.assertEqual(len(environments), 2)
-        expected = [
-            '"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",',
-            '"HOME": account.home, "USER": account.name, "LOGNAME": account.name,',
-            '"LANG": "en_US.UTF-8",',
-            '"LC_ALL": "en_US.UTF-8", "TZ": "UTC"',
-        ]
-        for environment in environments:
-            self.assertEqual([line.strip() for line in environment.strip().splitlines()], expected)
+        self.assertIn("_ = try admittedJourneyApplication(profile: profile)", basic)
+        self.assertIn("_ = try admittedJourneyApplication()", launch)
+        self.assertEqual(basic.count("let app = try launchOrdinaryApplication()"), 1)
+        self.assertEqual(launch.count("let app = try launchOrdinaryApplication()"), 1)
+        self.assertNotIn("admitHostedAccount(", launch)
+        self.assertEqual(source.count("try launchCancelAndQuit(profile: .packagedEntry)"), 1)
+        self.assertEqual(source.count("configuration.arguments = []"), 1)
+        self.assertNotIn("configuration.environment", source)
+        self.assertNotIn("app.launchEnvironment", source)
+        self.assertNotIn("app.launchArguments", source)
+        # The unchanged entry, not arbitrary runner environment, remains the
+        # payload's clean-environment authority. All old journeys stay strict.
+        same_build = source.split("case .sameBuild:", 1)[1].split("case .packagedEntry:", 1)[0]
+        self.assertIn("applicationSource == harnessSource", same_build)
         persistence = source.split("@MainActor func testSyntheticPersistentCredentials() throws {", 1)[1]
         persistence = persistence.split('stage("persistence-launch")', 1)[0]
         self.assertLess(persistence.index("_ = try admittedJourneyApplication()"),
@@ -155,10 +157,10 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         # count bindings, deadlines and finality limitations intact.
         pins = {
             b"normal_ui_build": "b240c46f7cdad329dbdff8b51a3be428ea2c3ef78e3ff66373393367d1115e5f",
-            b"normal_ui_test": "4d0e38e398d1e49b804177f65deb7aa4abe59ed8fc8e2c6d8d56dcf9e676c1d5",
-            b"normal_project_ui_test": "161d12ffaada989d866466ec297dd17ed64de10ac6b84bc9cc1973e76d7d07fb",
+            b"normal_ui_test": "f9a4ab10526a79ff9f87bcb2ef8ed5fc9b6126c9e38a472a43b9e71bec9d2806",
+            b"normal_project_ui_test": "d903ce62063fd858c158a87bcc2a5532c47c043f13ddaf9147a568222b306bd2",
             b"normal_project_ui_result": "20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d",
-            b"normal_persistence_ui_test": "01bded1ba9c28bff4d9ce7a224665cc8e2a1bcb1327a2f097da4bde50fec390e",
+            b"normal_persistence_ui_test": "71b6c1436503ada551ca0512fc49f925a6caecfe3448daec464fc3134d49b8bc",
         }
         for identifier, expected in pins.items():
             self.assertEqual(ids.count(identifier), 1, identifier)

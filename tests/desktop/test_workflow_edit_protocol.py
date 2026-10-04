@@ -147,6 +147,39 @@ class WorkflowEditProtocolTests(unittest.TestCase):
         self.assertGreater(len(wire.response(request, "opened", larger)), wire.WORKFLOW_RESPONSE_LIMIT)
         self.assertEqual(wire.RESPONSE_LIMIT, 4 * 1024 * 1024)
 
+    def test_recovery_has_three_closed_shapes_under_the_original_workflow_protocol(self):
+        cases = [(0, "open", {"root": "/inert/project", "registeredIdentity": identity(), "intent": "recover"}),
+                 (1, "prepare", {"revision": REVISION, "intent": "recover"}),
+                 (2, "apply", {"planToken": REVISION, "intent": "recover"})]
+        for seq, op, params in cases:
+            with self.subTest(op=op):
+                parsed = decode(seq, op, params)
+                self.assertEqual(parsed.params, params)
+                self.assertEqual(parsed.protocol, wire.WORKFLOW_PROTOCOL)
+                with self.assertRaises(wire.ProtocolError):
+                    wire.parse_request(frame(seq, op, params, protocol=wire.PROTOCOL),
+                                       sequence=seq, session=None if seq == 0 else SESSION)
+        for seq in (1, 2):
+            self.assertEqual(decode(seq, "discard", {}).params, {})
+            with self.assertRaises(wire.ProtocolError):
+                decode(seq, "discard", {"intent": "recover"})
+
+    def test_recovery_refuses_mixed_edit_inputs_unknown_intent_and_extra_authority(self):
+        cases = [(0, "open", {"root": "/inert/project", "registeredIdentity": identity(), "intent": "recover"}),
+                 (1, "prepare", {"revision": REVISION, "intent": "recover"}),
+                 (2, "apply", {"planToken": REVISION, "intent": "recover"})]
+        for seq, op, params in cases:
+            for intent in (None, False, "edit", "rollback", "Recover", {"recover": True}):
+                with self.subTest(op=op, intent=intent), self.assertRaises(wire.ProtocolError):
+                    decode(seq, op, {**params, "intent": intent})
+            for key in ("draft", "toolingRepository", "toolingSha", "files", "path", "content", "force", "transactionId"):
+                with self.subTest(op=op, extra=key), self.assertRaises(wire.ProtocolError):
+                    decode(seq, op, {**params, key: None})
+        with self.assertRaises(wire.ProtocolError):
+            decode(1, "prepare", {**prepare(), "intent": "recover"})
+        with self.assertRaises(wire.ProtocolError):
+            decode(1, "prepare", {"revision": REVISION})
+
 
 if __name__ == "__main__":
     unittest.main()

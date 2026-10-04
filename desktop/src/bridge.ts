@@ -480,6 +480,9 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       try { return await listen('config-edit-state', onStatus); }
       catch (error) { throw apiError(error); }
     },
+    openGitHubWorkflowRecovery: (projectId) => workflowCall('github_workflow_edit_open', { projectId, intent: 'recover' }),
+    prepareGitHubWorkflowRecovery: (sessionId, revision) => workflowCall('github_workflow_edit_prepare', { sessionId, revision, intent: 'recover' }),
+    applyGitHubWorkflowRecovery: (sessionId, planToken) => workflowCall('github_workflow_edit_apply', { sessionId, planToken, intent: 'recover' }),
     openGitHubWorkflowEdit: (projectId) => workflowCall('github_workflow_edit_open', { projectId }),
     prepareGitHubWorkflowEdit: (request) => workflowCall('github_workflow_edit_prepare', request),
     applyGitHubWorkflowEdit: (sessionId, planToken) => workflowCall('github_workflow_edit_apply', { sessionId, planToken }),

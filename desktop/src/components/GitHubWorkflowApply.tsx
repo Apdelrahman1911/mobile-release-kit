@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import {
-  canApplyWorkflows, currentWorkflowApplyBinding, workflowApplyHelp, workflowDisplayDiff,
+  canApplyWorkflows, canRecoverWorkflows, currentWorkflowApplyBinding, currentWorkflowRecoveryBinding, workflowApplyHelp, workflowDisplayDiff,
   workflowEditNotice, workflowNoOp,
 } from '../githubWorkflowEdit.ts';
-import type { GitHubWorkflowEditState, WorkflowApplyBinding } from '../githubWorkflowEdit.ts';
+import type { GitHubWorkflowEditState, WorkflowApplyBinding, WorkflowRecoveryApplyBinding } from '../githubWorkflowEdit.ts';
 import type { GitHubWorkflowEditController } from '../githubWorkflowEditController.ts';
 import type { WorkflowPreparedView } from '../githubWorkflowEditTypes.ts';
 import type { GitHubSetupState } from '../githubSetupController.ts';
@@ -11,6 +11,7 @@ import type { ProjectSession } from '../drafts.ts';
 import type { HelpContent } from '../types.ts';
 import { Badge, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
+import { WorkflowRecoveryConfirmation, WorkflowRecoveryReview } from './WorkflowRecoveryReview.tsx';
 
 function WorkflowFiles({ view }: { view: WorkflowPreparedView }) {
   return <div className="review-table-wrap workflow-files"><table className="review-table">
@@ -83,6 +84,7 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
   onHelp: (help: HelpContent) => void;
 }) {
   const [confirmation, setConfirmation] = useState<WorkflowApplyBinding | null>(null);
+  const [recoveryConfirmation, setRecoveryConfirmation] = useState<WorkflowRecoveryApplyBinding | null>(null);
   const attempt = state.attempt;
   const owner = attempt?.projection ?? state.unknownEvidence ?? state.status?.active ?? state.status?.lastTerminal ?? null;
   const projectId = owner?.projectId ?? attempt?.binding.projectId ?? null;
@@ -90,6 +92,11 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
   const selected = selectedId && Object.hasOwn(projects, selectedId) ? projects[selectedId] ?? null : null;
   const notice = workflowEditNotice(state);
   const startReason = controller.startReason();
+  const recoveryStartReason = controller.recoveryStartReason();
+  const recoveryBinding = currentWorkflowRecoveryBinding(state);
+  const mayRecover = canRecoverWorkflows(state, selected);
+  const recoveryView = owner?.recovery?.prepared?.view ?? owner?.recovery?.checkout?.view;
+  const showRecovery = detailed && selectedId === projectId && recoveryView?.state === 'recoverable';
   const binding = currentWorkflowApplyBinding(state);
   const mayApply = canApplyWorkflows(state, selected, setup);
   const owned = Boolean(attempt && owner && attempt.sessionId === owner.sessionId && attempt.binding.windowGeneration === owner.ownerGeneration);
@@ -101,6 +108,9 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
   useEffect(() => {
     if (confirmation && (!detailed || selectedId !== projectId || !canApplyWorkflows(state, selected, setup, confirmation))) setConfirmation(null);
   }, [state, setup, selected, selectedId, projectId, detailed, confirmation]);
+  useEffect(() => {
+    if (recoveryConfirmation && (!detailed || selectedId !== projectId || !canRecoverWorkflows(state, selected, recoveryConfirmation))) setRecoveryConfirmation(null);
+  }, [state, selected, selectedId, projectId, detailed, recoveryConfirmation]);
   if (!detailed && !notice) return null;
   return <section className="card native-workflow-panel" aria-label="Local GitHub workflow files">
     <SectionHeading title={notice?.title ?? 'Local workflow files · separate native review'} description={project ? `Original local operation for ${project.project.name}. Configuration drafts remain separate and unsaved.` : 'Create absent, update canonical or preserve identical callers. Passive previews never supply Apply authority.'}>
@@ -110,11 +120,16 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
     {owner && !owned && <p className="review-caution">Read-only native operation summary. This renderer has not adopted its review token or submitted an Apply.</p>}
     {state.generationLost && applyPending && <p className="review-caution">The document generation changed. The original submitted outcome is retained for observation only; no review authority can be reattached.</p>}
     {state.nativeBlocked && owner?.phase === 'final' && <p className="review-caution" role="alert">This original result is retained, but other native cleanup remains unverified. Further file edits are disabled; do not repeat Apply or clear recovery evidence.</p>}
-    {applyPending && <p className="save-note">This status belongs to the originally submitted project, draft and pin. Newer selections and configuration edits are kept; workflow installation never marks a draft clean.</p>}
+    {applyPending && <p className="save-note">{owner?.recovery ?
+      'This result belongs to the original submitted recovery inspection. Newer selections and drafts are kept; recovery does not retry Apply or mark configuration saved.' :
+      'This status belongs to the originally submitted project, draft and pin. Newer selections and configuration edits are kept; workflow installation never marks a draft clean.'}</p>}
     {showReview && owner?.prepared && <WorkflowReview view={owner.prepared.view} />}
+    {showRecovery && recoveryView && <WorkflowRecoveryReview view={recoveryView} />}
     {owner?.conflict && <div className="workflow-conflict"><h3>Observed differing callers · no Apply token</h3><ul>{owner.conflict.conflicts.map((row) => <li key={row.id}><strong>{row.id}</strong><span>{row.observed.byteLength.toLocaleString()} observed bytes</span><code>{row.observed.sha256}</code></li>)}</ul><p>Only summaries actually obtained by the original capture are shown. Existing YAML is not exposed; no subset, force or overwrite option is available.</p></div>}
     {owner && (terminal || owner.phase === 'finalizing') && <dl className="save-outcome-facts" aria-label="Independent native workflow outcome facts"><div><dt>Transaction effect</dt><dd>{owner.coreOutcome?.effect ?? 'Not reported'}</dd></div><div><dt>Journal</dt><dd>{owner.coreOutcome?.journal ?? 'Not reported'}</dd></div><div><dt>Core resources</dt><dd>{owner.coreOutcome?.resources ?? 'Not reported'}</dd></div><div><dt>Native finality</dt><dd>{owner.nativeFinality}{owner.lateSettled ? ' · late settlement recorded' : ''}</dd></div></dl>}
     <div className="button-row save-actions">
+      {detailed && <button type="button" className="button secondary" disabled={recoveryStartReason !== null} aria-describedby="github-workflow-recovery-reason" onClick={() => controller.inspectRecovery()}><Icon name={recoveryStartReason ? 'lock' : 'shield'} size={17} />Inspect workflow recovery</button>}
+      {showRecovery && owned && !terminal && owner?.recovery?.prepared && <button type="button" className="button primary" disabled={!mayRecover || !recoveryBinding} onClick={() => { if (mayRecover && recoveryBinding) setRecoveryConfirmation(recoveryBinding); }}>{applyPending ? 'Recover already requested' : 'Confirm inspected recovery'}</button>}
       {detailed && <button type="button" className="button secondary" disabled={startReason !== null} aria-describedby="github-workflow-start-reason" onClick={() => controller.start()}><Icon name={startReason ? 'lock' : 'github'} size={17} />Review local workflow files</button>}
       {showReview && owned && !terminal && owner?.prepared && <button type="button" className="button primary" disabled={!mayApply || !binding} onClick={() => { if (binding && mayApply) setConfirmation(binding); }}>{applyPending ? 'Apply already requested' : workflowNoOp(owner.prepared.view) ? 'Review unchanged confirmation' : 'Confirm reviewed local files'}<Icon name={mayApply ? 'check' : 'lock'} size={16} /></button>}
       {mayClose && <button type="button" className="button secondary" onClick={() => controller.requestClose()}>{applyPending ? 'Request cancellation' : 'Close workflow review / keep draft'}</button>}
@@ -122,7 +137,13 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
       {state.mode === 'native' && <button type="button" className="button small secondary" disabled={state.readPending} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} className={state.readPending ? 'spin' : ''} />{state.readPending ? 'Checking status…' : 'Check original workflow status'}</button>}
     </div>
     {detailed && <p id="github-workflow-start-reason" className="save-note">{startReason ?? 'Starts a fresh original-file observation and native review. It ignores all supplied comparison assertions and does not apply the passive preview.'}</p>}
+    {detailed && <p id="github-workflow-recovery-reason" className="save-note">{recoveryStartReason ??
+      'Read-only inspection and preparation work without a valid draft or toolkit pin. A separate explicit confirmation is required for one rollback or private cleanup; incomplete legacy state is preserved and refused.'}</p>}
+    {showRecovery && !terminal && <p className="save-note">Changing project or native document retires this recovery review. Draft and toolkit edits are unrelated; no old Apply authority is reattached and no mutation is retried.</p>}
     {showReview && !terminal && <p className="save-note">Selection, draft/baseline, toolkit pin, service/runtime or document changes retire this review before Apply. The native review lifetime is nonrenewable. Nothing is silently rebased, reprepared or retried.</p>}
+    {recoveryConfirmation && owner?.recovery?.prepared && <WorkflowRecoveryConfirmation view={owner.recovery.prepared.view} binding={recoveryConfirmation}
+      allowed={detailed && selectedId === projectId && canRecoverWorkflows(state, selected, recoveryConfirmation)} onCancel={() => setRecoveryConfirmation(null)}
+      onConfirm={() => { controller.recover(recoveryConfirmation); setRecoveryConfirmation(null); }} />}
     {confirmation && owner?.prepared && <WorkflowConfirmation view={owner.prepared.view} binding={confirmation} allowed={detailed && selectedId === projectId && canApplyWorkflows(state, selected, setup, confirmation)} onCancel={() => setConfirmation(null)} onConfirm={() => { controller.apply(confirmation); setConfirmation(null); }} />}
   </section>;
 }

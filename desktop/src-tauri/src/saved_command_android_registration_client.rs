@@ -391,7 +391,7 @@ fn source_worker(original: Arc<Operation>, mut input: SourceInputs) -> SourceRet
             entered = true;
             let mut publish = |failure, at| source_failure(&original.control, failure, at);
             let result = sources.reprove_once(original.source.roots(), &client.reviewed.source,
-                original.supplier_reservation, original.control.work, &original.control.stop.subscribe(), &mut publish);
+                original.control.work, &original.control.stop.subscribe(), &mut publish);
             if result.is_ok() && client.work(&original) {
                 let nonce = permit.nonce;
                 if input.reproved.send(Reproved { original: Arc::downgrade(&original), nonce }).is_ok() {
@@ -911,9 +911,9 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
         || checked.instance != reviewed.source.instance() || checked.review_id != reviewed.public.review_id {
         return Err(wire::unavailable());
     }
-    let supplier_reservation = crate::android_supplier_macos::max_working_reservation_bytes().map_err(|_| wire::unavailable())?;
-    let source_reservation = AndroidRegistrationSourceSlots::working_reservation_bytes()
-        .and_then(|bytes| bytes.checked_add(supplier_reservation)).ok_or_else(wire::unavailable)?;
+    let source_budget = AndroidRegistrationSourceSlots::reservation(crate::android_supplier_macos_source::SourcePhase::Reproof)
+        .ok_or_else(wire::unavailable)?;
+    let source_reservation = source_budget.bytes();
     let work = snapshot.at.checked_add(WORK).ok_or_else(wire::unavailable)?;
     let hard = snapshot.at.checked_add(HARD).ok_or_else(wire::unavailable)?;
     let observed = Instant::now();
@@ -944,15 +944,9 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
     let phase_bytes=source_reservation.checked_add(service_setup::Preparation::SETTLED_BYTES)
         .map(|bytes|bytes.max(service_setup::Preparation::reservation_bytes().unwrap_or(usize::MAX)))
         .ok_or_else(wire::unavailable)?;
-    let total = previous.checked_add(arc_bytes::<Operation>().ok_or_else(wire::unavailable)?)
-        .and_then(|n| n.checked_add(operation_projection_bytes(&data)?))
-        .and_then(|n| n.checked_add(checked.review_id.capacity()))
-        .and_then(|n| n.checked_add(checked.instance.capacity()))
-        .and_then(|n| n.checked_add(control.retained_bytes()?))
-        .and_then(|n| n.checked_add(phase_bytes)).and_then(|n| n.checked_add(client_bytes))
-        .and_then(|n| n.checked_add(3usize.checked_mul(wire::STATUS_LIMIT)?))
-        .and_then(|n| n.checked_add(3usize.checked_mul(wire::REQUEST_LIMIT)?))
-        .filter(|n| *n <= OWNED_LIMIT).ok_or_else(wire::unavailable)?;
+    let phase_storage = phase_bytes.checked_add(client_bytes).ok_or_else(wire::unavailable)?;
+    let total = operation_admission_bytes(previous,&data,&checked.review_id,&checked.instance,&control,phase_storage)
+        .ok_or_else(wire::unavailable)?;
     // The whole high-water, including bounded task/channel cells, is accepted
     // BEFORE allocating the flight buffer. ClientBook is not constructed until
     // control admission below, so failed DATA admission cannot leak its retained
@@ -960,13 +954,13 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
     let client = ClientOriginal::reserve(reviewed,WorkGate{slot:owner.inner.android_registration_control.clone(),control:control.clone()},dispatcher).ok_or_else(wire::unavailable)?;
     let original = Arc::new(Operation { owner: Arc::downgrade(&owner.inner), document: Arc::downgrade(document),
         source: snapshot.source.clone(), data, saved: current, cohort, review_id: checked.review_id.clone(),
-        instance: checked.instance.clone(), control: control.clone(), supplier_reservation,
+        instance: checked.instance.clone(), control: control.clone(),
         reservation: OnceLock::new(), settling: AtomicBool::new(false), source_handle: AsyncMutex::new(None),
         source_return: Mutex::new(None), source_join_seen: AtomicBool::new(false), coordinator: Mutex::new(None),
         coordinator_return: Mutex::new(None), final_seen: AtomicBool::new(false), joined_at: OnceLock::new(),
         accepted: AtomicBool::new(false), client: Some(client),
         sources: Mutex::new(AndroidRegistrationSourceSlots::new_registered(audit_read,
-            WorkGate { slot: owner.inner.android_registration_control.clone(), control: control.clone() })) });
+            WorkGate { slot: owner.inner.android_registration_control.clone(), control: control.clone() },source_budget)) });
     let (release, begin) = oneshot::channel();
     let (prepare, preparation) = oneshot::channel(); let (ready_send, ready) = oneshot::channel();
     let (reproof_send, reproof) = oneshot::channel(); let (reproved_send, reproved) = oneshot::channel();

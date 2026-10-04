@@ -639,8 +639,14 @@ pub(crate) struct SavedCommandOwner { inner: Arc<Inner> }
 struct InstalledObservation { control: Arc<crate::shell::installed_observation::commands::Control>, original: Option<Arc<Session>>, retired: bool, core_settled: bool, android_lifetime: Option<android_wire::Lifetime> }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
 struct InstalledIOSObservation {
-    control: Arc<crate::shell::installed_observation::ios::Control>, original: Option<Arc<Session>>,
-    retired: bool, core_settled: bool, terminal: Option<ios_wire::Terminal>,
+    control: Arc<crate::shell::installed_observation::ios::Control>,
+    // Exactly Inspect then Account in the pending-account case; legacy cases
+    // use slot0 only. Never replace/clear either original, including on error.
+    originals: [Option<InstalledIOSOriginal>; 2],
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+struct InstalledIOSOriginal {
+    original: Arc<Session>, retired: bool, core_settled: bool, terminal: Option<ios_wire::Terminal>,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[path = "saved_command_recovery_observation.rs"]
@@ -1551,11 +1557,23 @@ impl SavedCommandOwner {
         recovery_observation::prepare(&self.inner, &r, &context)?;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if let Some(observation) = self.inner.ios_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_ref() {
-            if self.inner.domain != SavedCommandDomain::IOSArchive || observation.original.is_some()
-                || !matches!(&context, Context::IOSArchive(selected) if observation.control.permits_mode(selected.operation)) {
+            let Context::IOSArchive(selected) = &context else { return Err(self.inner.domain.unavailable()); };
+            let index = observation.control.slot_for(selected).ok_or_else(|| self.inner.domain.unavailable())?;
+            if self.inner.domain != SavedCommandDomain::IOSArchive || observation.originals[index].is_some()
+                || !observation.control.permits_mode(selected.operation) {
                 return Err(self.inner.domain.unavailable());
             }
-            observation.control.claim()?;
+            if index == 1 {
+                // The ordinary prepare path above already matched this exact
+                // project/registration/session. Keep its original Arc, never
+                // substitute terminal JSON or recursively snapshot under r.
+                let first = observation.originals[0].as_ref().ok_or_else(|| self.inner.domain.unavailable())?;
+                if !first.retired || !first.core_settled || first.terminal.is_none()
+                    || !recovery.as_ref().is_some_and(|inspected| Arc::ptr_eq(&inspected.original, &first.original)) {
+                    return Err(self.inner.domain.unavailable());
+                }
+            }
+            observation.control.claim_slot(index)?;
         }
         let id = nonce(self.inner.domain)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
@@ -1587,7 +1605,7 @@ impl SavedCommandOwner {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         let clocks = if prepared.projection.context.signed_ios()
             && self.inner.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
-                o.original.is_none() && o.control.permits_mode(ios_wire::Operation::IOSSignedExport))) {
+                o.originals[0].is_none() && o.control.permits_mode(ios_wire::Operation::IOSSignedExport))) {
             Clocks::installed_ios_signed(admitted_at)
         } else { clocks };
         let material_matches = match (&prepared.material, &material) {
@@ -1706,11 +1724,18 @@ impl SavedCommandOwner {
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if let Some(observation) = self.inner.ios_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_mut() {
-            if self.inner.domain != SavedCommandDomain::IOSArchive || observation.original.is_some()
-                || !matches!(&owner.context, Context::IOSArchive(selected) if observation.control.permits_mode(selected.operation)) {
+            let Context::IOSArchive(selected) = &owner.context else { return Err(self.inner.domain.unavailable()); };
+            let index = observation.control.slot_for(selected).ok_or_else(|| self.inner.domain.unavailable())?;
+            if self.inner.domain != SavedCommandDomain::IOSArchive || observation.originals[index].is_some()
+                || !observation.control.permits_mode(selected.operation) || !observation.control.slot_claimed(index)
+                || index == 1 && !observation.originals[0].as_ref().is_some_and(|first|
+                    first.retired && first.core_settled && owner.recovery.as_ref()
+                        .is_some_and(|inspected| Arc::ptr_eq(&inspected.original, &first.original))) {
                 return Err(self.inner.domain.unavailable());
             }
-            observation.original = Some(owner.clone());
+            observation.originals[index] = Some(InstalledIOSOriginal {
+                original: owner.clone(), retired: false, core_settled: false, terminal: None,
+            });
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         recovery_observation::bind(&self.inner, &owner)?;
@@ -1930,7 +1955,8 @@ impl SavedCommandOwner {
                 recovery_observation::retire(&self.inner, &active, &owner, r.recovery_review.is_some());
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
                 if let Ok(mut observation) = self.inner.ios_observation.lock() {
-                    if let Some(observation) = observation.as_mut().filter(|o| o.original.as_ref().is_some_and(|s| Arc::ptr_eq(s, &owner))) {
+                    if let Some(observation) = observation.as_mut().and_then(|o|
+                        o.originals.iter_mut().flatten().find(|s| Arc::ptr_eq(&s.original, &owner))) {
                         // Preserve actual core DATA before public() deliberately
                         // strips a result which cannot be exposed as success.
                         observation.retired = true;
@@ -2067,9 +2093,10 @@ impl Inner {
             let Ok(slot) = self.ios_observation.lock() else { return false; };
             if let Some(observation) = slot.as_ref() {
                 let Context::IOSArchive(selected) = context else { return false; };
-                let same_original = match (original, observation.original.as_ref()) {
+                let Some(index) = observation.control.slot_for(selected) else { return false; };
+                let same_original = match (original, observation.originals[index].as_ref()) {
                     (None, None) => true,
-                    (Some(owner), Some(bound)) => std::ptr::eq(bound.as_ref(), owner),
+                    (Some(owner), Some(bound)) => std::ptr::eq(bound.original.as_ref(), owner),
                     _ => false,
                 };
                 // A different observed mode never falls through to production
@@ -2088,7 +2115,7 @@ impl Inner {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if self.domain == SavedCommandDomain::IOSArchive
             && self.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
-                o.original.is_none() && o.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive))) {
+                o.originals[0].is_none() && o.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive))) {
             return Clocks::installed_ios(admitted);
         }
         Clocks::new(self.domain, admitted)
@@ -3719,7 +3746,7 @@ impl SavedCommandOwner {
         let mut slot = self.inner.ios_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
         if slot.is_some() { return Err(self.inner.domain.unavailable()); }
         *slot = Some(InstalledIOSObservation { control: token.consume(&self.inner.ios_observation_identity)?,
-            original: None, retired: false, core_settled: false, terminal: None });
+            originals: [None, None] });
         Ok(())
     }
     pub(crate) fn installed_ios_snapshot(&self) -> Option<crate::shell::installed_observation::ios::Snapshot> {
@@ -3731,7 +3758,7 @@ impl SavedCommandOwner {
 fn observe_installed_ios_signed_inputs(inner: &Inner, owner: &Session) {
     use crate::shell::installed_observation::ios::Case;
     let original = inner.ios_observation.lock().ok().map(|slot| slot.as_ref().map(|observation| {
-        (observation.control.clone(), observation.original.as_ref().is_some_and(|original| std::ptr::eq(original.as_ref(), owner)))
+        (observation.control.clone(), observation.originals.iter().flatten().any(|row| std::ptr::eq(row.original.as_ref(), owner)))
     }));
     match original {
         Some(Some((control, true))) if control.case == Case::SignedCancel => {
@@ -3750,7 +3777,8 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
     let (owner, control, retired, core_settled, recorded_terminal) = {
         let observation = inner.ios_observation.try_lock().ok()?;
         let observation = observation.as_ref()?;
-        (observation.original.as_ref()?.clone(), observation.control.clone(), observation.retired, observation.core_settled, observation.terminal.clone())
+        let original = observation.originals[1].as_ref().or(observation.originals[0].as_ref())?;
+        (original.original.clone(), observation.control.clone(), original.retired, original.core_settled, original.terminal.clone())
     };
     if owner.domain != SavedCommandDomain::IOSArchive || inner.domain != SavedCommandDomain::IOSArchive { return None; }
     let Context::IOSArchive(context) = &owner.context else { return None; };
@@ -3822,7 +3850,7 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
 async fn observe_installed_ios_final(inner: &Arc<Inner>, owner: &Arc<Session>, settled: bool) -> bool {
     if owner.domain != SavedCommandDomain::IOSArchive { return settled; }
     let original = inner.ios_observation.lock().ok().map(|slot| slot.as_ref().map(|observation| {
-        (observation.control.clone(), observation.original.as_ref().is_some_and(|original| Arc::ptr_eq(original, owner)))
+        (observation.control.clone(), observation.originals.iter().flatten().any(|row| Arc::ptr_eq(&row.original, owner)))
     }));
     let control = match original {
         Some(Some((control, true))) if control.holds_finality() => control,

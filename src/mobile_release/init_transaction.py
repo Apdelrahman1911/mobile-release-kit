@@ -390,6 +390,8 @@ class InitWorkspace:
         self._image_targets: Any = None
         self._image_recovery: Any = None
         self._image_recovery_journal = "unknown"
+        self._workflow_recovery_mode = False
+        self._workflow_recovery_guard: Any = None
         self._rooted_revision: Any = None
         # Strong typed domains have original, in-memory authority. The legacy
         # workflow-prefixed storage/method names are shared only by the three
@@ -423,6 +425,7 @@ class InitWorkspace:
         from .init_workspace_custody import LockedInitScope
         _require(type(scope) is LockedInitScope, "a concrete original lock scope is required")
         scope.check()
+        _require(not scope.lease._workflow_recovery_mode, "workflow recovery requires its explicit untyped borrow")
         workspace = cls(scope.lease.root)
         scope.claim_workspace(workspace)
         workspace._guard, workspace._scope = scope.lease.guard, scope
@@ -435,6 +438,33 @@ class InitWorkspace:
         workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
         return workspace
+
+    @classmethod
+    def borrowed_workflow_recovery(cls, scope: Any) -> InitWorkspace:
+        from .init_workspace_custody import LockedInitScope
+        _require(type(scope) is LockedInitScope and scope.lease._workflow_recovery_mode
+                 and not scope.lease._image_recovery_mode
+                 and scope.lease.profile is TypedEditProfile.GITHUB_WORKFLOWS,
+                 "workflow recovery requires its original registered lock scope")
+        scope.check()
+        workspace = cls(scope.lease.root)  # Fresh and deliberately untyped.
+        scope.claim_workspace(workspace)
+        workspace._guard, workspace._scope = scope.lease.guard, scope
+        workspace._workflow_recovery_mode = True
+        workspace.fd = scope.fd  # Never __enter__, reopen the root, or take a second flock.
+        workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
+        return workspace
+
+    def _workflow_restoration(self):
+        value = self._workflow_recovery_guard
+        if value is None:
+            return None
+        from .github_workflow_recovery import _RestorationGuard
+        _require(type(value) is _RestorationGuard and self._workflow_recovery_mode,
+                 "an original workflow recovery guard is required")
+        value.check_workspace(self)
+        return value
 
     @property
     def _state_names(self) -> tuple[str, str, str]:
@@ -608,13 +638,18 @@ class InitWorkspace:
             _attempt_all(self._guard, [slot.close for slot in reversed(self._slots)])
 
     def _read(self, fd: int, name: str, limit: int | None = None):
-        return _read(fd, name, self._file_limit if limit is None else limit, owner=self)
+        item = _read(fd, name, self._file_limit if limit is None else limit, owner=self)
+        restoration = self._workflow_restoration()
+        if restoration is not None:
+            restoration.control_read(self, fd, name, item)  # Before header/plan/marker consumption.
+        return item
 
     def _binding(self, fd: int, name: str, *, directory: bool = False, limit: int | None = None):
         self._checkpoint()
         return _binding(fd, name, directory=directory, limit=self._file_limit if limit is None else limit, owner=self)
 
     def _write(self, fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False):
+        _require(not self._workflow_recovery_mode, "workflow recovery cannot stage new content")
         self._checkpoint()
         return _write(fd, name, data, mode, preserve_mode=preserve_mode, owner=self)
 
@@ -624,6 +659,7 @@ class InitWorkspace:
         self._checkpoint()
 
     def _mkdir(self, name: str, mode: int, *, dir_fd: int) -> None:
+        _require(not self._workflow_recovery_mode, "workflow recovery cannot create a transaction")
         self._checkpoint()
         if self._guard is None:
             os.mkdir(name, mode, dir_fd=dir_fd)
@@ -655,11 +691,16 @@ class InitWorkspace:
 
     def _unlink(self, name: str, *, dir_fd: int, directory: bool = False) -> None:
         self._checkpoint()
+        restoration = self._workflow_restoration()
         with self._handoff():
+            receipt = restoration.before_unlink(self, dir_fd, name, directory) if restoration is not None else None
             (os.rmdir if directory else os.unlink)(name, dir_fd=dir_fd)
+            if restoration is not None:
+                restoration.unlinked(self, receipt, dir_fd, name)
         self._checkpoint()
 
     def _control_rename(self, source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+        _require(not self._workflow_recovery_mode, "workflow recovery cannot publish a new plan")
         self._checkpoint()
         with self._handoff():
             if self._guard is not None and not self._cleanup_mode:
@@ -730,6 +771,37 @@ class InitWorkspace:
     def require_clean(self) -> None:
         _require(self.state() is None,
                  "pending transaction; run mobile-release init --root <project> --recover before applying again")
+
+    @contextmanager
+    def inspect_workflow_recovery_state(self) -> Iterator[tuple[str | None, int | None]]:
+        """Bind only the currently inspected legacy directory, not creation."""
+        _require(self._workflow_recovery_mode and self._typed_profile is None and self._scope is not None,
+                 "workflow inspection requires its original recovery-only borrow")
+        lease = self._scope.lease
+        state = self.state()
+        if state is None:
+            # Only an initial clean inspection can establish absence. A missing
+            # previously inspected journal is unverified, not never-created.
+            lease._workflow_recovery_journal = ("not_created" if lease._workflow_recovery is None
+                                                and lease._rechecks == 0 else "unknown")
+        else:
+            lease._workflow_recovery_journal = "recovery_required"
+        if state is None:
+            yield None, None
+            return
+        with self._descriptor(state, self.flags, dir_fd=self.fd) as fd:
+            from .build_inputs import _directory
+            value = os.fstat(fd)
+            identity, facts = _dir_identity(value), tuple(sorted(_directory(value).items()))
+            _require(value.st_uid == os.geteuid() and stat.S_IMODE(value.st_mode) == 0o700
+                     and identity["device"] == self.root_identity["device"],
+                     "workflow journal must be a private owned same-filesystem directory")
+            _require(self.private_identity is None and self._private_facts is None,
+                     "the fresh recovery workspace can inspect its directory only once")
+            self.private_identity, self._private_facts = identity, facts
+            self._private_check(fd, state)
+            yield state, fd
+            self._private_check(fd, state)
 
     @contextmanager
     def inspect_image_recovery_state(self) -> Iterator[tuple[str | None, int | None]]:
@@ -909,6 +981,9 @@ class InitWorkspace:
         self._namespace_check()
         self._expect_unchanged(self._binding(source_fd, source, directory=directory) == expected, "move source changed")
         self._expect_unchanged(_stat(destination_fd, destination) is None, "exclusive move destination appeared")
+        restoration = self._workflow_restoration()
+        receipt = (restoration.before_move(self, source_fd, source, destination_fd, destination,
+                                          expected, directory, directory_path) if restoration is not None else None)
         failure: BaseException | None = None
         try:
             if self._guard is not None and not self._cleanup_mode:
@@ -917,9 +992,13 @@ class InitWorkspace:
                 self._install_started = True
             if self._publishing_terminal is not None:
                 self._terminal_ambiguous = True
+            if restoration is not None:
+                restoration.effect_started(receipt)
             self.rename(source_fd, source, destination_fd, destination)
         except BaseException as error:
             failure = error
+            if restoration is not None:
+                restoration.record_failure(error)
         captured = _stat(destination_fd, destination)
         if captured is not None and _stat(source_fd, source) is None:
             try:
@@ -930,6 +1009,10 @@ class InitWorkspace:
                                            "move captured a changed source")
                 finally:
                     self._terminal_read = None
+                if restoration is not None:
+                    # Inside the existing captured-object proof: rejection still
+                    # takes its original user-object restoration/terminal path.
+                    restoration.captured_move(self, receipt, source_fd, source, destination_fd, destination)
                 if directory:
                     with self._descriptor(destination, self.flags, dir_fd=destination_fd) as handle:
                         self._expect_unchanged(not self._list(handle), "moved directory gained unrelated contents")
@@ -973,6 +1056,8 @@ class InitWorkspace:
         self._namespace_check(changing=directory_path)
         self._fsync(source_fd)
         self._fsync(destination_fd)
+        if restoration is not None:
+            restoration.moved(self, receipt, source_fd, source, destination_fd, destination)
 
     def _state_move(self, old: str, new: str) -> None:
         self._checkpoint()
@@ -989,6 +1074,8 @@ class InitWorkspace:
         self._expect_unchanged(expected is not None, "transaction directory disappeared")
         self._expect_unchanged(self.private_identity is None or expected == self.private_identity,
                                "transaction directory changed before handoff")
+        restoration = self._workflow_restoration()
+        receipt = restoration.before_state_move(self, old, new) if restoration is not None else None
         failure: BaseException | None = None
         try:
             if self._guard is not None and not self._cleanup_mode:
@@ -996,11 +1083,14 @@ class InitWorkspace:
             self.rename(self.fd, old, self.fd, new)
         except BaseException as error:
             failure = error
+            if restoration is not None:
+                restoration.record_failure(error)
         captured = _stat(self.fd, new)
         if captured is not None and _stat(self.fd, old) is None and (
             not stat.S_ISDIR(captured.st_mode)
             or (captured.st_dev, captured.st_ino, stat.S_IMODE(captured.st_mode))
             != (expected["device"], expected["inode"], expected["mode"])
+            or restoration is not None and not restoration.state_capture_matches(receipt, captured)
         ):
             self._root_check()
             _require(_raw_identity(captured) == _raw_identity(os.stat(new, dir_fd=self.fd, follow_symlinks=False)),
@@ -1012,6 +1102,8 @@ class InitWorkspace:
             raise failure
         self._expect_unchanged(self._binding(self.fd, new, directory=True) == expected, "transaction directory changed during handoff")
         self._fsync(self.fd)
+        if restoration is not None:
+            restoration.state_moved(self, receipt)
 
     def _header(self, fd: int) -> dict[str, Any]:
         item = self._read(fd, "header.json", MAX_CONTROL_BYTES)
@@ -1362,6 +1454,9 @@ class InitWorkspace:
                  "an irreversible or uncertain terminal decision cannot be rolled back")
         _require(self._terminal(fd, plan) is None, "a terminal transaction cannot be rolled back")
         self._locations(fd, plan)
+        restoration = self._workflow_restoration()
+        if restoration is not None:
+            restoration.rollback(self, fd, plan)
         for i, entry in reversed(list(enumerate(plan["files"]))):
             if entry["after"]:
                 with self._parent(entry["path"]) as parent:
@@ -1384,6 +1479,10 @@ class InitWorkspace:
         self._publish_terminal(fd, plan, "ROLLED_BACK")
 
     def _preparing_inventory(self, fd: int) -> None:
+        restoration = self._workflow_restoration()
+        if restoration is not None:
+            restoration.preparing(self, fd)
+            return
         names = set(self._list(fd))
         if self._original_controls_required:
             restoration = self._image_restoration()
@@ -1430,6 +1529,9 @@ class InitWorkspace:
     def _cleanup(self) -> None:
         self._metadata_dependencies_check()
         with self._private(self._state_names[2]) as fd:
+            current_recovery = self._workflow_restoration()
+            if current_recovery is not None:
+                current_recovery.cleanup_start(self, fd)
             workflow_entries: dict[str, tuple[bool, dict[str, Any]]] = {}
             if self._original_controls_required:
                 restoration = self._image_restoration()
@@ -1477,6 +1579,8 @@ class InitWorkspace:
                     _require(observed_bytes <= MAX_TOTAL_BYTES + len(CONTROLS) * MAX_CONTROL_BYTES,
                              "cleanup byte bound exceeded")
                 entries[name] = (directory, binding)
+                if current_recovery is not None:
+                    current_recovery.cleanup_entry(self, fd, name, directory, binding)
                 if self._original_controls_required:
                     _require(workflow_entries.get(name) == entries[name],
                              "original workflow cleanup entry changed")
@@ -1486,6 +1590,8 @@ class InitWorkspace:
                 try:
                     self._private_check(fd, self._state_names[2])
                     directory, expected = entries[name]
+                    if current_recovery is not None:
+                        current_recovery.cleanup_entry(self, fd, name, directory, expected)
                     if self._original_controls_required:
                         _require(workflow_entries.get(name) == (directory, expected),
                                  "original workflow cleanup proof changed")
@@ -1580,6 +1686,9 @@ class InitWorkspace:
         No additional IO, observer reopens, or exception-text interpretation is
         performed. The outer scope/lease adds its own close evidence.
         """
+        if self._workflow_recovery_mode:
+            from .github_workflow_recovery import recovery_outcome
+            return recovery_outcome(self._scope.lease, self, reason)
         # A new restoration has its own current-attempt accounting. It never
         # claims that this workspace created/imported a persisted journal.
         if self._image_recovery is not None:
@@ -1699,6 +1808,15 @@ class InitWorkspace:
         """Only selected image targets; fixed config and other images remain dependencies."""
         return self._apply_typed(changes, TypedEditProfile.METADATA_IMAGES)
 
+    def apply_workflow_recovery(self, revision: Any) -> InitApplyOutcome:
+        from .github_workflow_recovery import WorkflowRecoveryRevision
+        _require(self._workflow_recovery_mode and self._typed_profile is None and self._scope is not None
+                 and type(revision) is WorkflowRecoveryRevision and getattr(revision, "_identity", None) is revision
+                 and self._scope.lease._workflow_recovery is revision and not self._typed_claimed,
+                 "workflow recovery requires the original one-use inspected capability")
+        self._typed_claimed = True
+        return revision.apply(self)
+
     def apply_metadata_images_recovery(self, revision: Any) -> InitApplyOutcome:
         """One explicit restoration through the original native workspace."""
         original = self._image_restoration()
@@ -1710,6 +1828,8 @@ class InitWorkspace:
 
     def _apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]],
                      profile: TypedEditProfile, *, workflow_resource_sha256: str | None = None) -> InitApplyOutcome:
+        if self._workflow_recovery_mode:
+            raise InitOperationFailure(self.current_outcome("invalid_params"))
         if (self._scope is None or self._guard is None or self._typed_claimed
                 or self._image_recovery is not None
                 or self._scope.lease._image_recovery_mode):
@@ -1798,6 +1918,9 @@ class InitWorkspace:
         return self.current_outcome()
 
     def recover(self) -> str:
+        if self._workflow_recovery_mode:
+            _require(self._typed_claimed and self._workflow_restoration() is not None,
+                     "workflow recovery cannot run without its inspected one-use guard")
         if self._saved_text_profile:
             _require(self._scope is not None and self._cleanup_mode and self._recovery_claimed
                      and self._creation["state"] == "CREATED" and self._workflow_complete,
@@ -1830,6 +1953,8 @@ class InitWorkspace:
         return result
 
     def apply(self, changes: list[tuple[ObservedFile, bytes | None]]) -> None:
+        if self._workflow_recovery_mode:
+            raise InitOperationFailure(self.current_outcome("invalid_params"))
         _require(not self._saved_text_profile,
                  "metadata requires its original typed target facade, not legacy apply")
         validate_paths([item.path for item, _ in changes])

@@ -18,7 +18,6 @@ const LIVE_FDS: usize = 64;
 const SDK_METADATA_BYTES: usize = 32 * 1024;
 // Optional package.xml originals are read once during this source's complete
 // selected-package pass; generated payloads open no second picked descriptor.
-const ORIGINALS: usize = 2 * policy::ENTRY_LIMIT + 512 + 2;
 const ANCESTORS: usize = 48;
 const BLOCK: usize = 65536;
 const READ_LIMIT: u64 = 4 * policy::TOTAL_LIMIT;
@@ -144,7 +143,27 @@ impl SourceReview {
             }).collect()
     }
 }
+/// Concrete, phase-bound allocation DATA created before workers/GO. No path,
+/// native original, consent, read result or finality can be supplied here.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceReservation {
+    phase: SourcePhase,
+    storage: SourceStorage,
+    // This is a full-catalogue validity upper bound, not a second allocation.
+    proposal_validity: usize,
+    supplier_work: usize,
+    bytes: usize,
+}
+impl SourceReservation {
+    pub(crate) fn bytes(&self) -> usize { self.bytes }
+    fn covers(&self, recipe: &Recipe, phase: SourcePhase) -> bool {
+        self.phase == phase && self.supplier_work > 0
+            && recipe.working_reservation_bytes().ok().is_some_and(|bytes| bytes <= self.proposal_validity)
+            && recipe.source_storage().ok().is_some_and(|shape| self.storage.covers(shape))
+    }
+}
 pub(crate) struct SourceSlots {
+    reservation: Option<SourceReservation>,
     originals: Vec<Original>, aliases: Vec<AliasOriginal>, roots: [Option<usize>; 3],
     observed: Vec<Option<Member>>, closure: Option<Closure>, recipe: Option<Recipe>,
     optional_sdk_metadata: [Option<ObservedSdkMetadata>; 2],
@@ -160,27 +179,42 @@ pub(crate) struct SourceSlots {
 impl SourceSlots {
     #[cfg(test)]
     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
-        Self::new_original(audit,None)
+        Self::new_original(audit,None,None)
     }
-    pub(crate) fn new_registered(audit:watch::Receiver<Instant>,gate:crate::saved_command_owner::AndroidRegistrationWorkGate)->Self{
-        Self::new_original(audit,Some(gate))
+    pub(crate) fn new_registered(audit:watch::Receiver<Instant>,gate:crate::saved_command_owner::AndroidRegistrationWorkGate,
+        reservation:SourceReservation)->Self{
+        Self::new_original(audit,Some(gate),Some(reservation))
     }
-    fn new_original(audit:watch::Receiver<Instant>,gate:Option<crate::saved_command_owner::AndroidRegistrationWorkGate>)->Self{
-        Self { originals: Vec::new(), aliases: Vec::new(), roots: [None; 3], observed: Vec::new(),
+    fn new_original(audit:watch::Receiver<Instant>,gate:Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
+        reservation:Option<SourceReservation>)->Self{
+        Self { reservation, originals: Vec::new(), aliases: Vec::new(), roots: [None; 3], observed: Vec::new(),
             closure: None, recipe: None, optional_sdk_metadata: [None, None], sdk_metadata_parents: [None; 2],
             proposal: None, instance: None, support: FixedSupportSlots::new_registered(gate.clone()),
             frame: None, frame_entered: false, frame_settled: false, live: 0, read_bytes: 0, account: None,
             begun: false, settled: false, unknown: false, reproof: false, streamed: false, first: None, audit, gate }
     }
-    /// App-owned maximum including two planned descriptor passes, all original
-    /// identities and simultaneous borrowed proposal views. Opaque native
-    /// allocation admission remains separate and cannot be fabricated here.
-    pub(crate) fn working_reservation_bytes() -> Option<usize> {
-        size_of::<Self>().checked_add(ORIGINALS.checked_mul(size_of::<Original>())?)?
-            .checked_add((policy::ENTRY_LIMIT + 256).checked_mul(size_of::<Member>() + size_of::<Option<Member>>()
+    /// One real source phase, not a new pool. The caller adds previous Review,
+    /// client/control/task/status/request storage under its same64MiB cap.
+    pub(crate) fn reservation(phase: SourcePhase) -> Option<SourceReservation> {
+        let catalogue = supplier::source_catalogue_budget().ok()?;
+        let supplier_work = match phase {
+            SourcePhase::Inspection => catalogue.proposal_work,
+            SourcePhase::Reproof => catalogue.reproof_work,
+        };
+        let bytes = Self::source_working_bytes(catalogue.storage)?.checked_add(supplier_work)?;
+        Some(SourceReservation { phase, storage: catalogue.storage, proposal_validity: catalogue.proposal_work,
+            supplier_work, bytes })
+    }
+    /// Concrete source maximum including both planned descriptor passes and
+    /// simultaneous observed/closure/views. Old settled arrays are NOT discarded.
+    fn source_working_bytes(shape: SourceStorage) -> Option<usize> {
+        if shape.members == 0 || shape.members > policy::ENTRY_LIMIT || shape.aliases > policy::ALIAS_COUNT
+            || shape.originals > SOURCE_ORIGINAL_LIMIT { return None; }
+        size_of::<Self>().checked_add(shape.originals.checked_mul(size_of::<Original>())?)?
+            .checked_add(shape.members.checked_add(256)?.checked_mul(size_of::<Member>() + size_of::<Option<Member>>()
                 + size_of::<SourceMemberData<'static>>())?)?
-            .checked_add(policy::FILE_COUNT.checked_mul(512 + 64)?)?
-            .checked_add(policy::ALIAS_COUNT.checked_mul(size_of::<AliasOriginal>() + 3 * 512)?)?
+            .checked_add(shape.file_heap)?.checked_add(shape.alias_heap)?.checked_add(shape.alias_original_heap)?
+            .checked_add(shape.aliases.checked_mul(size_of::<AliasOriginal>())?)?
             .checked_add(512 * 255 + (3 * (ANCESTORS + 4) + 128) * size_of::<Identity>() + 16 * size_of::<(SourceGroup, &'static str, usize)>())?
             .checked_add(18 * BLOCK + NATIVE_HEADER + NATIVE_PARSE)?
             .checked_add(policy::OS_FILES.len().checked_mul(2 * size_of::<FileSpec>() + size_of::<ProviderFile>() + 2 * (512 + 64))?)?
@@ -236,7 +270,8 @@ impl SourceSlots {
         self.originals.get(index).and_then(|o| o.identity).ok_or(AdmissionFailure::Identity)
     }
     fn reserve(&mut self, parent: Option<usize>, name: Name, selected: bool, readonly: bool) -> Result<usize> {
-        if self.originals.len() >= ORIGINALS || self.originals.len() == self.originals.capacity() || self.live >= LIVE_FDS {
+        let bound = self.reservation.ok_or(AdmissionFailure::Bounds)?.storage.originals;
+        if self.originals.len() >= bound || self.originals.len() == self.originals.capacity() || self.live >= LIVE_FDS {
             return Err(AdmissionFailure::Bounds);
         }
         let index = self.originals.len();
@@ -386,19 +421,28 @@ impl SourceSlots {
         self.point(end, stop)?;
         if unistd::read(self.fd(index)?, &mut block[..1]).map_err(native_error)? != 0 { return Err(AdmissionFailure::Identity); }
         self.check(index, end, stop)?;
-        Ok((hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect(), kept))
+        Ok((source_hash_text(hash.finalize().into())?, kept))
     }
     fn charge_read(&mut self, bytes: usize) -> Result<()> {
         self.read_bytes = self.read_bytes.checked_add(bytes as u64).filter(|bytes| *bytes <= READ_LIMIT).ok_or(AdmissionFailure::Bounds)?;
         Ok(())
     }
-    fn begin(&mut self, roots: &[RegisteredRoot; 3], end: Instant, stop: &watch::Receiver<bool>)
-        -> Result<([Vec<Identity>; 3], JdkLayout, String, String)> {
+    /// No native entry here. The phase must match before either source array
+    /// is allocated; begin is the sole production caller of this first step.
+    fn allocate_records(&mut self, phase: SourcePhase) -> Result<()> {
         if self.begun || self.settled || self.frame_entered || self.frame.is_some() { return Err(AdmissionFailure::AlreadyUsed); }
-        self.originals.try_reserve_exact(ORIGINALS).map_err(native_error)?;
-        self.aliases.try_reserve_exact(policy::ALIAS_COUNT).map_err(native_error)?;
-        if self.originals.capacity() != ORIGINALS || self.aliases.capacity() != policy::ALIAS_COUNT { return Err(AdmissionFailure::Bounds); }
+        let reservation = self.reservation.filter(|value| value.phase == phase).ok_or(AdmissionFailure::Bounds)?;
+        self.originals.try_reserve_exact(reservation.storage.originals).map_err(native_error)?;
+        self.aliases.try_reserve_exact(reservation.storage.aliases).map_err(native_error)?;
+        if self.originals.capacity() != reservation.storage.originals || self.aliases.capacity() != reservation.storage.aliases {
+            return Err(AdmissionFailure::Bounds);
+        }
         self.begun = true;
+        Ok(())
+    }
+    fn begin(&mut self, roots: &[RegisteredRoot; 3], phase: SourcePhase, end: Instant, stop: &watch::Receiver<bool>)
+        -> Result<([Vec<Identity>; 3], JdkLayout, String, String)> {
+        self.allocate_records(phase)?;
         self.point(end, stop)?; self.account = Some(native::real_user().map_err(native_error)?); self.point(end, stop)?;
         if matches!(self.account, None | Some(0) | Some(u32::MAX)) { return Err(AdmissionFailure::Ownership); }
         self.frame_entered = true; self.frame = Some(SnapshotBook::new());
@@ -437,14 +481,15 @@ impl SourceSlots {
         let (vendor, version) = release_layout(&bytes)?;
         Ok((identities, layout.ok_or(AdmissionFailure::Inventory)?, vendor, version))
     }
-    pub(crate) fn inspect_once(&mut self, roots: &[RegisteredRoot; 3], instance: &str, supplier_reservation: usize,
+    pub(crate) fn inspect_once(&mut self, roots: &[RegisteredRoot; 3], instance: &str,
         end: Instant, stop: &watch::Receiver<bool>, publish: &mut Publish<'_>) -> Result<()> {
         let result = (|| {
-            let (root_data, layout, vendor, version) = self.begin(roots, end, stop)?;
+            let (root_data, layout, vendor, version) = self.begin(roots, SourcePhase::Inspection, end, stop)?;
             let recipe = supplier::recipe(&SourceLayouts { jdk: layout, jdk_vendor: &vendor, jdk_version: &version })
                 .map_err(|_| AdmissionFailure::Inventory)?;
-            if recipe.working_reservation_bytes().ok().is_none_or(|bytes| bytes > supplier_reservation)
-                || supplier::max_working_reservation_bytes().ok() != Some(supplier_reservation) { return Err(AdmissionFailure::Bounds); }
+            if !self.reservation.is_some_and(|reserved| reserved.covers(&recipe, SourcePhase::Inspection)) {
+                return Err(AdmissionFailure::Bounds);
+            }
             self.observe(&recipe, root_data, end, stop)?;
             let closure = self.closure.as_ref().ok_or(AdmissionFailure::Unknown)?;
             let mut members = vec_with(closure.members.len())?;
@@ -464,13 +509,13 @@ impl SourceSlots {
         if let Err(failure) = result { self.note(failure, Instant::now(), publish); }
         result
     }
-    pub(crate) fn reprove_once(&mut self, roots: &[RegisteredRoot; 3], reviewed: &SourceReview, supplier_reservation: usize,
+    pub(crate) fn reprove_once(&mut self, roots: &[RegisteredRoot; 3], reviewed: &SourceReview,
         end: Instant, stop: &watch::Receiver<bool>, publish: &mut Publish<'_>) -> Result<()> {
         let result = (|| {
-            let (root_data, layout, vendor, version) = self.begin(roots, end, stop)?;
+            let (root_data, layout, vendor, version) = self.begin(roots, SourcePhase::Reproof, end, stop)?;
             if self.account != Some(reviewed.account) || layout != reviewed.closure.layout
                 || reviewed.recipe.jdk_layout() != layout
-                || reviewed.recipe.working_reservation_bytes().ok().is_none_or(|bytes| bytes > supplier_reservation) {
+                || !self.reservation.is_some_and(|reserved| reserved.covers(&reviewed.recipe, SourcePhase::Reproof)) {
                 return Err(AdmissionFailure::Identity);
             }
             // Only prove the small layout against the SAME reviewed reference.
@@ -493,7 +538,8 @@ impl SourceSlots {
     fn observe(&mut self, recipe: &Recipe, mut roots: [Vec<Identity>; 3], end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         let roster = recipe.source_roster();
         optional_sdk_metadata_roster(roster)?;
-        if roster.members.is_empty() || roster.members.len() > policy::ENTRY_LIMIT || !self.observed.is_empty()
+        if roster.members.is_empty() || roster.members.len() > policy::ENTRY_LIMIT
+            || self.reservation.is_none_or(|value| roster.members.len() > value.storage.members) || !self.observed.is_empty()
             || self.optional_sdk_metadata.iter().any(Option::is_some) || self.sdk_metadata_parents.iter().any(Option::is_some) {
             return Err(AdmissionFailure::Bounds);
         }
@@ -671,7 +717,8 @@ impl SourceSlots {
     fn alias(&mut self, position: usize, parent: usize, name: &'static str, expected: SourceMemberSpec,
         inode: u64, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.point(end, stop)?;
-        if self.aliases.len() >= policy::ALIAS_COUNT { return Err(AdmissionFailure::Bounds); }
+        if self.reservation.is_none_or(|value| self.aliases.len() >= value.storage.aliases)
+            || self.aliases.len() == self.aliases.capacity() { return Err(AdmissionFailure::Bounds); }
         let SourceKindSpec::Alias { target, canonical, modes } = expected.kind else { return Err(AdmissionFailure::Inventory); };
         if expected.group != SourceGroup::Jdk || !policy::jdk_source_alias_resolves(expected.relative, target, canonical) {
             return Err(AdmissionFailure::Inventory);
@@ -828,13 +875,15 @@ impl SourceSlots {
     pub(crate) fn stream_payloads(&mut self, reviewed: &SourceReview, end: Instant, stop: &watch::Receiver<bool>,
         sink: &mut dyn PayloadSink, publish: &mut Publish<'_>) -> Result<()> {
         let result = (|| {
-            if !self.reproof || self.streamed || self.settled || self.first_failure().is_some() {
+            if !self.reproof || self.streamed || self.settled || self.first_failure().is_some()
+                || self.reservation.is_none_or(|value| value.phase != SourcePhase::Reproof) {
                 return Err(AdmissionFailure::AlreadyUsed);
             }
             self.streamed = true;
             let map = reviewed.proposal.payload_map();
             let planned = payload_open_plan(map)?;
-            if self.originals.len().checked_add(planned).is_none_or(|count| count > ORIGINALS) {
+            let bound = self.reservation.ok_or(AdmissionFailure::Bounds)?.storage.originals;
+            if self.originals.len().checked_add(planned).is_none_or(|count| count > bound) {
                 return Err(AdmissionFailure::Bounds);
             }
             let roster = reviewed.recipe.source_roster();
@@ -1079,23 +1128,90 @@ fn release_layout(raw: &[u8]) -> Result<(String, String)> {
         version.filter(|value| !value.is_empty()).ok_or(AdmissionFailure::Inventory)?))
 }
 fn payload_open_plan(map: &[PayloadSource]) -> Result<usize> {
-    if map.is_empty() || map.len() > policy::FILE_COUNT { return Err(AdmissionFailure::Bounds); }
-    let mut previous: Option<(SourceGroup, &str)> = None; let mut count = 0usize;
-    for payload in map {
-        if let PayloadOrigin::DirectOriginal(OriginalSource::Picked { group, relative }) = payload.origin {
-            if group_index(group).is_none() || !policy::relative(relative) { return Err(AdmissionFailure::Inventory); }
-            let directory = relative.rsplit_once('/').map_or("", |(parent, _)| parent);
-            let common = previous.filter(|(before, _)| *before == group).map_or(0, |(_, before)| {
-                before.split('/').zip(directory.split('/')).take_while(|(a, b)| !a.is_empty() && a == b).count()
-            });
-            let directories = if directory.is_empty() { 0 } else { directory.split('/').count() };
-            count = count.checked_add(directories.checked_sub(common).ok_or(AdmissionFailure::Bounds)?)
-                .and_then(|count| count.checked_add(1)).ok_or(AdmissionFailure::Bounds)?;
-            previous = Some((group, directory));
+    payload_original_open_plan(map).map_err(|failure| match failure {
+        PayloadPlanFailure::Bounds => AdmissionFailure::Bounds,
+        PayloadPlanFailure::Inventory => AdmissionFailure::Inventory,
+    })
+}
+
+/// The source heap charge includes exactly64 bytes per hash, including capacity.
+/// A growable iterator collect is not an allocation proof. This exact Vec is
+/// converted without copying; all pushed bytes come from the fixed hex alphabet.
+fn source_hash_text(digest: [u8; 32]) -> Result<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = vec_with(64)?;
+    for byte in digest { bytes.push(HEX[usize::from(byte >> 4)]); bytes.push(HEX[usize::from(byte & 15)]); }
+    String::from_utf8(bytes).map_err(native_error)
+}
+
+#[cfg(test)]
+mod storage_capacity_tests {
+    use super::*;
+    fn shape() -> SourceStorage {
+        SourceStorage { members: 3, aliases: 1, originals: SOURCE_ORIGINAL_SPILL + 4,
+            file_heap: 80, alias_heap: 40, alias_original_heap: 7 }
+    }
+    fn reservation(phase: SourcePhase) -> SourceReservation {
+        let storage = shape();
+        SourceReservation { phase, storage, proposal_validity: 2, supplier_work: 1,
+            bytes: SourceSlots::source_working_bytes(storage).unwrap() + 1 }
+    }
+    #[test]
+    fn phase_checked_allocation_uses_exact_admitted_records_without_native_entry() {
+        for phase in [SourcePhase::Inspection, SourcePhase::Reproof] {
+            let (_send, audit) = watch::channel(Instant::now());
+            let mut source = SourceSlots::new_original(audit, None, Some(reservation(phase)));
+            let before = source.retained_bytes().unwrap();
+            let wrong = if phase == SourcePhase::Inspection { SourcePhase::Reproof } else { SourcePhase::Inspection };
+            assert_eq!(source.allocate_records(wrong), Err(AdmissionFailure::Bounds));
+            assert!(!source.begun && source.originals.capacity() == 0 && source.aliases.capacity() == 0);
+            source.allocate_records(phase).unwrap();
+            assert_eq!(source.originals.capacity(), shape().originals);
+            assert_eq!(source.aliases.capacity(), shape().aliases);
+            assert_eq!(source.retained_bytes().unwrap() - before,
+                shape().originals * size_of::<Original>() + shape().aliases * size_of::<AliasOriginal>());
+            for index in 0..shape().originals {
+                assert_eq!(source.reserve(None, Name::Static("inert-record"), false, false), Ok(index));
+            }
+            assert_eq!(source.reserve(None, Name::Static("surplus"), false, false), Err(AdmissionFailure::Bounds));
+            assert_eq!(source.originals.capacity(), shape().originals);
+            assert_eq!(source.allocate_records(phase), Err(AdmissionFailure::AlreadyUsed));
+            assert!(source.originals.iter().all(|record| record.fd.is_none()));
+            assert!(source.frame.is_none() && !source.frame_entered && source.account.is_none() && source.live == 0);
+        }
+        let (_send, audit) = watch::channel(Instant::now());
+        let mut missing = SourceSlots::new(audit);
+        assert_eq!(missing.allocate_records(SourcePhase::Inspection), Err(AdmissionFailure::Bounds));
+        assert_eq!(missing.originals.capacity(), 0);
+        // Private inert capacity records only, never a Recipe/Review, source
+        // worker, genuine original close, admission or finality receipt.
+    }
+    #[test]
+    fn source_heap_formula_keeps_fourth_alias_string_and_checked_limits() {
+        let base = shape();
+        let bytes = SourceSlots::source_working_bytes(base).unwrap();
+        assert_eq!(SourceSlots::source_working_bytes(SourceStorage { alias_original_heap: base.alias_original_heap + 1, ..base }),
+            Some(bytes + 1));
+        for bad in [SourceStorage { members: policy::ENTRY_LIMIT + 1, ..base },
+            SourceStorage { aliases: policy::ALIAS_COUNT + 1, ..base },
+            SourceStorage { originals: SOURCE_ORIGINAL_LIMIT + 1, ..base },
+            SourceStorage { file_heap: usize::MAX, ..base },
+            SourceStorage { alias_original_heap: usize::MAX, ..base }] {
+            assert!(SourceSlots::source_working_bytes(bad).is_none());
         }
     }
-    if count > policy::ENTRY_LIMIT + 256 { return Err(AdmissionFailure::Bounds); }
-    Ok(count)
+    #[test]
+    fn observed_sha_text_has_exact_charged_capacity() {
+        let ordered = std::array::from_fn(|index| index as u8);
+        for (raw, expected) in [([0; 32], "00".repeat(32)), ([255; 32], "ff".repeat(32)),
+            (ordered, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_owned())] {
+            let text = source_hash_text(raw).unwrap();
+            assert_eq!(text, expected);
+            assert_eq!(text.len(), 64);
+            assert_eq!(text.capacity(), 64);
+        }
+        assert_eq!(text_owned("Contents/release", 512).unwrap().capacity(), "Contents/release".len());
+    }
 }
 
 #[cfg(test)]
@@ -1231,7 +1347,9 @@ mod optional_sdk_metadata_tests {
         let four_buffers = 4 * SDK_METADATA_BYTES;
         let reserved = optional_sdk_metadata_reservation_bytes().unwrap();
         assert!(reserved >= four_buffers + 4 * (512 + 64));
-        assert!(SourceSlots::working_reservation_bytes().unwrap() >= reserved);
+        let inert_shape = SourceStorage { members: 1, aliases: 0, originals: SOURCE_ORIGINAL_SPILL + 1,
+            file_heap: 65, alias_heap: 0, alias_original_heap: 0 };
+        assert!(SourceSlots::source_working_bytes(inert_shape).unwrap() >= reserved);
         let bytes = vec![b'x'; SDK_METADATA_BYTES];
         let value = observed(&bytes);
         assert!(value.heap_bytes().unwrap() >= SDK_METADATA_BYTES);
