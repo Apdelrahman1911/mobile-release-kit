@@ -232,6 +232,186 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
             self.assertEqual(opened, {})
             self.assertEqual(offsets, {})
 
+
+    def ui_alias_fixture(self, root, alias=True):
+        spec = importlib.util.spec_from_file_location("mrk_ui_alias_original_helper", ROOT / MODULE.UI_HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        applications = root / "Applications"
+        developer = applications / ("Xcode_26.6.app" if alias else "Xcode.app") / "Contents/Developer"
+        sdk = developer / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk"
+        sdk.mkdir(parents=True)
+        application = applications / "Xcode.app"
+        if alias:
+            application.symlink_to("Xcode_26.6.app", target_is_directory=True)
+        return helper, application / "Contents/Developer", developer, sdk
+
+    @unittest.skipUnless(os.name == "posix", "No-follow directory fixture, not native toolchain evidence")
+    def test_selected_xcode_and_terminal_sdk_alias_bind_same_originals(self):
+        for spelling in ("literal", "canonical", "logical", "sdk-alias"):
+            with self.subTest(spelling=spelling), tempfile.TemporaryDirectory(prefix="mrk-ui-alias-") as temporary:
+                root = Path(temporary).resolve()
+                helper, logical, physical, sdk = self.ui_alias_fixture(root, spelling != "literal")
+                candidate = sdk
+                if spelling == "logical":
+                    candidate = logical / sdk.relative_to(physical)
+                elif spelling == "sdk-alias":
+                    candidate = sdk.with_name("MacOSX.sdk")
+                    candidate.symlink_to(sdk.name, target_is_directory=True)
+                report = {}
+                with patch.object(MODULE, "UI_DEVELOPER", str(logical)):
+                    with MODULE.SelectedUIToolchain(helper, report) as authority:
+                        authority.admit_sdk(str(candidate), "26.5")
+                        self.assertEqual(len(authority.bindings), 3)
+                        self.assertFalse(report["toolchainAdmission"]["admitted"])
+                self.assertEqual(authority.held, {"developer": None, "sdk-parent": None, "sdk": None})
+                self.assertEqual(report["toolchainAdmission"], {"admitted": True, "check": "admitted",
+                                 "originalClosesCompleted": True, "closeFailures": []})
+
+    @unittest.skipUnless(os.name == "posix", "Task-owned alias refusal fixture, no native execution")
+    def test_selected_xcode_refuses_other_installation_redirect_missing_and_cycle(self):
+        for scenario in ("other-xcode", "prefix-lookalike", "dot-traversal", "application-escape",
+                         "developer-redirect", "sdk-parent-redirect", "sdk-leaf-escape", "sdk-missing",
+                         "sdk-cycle", "missing", "cycle"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="mrk-ui-alias-refuse-") as temporary:
+                root = Path(temporary).resolve()
+                helper, logical, physical, sdk = self.ui_alias_fixture(root)
+                candidate = str(sdk)
+                application = logical.parent.parent
+                if scenario in {"other-xcode", "prefix-lookalike"}:
+                    name = "Xcode_26.4.app" if scenario == "other-xcode" else "Xcode_26.6.app-extra"
+                    candidate = str(application.parent / name / "Contents/Developer" / sdk.relative_to(physical))
+                    Path(candidate).mkdir(parents=True)
+                elif scenario == "dot-traversal":
+                    candidate = str(sdk.parent) + "/../SDKs/" + sdk.name
+                elif scenario == "application-escape":
+                    external = root / "Elsewhere/Xcode_26.6.app"
+                    external.parent.mkdir()
+                    physical.parent.parent.rename(external)
+                    application.unlink()
+                    application.symlink_to(external, target_is_directory=True)
+                elif scenario == "developer-redirect":
+                    external = root / "other-developer"
+                    physical.rename(external)
+                    physical.symlink_to(external, target_is_directory=True)
+                elif scenario == "sdk-parent-redirect":
+                    external = root / "other-sdks"
+                    sdk.parent.rename(external)
+                    sdk.parent.symlink_to(external, target_is_directory=True)
+                elif scenario == "sdk-leaf-escape":
+                    external = root / sdk.name
+                    sdk.rename(external)
+                    sdk.symlink_to(external, target_is_directory=True)
+                elif scenario in {"sdk-missing", "sdk-cycle"}:
+                    sdk.rmdir()
+                    if scenario == "sdk-cycle":
+                        sdk.symlink_to(sdk.name, target_is_directory=True)
+                else:
+                    application.unlink()
+                    if scenario == "cycle":
+                        application.symlink_to(application.name, target_is_directory=True)
+                report = {}
+                authority = MODULE.SelectedUIToolchain(helper, report)
+                with patch.object(MODULE, "UI_DEVELOPER", str(logical)):
+                    with self.assertRaises((MODULE.Refused, OSError, RuntimeError)):
+                        with authority:
+                            authority.admit_sdk(candidate, "26.5")
+                self.assertFalse(report["toolchainAdmission"]["admitted"])
+                self.assertTrue(report["toolchainAdmission"]["originalClosesCompleted"])
+                self.assertTrue(all(fd is None for fd in authority.held.values()))
+
+    @unittest.skipUnless(os.name == "posix", "Owned directory/CompletedProcess seams only, no build/test process")
+    def test_ui_build_requires_query_original_binding_and_final_closes_keeps_safe_diagnostics(self):
+        for scenario in ("accepted", "query-retarget", "close-uncertain", "unsafe-values", "wrong-major"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="mrk-ui-build-seam-") as temporary:
+                root = Path(temporary).resolve()
+                helper, logical, physical, sdk = self.ui_alias_fixture(root)
+                alternative = logical.parent.parent.parent / "Xcode_26.7.app/Contents/Developer"
+                alternative.mkdir(parents=True)
+                pending, acquired, consumed, queries, builds = set(), [], [], [], []
+                def open_original(path):
+                    fd = helper.open_directory(path)
+                    pending.add(fd); acquired.append(fd)
+                    return fd
+                def close_original(fd):
+                    owned = fd in pending
+                    if owned:
+                        pending.remove(fd); consumed.append(fd)
+                    os.close(fd)  # Always really consume the fixture FD before simulating uncertainty.
+                    if owned and scenario == "close-uncertain" and len(consumed) == 1:
+                        raise OSError("fixture consuming-close uncertainty")
+                local_os = SimpleNamespace(**vars(os))
+                local_os.close = close_original  # Replace only the subject's namespace, never global os.
+                context = MODULE.Context.__new__(MODULE.Context)
+                context.root = ROOT
+                context.work = root / "work"; context.work.mkdir()
+                context.environment = {}
+                context.report = {"commands": [], "diagnosticValid": False, "diagnosticComplete": False}
+                context.ui_file_budget = lambda phase: self.assertEqual(phase, "build")
+                context.ui_prior = lambda phase: {"freshInstallerOriginalZero": phase == "readback"}
+                context.selected = lambda: {"packageSize": MODULE.PACKAGE_BYTES, "packageSha256": MODULE.PACKAGE_SHA}
+                context.readback = lambda: None
+                context.ui_tools = lambda: None
+                context.check = lambda: None
+                context.ui_helper = SimpleNamespace(PROJECT=helper.PROJECT, open_directory=open_original)
+                outputs = {
+                    ("/usr/bin/xcodebuild", "-version"): b"Xcode 26.6\nBuild version 17F113\n",
+                    ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"): (str(sdk) + "\n").encode(),
+                    ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"): b"26.5\n",
+                    # This is an explicit synthetic fixture token, not native sdkBuild evidence.
+                    ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"): b"FIXTURE26\n",
+                }
+                if scenario == "unsafe-values":
+                    outputs[("/usr/bin/xcodebuild", "-version")] = b"private-token /home/private/input\n"
+                    outputs[("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")] = b"/home/private/SDK.sdk\n"
+                elif scenario == "wrong-major":
+                    outputs[("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version")] = b"27.0\n"
+                def run_owned(argv, **options):
+                    self.assertEqual(options["cwd"], context.work)
+                    self.assertEqual(options["output_limit"], MODULE.LIMIT)
+                    if tuple(argv) in outputs:
+                        self.assertEqual(len(pending), 1)  # The original predates the first query.
+                        self.assertEqual(consumed, [])
+                        queries.append(tuple(argv))
+                        if scenario == "query-retarget" and len(queries) == 2:
+                            application = logical.parent.parent
+                            application.unlink()
+                            application.symlink_to(alternative.parent.parent.name, target_is_directory=True)
+                        return subprocess.CompletedProcess(argv, 0, outputs[tuple(argv)], b"")
+                    self.assertEqual(argv[:2], ["/usr/bin/xcodebuild", "build-for-testing"])
+                    self.assertEqual(pending, set())
+                    self.assertEqual(consumed, acquired)
+                    self.assertEqual(len(consumed), 3)
+                    self.assertTrue(context.report["toolchainAdmission"]["admitted"])
+                    builds.append(argv)
+                    return subprocess.CompletedProcess(argv, 0, b"", b"")
+                context.owner = SimpleNamespace(run_owned=run_owned)
+                with patch.object(MODULE, "UI_DEVELOPER", str(logical)), patch.object(MODULE, "os", local_os):
+                    if scenario == "accepted":
+                        context.ui_build()
+                    else:
+                        with self.assertRaises(MODULE.Refused):
+                            context.ui_build()
+                self.assertEqual(len(queries), 4)
+                self.assertEqual(pending, set())
+                self.assertEqual(consumed, acquired)
+                self.assertEqual(len(builds), int(scenario == "accepted"))
+                self.assertEqual(context.report["diagnosticComplete"], scenario == "accepted")
+                self.assertEqual(context.report["toolchainAdmission"]["admitted"], scenario == "accepted")
+                self.assertEqual(context.report["toolchain"]["sdkBuild"], "FIXTURE26")
+                self.assertEqual(len(context.report["commands"]), 4 + len(builds))
+                if scenario == "close-uncertain":
+                    self.assertEqual(len(consumed), 3)
+                    self.assertEqual(context.report["toolchainAdmission"]["closeFailures"], ["developer"])
+                    self.assertFalse(context.report["toolchainAdmission"]["originalClosesCompleted"])
+                if scenario == "unsafe-values":
+                    self.assertNotIn("xcode", context.report["toolchain"])
+                    self.assertNotIn("sdkPath", context.report["toolchain"])
+                    self.assertNotIn("private-token", json.dumps(context.report))
+                    self.assertNotIn("/home/private", json.dumps(context.report))
+                else:
+                    self.assertEqual(context.report["toolchain"]["sdkPath"], str(sdk))
+
     def test_fixed_two_host_workflow_and_original_only_native_route(self):
         workflow = (ROOT / MODULE.WORKFLOW).read_text()
         native = (ROOT / MODULE.NATIVE).read_text()

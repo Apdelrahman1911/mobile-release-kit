@@ -86,6 +86,139 @@ def full9(info):
             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+
+def ui_public_toolchain(values):
+    """Only bounded public version tokens and fixed toolchain path shapes."""
+    applications = re.escape(str(Path(UI_DEVELOPER).parent.parent.parent))
+    patterns = {
+        "xcode": r"Xcode [0-9]+(?:\.[0-9]+)*\nBuild version [0-9A-Za-z]+",
+        "sdkVersion": r"[0-9]+(?:\.[0-9]+)*",
+        "sdkBuild": r"[0-9A-Za-z]+",
+        "sdkPath": applications + r"/Xcode(?:_[0-9]+(?:\.[0-9]+)*)?\.app/Contents/Developer"
+                   r"/Platforms/MacOSX\.platform/Developer/SDKs/MacOSX(?:[0-9]+(?:\.[0-9]+)*)?\.sdk",
+    }
+    return {key: value for key, value in values.items()
+            if key in patterns and len(value) <= 512 and re.fullmatch(patterns[key], value)}
+
+
+class SelectedUIToolchain:
+    """Bind only the fixed selected Xcode alias; release originals before build."""
+
+    def __init__(self, helper, report):
+        self.helper = helper
+        # All slots exist before any acquisition; no FD is discovered or retried.
+        self.held = {"developer": None, "sdk-parent": None, "sdk": None}
+        self.bindings = {}
+        self.closed = False
+        self.state = {"admitted": False, "check": "selected-developer",
+                      "originalClosesCompleted": False, "closeFailures": []}
+        report["toolchainAdmission"] = self.state
+
+    def hold(self, role, path):
+        need(not self.closed and role in self.held and self.held[role] is None, "ui-toolchain-custody")
+        self.held[role] = self.helper.open_directory(path)
+        identity = full9(os.fstat(self.held[role]))
+        need(stat.S_ISDIR(identity[2]) and full9(path.lstat()) == identity, "ui-toolchain-original")
+        self.bindings[role] = (path, identity)
+
+    def __enter__(self):
+        try:
+            self.logical = Path(UI_DEVELOPER)
+            self.application = self.logical.parent.parent
+            self.alias_identity = full9(self.application.lstat())
+            self.physical = self.logical.resolve(strict=True)
+            physical_app = self.physical.parent.parent
+            need(self.application.name == "Xcode.app"
+                 and self.logical == self.application / "Contents/Developer"
+                 and self.physical == physical_app / "Contents/Developer"
+                 and physical_app.parent == self.application.parent
+                 and (physical_app.name == "Xcode.app"
+                      or re.fullmatch(r"Xcode_26(?:\.[0-9]+)*\.app", physical_app.name)),
+                 "ui-selected-developer-location")
+            if stat.S_ISLNK(self.alias_identity[2]):
+                target = Path(os.readlink(self.application))
+                need(str(target) == os.readlink(self.application)
+                     and (target == physical_app or target == Path(physical_app.name)),
+                     "ui-selected-developer-alias")
+            else:
+                need(stat.S_ISDIR(self.alias_identity[2]) and physical_app == self.application,
+                     "ui-selected-developer-directory")
+            self.hold("developer", self.physical)
+            self.check()
+            self.state["check"] = "toolchain-queries"
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def check(self):
+        need(full9(self.application.lstat()) == self.alias_identity
+             and self.logical.resolve(strict=True) == self.physical
+             and full9(self.logical.stat()) == self.bindings["developer"][1],
+             "ui-selected-developer-changed")
+        for role, (path, identity) in self.bindings.items():
+            need(full9(os.fstat(self.held[role])) == identity == full9(path.lstat()),
+                 "ui-toolchain-original-changed")
+        if "sdk" in self.bindings:
+            path, identity = self.bindings["sdk"]
+            need(full9(self.sdk_named.lstat()) == self.sdk_alias_identity
+                 and self.sdk_logical.resolve(strict=True) == path
+                 and full9(self.sdk_logical.stat()) == identity,
+                 "ui-selected-sdk-changed")
+        need(full9(self.application.lstat()) == self.alias_identity, "ui-selected-developer-changed")
+
+    def admit_sdk(self, sdk_text, version):
+        self.state["check"] = "selected-sdk"
+        self.check()
+        suffix = "Platforms/MacOSX.platform/Developer/SDKs"
+        parent = self.physical / suffix
+        candidate = Path(sdk_text)
+        names = {"MacOSX.sdk", "MacOSX" + version + ".sdk"}
+        need(sdk_text == str(candidate) and candidate.parent in {parent, self.logical / suffix}
+             and candidate.name in names, "ui-sdk-selected-path")
+        self.hold("sdk-parent", parent)  # No-follow traversal rejects redirected SDKs/parents.
+        self.sdk_named = parent / candidate.name
+        self.sdk_alias_identity = full9(self.sdk_named.lstat())
+        physical_sdk = candidate.resolve(strict=True)
+        need(physical_sdk.parent == parent and physical_sdk.name in names, "ui-sdk-selected-location")
+        if stat.S_ISLNK(self.sdk_alias_identity[2]):
+            target = Path(os.readlink(self.sdk_named))
+            need(str(target) == os.readlink(self.sdk_named)
+                 and (target == physical_sdk or target == Path(physical_sdk.name)), "ui-sdk-terminal-alias")
+        else:
+            need(stat.S_ISDIR(self.sdk_alias_identity[2]) and physical_sdk == self.sdk_named,
+                 "ui-sdk-directory")
+        self.sdk_logical = candidate
+        self.hold("sdk", physical_sdk)
+        self.check()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        for role in self.held:
+            fd, self.held[role] = self.held[role], None  # Consume once before close.
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except BaseException:
+                    self.state["closeFailures"].append(role)
+        self.state["originalClosesCompleted"] = not self.state["closeFailures"]
+        need(self.state["originalClosesCompleted"], "ui-toolchain-close")
+
+    def __exit__(self, kind, value, traceback):
+        try:
+            if kind is None:
+                self.state["check"] = "pre-build-identity"
+                need(set(self.bindings) == set(self.held), "ui-toolchain-incomplete")
+                self.check()
+        finally:
+            self.close()  # A close failure blocks build, also after a body/check failure.
+        if kind is None:
+            self.state.update(admitted=True, check="admitted")
+        return False
+
+
 def read(path, limit):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
@@ -536,16 +669,20 @@ class Context:
             "sdkBuild": ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"],
         }
         toolchain = {}
-        for role, command in commands.items():
-            original = self.zero("ui-toolchain-" + role, command, 15)
-            need(0 < len(original.stdout) <= 4096, "ui-toolchain-bound")
-            toolchain[role] = original.stdout.decode("ascii", "strict").strip()
-        need(re.fullmatch(r"Xcode 26(?:\.[0-9]+)*\nBuild version [0-9A-Za-z]+", toolchain["xcode"])
-             and toolchain["sdkPath"].startswith(UI_DEVELOPER + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX")
-             and toolchain["sdkPath"].endswith(".sdk") and ".." not in toolchain["sdkPath"].split("/")
-             and re.fullmatch(r"26(?:\.[0-9]+)*", toolchain["sdkVersion"])
-             and re.fullmatch(r"[0-9A-Za-z]+", toolchain["sdkBuild"]), "ui-fixed-toolchain")
-        self.report["toolchain"] = toolchain
+        self.report["toolchain"] = {}
+        with SelectedUIToolchain(self.ui_helper, self.report) as authority:
+            for role, command in commands.items():
+                original = self.zero("ui-toolchain-" + role, command, 15)
+                need(0 < len(original.stdout) <= 4096, "ui-toolchain-bound")
+                toolchain[role] = original.stdout.decode("ascii", "strict").strip()
+                self.report["toolchain"].update(ui_public_toolchain({role: toolchain[role]}))
+            authority.state["check"] = "toolchain-values"
+            need(set(self.report["toolchain"]) == set(commands)
+                 and re.fullmatch(r"Xcode 26(?:\.[0-9]+)*\nBuild version [0-9A-Za-z]+", toolchain["xcode"])
+                 and re.fullmatch(r"26(?:\.[0-9]+)*", toolchain["sdkVersion"])
+                 and re.fullmatch(r"[0-9A-Za-z]+", toolchain["sdkBuild"]), "ui-fixed-toolchain")
+            authority.admit_sdk(toolchain["sdkPath"], toolchain["sdkVersion"])
+        # Same selected originals were rechecked and all consuming closes returned.
         self.zero("build-ui-runner", ["/usr/bin/xcodebuild", "build-for-testing", "-quiet",
             "-project", str(self.root / self.ui_helper.PROJECT), "-scheme", "MRKNormalAppUI",
             "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
