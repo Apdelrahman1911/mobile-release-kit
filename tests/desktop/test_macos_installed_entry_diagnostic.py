@@ -517,7 +517,73 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                 self.assertEqual(value["sourceFailures"], [])
                 self.assertEqual(value["queryObservations"], [])
                 self.assertEqual(value["contextObservations"], [])
+                self.assertIsNone(value["dashboardReadiness"])
                 self.assertFalse(any(value["markers"].values()))  # Marker does not manufacture XCTest outcome.
+
+    def test_dashboard_readiness_is_paired_finite_prewait_data(self):
+        reasons = ("loading", "not-loaded", "bridge-unavailable", "selection-unavailable",
+                   "selection-in-progress", "shutting-down", "other-or-unobserved", "ambiguous")
+        waiters = ("timed-out", "incorrect-order", "inverted-fulfillment", "interrupted", "unknown")
+        for index, reason in enumerate(reasons):
+            ordinal, line = index % 4 + 1, (1 if index % 2 == 0 else 65535)
+            waiter, enabled, hittable = waiters[index % len(waiters)], bool(index % 2), bool(index // 2 % 2)
+            stream, ending = ("stdout", b"\n") if index % 2 == 0 else ("stderr", b"\r\n")
+            with self.subTest(ordinal=ordinal, reason=reason, waiter=waiter, stream=stream):
+                require = f"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line={line};check=condition".encode()
+                row = (f"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line={line};ordinal={ordinal};waiter={waiter}"
+                       f";enabled={int(enabled)};hittable={int(hittable)};reason={reason};sample=pre-wait;nonAtomic=1").encode()
+                body = require + ending + row + ending
+                value = MODULE.ui_failure_diagnostics(body if stream == "stdout" else b"",
+                                                      body if stream == "stderr" else b"")
+                self.assertEqual(value["requireFailure"], {"status": "observed", "site": {
+                    "stream": stream, "line": line, "check": "condition"}})
+                self.assertEqual(value["dashboardReadiness"], {
+                    "stream": stream, "line": line, "ordinal": ordinal, "waiter": waiter,
+                    "enabled": enabled, "hittable": hittable, "reason": reason,
+                    "sample": "pre-wait", "nonAtomic": True})
+                self.assertFalse(any(value["markers"].values()))  # Not a final state or XCTest outcome.
+
+    def test_dashboard_readiness_requires_one_matching_first_site_and_stream(self):
+        require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=508;check=condition\n"
+        row = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=508;ordinal=1;waiter=timed-out;"
+               b"enabled=0;hittable=0;reason=loading;sample=pre-wait;nonAtomic=1\n")
+        for stdout, stderr in (
+                (row, b""), (require, b""), (require, row), (row, require),
+                (require.replace(b"line=508", b"line=509") + row, b""),
+                (require.replace(b"condition", b"singleton") + row, b""),
+                (require + require + row, b""), (require + row, require),
+                (require + row + row, b""), (require + row, row),
+                (require + row + row.replace(b"ordinal=1", b"ordinal=2"), b""),
+                (require + row + require[:-1] + b";private=MRK_MACOS_PACKAGED_DASHBOARD_FAILURE\n", b"")):
+            with self.subTest(stdout=stdout[:100], stderr=stderr[:100]):
+                value = MODULE.ui_failure_diagnostics(stdout, stderr)
+                self.assertIsNone(value["dashboardReadiness"])
+                self.assertNotIn(b"private", MODULE.encoded(value))
+
+    def test_invalid_dashboard_readiness_cannot_erase_first_refusal_or_leak_text(self):
+        require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=508;check=condition\n"
+        row = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=508;ordinal=1;waiter=timed-out;"
+               b"enabled=0;hittable=0;reason=loading;sample=pre-wait;nonAtomic=1\n")
+        namespace = b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE"
+        malformed = [row.replace(old, new, 1) for old, new in (
+            (b"v1;", b"v2;"), (b"line=508", b"line=0"), (b"line=508", b"line=0508"),
+            (b"line=508", b"line=65536"), (b"ordinal=1", b"ordinal=0"), (b"ordinal=1", b"ordinal=5"),
+            (b"ordinal=1", b"ordinal=01"), (b"timed-out", b"completed"), (b"timed-out", b"fixture-secret"),
+            (b"enabled=0", b"enabled=true"), (b"hittable=0", b"hittable=2"),
+            (b"reason=loading", b"reason=fixture-secret"), (b"sample=pre-wait", b"sample=post-wait"),
+            (b"nonAtomic=1", b"nonAtomic=0"))]
+        malformed += [row[:-1], namespace[:-1], b"fixture-secret " + namespace[:-1],
+                      b"fixture-secret " + row, row[:-1] + b";extra=fixture-secret\n",
+                      row[:-1] + b"\r\r\n", row.replace(namespace, namespace + b"_EXTRA")]
+        for bad in malformed:
+            for observations in (bad, row + bad, bad + row):
+                with self.subTest(bad=bad[:110], observations=len(observations)):
+                    value = MODULE.ui_failure_diagnostics(require + observations, b"")
+                    self.assertIsNone(value["dashboardReadiness"])
+                    self.assertEqual(value["requireFailure"], {"status": "observed", "site": {
+                        "stream": "stdout", "line": 508, "check": "condition"}})
+                    self.assertEqual(value["status"], "classified")
+                    self.assertNotIn(b"fixture-secret", MODULE.encoded(value))
 
     def test_ui_failure_fixed_context_and_queries_preserve_bounded_observations(self):
         host = (b"MRK_MACOS_UI_HOST_FACTS=os=26.0.1;nonroot=true;sameUid=true;sameGid=true;"
@@ -560,14 +626,17 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                          b"matches=4;exceedsFour=0;nonAtomic=1\n")
         widest_cleanup = (b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=false;normalReturned=false;forceRequested=false;"
                           b"forceReturned=false;originalTerminated=false;unknownStateRetained=false\n")
-        require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=65535;check=actionable\n"
+        require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=65535;check=condition\n"
+        readiness = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=65535;ordinal=4;waiter=inverted-fulfillment;"
+                     b"enabled=0;hittable=0;reason=selection-unavailable;sample=pre-wait;nonAtomic=1\n")
         codes = b"".join(f"Error Domain=IDETestOperationsObserverErrorDomain Code={-2147483648 + i}\n".encode() for i in range(8))
         sites = b"".join(b"NormalAppUITests.swift:" + str(line).encode() + b":4096: error: " + UI_FAILURE_CASE
                          + b" : fixture-secret\n" for line in range(65532, 65536))
-        maximum = MODULE.ui_failure_diagnostics(b"", require + codes + sites + longest_query * 8 + widest_cleanup * 4)
+        maximum = MODULE.ui_failure_diagnostics(b"", require + readiness + codes + sites + longest_query * 8 + widest_cleanup * 4)
         self.assertEqual([len(maximum[key]) for key in ("errorCodes", "sourceFailures", "queryObservations", "contextObservations")],
                          [8, 4, 8, 4])
         self.assertEqual(maximum["requireFailure"]["status"], "observed")
+        self.assertEqual(maximum["dashboardReadiness"]["waiter"], "inverted-fulfillment")
         self.assertFalse(maximum["findingsTruncated"])
         encoded = MODULE.encoded(maximum, MODULE.UI_FAILURE_LIMIT)
         self.assertLessEqual(len(encoded), 4096)
@@ -657,7 +726,9 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
 
     def test_ui_failure_nonzero_keeps_original_refusal_and_skips_success_queries(self):
         original = subprocess.CompletedProcess([], 65, b"Error Domain=NSPOSIXErrorDomain Code=13\n"
-            b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=591;check=actionable\n"
+            b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=591;check=condition\n"
+            b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=591;ordinal=3;waiter=timed-out;"
+            b"enabled=0;hittable=1;reason=loading;sample=pre-wait;nonAtomic=1\n"
             b"MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=true;originalRecord=true;uidMatches=true;"
             b"gidMatches=true;nameMatches=false;homeMatches=true\n", b"fixture-secret")
         context, runner, events = self.ui_failure_context(original)
@@ -677,7 +748,10 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
         self.assertEqual(events, ["helper-return", "format"])
         self.assertEqual(context.report["uiFailureDiagnostics"], formatter(original.stdout, original.stderr))
         self.assertEqual(context.report["uiFailureDiagnostics"]["requireFailure"], {"status": "observed", "site": {
-            "stream": "stdout", "line": 591, "check": "actionable"}})
+            "stream": "stdout", "line": 591, "check": "condition"}})
+        self.assertEqual(context.report["uiFailureDiagnostics"]["dashboardReadiness"], {
+            "stream": "stdout", "line": 591, "ordinal": 3, "waiter": "timed-out", "enabled": False,
+            "hittable": True, "reason": "loading", "sample": "pre-wait", "nonAtomic": True})
         self.assertFalse(context.report["uiFailureDiagnostics"]["contextObservations"][0]["nameMatches"])
         self.assertEqual(context.report["originalTestReturncode"], 65)
         self.assertEqual(context.report["error"], "original-ui-test-nonzero")

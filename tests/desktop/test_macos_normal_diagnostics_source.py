@@ -2,7 +2,7 @@
 
 These methods read first-party bytes and AST/literals only. They do not launch
 XCTest, import product code, qualify native resources, or stand in for the
-original future XCTest result. The four fixed negative mutations are applied
+original future XCTest result. The fixed negative mutations are applied
 by the separately authorized local verification route, never by native retry.
 """
 from __future__ import annotations
@@ -169,6 +169,66 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def restored_packaged_dashboard_readiness(self, swift: str) -> str:
+        # Invert only the exact reviewed diagnostic, never repin or broadly strip
+        # the accepted original-owner, restart, predicate or deadline baseline.
+        for start, following, pinned, original in (
+            (
+                "    private enum DashboardReason: String {\n",
+                "    @MainActor private var packagedRequireDiagnosticActive = false\n",
+                "629f3873163a05750be260ee6217da105347e0a3dfc22345d22cd48b948c2196",
+                "",
+            ),
+            (
+                "                print(\"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\\(line);check=\\(check.rawValue)\")\n",
+                "            }\n            throw refusal\n",
+                "7459e8aaf3f887e814011f4d085c77db3548fe0889cc245bda55c61bf6f1cc11",
+                "                print(\"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\\(line);check=\\(check.rawValue)\")\n",
+            ),
+            (
+                "        let snapshot: DashboardSnapshot?\n",
+                "        try require(renderer.staticTexts.matching(identifier: \"BROWSER PREVIEW — EXAMPLE DATA ONLY\").count == 0,\n",
+                "911b8fa9a8c0b37ce46fe6a0b5f7d750cf946937496fc0bc19382f617258fad1",
+                "        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: \"enabled == true AND hittable == true\"), object: open)\n        try require(XCTWaiter.wait(for: [ready], timeout: try remaining(5)) == .completed, \"ordinary project control is not usable\")\n",
+            ),
+        ):
+            self.assertEqual(swift.count(start), 1, start)
+            self.assertEqual(swift.count(following), 1, following)
+            begin, end = swift.index(start), swift.index(following)
+            self.assertLess(begin, end)
+            self.assertEqual(digest(swift[begin:end].encode()), pinned)
+            swift = swift[:begin] + original + swift[end:]
+        for added, previous in (
+            (
+                "    @MainActor private func require(_ value: Bool, _ reason: String,\n                                    line: UInt = #line, check: RequireCheck = .condition,\n                                    dashboard: (DashboardSnapshot, DashboardWaiter)? = nil) throws {\n",
+                "    @MainActor private func require(_ value: Bool, _ reason: String,\n                                    line: UInt = #line, check: RequireCheck = .condition) throws {\n",
+            ),
+            (
+                "    @MainActor private func dashboard(_ renderer: XCUIElement, diagnosticOrdinal: UInt8? = nil) throws {\n",
+                "    @MainActor private func dashboard(_ renderer: XCUIElement) throws {\n",
+            ),
+            (
+                "        // End bounded initial renderer readiness.\n        try dashboard(renderer, diagnosticOrdinal: 1)\n        try gate.probe(busy: true)\n",
+                "        // End bounded initial renderer readiness.\n        try dashboard(renderer)\n        try gate.probe(busy: true)\n",
+            ),
+            (
+                "        try require(XCTWaiter.wait(for: [pickerDismissed], timeout: try remaining(5)) == .completed, \"native picker Cancel did not settle\")\n        try dashboard(renderer, diagnosticOrdinal: 2)\n",
+                "        try require(XCTWaiter.wait(for: [pickerDismissed], timeout: try remaining(5)) == .completed, \"native picker Cancel did not settle\")\n        try dashboard(renderer)\n",
+            ),
+            (
+                "        try require(app.state == .runningForeground && window.exists, \"Cancel did not preserve the running application\")\n        try dashboard(renderer, diagnosticOrdinal: 3)\n",
+                "        try require(app.state == .runningForeground && window.exists, \"Cancel did not preserve the running application\")\n        try dashboard(renderer)\n",
+            ),
+            (
+                "        try click(renderer.buttons.matching(identifier: \"Dashboard\"), \"post-Cancel Dashboard navigation is unavailable\")\n        try dashboard(renderer, diagnosticOrdinal: 4)\n",
+                "        try click(renderer.buttons.matching(identifier: \"Dashboard\"), \"post-Cancel Dashboard navigation is unavailable\")\n        try dashboard(renderer)\n",
+            ),
+        ):
+            self.assertEqual(swift.count(added), 1, added)
+            self.assertEqual(swift.count(previous), 0, previous)
+            swift = swift.replace(added, previous, 1)
+        return swift
+
     def restored_initial_renderer_readiness(self, swift: str) -> str:
         # This one reviewed readiness allowance is not a general normalization:
         # the other launch site and every byte outside this block remain bound.
@@ -273,6 +333,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         return swift.replace(block, RENDERER_QUERY_ORIGINAL)
 
     def restored_semantic_heading_queries(self, swift: str) -> str:
+        swift = self.restored_packaged_dashboard_readiness(swift)
         # Refuse a missing, duplicate, broadened or unexpected title selector
         # before restoring only the reviewed complete source lines.
         self.assertEqual(len(SEMANTIC_HEADING_LINES), 17)
@@ -545,7 +606,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_renderer_readiness_preserves_one_query_and_current_baseline(self):
         self.checked_diagnostics_source()
         source = (ROOT / SWIFT).read_text()
-        accepted = source
+        accepted = self.restored_packaged_dashboard_readiness(source)
         for previous, reused in PACKAGED_REUSE_BINDINGS:
             self.assertEqual(source.count(reused), 1, reused)
             self.assertNotIn(previous, source)
@@ -562,8 +623,11 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             ("looser title predicate", source.replace(
                 semantic, semantic.replace("title == %@", "title CONTAINS %@", 1), 1)),
             ("broad restart heading reversion", source.replace(restart_semantic, restart_original, 1)),
+            ("changed readiness block", source.replace("let enabled = open.isEnabled", "let enabled = true", 1)),
+            ("duplicate readiness anchor", source.replace("let snapshot: DashboardSnapshot?",
+                                                         "let snapshot: DashboardSnapshot?\nlet snapshot: DashboardSnapshot?", 1)),
         ):
-            with self.subTest(semantic_heading_refusal=label):
+            with self.subTest(source_refusal=label):
                 with self.assertRaises(AssertionError):
                     self.restored_semantic_heading_queries(changed)
 

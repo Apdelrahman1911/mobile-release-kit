@@ -13,6 +13,31 @@ import XCTest
 final class NormalAppUITests: XCTestCase {
     private enum Refusal: Error { case condition(String) }
     private enum RequireCheck: String { case condition, singleton, actionable }
+    private enum DashboardReason: String {
+        case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
+        case selectionUnavailable = "selection-unavailable", selectionInProgress = "selection-in-progress"
+        case shuttingDown = "shutting-down", otherOrUnobserved = "other-or-unobserved", ambiguous
+    }
+    private enum DashboardWaiter: String {
+        case completed, timedOut = "timed-out", incorrectOrder = "incorrect-order"
+        case invertedFulfillment = "inverted-fulfillment", interrupted, unknown
+        init(_ result: XCTWaiter.Result) {
+            switch result {
+            case .completed: self = .completed
+            case .timedOut: self = .timedOut
+            case .incorrectOrder: self = .incorrectOrder
+            case .invertedFulfillment: self = .invertedFulfillment
+            case .interrupted: self = .interrupted
+            @unknown default: self = .unknown
+            }
+        }
+    }
+    private struct DashboardSnapshot {
+        let ordinal: UInt8
+        let enabled: Bool
+        let hittable: Bool
+        let reason: DashboardReason
+    }
     @MainActor private var packagedRequireDiagnosticActive = false
     @MainActor private var packagedRequireDiagnosticEmitted = false
     @MainActor private var originalLaunch: OrdinaryLaunch?
@@ -454,7 +479,8 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func require(_ value: Bool, _ reason: String,
-                                    line: UInt = #line, check: RequireCheck = .condition) throws {
+                                    line: UInt = #line, check: RequireCheck = .condition,
+                                    dashboard: (DashboardSnapshot, DashboardWaiter)? = nil) throws {
         guard value else {
             let originalFailureAbsent = caseClock?.firstFailure == nil
             let refusal = caseClock?.fail(reason) ?? Refusal.condition(reason)
@@ -463,6 +489,10 @@ final class NormalAppUITests: XCTestCase {
                 && line >= 1 && line <= 65535 {
                 packagedRequireDiagnosticEmitted = true
                 print("MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\(line);check=\(check.rawValue)")
+                if let (sample, waiter) = dashboard, (1...4).contains(sample.ordinal), waiter != .completed {
+                    // Immutable pre-wait DATA only; no native observation after failure.
+                    print("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=\(line);ordinal=\(sample.ordinal);waiter=\(waiter.rawValue);enabled=\(sample.enabled ? 1 : 0);hittable=\(sample.hittable ? 1 : 0);reason=\(sample.reason.rawValue);sample=pre-wait;nonAtomic=1")
+                }
             }
             throw refusal
         }
@@ -483,7 +513,7 @@ final class NormalAppUITests: XCTestCase {
         element.click()
     }
 
-    @MainActor private func dashboard(_ renderer: XCUIElement) throws {
+    @MainActor private func dashboard(_ renderer: XCUIElement, diagnosticOrdinal: UInt8? = nil) throws {
         let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here."))
         try require(heading.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "dashboard heading did not render")
         // Fixed dashboard query diagnostics only; observations are non-atomic.
@@ -504,8 +534,35 @@ final class NormalAppUITests: XCTestCase {
         // End fixed dashboard query diagnostics.
         let open = try unique(renderer.buttons.matching(identifier: "Open project folder"),
                               "ordinary first-party project control is missing or ambiguous")
+        let snapshot: DashboardSnapshot?
+        if packagedRequireDiagnosticActive, let ordinal = diagnosticOrdinal, (1...4).contains(ordinal) {
+            // The added fixed observations use the same originals and case end.
+            try checkOriginalOwners()
+            _ = try remaining(5)
+            let enabled = open.isEnabled
+            let hittable = open.isHittable
+            let reasons: [(String, DashboardReason)] = [
+                ("Application capabilities are being loaded.", .loading),
+                ("Application capabilities have not been loaded.", .notLoaded),
+                ("The native desktop bridge is unavailable.", .bridgeUnavailable),
+                ("Project selection is not available in the current desktop runtime profile.", .selectionUnavailable),
+                ("Finish the original project selection first.", .selectionInProgress),
+                ("The application is shutting down.", .shuttingDown),
+            ]
+            var selected: DashboardReason?
+            var ambiguous = false
+            for (title, reason) in reasons {
+                if renderer.staticTexts.matching(NSPredicate(format: "title == %@", title)).firstMatch.exists {
+                    if selected != nil { ambiguous = true } else { selected = reason }
+                }
+            }
+            snapshot = DashboardSnapshot(ordinal: ordinal, enabled: enabled, hittable: hittable,
+                                         reason: ambiguous ? .ambiguous : selected ?? .otherOrUnobserved)
+        } else { snapshot = nil }
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true AND hittable == true"), object: open)
-        try require(XCTWaiter.wait(for: [ready], timeout: try remaining(5)) == .completed, "ordinary project control is not usable")
+        let returned = XCTWaiter.wait(for: [ready], timeout: try remaining(5))
+        let readiness = snapshot.map { ($0, DashboardWaiter(returned)) }
+        try require(returned == .completed, "ordinary project control is not usable", dashboard: readiness)
         try require(renderer.staticTexts.matching(identifier: "BROWSER PREVIEW — EXAMPLE DATA ONLY").count == 0,
                     "browser-preview data is not ordinary-app evidence")
     }
@@ -663,7 +720,7 @@ final class NormalAppUITests: XCTestCase {
         try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
         // End bounded initial renderer readiness.
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 1)
         try gate.probe(busy: true)
         // Exercise the real same-window native picker without selecting a
         // project or creating a document/Store operation.
@@ -673,21 +730,21 @@ final class NormalAppUITests: XCTestCase {
         try click(picker.buttons.matching(identifier: "Cancel"), "native project picker Cancel is unavailable")
         let pickerDismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: picker)
         try require(XCTWaiter.wait(for: [pickerDismissed], timeout: try remaining(5)) == .completed, "native picker Cancel did not settle")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 2)
 
         let first = try quitSheet(app, window)
         try click(first.buttons.matching(identifier: "Cancel"), "normal Quit Cancel is unavailable")
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: first)
         try require(XCTWaiter.wait(for: [dismissed], timeout: try remaining(5)) == .completed, "Cancel did not dismiss the normal Quit sheet")
         try require(app.state == .runningForeground && window.exists, "Cancel did not preserve the running application")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 3)
         // Prove renderer responsiveness after Cancel without selecting a project,
         // changing configuration or invoking a Store.
         try click(renderer.buttons.matching(identifier: "Project settings"), "post-Cancel navigation is unavailable")
         try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
                     .element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "post-Cancel settings navigation failed")
         try click(renderer.buttons.matching(identifier: "Dashboard"), "post-Cancel Dashboard navigation is unavailable")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 4)
 
         let second = try quitSheet(app, window)
         try click(second.buttons.matching(identifier: "Quit"), "normal affirmative Quit is unavailable")

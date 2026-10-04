@@ -358,12 +358,14 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                    "if packagedRequireDiagnosticActive && originalFailureAbsent && !packagedRequireDiagnosticEmitted",
                    "&& line >= 1 && line <= 65535", "packagedRequireDiagnosticEmitted = true",
                    'print("MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\\(line);check=\\(check.rawValue)")',
-                   "throw refusal")
+                   "if let (sample, waiter) = dashboard, (1...4).contains(sample.ordinal), waiter != .completed",
+                   "MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;", "throw refusal")
         positions = [false_guard.index(item) for item in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(source.count("MRK_MACOS_PACKAGED_REQUIRE_FAILURE="), 1)
         self.assertEqual(require.count("caseClock?.fail(reason) ?? Refusal.condition(reason)"), 1)
-        for forbidden in ("XCTFail", "recordIssue", "waitFor", "remaining(", "systemUptime", "owner.", "checkOriginalOwners(", "catch", "try?"):
+        for forbidden in ("XCTFail", "recordIssue", "waitFor", "remaining(", "systemUptime", "owner.", "checkOriginalOwners(",
+                          "catch", "try?", "isEnabled", "isHittable", "renderer.", "firstMatch", "XCUIElement"):
             self.assertNotIn(forbidden, false_guard)
         self.assertEqual(require.count("try checkOriginalOwners()"), 1)
         # A false guard still throws; true values retain BOTH original gates.
@@ -377,6 +379,44 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn("try require(element.isEnabled && element.isHittable, reason, line: line, check: .actionable)", click)
         self.assertLess(click.index("try unique(query, reason, line: line)"), click.index("try require("))
         self.assertLess(click.index("try require("), click.index("element.click()"))
+        self.assertEqual(source.count("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE="), 1)
+        self.assertIn("dashboard: (DashboardSnapshot, DashboardWaiter)? = nil", require)
+        self.assertIn(";sample=pre-wait;nonAtomic=1", false_guard)
+        snapshot_type = source.split("private struct DashboardSnapshot {", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(snapshot_type.count("let "), 4)
+        self.assertNotIn("var ", snapshot_type)
+        dashboard = source.split("private func dashboard(", 1)[1].split("private func quitSheet(", 1)[0]
+        self.assertIn("diagnosticOrdinal: UInt8? = nil", dashboard)
+        sample = dashboard.split("let snapshot: DashboardSnapshot?", 1)[1].split("        let ready =", 1)[0]
+        order = ("if packagedRequireDiagnosticActive, let ordinal = diagnosticOrdinal, (1...4).contains(ordinal)",
+                 "try checkOriginalOwners()", "_ = try remaining(5)",
+                 "let enabled = open.isEnabled", "let hittable = open.isHittable",
+                 "for (title, reason) in reasons")
+        self.assertEqual([sample.index(item) for item in order], sorted(sample.index(item) for item in order))
+        self.assertEqual(sample.count("try checkOriginalOwners()"), 1)
+        self.assertEqual(sample.count("try remaining(5)"), 1)
+        self.assertEqual(sample.count("open.isEnabled"), 1)
+        self.assertEqual(sample.count("open.isHittable"), 1)
+        self.assertEqual(sample.count('.firstMatch.exists'), 1)
+        self.assertEqual(sample.count('("'), 6)  # Only the six fixed public reason literals.
+        for title in ("Application capabilities are being loaded.", "Application capabilities have not been loaded.",
+                      "The native desktop bridge is unavailable.",
+                      "Project selection is not available in the current desktop runtime profile.",
+                      "Finish the original project selection first.", "The application is shutting down."):
+            self.assertEqual(sample.count('("' + title + '",'), 1)
+        self.assertIn('renderer.staticTexts.matching(NSPredicate(format: "title == %@", title)).firstMatch.exists', sample)
+        self.assertIn("reason: ambiguous ? .ambiguous : selected ?? .otherOrUnobserved)", sample)
+        for forbidden in ("print(", ".label", ".value", "debugDescription", "screenshot", "while ", "sleep("):
+            self.assertNotIn(forbidden, sample)
+        self.assertEqual(dashboard.count('NSPredicate(format: "enabled == true AND hittable == true"), object: open'), 1)
+        self.assertEqual(dashboard.count("XCTWaiter.wait(for: [ready], timeout: try remaining(5))"), 1)
+        self.assertIn("let returned = XCTWaiter.wait(for: [ready], timeout: try remaining(5))\n"
+                      "        let readiness = snapshot.map { ($0, DashboardWaiter(returned)) }\n"
+                      '        try require(returned == .completed, "ordinary project control is not usable", dashboard: readiness)', dashboard)
+        self.assertEqual(source.count("diagnosticOrdinal:"), 5)  # Default plus only four shared-case callers.
+        case_body = shared.split("    // Finite synthetic files only.", 1)[0]
+        for ordinal in range(1, 5):
+            self.assertEqual(case_body.count(f"try dashboard(renderer, diagnosticOrdinal: {ordinal})"), 1)
         clock = source.split("func fail(_ reason: String) -> Refusal {", 1)[1].split("private func now()", 1)[0]
         self.assertIn("if firstFailure == nil { firstFailure = reason }\n            return .condition(firstFailure!)", clock)
 

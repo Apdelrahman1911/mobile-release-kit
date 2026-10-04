@@ -105,7 +105,7 @@ def ui_public_toolchain(values):
 def ui_failure_unavailable():
     return {"schemaVersion": 1, "scope": "captured-ui-failure-diagnostics-only", "status": "unavailable",
             "errorCodes": [], "sourceFailures": [], "findingsTruncated": False,
-            "requireFailure": {"status": "unobserved", "site": None},
+            "requireFailure": {"status": "unobserved", "site": None}, "dashboardReadiness": None,
             "queryObservations": [], "contextObservations": [],
             "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
                         "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
@@ -141,6 +141,13 @@ def ui_failure_diagnostics(stdout, stderr):
     require_prefix = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE="
     require_pattern = re.escape(require_prefix) + rb"v1;line=([1-9][0-9]{0,4});check=(condition|singleton|actionable)"
     require_candidates = 0
+    dashboard_namespace = b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE"
+    dashboard_pattern = (re.escape(dashboard_namespace) + rb"=v1;line=([1-9][0-9]{0,4});ordinal=([1-4])"
+                         rb";waiter=(timed-out|incorrect-order|inverted-fulfillment|interrupted|unknown)"
+                         rb";enabled=([01]);hittable=([01]);reason=(loading|not-loaded|bridge-unavailable|"
+                         rb"selection-unavailable|selection-in-progress|shutting-down|other-or-unobserved|ambiguous)"
+                         rb";sample=pre-wait;nonAtomic=1")
+    dashboard_candidates, dashboard_candidate = 0, None
     query_pattern = (rb"MRK_MACOS_NORMAL_(RENDERER|DASHBOARD)_QUERY=observation="
                      rb"(initial|identifier|title|label|value|placeholderValue|containingSameStaticText)"
                      rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
@@ -170,7 +177,7 @@ def ui_failure_diagnostics(stdout, stderr):
             value["findingsTruncated"] = True
 
     def record_observation(stream, record, complete):
-        nonlocal require_candidates
+        nonlocal require_candidates, dashboard_candidates, dashboard_candidate
         if record.startswith(require_prefix):
             require_candidates = min(2, require_candidates + 1)
             match = re.fullmatch(require_pattern, record) if complete else None
@@ -181,6 +188,18 @@ def ui_failure_diagnostics(stdout, stderr):
                     "stream": stream, "line": int(match.group(1)), "check": match.group(2).decode("ascii")}}
             else:
                 value["requireFailure"] = {"status": "malformed", "site": None}
+            return
+        if (dashboard_namespace in record or (record and dashboard_namespace.startswith(record))
+                or (not complete and any(record.endswith(dashboard_namespace[:size])
+                                         for size in range(1, len(dashboard_namespace))))):
+            dashboard_candidates = min(2, dashboard_candidates + 1)
+            match = re.fullmatch(dashboard_pattern, record) if complete else None
+            dashboard_candidate = None
+            if dashboard_candidates == 1 and match is not None and int(match.group(1)) <= 65535:
+                dashboard_candidate = {"stream": stream, "line": int(match.group(1)), "ordinal": int(match.group(2)),
+                    "waiter": match.group(3).decode("ascii"), "enabled": match.group(4) == b"1",
+                    "hittable": match.group(5) == b"1", "reason": match.group(6).decode("ascii"),
+                    "sample": "pre-wait", "nonAtomic": True}
             return
         if not complete:
             return
@@ -248,6 +267,12 @@ def ui_failure_diagnostics(stdout, stderr):
                 record = record[:-1]
             record_observation(stream, record, complete)
             offset = end + 1
+    site = value["requireFailure"]["site"]
+    if (dashboard_candidates == 1 and dashboard_candidate is not None
+            and value["requireFailure"]["status"] == "observed" and site is not None
+            and site["check"] == "condition" and site["line"] == dashboard_candidate["line"]
+            and site["stream"] == dashboard_candidate["stream"]):
+        value["dashboardReadiness"] = dashboard_candidate
     value["status"] = ("classified" if value["errorCodes"] or value["sourceFailures"]
                        or value["requireFailure"]["status"] == "observed" else "unclassified")
     return value
