@@ -160,19 +160,45 @@ The changed transport/created-directory path still needs its own native evidence
 
 ## Deliberately small product surface
 
+These are current normal Mac implementation selections, not a record of native
+acceptance. Original runtime, document, input and owner admission still applies.
+
 - macOS **26.x, ARM64**, normal `desktop-shell,custom-protocol`, no
   `development-runtime`. App startup rejects root/set-ID/incompatible hosts.
-- Exactly eight passive methods: `capabilities`, `catalog`, `project.snapshot`,
-  `config.validate`, `config.suggest`, `config.preview`,
-  `environment.requirements`, `github.setup.propose`.
+- The Mac passive selector includes thirteen methods: `capabilities`, `catalog`,
+  `project.snapshot`, `config.validate`, `config.suggest`, `config.preview`,
+  `environment.requirements`, `github.setup.propose`, `release.version.observe`,
+  `metadata.text.observe`, `metadata.text.validate`,
+  `artifacts.candidate.observe`, and `release.evidence.observe`.
+  These read/validate routes do not grant edit, private-input or release custody.
 - Separate existing configuration `EditOwner`: open → prepare/review → explicit
   Apply/Save → close/status. Same core `InitRootLease`/transaction, stale-base
   policy, `.gitignore` control, and absent-`release/` creation. The project picker
   supplies an observation/registered identity, **not** the Save lease.
-- No Mac P2 picker, C candidate evidence, saved metadata/version service,
-  credentials, workflow/metadata Apply, diagnostics, builds, Store or network
-  service. Existing frontend and capability intersection are reused unchanged.
-  File/P2/evidence native panels are explicitly unsupported on this platform.
+- Normal Mac selectors also connect workflow Apply, public locale-text Save,
+  saved-version edits and public-image edits to their separate domains of the
+  original shared edit owner. Image selection shares the fixed image-edit gate.
+- Project-folder and documents-only evidence-folder selection are implemented
+  separately from credential/signing-file inputs. Ordinary session/persistence
+  selection retains the original Supervisor/document and pinned-helper gates;
+  selection alone proves neither saved credentials nor restart/upgrade continuity.
+- Separate installed profiles exist for build-tool diagnostics, saved Android
+  offline checks/builds, project recovery and full-Xcode iOS archive work. Their
+  operation-specific runtime/tool/input custody and native acceptance remain
+  separate; an offline check does not authorize a build.
+- GitHub read-only and publisher-bound preflight/release profiles have separate
+  selectors. A local workflow proposal grants no network or Store operation;
+  profile selection is not live-service success or general network authority.
+- The project-relative P2 field picker remains closed in the normal Mac profile:
+  `INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED` is false. Browse for `version.source`,
+  `ios.project`, `ios.workspace`, and `metadata.root` is unavailable; manual text
+  entry remains. Project registration and the other selection profiles do not
+  qualify this separate gate.
+
+The existing frontend/capability intersection is still used. None of these
+selectors, source tests or a successful build establishes the outstanding native
+UI/owner acceptance, SDK/tool qualification, signing/notarization, Store approval
+or product readiness. The separate evidence and signing limitations below remain.
 
 ## Fixed installation and root boundary
 

@@ -263,8 +263,21 @@ Through ordinary native pickers and accessible controls, it:
 7. Locks, preserves the original mutation receipt, checks files and quits using
    the real File menu. Every mutation requires known-applied/confirmed/known;
    idle status alone does not establish success.
+8. Only after that original app terminates normally, its gate is free and its
+   original observation closes successfully, launches the **same installed app
+   once more**. Keeps the first owner/gate/Quit facts, fixture originals and exact
+   post-delete encrypted-store baseline; does not repeat admission/Initialize.
+9. Selects the same project through the native picker and sets the same context
+   while storage is closed. Open must show locked with zero visible/assigned
+   records. Unlock uses the ordinary provider/helper; waits for the normal UI's
+   automatic current-context acknowledgement, without pressing Submit again.
+   Requires exactly the replacement P12/revision2, not assessed or assigned, and
+   no profile, **before** explicit Assess/Bind. This observes ordinary UI state,
+   not an internal pre-context-submission snapshot. Reassesses/binds the survivor,
+   locks and genuinely quits the second original, with the store unchanged.
+   Only then consumes the fixture originals and accepts both app lifetimes.
 
-Before **any application launch**, the harness retains NoFollow ancestors and
+Before the **first application launch**, the harness retains NoFollow ancestors and
 requires `/Users/runner/Library/Application Support/dev.mobile-release-kit.desktop`
 absent, including dangling links and bounded case/normalization collisions.
 Existing state is never adopted, erased or repaired. After the app creates its
@@ -286,10 +299,20 @@ job retirement; never erase possibly-live recovery state. Harness-owned FDs
 are consumed once, independently of failed app cleanup.
 
 Use one nonrenewable300-second allowance and a seven-minute workflow ceiling.
-Require the original XCTest command to succeed with exactly one passed test,
-zero failures/skips, and exact application/harness/helper bindings. Export only
-closed stage/count/result facts for this private-input journey, not raw test
-logs, screenshots, password keystrokes or xcresult contents. Session reopening
-is **not application-restart/upgrade continuity**. Original POSIX exit and all
-worker finality remain unavailable to XCTest UI observation; native owners,
-helper/provider and filesystem qualification remain separate obligations.
+Require the original XCTest command to succeed with exactly one selected
+start/pass and zero failures/skips/expected failures, exact application/harness/
+helper bindings, and ordered first-lifetime/second-lifetime/final restart markers.
+A missing/duplicate marker, framework retry, failure cleanup, stale first owner
+or elapsed original deadline cannot become restart success. Both owners remain
+checked through final acceptance and teardown. Only the active failed lifetime
+may consume the original bounded cleanup allowance; the completed first one is
+rechecked without another stop request or fresh cleanup window.
+
+Export only closed stage/count/result facts for this private-input journey, not
+raw test logs, screenshots, password keystrokes or xcresult contents. Diagnostic
+stages alone are not success authority. Same-process lock/reopen alone is not
+an app restart; this selection requires two genuine ordinary lifetimes of the
+same installation. It is **not upgrade continuity**: the engineering installer
+does not implement occupied-install update/repair/uninstall. Original POSIX exit
+and all-worker finality remain unavailable to XCTest UI observation; native
+owners, helper/provider and filesystem qualification remain separate obligations.

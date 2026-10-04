@@ -161,6 +161,7 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
 
     def test_original_child_clocks_clean_environment_and_one_use_calls(self):
         fixture = InertAccountFixtures(); calls = []
+        fixture.precursor_diagnostic = {"stale": "must-not-survive"}
         def owner(argv, **options):
             mode = argv[7]; calls.append(mode)
             self.assertEqual(argv[1:5], ["-I", "-S", "-B", "-c"])
@@ -176,6 +177,7 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
         with patch("time.monotonic_ns", side_effect=[1_000_000_000, 2_000_000_000, 3_000_000_000]):
             M._run_ios_account_child(fixture, owner, UID, "runner", "produce")
         self.assertFalse(fixture.inflight); self.assertTrue(fixture.last_returned)
+        self.assertIsNone(fixture.precursor_diagnostic)
         with self.assertRaises(M.Refused): M._run_ios_account_child(fixture, owner, UID, "runner", "produce")
         with self.assertRaises(M.Refused): M._run_ios_account_child(fixture, owner, UID, "runner", "observe")
         fixture.account_app_returned = True
@@ -183,6 +185,7 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
             M._run_ios_account_child(fixture, owner, UID, "runner", "observe")
         self.assertEqual(calls, ["produce", "observe"])
         self.assertTrue(fixture.account_readback)
+        self.assertIsNone(fixture.precursor_diagnostic)
         with self.assertRaises(M.Refused): M._run_ios_account_child(fixture, owner, UID, "runner", "observe")
 
     def test_unknown_or_late_original_return_never_enters_app_or_readback(self):
@@ -191,20 +194,65 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
         def foreign(argv, **kwargs): return returned(["foreign"], "produce")
         for owner in (lost, foreign):
             fixture = InertAccountFixtures()
-            with patch("time.monotonic_ns", return_value=1_000_000_000):
+            with patch("time.monotonic_ns", return_value=1_000_000_000), \
+                    patch.object(M, "_precursor_diagnostic", side_effect=AssertionError("no unknown capture")) as reduced:
                 with self.assertRaises((RuntimeError, M.Refused)) as raised:
                     M._run_ios_account_child(fixture, owner, UID, "runner", "produce")
+            reduced.assert_not_called(); self.assertIsNone(fixture.precursor_diagnostic)
             if owner is lost: self.assertIs(raised.exception, error)
             self.assertTrue(fixture.inflight); self.assertFalse(fixture.last_returned)
             self.assertFalse(fixture.account_produced); self.assertEqual(fixture.events, [])
             with self.assertRaises(M.Refused): M._run_ios_account_child(fixture, owner, UID, "runner", "observe")
         fixture = InertAccountFixtures()
-        with patch("time.monotonic_ns", side_effect=[1_000_000_000, 176_000_000_000]):
+        with patch("time.monotonic_ns", side_effect=[1_000_000_000, 176_000_000_000]), \
+                patch.object(M, "_precursor_diagnostic", side_effect=AssertionError("no late capture")) as reduced:
             with self.assertRaises(M.Refused):
                 M._run_ios_account_child(fixture, lambda argv, **kw: returned(argv, "produce"), UID, "runner", "produce")
         self.assertFalse(fixture.inflight); self.assertTrue(fixture.last_returned)
         self.assertFalse(fixture.account_produced); self.assertTrue(fixture.account_attempts["produce"])
+        reduced.assert_not_called(); self.assertIsNone(fixture.precursor_diagnostic)
         self.assertEqual(fixture.events, [])
+
+    def test_returned_precursor_failure_keeps_role_private_data_and_adoption_separate(self):
+        for mode in ("produce", "observe"):
+            fixture = InertAccountFixtures(); calls = []
+            fixture.account_produced = fixture.account_app_returned = mode == "observe"
+            private = b"PRIVATE_BASELINE_ACCOUNT_CANARY\n"
+            def owner(argv, **options):
+                calls.append(argv)
+                return CompletedProcess(argv, 1, private, b"PRIVATE_NATIVE_ERROR_CANARY")
+            with patch("time.monotonic_ns", side_effect=[1_000_000_000, 2_000_000_000]) as clock:
+                with self.assertRaisesRegex(M.Refused, "ios-account-child-failed"):
+                    M._run_ios_account_child(fixture, owner, UID, "runner", mode)
+            value = fixture.precursor_diagnostic
+            self.assertEqual(value["kind"], "ios-account-" + mode)
+            self.assertEqual(value["returncode"], 1); self.assertEqual(value["stdoutBytes"], len(private))
+            self.assertNotIn("PRIVATE_", json.dumps(value)); self.assertNotIn("childFailure", value)
+            self.assertEqual(clock.call_count, 2); self.assertEqual(len(calls), 1)
+            self.assertFalse(fixture.inflight); self.assertTrue(fixture.last_returned)
+            self.assertFalse(fixture.account_readback)
+            self.assertEqual(fixture.account_produced, mode == "observe")
+            self.assertEqual(fixture.events, ["after-readback"] if mode == "observe" else [])
+
+    def test_diagnostic_fault_preserves_identical_parser_error_and_original_deadline(self):
+        for mode in ("produce", "observe"):
+            fixture = InertAccountFixtures(); calls = []
+            fixture.account_produced = fixture.account_app_returned = mode == "observe"
+            original = M.Refused("ios-account-child-failed")
+            def owner(argv, **options):
+                calls.append(argv)
+                return CompletedProcess(argv, 1, b"", b"private-original-canary")
+            with patch("time.monotonic_ns", side_effect=[1_000_000_000, 2_000_000_000]) as clock, \
+                    patch.object(M, "_ios_account_child_result", side_effect=original), \
+                    patch.object(M, "_precursor_diagnostic", side_effect=RuntimeError("private-reducer-canary")) as reduced:
+                with self.assertRaises(M.Refused) as raised:
+                    M._run_ios_account_child(fixture, owner, UID, "runner", mode)
+            self.assertIs(raised.exception, original); reduced.assert_called_once()
+            self.assertEqual(clock.call_count, 2); self.assertEqual(len(calls), 1)
+            self.assertIsNone(fixture.precursor_diagnostic)
+            self.assertFalse(fixture.inflight); self.assertTrue(fixture.last_returned)
+            self.assertFalse(fixture.account_readback)
+            self.assertEqual(fixture.events, ["after-readback"] if mode == "observe" else [])
 
     def test_three_originals_are_serial_and_failure_never_dispatches_the_next_leg(self):
         class Fixtures(InertAccountFixtures):

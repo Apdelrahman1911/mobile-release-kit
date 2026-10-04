@@ -1946,7 +1946,8 @@ jobs:
           finally: os.close(fd)
           stages = {"persistence-" + name for name in ("admission", "launch", "project-and-initialize",
               "save-and-bind-p12", "save-and-bind-profile", "context-invalidation", "lock-reopen-rebind",
-              "replacement-cancel", "replace-current-record", "delete-and-quit")}
+              "replacement-cancel", "replace-current-record", "delete-and-quit",
+              "restart-launch", "restart-unlock", "restart-rebind-and-quit")}
           events = []
           for raw in data.splitlines():
               match = re.fullmatch(rb"MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]+);result=(started|passed|failed)(;laterStages=not-run)?", raw.strip())
@@ -2051,6 +2052,28 @@ jobs:
           expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
           if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
               raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+          # Read only the bounded task-local original. Never export raw XCTest
+          # text: it can contain synthetic secure-field keystrokes. Stage/count
+          # diagnostics are not authority for the following terminal checks.
+          log_bytes = read(root / "normal-ui/persistence-test.log", 16 * 1024 * 1024)
+          log = log_bytes.decode("utf-8", "strict")
+          lines = log.splitlines()
+          selected = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticPersistentCredentials]"
+          start = "Test Case '" + selected + "' started."
+          test_events = [(index, line) for index, line in enumerate(lines) if line.startswith("Test Case '")]
+          if (len(test_events) != 2 or test_events[0][1] != start
+                  or re.fullmatch(r"Test Case '" + re.escape(selected) + r"' passed \([0-9.]+ seconds\)\.", test_events[1][1]) is None):
+              raise ValueError("one exact selected persistence XCTest start/pass without retry required")
+          lifetime = (";outerRequest=1;completion=1;body=1;handoff=1;payloadIdentity=1;originalTerminated=1;"
+                      "gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
+          required_markers = ["MRK_MACOS_PERSISTENCE_LIFETIME=phase=" + str(phase) + lifetime for phase in (1, 2)]
+          required_markers.append("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete-restart-unlock-reassess-rebind;appRestart=passed;ordinaryLifetimes=2;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
+          terminal_events = [(index, line) for index, line in enumerate(lines)
+                             if line.startswith(("MRK_MACOS_PERSISTENCE_LIFETIME=", "MRK_MACOS_NORMAL_PERSISTENCE_UI="))]
+          if ([line for _, line in terminal_events] != required_markers
+                  or "MRK_MACOS_UI_FAILURE_CLEANUP=" in log or "MRK_MACOS_UI_ORIGINAL=" in log
+                  or not test_events[0][0] < terminal_events[0][0] < terminal_events[-1][0] < test_events[1][0]):
+              raise ValueError("two ordered normal lifetimes and final restart marker without failure cleanup required")
           toolchain = {key: read(root / ("normal-ui/" + name), 4096).decode("utf-8", "strict").strip()
                        for key, name in (("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
                                          ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt"))}
@@ -2068,7 +2091,8 @@ jobs:
                     "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials",
                     "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
                     "normalPersistenceSelected": True, "syntheticPersistenceCRUDUI": "passed",
-                    "applicationStateAfterNormalQuit": "notRunning", "applicationRestart": "not-run",
+                    "applicationStateAfterNormalQuit": "notRunning", "applicationRestart": "passed",
+                    "ordinaryApplicationLifetimes": 2, "originalReferenceAndGateTerminalObserved": True,
                     "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
                     "signingOrStoreValidated": False, "fullUIQualified": False, "distributionQualified": False, "productReady": False}
           fd = os.open(root / "normal-ui/persistence-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -2076,7 +2100,7 @@ jobs:
               with os.fdopen(fd, "w", closefd=False) as output:
                   json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
           finally: os.close(fd)
-          print("One ordinary synthetic persistence UI journey passed; restart, signing and all-worker finality remain unproved.")
+          print("One synthetic persistence XCTest passed across two ordinary app lifetimes; upgrade, signing and all-worker finality remain unproved.")
           PY_PERSISTENCE_RESULT
       - name: Observe one original build-tool diagnostics report through the ordinary Mac UI
         id: normal_diagnostics_ui_test

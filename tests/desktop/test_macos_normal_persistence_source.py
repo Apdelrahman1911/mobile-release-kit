@@ -77,7 +77,7 @@ class NormalPersistenceSourceTests(unittest.TestCase):
                        "count: 0, assigned: 0", "fixture.assertStoreUnchanged()", "reopenPrivateVault("):
             self.assertIn(marker, cancellation)
         self.assertLess(cancellation.index("fixture.assertStoreUnchanged()"), cancellation.index("reopenPrivateVault("))
-        for claim in ("appRestart=not-run", "cleanExitStatus=unavailable", "allWorkerFinality=unavailable",
+        for claim in ("appRestart=passed", "ordinaryLifetimes=2", "cleanExitStatus=unavailable", "allWorkerFinality=unavailable",
                       "fixtures=retained-for-disposable-job-retirement"):
             self.assertIn(claim, journey)
         secure = source.split("@MainActor private func savePrivate(", 1)[1].split("@MainActor private func assignPrivate(", 1)[0]
@@ -86,6 +86,82 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         self.assertNotIn("password.value", secure)
         self.assertNotIn("replace(password", secure)
         self.assertNotIn(".terminate()", journey)
+
+    def test_restart_retains_both_originals_and_never_refreshes_clock_or_cleanup(self):
+        source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        transition = source.split("private func retainPersistenceLifetimeForRestart(", 1)[1].split("private func checkOriginalOwners()", 1)[0]
+        for required in ("completedPersistenceLifetime == nil && normalQuitObserved && app.state == .notRunning",
+                         "try owner.acceptTerminal()", "try fixture.assertStoreUnchanged()",
+                         "CompletedPersistenceLifetime(owner: owner, gate: gate, normalQuit: normalQuitObserved)"):
+            self.assertIn(required, transition)
+        assignment = "\n        completedPersistenceLifetime = CompletedPersistenceLifetime("
+        self.assertEqual(source.count(assignment), 1)
+        for earlier, later in (("owner.acceptTerminal()", "fixture.assertStoreUnchanged()"),
+                               ("fixture.assertStoreUnchanged()", assignment),
+                               (assignment, "originalLaunch = nil"),
+                               (assignment, "entryGateObservation = nil")):
+            self.assertLess(transition.index(earlier), transition.index(later))
+        self.assertEqual(source.count("try retainPersistenceLifetimeForRestart(app, fixture: fixture)"), 1)
+        self.assertNotIn("CaseClock(", transition)
+        self.assertNotIn("beginCase(", transition)
+        self.assertNotIn("journeyDeadline =", transition)
+        owners = source.split("private func checkOriginalOwners()", 1)[1].split("private func acceptPersistenceRestart()", 1)[0]
+        for required in ("first.normalQuit", "first.owner.acceptTerminal()", "owner.healthy()"):
+            self.assertIn(required, owners)
+        for name in ("require", "remaining"):
+            section = source.split("private func " + name + "(", 1)[1].split("\n    @MainActor ", 1)[0]
+            self.assertIn("try checkOriginalOwners()", section)
+        final = source.split("private func acceptPersistenceRestart()", 1)[1].split("private final class GateObservation", 1)[0]
+        for required in ("try require(normalQuitObserved", "first.normalQuit", "first.owner.acceptTerminal()",
+                         "owner.acceptTerminal()", "try remaining(1)", "MRK_MACOS_PERSISTENCE_LIFETIME=phase=2"):
+            self.assertIn(required, final)
+        self.assertLess(final.index("try remaining(1)"), final.index("MRK_MACOS_PERSISTENCE_LIFETIME=phase=2"))
+        single = source.split("private func acceptFinalScenario()", 1)[1].split("private func retainPersistenceLifetimeForRestart(", 1)[0]
+        self.assertIn("completedPersistenceLifetime == nil", single)
+        teardown = source.split("override func tearDown() async throws", 1)[1]
+        for required in ("owner.tearDown(normalQuit: normalQuitObserved)", "first.owner.recheckCompletedTerminal()",
+                         "entryGateObservation?.closeOriginal()", "completedPersistenceLifetime?.gate.closeOriginal()"):
+            self.assertIn(required, teardown)
+        self.assertNotIn("first.owner.tearDown(", teardown)
+        self.assertNotIn("clock.end(", teardown)
+        recheck = source.split("func recheckCompletedTerminal()", 1)[1].split("private func driveCleanup(", 1)[0]
+        for required in ("callbackHealthy(complete: true)", "payloadIdentity()", "!workClosed, app.isTerminated, !normalRequested, !forceRequested"):
+            self.assertIn(required, recheck)
+        for forbidden in ("clock.end(", "driveCleanup(", ".terminate(", ".forceTerminate("):
+            self.assertNotIn(forbidden, recheck)
+
+    def test_restart_preserves_store_and_awaits_ordinary_context_before_explicit_reassessment(self):
+        source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
+        journey = source.split("@MainActor func testSyntheticPersistentCredentials() throws {", 1)[1]
+        journey = journey.split("@MainActor func testSyntheticProjectLocalEdits()", 1)[0]
+        restart = journey.split('stage("persistence-restart-launch")', 1)[1]
+        self.assertLess(journey.index("try completeNormalQuit(app)"), journey.index("retainPersistenceLifetimeForRestart("))
+        self.assertLess(restart.index("retainPersistenceLifetimeForRestart("), restart.index("launchForJourney()"))
+        self.assertEqual(journey.count("try beginCase(seconds: 300)"), 1)
+        self.assertEqual(journey.count("fixture.admitDefaultVault()"), 1)
+        self.assertEqual(journey.count("fixture.prepare(.persistentCredentials)"), 1)
+        self.assertEqual(journey.count("fixture.closeOriginals()"), 1)
+        self.assertLess(restart.index("completeNormalQuit(restartedApp)"), restart.index("fixture.closeOriginals()"))
+        self.assertLess(restart.index("fixture.closeOriginals()"), restart.index("acceptPersistenceRestart()"))
+        for forbidden in ("fixture.acceptStore(", "fixture.admitDefaultVault()", "fixture.assertDefaultVaultAbsent()",
+                          "fixture.prepare(", '"Create encrypted vault"', "explicitlySubmit: true", '"Submit current context"'):
+            self.assertNotIn(forbidden, restart)
+        for earlier, later in (('"Storage closed"', 'label: "Platform"'),
+                               ('label: "Input purpose"', "openAndUnlockPrivateVault("),
+                               ("openAndUnlockPrivateVault(", "privateContext(storage, renderer: restartedRenderer)"),
+                               ("privateContext(storage, renderer: restartedRenderer)", "count: 1, assigned: 0"),
+                               ("assigned: false, notChecked: true", "assignPrivate(storageAfterRestart"),
+                               ("assignPrivate(storageAfterRestart", "completeNormalQuit(restartedApp)")):
+            self.assertLess(restart.index(earlier), restart.index(later))
+        self.assertIn('label: "Synthetic distribution replacement", revision: 2', restart)
+        self.assertGreaterEqual(restart.count("fixture.assertStoreUnchanged()"), 3)
+        unlock = source.split("private func openAndUnlockPrivateVault(", 1)[1].split("private func reopenPrivateVault(", 1)[0]
+        self.assertLess(unlock.index('"Encrypted vault · locked"'), unlock.index("count: 0, assigned: 0"))
+        self.assertLess(unlock.index("count: 0, assigned: 0"), unlock.index('"Unlock vault"'))
+        self.assertNotIn("privateContext(", unlock)
+        old_reopen = source.split("private func reopenPrivateVault(", 1)[1].split("func testSyntheticPersistentCredentials()", 1)[0]
+        self.assertIn("count: 2, assigned: 0", old_reopen)
+        self.assertIn("revision: 1, assigned: false, notChecked: true", old_reopen)
 
     def test_store_observation_preserves_permanent_controls_and_refuses_unowned_state(self):
         source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
@@ -160,7 +236,7 @@ class NormalPersistenceSourceTests(unittest.TestCase):
             b"normal_ui_test": "f9a4ab10526a79ff9f87bcb2ef8ed5fc9b6126c9e38a472a43b9e71bec9d2806",
             b"normal_project_ui_test": "d903ce62063fd858c158a87bcc2a5532c47c043f13ddaf9147a568222b306bd2",
             b"normal_project_ui_result": "20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d",
-            b"normal_persistence_ui_test": "71b6c1436503ada551ca0512fc49f925a6caecfe3448daec464fc3134d49b8bc",
+            b"normal_persistence_ui_test": "2396acc5b9f10129447f2b52933feab88d06c6a84a512edaad8c637994a59a99",
         }
         for identifier, expected in pins.items():
             self.assertEqual(ids.count(identifier), 1, identifier)

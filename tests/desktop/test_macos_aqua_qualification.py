@@ -1,6 +1,8 @@
 """Inert DATA/control-flow regressions, not Mac/native/process evidence.
 
-No core owner is imported and no command/native fixture is run. The unsigned-
+No core owner is imported and no command/native fixture is run. Invalid inline
+producer entries exercise only their refusal footers, before any core/native/FS
+operation. The unsigned-
 iOS output-reader tests use disposable regular-file fixtures only; their DATA
 does not substitute for required installed hosted Aqua/core/native evidence.
 """
@@ -8,6 +10,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import ast
+import builtins
 import importlib.util
 from importlib.machinery import ModuleSpec
 import io
@@ -6702,7 +6705,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
-            "          - vault-helper-shipping-installation-inspection\n"
+            "          - project-fields\n"
             "          - project-recovery-pending\n"
             "          - ios-recovery-pending\n"
             "    runs-on: macos-26\n"
@@ -9112,11 +9115,11 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
         self.assertIn(
             "        scope:\n"
-            "          - vault-helper-shipping-installation-inspection\n"
+            "          - project-fields\n"
             "          - project-recovery-pending\n"
             "          - ios-recovery-pending\n"
             "    runs-on: macos-26\n", header)
-        self.assertNotIn("          - project-fields", header)
+        self.assertNotIn("          - vault-helper-shipping-installation-inspection\n", header)
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         run = blocks["Three serial shipping-helper journeys through the original document and invocation owner"]
         self.assertIn("if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')", run)
@@ -9811,6 +9814,151 @@ class InertRecoveryFixtures(InertFixtures):
         return super().readback(M.RECOVERY_CASE)
 
 
+class PrecursorFailureDiagnosticDataTests(unittest.TestCase):
+    @staticmethod
+    def detail(kind):
+        project = kind == "project-recovery-producer"
+        value = {"schemaVersion": 1, "reason": "fixture-check-failed" if project else "native-account-entry",
+                 "exceptionCategory": "runtime" if project else "refused", "sourceSites": [1, 2],
+                 "tracebackLinksSeen": 2, "sourceSitesComplete": True}
+        if project:
+            value["caughtExceptionCategory"] = "none"
+        return value
+
+    @staticmethod
+    def record(kind, value):
+        marker = M._precursor_spec(kind)[1]
+        return marker + json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+    def invalid_entry(self, program, argv, *, encode_fault=False, emit_fault=False):
+        # Actual source, deliberately invalid first entry: no core/native/FS
+        # calls, no subprocess and no synthetic native-success receipt.
+        imports, writes = [], []
+        ordinary_import = builtins.__import__
+        def guarded_import(name, *args, **kwargs):
+            imports.append(name)
+            if name == "mobile_release" or name.startswith("mobile_release."):
+                raise AssertionError("invalid entry must precede core import")
+            return ordinary_import(name, *args, **kwargs)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        def refused_write(value):
+            writes.append(value)
+            raise RuntimeError("private-emission-error-canary")
+        namespace = {"__name__": "_invalid_precursor_entry"}
+        with patch.object(sys, "argv", argv), patch.object(sys, "stdout", stdout), patch.object(sys, "stderr", stderr), \
+                patch.object(builtins, "__import__", side_effect=guarded_import), \
+                patch.object(M.os, "open", side_effect=AssertionError("no fixture access")) as opened, \
+                patch.object(M.subprocess, "Popen", side_effect=AssertionError("no original dispatch")) as dispatched:
+            if encode_fault:
+                with patch.object(M.json, "dumps", side_effect=RuntimeError("private-encoding-error-canary")):
+                    with self.assertRaises(SystemExit) as raised:
+                        exec(compile(program, "<string>", "exec"), namespace)
+            elif emit_fault:
+                with patch.object(stderr, "write", side_effect=refused_write):
+                    with self.assertRaises(SystemExit) as raised:
+                        exec(compile(program, "<string>", "exec"), namespace)
+            else:
+                with self.assertRaises(SystemExit) as raised:
+                    exec(compile(program, "<string>", "exec"), namespace)
+        self.assertEqual(raised.exception.code, 1)
+        opened.assert_not_called(); dispatched.assert_not_called()
+        self.assertFalse(any(name == "mobile_release" or name.startswith("mobile_release.") for name in imports))
+        self.assertEqual(stdout.getvalue(), "")
+        for value in writes:
+            self.assertNotIn("private-emission-error-canary", value)
+            self.assertNotIn("Traceback", value)
+        return stderr.getvalue().encode()
+
+    def test_precursor_envelope_is_separate_bounded_and_never_exports_private_buffers(self):
+        canary = b"PRIVATE_ACCOUNT_PATH_OR_CREDENTIAL_CANARY"
+        for kind in ("project-recovery-producer", "ios-account-produce", "ios-account-observe"):
+            for code, stdout, stderr in ((1, b"", self.record(kind, self.detail(kind))),
+                                         (0, b"{}\n", canary), (1, canary + b"\n", canary),
+                                         (1, b"two\nlines\n", b""), (1, b"unterminated", b"")):
+                result = CompletedProcess([], code, stdout, stderr)
+                value = M._precursor_diagnostic(result, kind)
+                self.assertEqual((value["kind"], value["returncode"], value["stdoutBytes"], value["stderrBytes"]),
+                                 (kind, code, len(stdout), len(stderr)))
+                self.assertEqual(value["envelope"], {"zeroReturncode": code == 0, "emptyStderr": stderr == b"",
+                    "stdoutNonemptyWithinLimit": bool(stdout), "stdoutFinalNewline": stdout.endswith(b"\n"),
+                    "stdoutSingleLine": b"\n" not in stdout[:-1]})
+                fixture = M.Fixtures(BINDING, UID, GID, M.RECOVERY_CASE)
+                fixture.last_returned = True; fixture.precursor_diagnostic = value
+                public = M.diagnostic(M.Refused("recovery-producer-failed"), None, fixture)
+                self.assertIsNone(public["appReturncode"]); self.assertIsNone(public["innerFailureReason"])
+                self.assertEqual(public["precursorDiagnostic"], value)
+                stream = io.StringIO(); M.emit_record(public, stream)
+                self.assertNotIn(canary.decode(), stream.getvalue())
+                self.assertLessEqual(len(stream.getvalue().encode()), 24*1024 + 1)
+            for code in (-(2**31)-1, 2**31, True):
+                with self.assertRaises(M.Refused): M._precursor_diagnostic(CompletedProcess([], code, b"", b""), kind)
+            for code in (0, 2, -9):
+                value = M._precursor_diagnostic(CompletedProcess([], code, b"", self.record(kind, self.detail(kind))), kind)
+                self.assertNotIn("childFailure", value)
+
+    def test_child_failure_schema_is_closed_single_canonical_record(self):
+        for kind in ("project-recovery-producer", "ios-account-produce", "ios-account-observe"):
+            good = self.detail(kind); record = self.record(kind, good)
+            self.assertEqual(M._precursor_child_failure(record, kind), good)
+            bad_records = [record[:-1], record + b"x", record + record, b"prefix" + record,
+                           record.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1'),
+                           record.replace(b'"schemaVersion":1', b'"schemaVersion":NaN'),
+                           record.replace(b'{', b'{ ', 1), b"x"*769]
+            for field, value in (("schemaVersion", True), ("reason", "private-field-canary"),
+                                 ("exceptionCategory", "private-error-canary"), ("exceptionCategory", "none"),
+                                 ("sourceSites", [True]), ("sourceSites", [0]),
+                                 ("sourceSites", [len(M._precursor_spec(kind)[0].splitlines()) + 1]),
+                                 ("sourceSites", [1]*5), ("tracebackLinksSeen", 33),
+                                 ("tracebackLinksSeen", True), ("tracebackLinksSeen", 1), ("sourceSitesComplete", 1)):
+                bad = {**good, field: value}; bad_records.append(self.record(kind, bad))
+            bad_records.append(self.record(kind, {**good, "private": "private-value-canary"}))
+            missing = dict(good); missing.pop("reason"); bad_records.append(self.record(kind, missing))
+            if kind == "project-recovery-producer":
+                bad_records.append(self.record(kind, {**good, "caughtExceptionCategory": "private-caught-canary"}))
+            else:
+                bad_records.append(self.record(kind, {**good, "caughtExceptionCategory": "none"}))
+            for bad in bad_records:
+                self.assertIsNone(M._precursor_child_failure(bad, kind))
+                reduced = M._precursor_diagnostic(CompletedProcess([], 1, b"", bad), kind)
+                self.assertNotIn("childFailure", reduced)
+                self.assertNotIn("private-", json.dumps(reduced))
+
+    def test_invalid_entry_exercises_both_actual_footers_without_core_or_native_access(self):
+        for kind in ("project-recovery-producer", "ios-account-produce"):
+            program = M._precursor_spec(kind)[0]
+            stderr = self.invalid_entry(program, [])
+            detail = M._precursor_child_failure(stderr, kind)
+            self.assertIsNotNone(detail); self.assertTrue(detail["sourceSitesComplete"])
+            self.assertGreaterEqual(len(detail["sourceSites"]), 2)
+            self.assertEqual(detail["tracebackLinksSeen"], len(detail["sourceSites"]))
+            self.assertEqual(detail["reason"], "fixture-check-failed" if kind == "project-recovery-producer" else "native-account-entry")
+            self.assertTrue(any("need(len(sys.argv)" in program.splitlines()[site - 1] for site in detail["sourceSites"]))
+            self.assertNotIn(b"Traceback", stderr)
+
+    def test_foreign_string_frames_and_total_traceback_cutoff_never_become_own_sites(self):
+        foreign = {}
+        exec(compile("def depth(n):\n    if n: return depth(n-1)\n    raise RuntimeError('PRIVATE_FOREIGN_TRACE_CANARY')\n"
+                     "def short(self): return depth(0)\ndef long(self): return depth(40)\n", "<string>", "exec"), foreign)
+        for kind in ("project-recovery-producer", "ios-account-produce"):
+            program = M._precursor_spec(kind)[0]
+            expected = {i + 1 for i, line in enumerate(program.splitlines()) if "need(len(sys.argv)" in line or line == "try:main()"}
+            for long in (False, True):
+                argv = type("ForeignArgv", (), {"__len__": foreign["long" if long else "short"]})()
+                stderr = self.invalid_entry(program, argv)
+                detail = M._precursor_child_failure(stderr, kind)
+                self.assertIsNotNone(detail)
+                self.assertEqual(set(detail["sourceSites"]), expected)
+                self.assertEqual(detail["sourceSitesComplete"], not long)
+                self.assertLessEqual(detail["tracebackLinksSeen"], 32)
+                if long: self.assertEqual(detail["tracebackLinksSeen"], 32)
+                self.assertNotIn(b"PRIVATE_FOREIGN_TRACE_CANARY", stderr)
+
+    def test_footer_reduction_and_emission_faults_keep_nonzero_refusal_without_raw_text(self):
+        for program in (M.SHELL_RECOVERY_PRODUCER, M.IOS_ACCOUNT_CORE_PROGRAM):
+            self.assertEqual(self.invalid_entry(program, [], encode_fault=True), b"")
+            self.assertEqual(self.invalid_entry(program, [], emit_fault=True), b"")
+
+
 class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
     def test_scope_and_pair_parser_are_closed_without_enabling_ios_modes(self):
         case = M.RECOVERY_CASE
@@ -9858,6 +10006,7 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
 
     def test_actual_returned_producer_then_app_then_independent_readback(self):
         fixtures = InertRecoveryFixtures(); calls, emitted = [], []
+        fixtures.precursor_diagnostic = {"stale": "must-not-survive"}
         def run(argv, **options):
             calls.append((tuple(argv), options))
             if len(calls) == 1:
@@ -9870,6 +10019,7 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
             return CompletedProcess(argv, 0, captured(M.expected_result(BINDING, M.RECOVERY_CASE)), b"")
         self.assertEqual(M.run_cases(BINDING, fixtures, run, UID, "runner", emitted.append, M.RECOVERY_CASE), ())
         self.assertEqual(len(calls), 2); self.assertEqual(len(fixtures.accepted), 1)
+        self.assertIsNone(fixtures.precursor_diagnostic)
         self.assertEqual(fixtures.before, [M.RECOVERY_CASE]); self.assertEqual(fixtures.reads, [M.RECOVERY_CASE])
         self.assertEqual(len(emitted), 1); self.assertTrue(fixtures.last_returned); self.assertFalse(fixtures.inflight)
         output = io.StringIO(); M.emit_record(emitted[0], output)
@@ -9886,8 +10036,11 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
                 if kind == "foreign": return SimpleNamespace(args=argv, returncode=0, stdout=b"{}\n", stderr=b"")
                 return CompletedProcess(["foreign"] if kind == "wrong-argv" else argv, 0,
                                         "{}\n" if kind == "wrong-buffer" else b"x"*2049 if kind == "oversize" else b"{}\n", b"")
-            with self.subTest(kind=kind), self.assertRaises((M.Refused, RuntimeError)) as caught:
-                M.run_cases(BINDING, fixtures, run, UID, "runner", emitted.append, M.RECOVERY_CASE)
+            fixtures.precursor_diagnostic = {"stale": "must-not-survive"}
+            with patch.object(M, "_precursor_diagnostic", side_effect=AssertionError("unknown original is not readable")) as reduced:
+                with self.subTest(kind=kind), self.assertRaises((M.Refused, RuntimeError)) as caught:
+                    M.run_cases(BINDING, fixtures, run, UID, "runner", emitted.append, M.RECOVERY_CASE)
+            reduced.assert_not_called(); self.assertIsNone(fixtures.precursor_diagnostic)
             if kind == "exception": self.assertIs(caught.exception, error)
             self.assertEqual(len(calls), 1); self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
             self.assertEqual((fixtures.before, fixtures.reads, fixtures.accepted, emitted), ([], [], [], []))
@@ -9909,7 +10062,26 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
                 M.run_cases(BINDING, fixtures, run, UID, "runner", emitted.append, M.RECOVERY_CASE)
             self.assertEqual(len(calls), 1); self.assertFalse(fixtures.inflight); self.assertTrue(fixtures.last_returned)
             self.assertEqual((fixtures.before, fixtures.reads, fixtures.accepted, emitted), ([], [], [], []))
+            self.assertEqual(fixtures.precursor_diagnostic["kind"], "project-recovery-producer")
+            self.assertEqual(fixtures.precursor_diagnostic["returncode"], 1 if kind == "exit" else 0)
+            self.assertEqual(fixtures.precursor_diagnostic["envelope"]["emptyStderr"], kind != "stderr")
+            self.assertIsNone(fixtures.app_returncode); self.assertIsNone(fixtures.inner_failure_reason)
             M.Fixtures.close(fixtures)  # Empty inert original book, no OS close.
+
+    def test_precursor_reducer_fault_preserves_identical_semantic_error_and_no_next_call(self):
+        fixture = InertRecoveryFixtures(); calls, emitted = [], []
+        original = M.Refused("recovery-producer-failed")
+        def owner(argv, **options):
+            calls.append(argv)
+            return CompletedProcess(argv, 1, b"", b"private-buffer-canary")
+        with patch.object(M, "recovery_producer_result", side_effect=original), \
+                patch.object(M, "_precursor_diagnostic", side_effect=RuntimeError("private-reducer-canary")) as reduced:
+            with self.assertRaises(M.Refused) as raised:
+                M.run_cases(BINDING, fixture, owner, UID, "runner", emitted.append, M.RECOVERY_CASE)
+        self.assertIs(raised.exception, original); reduced.assert_called_once()
+        self.assertEqual(len(calls), 1); self.assertFalse(fixture.inflight); self.assertTrue(fixture.last_returned)
+        self.assertIsNone(fixture.precursor_diagnostic)
+        self.assertEqual((fixture.before, fixture.reads, fixture.accepted, emitted), ([], [], [], []))
 
     def test_four_inventory_stages_preserve_exact_full9_and_original_restoration(self):
         stages = inert_recovery_inventories()
@@ -9958,9 +10130,8 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    runs-on:", 1)[0]
         selected = [line.strip()[2:] for line in header.split("        scope:\n", 1)[1].splitlines() if line.strip().startswith("- ")]
-        # Select only combined shipping/inspection and both pending-recovery scopes.
-        self.assertEqual(selected, ["vault-helper-shipping-installation-inspection",
-                                    M.RECOVERY_CASE, M.IOS_ACCOUNT_CASE])
+        # Qualify project fields and retry both pending recoveries, not completed shipping/inspection.
+        self.assertEqual(selected, ["project-fields", M.RECOVERY_CASE, M.IOS_ACCOUNT_CASE])
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         step = blocks["One real pending iOS build-input recovery through ordinary Inspect and explicit Recover"]
         self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'", step)

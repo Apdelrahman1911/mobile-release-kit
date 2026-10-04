@@ -17,6 +17,14 @@ ROOT = Path(__file__).absolute().parents[2]
 WORKFLOW = ROOT / ".github/workflows/desktop-macos-installed.yml"
 SHA = "a" * 40
 HELPER = "b" * 64
+SELECTED = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticPersistentCredentials]"
+START = ("Test Case '" + SELECTED + "' started.").encode()
+PASS = ("Test Case '" + SELECTED + "' passed (1.000 seconds).").encode()
+LIFETIME = (b";outerRequest=1;completion=1;body=1;handoff=1;payloadIdentity=1;originalTerminated=1;"
+            b"gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
+FIRST = b"MRK_MACOS_PERSISTENCE_LIFETIME=phase=1" + LIFETIME
+SECOND = b"MRK_MACOS_PERSISTENCE_LIFETIME=phase=2" + LIFETIME
+FINAL = b"MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete-restart-unlock-reassess-rebind;appRestart=passed;ordinaryLifetimes=2;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement"
 
 
 def parser_body(marker):
@@ -61,6 +69,7 @@ def inputs():
         files["normal-ui/" + name + ".status"] = b"0\n"
     for name in ("xcode-version", "sdk-path", "sdk-version", "sdk-build"):
         files["normal-ui/" + name + ".txt"] = b"synthetic-tool-binding\n"
+    files["normal-ui/persistence-test.log"] = b"\n".join((START, FIRST, SECOND, FINAL, PASS)) + b"\n"
     return files
 
 
@@ -107,11 +116,54 @@ class MacPersistenceWorkflowTests(unittest.TestCase):
             self.assertEqual(result["applicationSourceCommit"], SHA)
             self.assertEqual(result["vaultHelperSha256"], HELPER)
             self.assertEqual(result["testCounts"], json.loads(inputs()["normal-ui/persistence-summary.raw.json"]))
-            self.assertEqual(result["applicationRestart"], "not-run")
+            self.assertEqual(result["applicationRestart"], "passed")
+            self.assertEqual(result["ordinaryApplicationLifetimes"], 2)
+            self.assertIs(result["originalReferenceAndGateTerminalObserved"], True)
             self.assertIsNone(result["cleanExitStatus"])
             self.assertEqual(result["allWorkerFinality"], "not-established-by-XCTest-UI-state")
             for field in ("signingOrStoreValidated", "fullUIQualified", "distributionQualified", "productReady"):
                 self.assertIs(result[field], False)
+
+    def test_both_lifetimes_and_final_marker_are_unique_ordered_and_inside_the_test(self):
+        original = inputs()["normal-ui/persistence-test.log"]
+        changes = [original.replace(marker + b"\n", b"") for marker in (FIRST, SECOND, FINAL)]
+        changes += [original.replace(marker + b"\n", marker + b"\n" + marker + b"\n") for marker in (FIRST, SECOND, FINAL)]
+        changes += [b"\n".join(events) + b"\n" for events in (
+            (START, SECOND, FIRST, FINAL, PASS), (START, FIRST, FINAL, SECOND, PASS),
+            (FIRST, START, SECOND, FINAL, PASS), (START, FIRST, SECOND, PASS, FINAL))]
+        changes += [original.replace(FINAL, FINAL.replace(b"ordinaryLifetimes=2", b"ordinaryLifetimes=1")),
+                    original.replace(FINAL, FINAL.replace(b"appRestart=passed", b"appRestart=not-run")),
+                    original + b"MRK_MACOS_UI_ORIGINAL=outerRequest=1\n"]
+        for index, changed in enumerate(changes):
+            with self.subTest(mutation=index):
+                files = inputs(); files["normal-ui/persistence-test.log"] = changed
+                self.rejected(files)
+
+    def test_each_original_terminal_fact_and_failure_cleanup_is_a_restart_gate(self):
+        original = inputs()["normal-ui/persistence-test.log"]
+        for marker in (FIRST, SECOND):
+            for field in (b"outerRequest", b"completion", b"body", b"handoff", b"payloadIdentity",
+                          b"originalTerminated", b"gateFree", b"gateClosed", b"caseDeadlineMet"):
+                with self.subTest(phase=marker[:40], field=field):
+                    files = inputs()
+                    files["normal-ui/persistence-test.log"] = original.replace(marker, marker.replace(field + b"=1", field + b"=0"))
+                    self.rejected(files)
+        for changed in (original.replace(b"failureCleanup=0", b"failureCleanup=1", 1),
+                        original + b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=true\n",
+                        original.replace(FINAL, b"MRK_MACOS_UI_FAILURE_CLEANUP=unknownStateRetained=true\n" + FINAL)):
+            files = inputs(); files["normal-ui/persistence-test.log"] = changed
+            self.rejected(files)
+
+    def test_wrong_selected_case_duplicate_attempt_or_late_failure_never_passes(self):
+        original = inputs()["normal-ui/persistence-test.log"]
+        for changed in (original.replace(START + b"\n", b""), original.replace(PASS + b"\n", b""),
+                        START + b"\n" + original, original + PASS + b"\n",
+                        original.replace(b"testSyntheticPersistentCredentials", b"testLaunchCancelAndQuit"),
+                        original.replace(START, START.replace(b"testSyntheticPersistentCredentials", b"testLaunchCancelAndQuit")),
+                        original.replace(PASS, PASS.replace(b"testSyntheticPersistentCredentials", b"testLaunchCancelAndQuit")),
+                        original + ("Test Case '" + SELECTED + "' failed (0.001 seconds).\n").encode()):
+            files = inputs(); files["normal-ui/persistence-test.log"] = changed
+            self.rejected(files)
 
     def test_original_source_attempt_package_and_helper_must_match(self):
         mutations = (

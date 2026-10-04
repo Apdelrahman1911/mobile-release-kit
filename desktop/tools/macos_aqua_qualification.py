@@ -21,8 +21,8 @@ import subprocess
 import sys
 from types import FunctionType, ModuleType
 
-# Fixed synthetic literals only. The producer below is byte-identical to the
-# reviewed core-failure fixture; the historical Linux runner is never imported.
+# Fixed synthetic literals only. The reviewed project producer body is kept
+# unchanged inside a module-level diagnostic try; no historical runner is imported.
 RECOVERY_CASE = "project-recovery-pending"
 IOS_ACCOUNT_CASE = "ios-recovery-pending"
 IOS_ACCOUNT_LOCK_NAME = ".fl" + hashlib.sha1(b"signing.keychain-db", usedforsecurity=False).hexdigest()[:8].upper()
@@ -99,6 +99,69 @@ def _recovery_report(value):
     return value
 
 
+# A failure record describes one returned precursor, never app success/finality.
+IOS_ACCOUNT_FAILURE_REASONS = ('duplicate-private-key', 'native-account-entry', 'entry-bounds', 'original-clock', 'state-route', 'private-comparison-binding', 'native-account-user', 'original-work-expired', 'original-finality-expired', 'descriptor-not-original', 'descriptor-limit', 'descriptor-inheritance', 'baseline-original-changed', 'directory-route', 'directory-original', 'baseline-not-eligible', 'baseline-path', 'baseline-member-original', 'baseline-member-substitution', 'command-owner', 'fixed-native-command', 'original-account-command-source', 'command-deadline', 'native-original-return', 'native-original-finality', 'private-comparison-file', 'private-comparison-original', 'private-account-binding', 'profile-destination-occupied', 'pending-boundary-unsettled', 'private-comparison-bound', 'persistent-lease-substitution', 'native-baseline-not-restored', 'pending-session-remains', 'account-original-close', 'account-close-state', 'producer-original-finality', 'pending-origin', 'readback-only', 'receipt-bound', 'original-operation-failed')
+PRECURSOR_FAILURE_CATEGORIES = ('none', 'refused', 'runtime', 'os', 'permission', 'missing', 'timeout', 'value', 'type', 'key', 'attribute', 'import', 'assertion', 'interrupted', 'exit', 'process-cleanup', 'other')
+
+
+def _precursor_spec(kind):
+    need(type(kind) is str and kind in ("project-recovery-producer", "ios-account-produce", "ios-account-observe"),
+         "precursor-diagnostic-kind")
+    project = kind == "project-recovery-producer"
+    return (SHELL_RECOVERY_PRODUCER if project else IOS_ACCOUNT_CORE_PROGRAM,
+            b"MRK_PROJECT_RECOVERY_FIXTURE_FAILURE=" if project else b"MRK_IOS_ACCOUNT_FIXTURE_FAILURE=",
+            ("fixture-check-failed", "original-operation-failed") if project else IOS_ACCOUNT_FAILURE_REASONS,
+            16*1024 if kind == "ios-account-produce" else 2048)
+
+
+def _precursor_child_failure(stderr, kind):
+    program, marker, reasons, _ = _precursor_spec(kind)
+    if (type(stderr) is not bytes or not 0 < len(stderr) <= 768 or not stderr.startswith(marker)
+            or not stderr.endswith(b"\n") or b"\n" in stderr[:-1]):
+        return None
+    try:
+        value = json.loads(stderr[len(marker):-1], object_pairs_hook=_pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(Refused("precursor-diagnostic-json")))
+        expected = {"schemaVersion", "reason", "exceptionCategory", "sourceSites", "tracebackLinksSeen", "sourceSitesComplete"}
+        if kind == "project-recovery-producer":
+            expected.add("caughtExceptionCategory")
+        need(type(value) is dict and set(value) == expected and type(value["schemaVersion"]) is int
+             and value["schemaVersion"] == 1, "precursor-diagnostic-schema")
+        need(type(value["reason"]) is str and value["reason"] in reasons
+             and type(value["exceptionCategory"]) is str and value["exceptionCategory"] in PRECURSOR_FAILURE_CATEGORIES
+             and value["exceptionCategory"] != "none", "precursor-diagnostic-enum")
+        need(type(value["sourceSites"]) is list and len(value["sourceSites"]) <= 4
+             and all(type(site) is int and 1 <= site <= len(program.splitlines()) for site in value["sourceSites"])
+             and type(value["tracebackLinksSeen"]) is int and len(value["sourceSites"]) <= value["tracebackLinksSeen"] <= 32
+             and type(value["sourceSitesComplete"]) is bool, "precursor-diagnostic-sites")
+        if kind == "project-recovery-producer":
+            need(type(value["caughtExceptionCategory"]) is str and value["caughtExceptionCategory"] in PRECURSOR_FAILURE_CATEGORIES,
+                 "precursor-diagnostic-caught")
+        canonical = json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
+        need(stderr == marker + canonical + b"\n", "precursor-diagnostic-record")
+        return value
+    except (Refused, ValueError, TypeError, UnicodeError, RecursionError):
+        return None  # Malformed detail cannot authorize anything or export private bytes.
+
+
+def _precursor_diagnostic(result, kind):
+    """Only called after the original CompletedProcess admission and time gate."""
+    _, _, _, limit = _precursor_spec(kind)
+    need(type(result) is subprocess.CompletedProcess and type(result.returncode) is int
+         and -(2**31) <= result.returncode < 2**31 and type(result.stdout) is bytes and type(result.stderr) is bytes
+         and len(result.stdout) + len(result.stderr) <= limit, "precursor-diagnostic-contract")
+    value = {"kind": kind, "returncode": result.returncode, "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
+             "envelope": {"zeroReturncode": result.returncode == 0, "emptyStderr": result.stderr == b"",
+                          "stdoutNonemptyWithinLimit": 0 < len(result.stdout) <= limit,
+                          "stdoutFinalNewline": result.stdout.endswith(b"\n"), "stdoutSingleLine": b"\n" not in result.stdout[:-1]}}
+    # A normal success receipt (especially private account JSON) is never decoded
+    # as failure detail. Only the fixed nonzero footer can supply a closed record.
+    detail = _precursor_child_failure(result.stderr, kind) if result.returncode == 1 else None
+    if detail is not None:
+        value["childFailure"] = detail
+    return value
+
+
 def recovery_producer_result(result):
     need(result.returncode == 0 and result.stderr == b"" and result.stdout.endswith(b"\n")
          and b"\n" not in result.stdout[:-1] and 0 < len(result.stdout) <= 2048, "recovery-producer-failed")
@@ -128,6 +191,7 @@ def produce_pending_recovery(fixtures, run_owned, uid, username):
     executable, core = fixtures.recovery_runtime_paths()
     state = fixtures.path / "state" / RECOVERY_CASE
     argv = [executable, "-I", "-S", "-B", "-c", SHELL_RECOVERY_PRODUCER, core, str(fixtures.path / RECOVERY_CASE / "project"), RECOVERY_CASE]
+    fixtures.precursor_diagnostic = None
     fixtures.case, fixtures.stage, fixtures.inflight, fixtures.last_returned = RECOVERY_CASE, "recovery-producer", True, False
     # The original callable's actual CompletedProcess is the only return edge.
     result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
@@ -137,7 +201,14 @@ def produce_pending_recovery(fixtures, run_owned, uid, username):
          and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= 2048,
          "recovery-producer-return-contract")
     fixtures.inflight, fixtures.last_returned, fixtures.stage = False, True, "recovery-generated"
-    attestation = recovery_producer_result(result)
+    try:
+        attestation = recovery_producer_result(result)
+    except BaseException:
+        try:
+            fixtures.precursor_diagnostic = _precursor_diagnostic(result, "project-recovery-producer")
+        except BaseException:
+            pass  # Diagnostics cannot replace the identical original semantic refusal.
+        raise
     fixtures.accept_recovery_producer(attestation)
 
 
@@ -253,98 +324,141 @@ def _recovery_inventory_bytes(rows):
     need(len(raw) <= 128*1024, "recovery-inventory-data-limit")
     return raw
 
-SHELL_RECOVERY_PRODUCER = r'''import errno, json, os, sys, threading
-from pathlib import Path, PurePosixPath
-def need(ok):
-    if not ok: raise RuntimeError("fixed recovery fixture refused")
-need(len(sys.argv)==4 and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode)
-core, raw_root, case=sys.argv[1:]
-need(case in ("project-recovery-pending","project-recovery-cancel","project-recovery-cleanup-only","project-recovery-partial"))
-root=Path(raw_root)
-need(root.is_absolute() and root.name=="project" and root.parent.name==case and Path(core).is_absolute())
-need(threading.current_thread() is threading.main_thread() and threading.active_count()==1)
-sys.path.insert(0, core)
-from mobile_release import build_inputs as inputs
-from mobile_release.owned_process import ProcessCleanupError
-need(inputs.__file__.startswith(core+"/") and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
-original_init=inputs._FD.__init__
-original_retire=inputs._retire_terminal
-slots=[]
-retirement_calls=[]
-def observed_init(self, guard):
-    original_init(self, guard)
-    need(len(slots)<2048)
-    slots.append(self)
-def retirement_stop(project, terminal, binding):
-    need(case=="project-recovery-cleanup-only" and not retirement_calls)
-    need(project is invocation._original_project and terminal["quiescence"]=="original")
-    retirement_calls.append(True)
-    raise OSError(errno.EIO,"fixed synthetic metadata retirement interruption")
-def foreign(original, name, content):
-    slot=inputs._FD(original.cancellation)
-    with inputs._fd_cleanup(slot):
-        fd=slot.open(root/name, os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
-        need(os.write(fd,content)==len(content))
-        os.fsync(fd)
-invocation=original=None
-caught=None
-inputs._FD.__init__=observed_init
-if case=="project-recovery-cleanup-only": inputs._retire_terminal=retirement_stop
-try:
+SHELL_RECOVERY_PRODUCER = r'''try:
+    import errno, json, os, sys, threading
+    from pathlib import Path, PurePosixPath
+    def need(ok):
+        if not ok: raise RuntimeError("fixed recovery fixture refused")
+    need(len(sys.argv)==4 and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode)
+    core, raw_root, case=sys.argv[1:]
+    need(case in ("project-recovery-pending","project-recovery-cancel","project-recovery-cleanup-only","project-recovery-partial"))
+    root=Path(raw_root)
+    need(root.is_absolute() and root.name=="project" and root.parent.name==case and Path(core).is_absolute())
+    need(threading.current_thread() is threading.main_thread() and threading.active_count()==1)
+    sys.path.insert(0, core)
+    from mobile_release import build_inputs as inputs
+    from mobile_release.owned_process import ProcessCleanupError
+    need(inputs.__file__.startswith(core+"/") and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+    original_init=inputs._FD.__init__
+    original_retire=inputs._retire_terminal
+    slots=[]
+    retirement_calls=[]
+    def observed_init(self, guard):
+        original_init(self, guard)
+        need(len(slots)<2048)
+        slots.append(self)
+    def retirement_stop(project, terminal, binding):
+        need(case=="project-recovery-cleanup-only" and not retirement_calls)
+        need(project is invocation._original_project and terminal["quiescence"]=="original")
+        retirement_calls.append(True)
+        raise OSError(errno.EIO,"fixed synthetic metadata retirement interruption")
+    def foreign(original, name, content):
+        slot=inputs._FD(original.cancellation)
+        with inputs._fd_cleanup(slot):
+            fd=slot.open(root/name, os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+            need(os.write(fd,content)==len(content))
+            os.fsync(fd)
+    invocation=original=None
+    caught=None
+    inputs._FD.__init__=observed_init
+    if case=="project-recovery-cleanup-only": inputs._retire_terminal=retirement_stop
     try:
-        with inputs.invocation_custody(root,mode="build") as invocation:
-            with invocation.project(signing_lease=None):
-                with invocation.materialization(signing_lease=None) as original:
-                    original.replace_all((
-                        inputs.TargetReplacement("android-services",PurePosixPath("google-services.json"),b"synthetic temporary Android input\n"),
-                        inputs.TargetReplacement("ios-services",PurePosixPath("GoogleService-Info.plist"),b"synthetic temporary iOS input\n"),
-                    ))
-                    if case=="project-recovery-partial":
-                        foreign(original,"google-services.json",b"synthetic foreign Android input; preserve\n")
-                    if case!="project-recovery-cleanup-only":
-                        foreign(original,"GoogleService-Info.plist",b"synthetic foreign iOS input; preserve\n")
-    except BaseException as error:
-        caught=error
-finally:
-    inputs._FD.__init__=original_init
-    inputs._retire_terminal=original_retire
-# NO core operation or filesystem access below: inspect the original retained
-# objects and emit bounded closed DATA to the original stdout only.
-need(type(caught) is ProcessCleanupError and invocation is not None and original is not None)
-guard=invocation.cancellation
-ledger=guard._ledger
-project=invocation._original_project
-attempted=[slot for slot in slots if slot.open_state!="NEW"]
-never_opened=[slot for slot in slots if slot.open_state=="NEW"]
-need(0<len(attempted)<=2048 and len(attempted)+len(never_opened)==len(slots))
-need(all(slot.guard is guard and slot.open_state in ("OPEN","NO_EFFECT") and slot.close_state=="CLOSED" and slot.number is None for slot in attempted))
-need(all(slot.guard is guard and slot.number is None and slot.close_state in ("NOT_ATTEMPTED","CLOSED") for slot in never_opened))
-need(guard._restoration=="RESTORED" and ledger._fatal and ledger._command is None and ledger._profile is None
-     and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False)
-need(invocation.claimed and not invocation.active and not invocation.reserved and not invocation.frames
-     and invocation.child is None and invocation.project_owner is None and invocation.store_namespace is None
-     and invocation.reservation_state=="RELEASED" and invocation.lock_result is None and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
-need(project is not None and project.claimed and original.claimed and original.quiescence=="original" and not original.failed)
-need(inputs._FD.__init__ is original_init and inputs._retire_terminal is original_retire)
-need(len(retirement_calls)==int(case=="project-recovery-cleanup-only"))
-primary=ledger._primary
-if case=="project-recovery-cleanup-only":
-    need(type(primary) is OSError and primary.errno==errno.EIO and primary.args==(errno.EIO,"fixed synthetic metadata retirement interruption"))
-else:
-    need(type(primary) is inputs.BuildInputError and primary.args==("build inputs: intervening target must be preserved",))
-restored={row["role"]:row["restored"] for row in original.records}
-expected={"android-services":case!="project-recovery-partial","ios-services":case=="project-recovery-cleanup-only"}
-need(restored==expected and all(type(x) is bool for x in restored.values()))
-report={"schemaVersion":1,"scope":"real-core-project-recovery-fixture-v1","case":case,
-    "materializationOutcome":"expected-cleanup-failure","coreFatal":True,"commands":0,"profileCalls":0,
-    "attemptedDescriptors":len(attempted),"neverOpenedDescriptors":len(never_opened),
-    "attemptedDescriptorsClosed":True,"handlersRestored":True,"invocationReleased":True,
-    "originalQuiescenceRecorded":True,"retirementInterceptions":len(retirement_calls),"observersRestored":True,
-    "restored":restored,"followupCoreOrFilesystemOperation":False}
-raw=json.dumps(report,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")+b"\n"
-need(len(raw)<=2048)
-sys.stdout.buffer.write(raw)
-sys.stdout.buffer.flush()
+        try:
+            with inputs.invocation_custody(root,mode="build") as invocation:
+                with invocation.project(signing_lease=None):
+                    with invocation.materialization(signing_lease=None) as original:
+                        original.replace_all((
+                            inputs.TargetReplacement("android-services",PurePosixPath("google-services.json"),b"synthetic temporary Android input\n"),
+                            inputs.TargetReplacement("ios-services",PurePosixPath("GoogleService-Info.plist"),b"synthetic temporary iOS input\n"),
+                        ))
+                        if case=="project-recovery-partial":
+                            foreign(original,"google-services.json",b"synthetic foreign Android input; preserve\n")
+                        if case!="project-recovery-cleanup-only":
+                            foreign(original,"GoogleService-Info.plist",b"synthetic foreign iOS input; preserve\n")
+        except BaseException as error:
+            caught=error
+    finally:
+        inputs._FD.__init__=original_init
+        inputs._retire_terminal=original_retire
+    # NO core operation or filesystem access below: inspect the original retained
+    # objects and emit bounded closed DATA to the original stdout only.
+    need(type(caught) is ProcessCleanupError and invocation is not None and original is not None)
+    guard=invocation.cancellation
+    ledger=guard._ledger
+    project=invocation._original_project
+    attempted=[slot for slot in slots if slot.open_state!="NEW"]
+    never_opened=[slot for slot in slots if slot.open_state=="NEW"]
+    need(0<len(attempted)<=2048 and len(attempted)+len(never_opened)==len(slots))
+    need(all(slot.guard is guard and slot.open_state in ("OPEN","NO_EFFECT") and slot.close_state=="CLOSED" and slot.number is None for slot in attempted))
+    need(all(slot.guard is guard and slot.number is None and slot.close_state in ("NOT_ATTEMPTED","CLOSED") for slot in never_opened))
+    need(guard._restoration=="RESTORED" and ledger._fatal and ledger._command is None and ledger._profile is None
+         and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False)
+    need(invocation.claimed and not invocation.active and not invocation.reserved and not invocation.frames
+         and invocation.child is None and invocation.project_owner is None and invocation.store_namespace is None
+         and invocation.reservation_state=="RELEASED" and invocation.lock_result is None and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+    need(project is not None and project.claimed and original.claimed and original.quiescence=="original" and not original.failed)
+    need(inputs._FD.__init__ is original_init and inputs._retire_terminal is original_retire)
+    need(len(retirement_calls)==int(case=="project-recovery-cleanup-only"))
+    primary=ledger._primary
+    if case=="project-recovery-cleanup-only":
+        need(type(primary) is OSError and primary.errno==errno.EIO and primary.args==(errno.EIO,"fixed synthetic metadata retirement interruption"))
+    else:
+        need(type(primary) is inputs.BuildInputError and primary.args==("build inputs: intervening target must be preserved",))
+    restored={row["role"]:row["restored"] for row in original.records}
+    expected={"android-services":case!="project-recovery-partial","ios-services":case=="project-recovery-cleanup-only"}
+    need(restored==expected and all(type(x) is bool for x in restored.values()))
+    report={"schemaVersion":1,"scope":"real-core-project-recovery-fixture-v1","case":case,
+        "materializationOutcome":"expected-cleanup-failure","coreFatal":True,"commands":0,"profileCalls":0,
+        "attemptedDescriptors":len(attempted),"neverOpenedDescriptors":len(never_opened),
+        "attemptedDescriptorsClosed":True,"handlersRestored":True,"invocationReleased":True,
+        "originalQuiescenceRecorded":True,"retirementInterceptions":len(retirement_calls),"observersRestored":True,
+        "restored":restored,"followupCoreOrFilesystemOperation":False}
+    raw=json.dumps(report,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")+b"\n"
+    need(len(raw)<=2048)
+    sys.stdout.buffer.write(raw)
+    sys.stdout.buffer.flush()
+except BaseException as _failure_error:
+    try:
+        import json, sys
+        _failure_globals = globals()
+        def _failure_category(error):
+            if error is None: return "none"
+            if type(error) is _failure_globals.get("Refused"): return "refused"
+            if type(error) is _failure_globals.get("ProcessCleanupError"): return "process-cleanup"
+            return {RuntimeError:"runtime", OSError:"os", PermissionError:"permission", FileNotFoundError:"missing",
+                TimeoutError:"timeout", BlockingIOError:"os", BrokenPipeError:"os", ChildProcessError:"os",
+                ValueError:"value", TypeError:"type", KeyError:"key", AttributeError:"attribute",
+                ImportError:"import", ModuleNotFoundError:"import", AssertionError:"assertion",
+                KeyboardInterrupt:"interrupted", SystemExit:"exit"}.get(type(error), "other")
+        _failure_args = BaseException.args.__get__(_failure_error)
+        _failure_reason = "original-operation-failed"
+        if (type(_failure_error) is RuntimeError and type(_failure_args) is tuple and len(_failure_args) == 1
+                and type(_failure_args[0]) is str and _failure_args[0] == "fixed recovery fixture refused"):
+            _failure_reason = "fixture-check-failed"
+        _failure_tb = BaseException.__traceback__.__get__(_failure_error)
+        _failure_sites, _failure_links, _failure_omitted = [], 0, False
+        # Bound all links, not merely exported own sites. A foreign <string>
+        # frame is not this program; no names, paths, locals or messages escape.
+        while _failure_tb is not None and _failure_links < 32:
+            _failure_links += 1
+            _failure_frame = _failure_tb.tb_frame
+            if _failure_frame.f_globals is _failure_globals and _failure_frame.f_code.co_filename == "<string>":
+                _failure_line = _failure_tb.tb_lineno
+                if type(_failure_line) is int and 1 <= _failure_line <= 135 and len(_failure_sites) < 4:
+                    _failure_sites.append(_failure_line)
+                else: _failure_omitted = True
+            _failure_tb = _failure_tb.tb_next
+        _failure_detail = {"schemaVersion":1, "reason":_failure_reason, "exceptionCategory":_failure_category(_failure_error),
+            "sourceSites":_failure_sites, "tracebackLinksSeen":_failure_links,
+            "sourceSitesComplete":_failure_tb is None and not _failure_omitted}
+        _failure_detail["caughtExceptionCategory"] = _failure_category(_failure_globals.get("caught"))
+        _failure_raw = "MRK_PROJECT_RECOVERY_FIXTURE_FAILURE=" + json.dumps(_failure_detail,sort_keys=True,separators=(",",":"),ensure_ascii=True,allow_nan=False) + "\n"
+        if len(_failure_raw.encode("ascii")) <= 768:
+            sys.stderr.write(_failure_raw)
+            sys.stderr.flush()
+    except BaseException:
+        pass  # Even diagnostic reduction/emission failure must not expose a raw traceback.
+    raise SystemExit(1) from None
 '''
 
 IOS_ACCOUNT_CORE_PROGRAM = r'''
@@ -532,11 +646,47 @@ def main():
     raw=encoded(report)+b"\n";need(len(raw)<=16*1024 if mode=="produce" else len(raw)<=2048,"receipt-bound")
     final_time();sys.stdout.buffer.write(raw);sys.stdout.buffer.flush()
 try:main()
-except BaseException as error:
-    label=str(error) if type(error) is Refused else "original-operation-failed"
-    if re.fullmatch(r"[a-z][a-z0-9-]{0,63}",label) is None:label="original-operation-failed"
-    sys.stderr.write("MRK_IOS_ACCOUNT_FIXTURE_FAILURE="+label+"\n")
-    raise SystemExit(1)
+except BaseException as _failure_error:
+    try:
+        import json, sys
+        _failure_globals = globals()
+        def _failure_category(error):
+            if error is None: return "none"
+            if type(error) is _failure_globals.get("Refused"): return "refused"
+            if type(error) is _failure_globals.get("ProcessCleanupError"): return "process-cleanup"
+            return {RuntimeError:"runtime", OSError:"os", PermissionError:"permission", FileNotFoundError:"missing",
+                TimeoutError:"timeout", BlockingIOError:"os", BrokenPipeError:"os", ChildProcessError:"os",
+                ValueError:"value", TypeError:"type", KeyError:"key", AttributeError:"attribute",
+                ImportError:"import", ModuleNotFoundError:"import", AssertionError:"assertion",
+                KeyboardInterrupt:"interrupted", SystemExit:"exit"}.get(type(error), "other")
+        _failure_args = BaseException.args.__get__(_failure_error)
+        _failure_reason = "original-operation-failed"
+        if (type(_failure_error) is Refused and type(_failure_args) is tuple and len(_failure_args) == 1
+                and type(_failure_args[0]) is str and _failure_args[0] in ('duplicate-private-key', 'native-account-entry', 'entry-bounds', 'original-clock', 'state-route', 'private-comparison-binding', 'native-account-user', 'original-work-expired', 'original-finality-expired', 'descriptor-not-original', 'descriptor-limit', 'descriptor-inheritance', 'baseline-original-changed', 'directory-route', 'directory-original', 'baseline-not-eligible', 'baseline-path', 'baseline-member-original', 'baseline-member-substitution', 'command-owner', 'fixed-native-command', 'original-account-command-source', 'command-deadline', 'native-original-return', 'native-original-finality', 'private-comparison-file', 'private-comparison-original', 'private-account-binding', 'profile-destination-occupied', 'pending-boundary-unsettled', 'private-comparison-bound', 'persistent-lease-substitution', 'native-baseline-not-restored', 'pending-session-remains', 'account-original-close', 'account-close-state', 'producer-original-finality', 'pending-origin', 'readback-only', 'receipt-bound', 'original-operation-failed')):
+            _failure_reason = _failure_args[0]
+        _failure_tb = BaseException.__traceback__.__get__(_failure_error)
+        _failure_sites, _failure_links, _failure_omitted = [], 0, False
+        # Bound all links, not merely exported own sites. A foreign <string>
+        # frame is not this program; no names, paths, locals or messages escape.
+        while _failure_tb is not None and _failure_links < 32:
+            _failure_links += 1
+            _failure_frame = _failure_tb.tb_frame
+            if _failure_frame.f_globals is _failure_globals and _failure_frame.f_code.co_filename == "<string>":
+                _failure_line = _failure_tb.tb_lineno
+                if type(_failure_line) is int and 1 <= _failure_line <= 226 and len(_failure_sites) < 4:
+                    _failure_sites.append(_failure_line)
+                else: _failure_omitted = True
+            _failure_tb = _failure_tb.tb_next
+        _failure_detail = {"schemaVersion":1, "reason":_failure_reason, "exceptionCategory":_failure_category(_failure_error),
+            "sourceSites":_failure_sites, "tracebackLinksSeen":_failure_links,
+            "sourceSitesComplete":_failure_tb is None and not _failure_omitted}
+        _failure_raw = "MRK_IOS_ACCOUNT_FIXTURE_FAILURE=" + json.dumps(_failure_detail,sort_keys=True,separators=(",",":"),ensure_ascii=True,allow_nan=False) + "\n"
+        if len(_failure_raw.encode("ascii")) <= 768:
+            sys.stderr.write(_failure_raw)
+            sys.stderr.flush()
+    except BaseException:
+        pass  # Even diagnostic reduction/emission failure must not expose a raw traceback.
+    raise SystemExit(1) from None
 '''
 
 
@@ -1571,6 +1721,7 @@ def _run_ios_account_child(fixtures, run_owned, uid, username, mode):
     final = work + 25*1_000_000_000
     argv = [executable, "-I", "-S", "-B", "-c", IOS_ACCOUNT_CORE_PROGRAM, core, mode, str(state), str(work), str(final),
             "-" if mode == "produce" else fixtures.account_private_sha]
+    fixtures.precursor_diagnostic = None
     fixtures.case, fixtures.stage, fixtures.inflight, fixtures.last_returned = IOS_ACCOUNT_CASE, "account-" + mode, True, False
     limit = 16*1024 if mode == "produce" else 2048
     result = run_owned(argv, environ=_account_environment(state, uid, username), cwd=state,
@@ -1581,7 +1732,14 @@ def _run_ios_account_child(fixtures, run_owned, uid, username, mode):
          "ios-account-child-return-contract")
     fixtures.inflight, fixtures.last_returned = False, True
     need(time.monotonic_ns() < final, "ios-account-child-finality-late")
-    value = _ios_account_child_result(result, mode, uid, fixtures.account_home)
+    try:
+        value = _ios_account_child_result(result, mode, uid, fixtures.account_home)
+    except BaseException:
+        try:
+            fixtures.precursor_diagnostic = _precursor_diagnostic(result, "ios-account-" + mode)
+        except BaseException:
+            pass  # Retain the original refusal and all unchanged time/adoption gates.
+        raise
     if mode == "produce":
         fixtures.accept_account_producer(value)
     else:
@@ -3646,6 +3804,7 @@ class Fixtures:
         self.last_returned = False
         self.app_returncode = self.inner_failure_step = self.inner_failure_reason = None
         self.inner_failure_context = self.inner_diagnostic_source = None
+        self.precursor_diagnostic = None
         self.case = None
         self.stage = "prepare"
         self.projects, self.states, self.originals, self.input_originals, self.field_outside_originals = {}, {}, {}, {}, {}
@@ -4613,6 +4772,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
         fixtures.inner_failure_context = fixtures.inner_diagnostic_source = None
+        fixtures.precursor_diagnostic = None
         # Only the original public return contract clears this flag. An
         # exception/interruption or foreign/malformed result leaves finality
         # unknown, with no readback, close or later invocation.
@@ -5419,6 +5579,9 @@ def diagnostic(error, owner, fixtures):
             "fixtureCloseErrors": fixtures.close_errors if fixtures else 0,
             "fixturesPreserved": True, "laterCasesStopped": True}
     try:
+        precursor = getattr(fixtures, "precursor_diagnostic", None)
+        if precursor is not None:
+            result["precursorDiagnostic"] = precursor
         location = _result_location(getattr(error, "result_location", None)) if type(error) is Refused else None
         if location is not None:
             result["resultLocation"] = location

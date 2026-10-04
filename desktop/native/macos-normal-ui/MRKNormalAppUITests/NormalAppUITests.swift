@@ -16,6 +16,14 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private var caseClock: CaseClock?
     @MainActor private var normalQuitObserved = false
     @MainActor private var entryGateObservation: GateObservation?
+    // Only the persistence case may retain a completed first lifetime and open
+    // a second. Active custody is never cleared without retaining its originals.
+    @MainActor private var completedPersistenceLifetime: CompletedPersistenceLifetime?
+    @MainActor private struct CompletedPersistenceLifetime {
+        let owner: OrdinaryLaunch
+        let gate: GateObservation
+        let normalQuit: Bool // Includes the first successful consuming gate close.
+    }
 
     // One immutable monotonic case end, started before admission. Stage limits
     // may narrow it; a failure or restored stage limit never renews work.
@@ -229,9 +237,15 @@ final class NormalAppUITests: XCTestCase {
         }
         func acceptTerminal() throws {
             try healthy()
+            try recheckCompletedTerminal()
+        }
+        // An already accepted first lifetime gets no second cleanup window or
+        // stop request. Its retained callback/terminal facts can still fail,
+        // even when another lifetime has already latched a case failure.
+        func recheckCompletedTerminal() throws {
             try callbackHealthy(complete: true)
             let app = try payloadIdentity()
-            guard app.isTerminated, !normalRequested, !forceRequested else {
+            guard !workClosed, app.isTerminated, !normalRequested, !forceRequested else {
                 throw clock.fail("same original termination without failure cleanup is required")
             }
         }
@@ -295,7 +309,8 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func launchOrdinaryApplication() throws -> XCUIApplication {
         _ = try remaining(15)
         guard let clock = caseClock else { throw Refusal.condition("original case clock missing") }
-        try require(originalLaunch == nil && entryGateObservation == nil, "only one ordinary launch is admitted")
+        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved,
+                    "a new ordinary launch requires empty active custody")
         let outer = XCUIApplication(url: OrdinaryLaunch.outerURL)
         let monitor = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         try require(outer.state == .notRunning && monitor.state == .notRunning,
@@ -330,6 +345,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func acceptFinalScenario() throws {
+        try require(completedPersistenceLifetime == nil, "two-lifetime persistence requires its own final acceptance")
         try require(normalQuitObserved, "normal Quit and consuming gate close are required before publication")
         guard let owner = originalLaunch else { throw Refusal.condition("original launch missing at publication") }
         try owner.acceptTerminal()
@@ -337,9 +353,47 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_UI_ORIGINAL=outerRequest=1;completion=1;body=1;handoff=1;payloadIdentity=1;originalTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
     }
 
-    // One read-only original of the already admitted permanent gate. An EX
-    // observation is not proof of SH acquisition, process exit status, or all
-    // worker finality. No gate creation, mutation, replacement or relaunch.
+    @MainActor private func retainPersistenceLifetimeForRestart(_ app: XCUIApplication,
+                                                               fixture: LocalFixture) throws {
+        try require(completedPersistenceLifetime == nil && normalQuitObserved && app.state == .notRunning,
+                    "restart requires the first normal Quit and consuming gate close exactly once")
+        guard let owner = originalLaunch, let gate = entryGateObservation else {
+            throw Refusal.condition("first persistence lifetime custody missing")
+        }
+        try owner.acceptTerminal()
+        try fixture.assertStoreUnchanged()
+        completedPersistenceLifetime = CompletedPersistenceLifetime(owner: owner, gate: gate, normalQuit: normalQuitObserved)
+        // Keep the first owner/gate/positive Quit facts above, using the original
+        // case clock. This single transition cannot authorize a third launch.
+        originalLaunch = nil
+        entryGateObservation = nil
+        normalQuitObserved = false
+        _ = try remaining(1)
+        print("MRK_MACOS_PERSISTENCE_LIFETIME=phase=1;outerRequest=1;completion=1;body=1;handoff=1;payloadIdentity=1;originalTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
+    }
+
+    @MainActor private func checkOriginalOwners() throws {
+        if let first = completedPersistenceLifetime {
+            guard first.normalQuit else { throw caseClock?.fail("first normal Quit proof missing") ?? Refusal.condition("first normal Quit proof missing") }
+            try first.owner.acceptTerminal()
+        }
+        if let owner = originalLaunch { try owner.healthy() }
+    }
+
+    @MainActor private func acceptPersistenceRestart() throws {
+        try require(normalQuitObserved, "second normal Quit and consuming gate close are required before publication")
+        guard let first = completedPersistenceLifetime, first.normalQuit, let owner = originalLaunch else {
+            throw Refusal.condition("both persistence lifetime originals are required at publication")
+        }
+        try first.owner.acceptTerminal()
+        try owner.acceptTerminal()
+        _ = try remaining(1)
+        print("MRK_MACOS_PERSISTENCE_LIFETIME=phase=2;outerRequest=1;completion=1;body=1;handoff=1;payloadIdentity=1;originalTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
+    }
+
+    // Each lifetime retains one read-only original of the admitted permanent
+    // gate. An EX observation is not proof of SH acquisition, process exit
+    // status or all-worker finality. No gate creation, mutation or replacement.
     private final class GateObservation {
         static let path = "/Library/Application Support/MobileReleaseKit/maintenance-gate-v1"
         private var fd: Int32?
@@ -398,7 +452,7 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor private func require(_ value: Bool, _ reason: String) throws {
         guard value else { throw caseClock?.fail(reason) ?? Refusal.condition(reason) }
-        if let owner = originalLaunch { try owner.healthy() }
+        try checkOriginalOwners()
         if let clock = caseClock { _ = try clock.remaining(1, before: journeyDeadline) }
     }
 
@@ -1197,7 +1251,7 @@ final class NormalAppUITests: XCTestCase {
         guard let clock = caseClock, let deadline = journeyDeadline else {
             throw Refusal.condition("original case deadline missing in " + journeyStage)
         }
-        if let owner = originalLaunch { try owner.healthy() }
+        try checkOriginalOwners()
         return try clock.remaining(requested, before: deadline)
     }
     @MainActor private func stage(_ name: String, _ body: () throws -> Void) throws {
@@ -1554,8 +1608,7 @@ final class NormalAppUITests: XCTestCase {
         try privateRecordCount(storage, count: 0, assigned: 0)
         try fixture.assertStoreUnchanged()
     }
-    @MainActor private func reopenPrivateVault(_ storage: XCUIElement, renderer: XCUIElement,
-                                              fixture: LocalFixture) throws {
+    @MainActor private func openAndUnlockPrivateVault(_ storage: XCUIElement, renderer: XCUIElement) throws {
         try press(storage, "Open encrypted vault", renderer: renderer, failures: Self.privateInputFailures)
         try privateStatus(storage, action: "open-vault")
         _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · locked"), in: storage,
@@ -1565,6 +1618,10 @@ final class NormalAppUITests: XCTestCase {
         try privateStatus(storage, action: "unlock")
         _ = try waitElement(storage.staticTexts.matching(identifier: "Encrypted vault · unlocked"), in: storage,
                             failures: Self.privateInputFailures)
+    }
+    @MainActor private func reopenPrivateVault(_ storage: XCUIElement, renderer: XCUIElement,
+                                              fixture: LocalFixture) throws {
+        try openAndUnlockPrivateVault(storage, renderer: renderer)
         try privateContext(storage, renderer: renderer, explicitlySubmit: true)
         try privateRecordCount(storage, count: 2, assigned: 0)
         for input in [PrivateInput.p12, .profile] {
@@ -1704,12 +1761,61 @@ final class NormalAppUITests: XCTestCase {
             try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
             try completeNormalQuit(app)
             try fixture.assertStoreUnchanged()
+        }
+        var restarted: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("persistence-restart-launch") {
+            try retainPersistenceLifetimeForRestart(app, fixture: fixture)
+            restarted = try launchForJourney()
+        }
+        guard let (restartedApp, restartedWindow, restartedRenderer) = restarted else {
+            throw Refusal.condition("second ordinary launch returned no original")
+        }
+        var restartedStorage: XCUIElement?
+        try stage("persistence-restart-unlock") {
+            try fixture.assertStoreUnchanged()
+            try press(restartedRenderer, "Open project folder", renderer: restartedRenderer)
+            let project = try nativeSheet(restartedWindow, title: "Choose a mobile project folder")
+            try goToFolder(project, path: fixture.projectPath); try nativeOpen(project)
+            _ = try waitElement(restartedRenderer.staticTexts.matching(identifier: "Let’s get project ready."), in: restartedRenderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(restartedRenderer.staticTexts.matching(identifier: fixture.projectPath), "restarted persistence project differs")
+            try press(restartedRenderer, "Credentials", renderer: restartedRenderer)
+            let storage = try waitElement(named(restartedRenderer, "Private-input storage controls"), in: restartedRenderer)
+            restartedStorage = storage
+            _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage,
+                                failures: Self.privateInputFailures)
+            try privateRecordCount(storage, count: 0, assigned: 0)
+            try select(storage, label: "Platform", value: "iOS", renderer: restartedRenderer)
+            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: restartedRenderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: restartedRenderer)
+            // Same default vault/provider/helper, never a second Initialize or
+            // fixture admission. Opening must be locked with no exposed rows.
+            try openAndUnlockPrivateVault(storage, renderer: restartedRenderer)
+            // Unlock normally submits the already-requested context. Wait for
+            // that acknowledgement; another Submit would clear stale state and
+            // obscure whether ordinary UI automatically assessed or assigned it.
+            try privateContext(storage, renderer: restartedRenderer)
+            try privateRecordCount(storage, count: 1, assigned: 0)
+            _ = try privateRecord(storage, input: .p12, label: "Synthetic distribution replacement", revision: 2,
+                                  assigned: false, notChecked: true)
+            try fixture.assertStoreUnchanged()
+        }
+        guard let storageAfterRestart = restartedStorage else { throw Refusal.condition("restarted private-input controls missing") }
+        try stage("persistence-restart-rebind-and-quit") {
+            try assignPrivate(storageAfterRestart, renderer: restartedRenderer, fixture: fixture, input: .p12,
+                              label: "Synthetic distribution replacement", revision: 2)
+            try privateRecordCount(storageAfterRestart, count: 1, assigned: 1)
+            try lockPrivateVault(storageAfterRestart, renderer: restartedRenderer, fixture: fixture)
+            let sheet = try quitSheet(restartedApp, restartedWindow)
+            try click(sheet.buttons.matching(identifier: "Quit"), "second normal affirmative Quit unavailable")
+            try completeNormalQuit(restartedApp)
+            try fixture.assertStoreUnchanged()
             try fixture.closeOriginals(); ownedFixture = nil
         }
         // Original XCTest counts/exit and independent native-owner evidence are
-        // still required. No app-restart, real signing or delivery claim.
-        try acceptFinalScenario()
-        print("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete;appRestart=not-run;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
+        // still required. Same installed app restart only, not upgrade/signing.
+        try acceptPersistenceRestart()
+        print("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete-restart-unlock-reassess-rebind;appRestart=passed;ordinaryLifetimes=2;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
     }
 
     @MainActor func testSyntheticProjectLocalEdits() throws {
@@ -2383,8 +2489,20 @@ final class NormalAppUITests: XCTestCase {
                 if let owner = originalLaunch { try owner.tearDown(normalQuit: normalQuitObserved) }
             }
         } catch { cleanupFailure = error }
+        // The completed first original is retained, never stopped again and
+        // never granted a fresh cleanup deadline after the active owner's five.
+        do {
+            try await MainActor.run {
+                if let first = completedPersistenceLifetime {
+                    guard first.normalQuit else { throw Refusal.condition("retained first normal Quit proof missing") }
+                    try first.owner.recheckCompletedTerminal()
+                }
+            }
+        } catch { if cleanupFailure == nil { cleanupFailure = error } }
         // Independent consuming closes even when app cleanup/clock is unknown.
         do { try await MainActor.run { try entryGateObservation?.closeOriginal() } }
+        catch { if cleanupFailure == nil { cleanupFailure = error } }
+        do { try await MainActor.run { try completedPersistenceLifetime?.gate.closeOriginal() } }
         catch { if cleanupFailure == nil { cleanupFailure = error } }
         // Never delete possibly live fixture/app state or seek a replacement owner.
         do {
