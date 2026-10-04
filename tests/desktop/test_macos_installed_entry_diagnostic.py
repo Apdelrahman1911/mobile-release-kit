@@ -492,6 +492,130 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                                (b"x" * (MODULE.LIMIT + 1), b""), (b"x" * MODULE.LIMIT, b"x")):
             self.assertEqual(MODULE.ui_failure_diagnostics(stdout, stderr), MODULE.ui_failure_unavailable())
 
+    def test_ui_failure_require_marker_has_one_canonical_first_site(self):
+        prefix = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE="
+        for stream, line, check, ending in (("stdout", 1, "condition", b"\n"),
+                                           ("stderr", 591, "singleton", b"\r\n"),
+                                           ("stderr", 65535, "actionable", b"\n")):
+            with self.subTest(stream=stream, line=line, check=check):
+                record = prefix + f"v1;line={line};check={check}".encode() + ending
+                value = MODULE.ui_failure_diagnostics(record if stream == "stdout" else b"",
+                                                      record if stream == "stderr" else b"")
+                self.assertEqual(value["requireFailure"], {"status": "observed", "site": {
+                    "stream": stream, "line": line, "check": check}})
+                self.assertEqual(value["status"], "classified")
+                self.assertEqual(value["errorCodes"], [])
+                self.assertEqual(value["sourceFailures"], [])
+                self.assertEqual(value["queryObservations"], [])
+                self.assertEqual(value["contextObservations"], [])
+                self.assertFalse(any(value["markers"].values()))  # Marker does not manufacture XCTest outcome.
+
+    def test_ui_failure_fixed_context_and_queries_preserve_bounded_observations(self):
+        host = (b"MRK_MACOS_UI_HOST_FACTS=os=26.0.1;nonroot=true;sameUid=true;sameGid=true;"
+                b"runnerName=true;fixedHome=false\n")
+        environment = (b"MRK_MACOS_UI_HOST_ENV_FACTS=homeIsRunner=true;userIsRunner=true;lognameIsRunner=true;"
+                       b"fixedHomePresent=false;versionCompatPresent=false\r\n")
+        account = (b"MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=true;originalRecord=true;uidMatches=true;"
+                   b"gidMatches=true;nameMatches=false;homeMatches=true\n")
+        cleanup = (b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=true;normalReturned=null;forceRequested=false;"
+                   b"forceReturned=false;originalTerminated=false;unknownStateRetained=true\n")
+        renderer = b"MRK_MACOS_NORMAL_RENDERER_QUERY=observation=initial;matches=0;exceedsFour=0;nonAtomic=1\n"
+        dashboard = b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=initial;matches=2;exceedsFour=0;nonAtomic=1\n"
+        property_row = b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=identifier;matches=1;exceedsFour=0;nonAtomic=1\n"
+        value = MODULE.ui_failure_diagnostics(host + environment + account + renderer + dashboard + property_row,
+                                              cleanup + property_row)
+        self.assertEqual(value["contextObservations"], [
+            {"stream": "stdout", "kind": "host", "os": [26, 0, 1], "nonroot": True, "sameUid": True,
+             "sameGid": True, "runnerName": True, "fixedHome": False},
+            {"stream": "stdout", "kind": "environment", "homeIsRunner": True, "userIsRunner": True,
+             "lognameIsRunner": True, "fixedHomePresent": False, "versionCompatPresent": False},
+            {"stream": "stdout", "kind": "account", "lookupSucceeded": True, "originalRecord": True,
+             "uidMatches": True, "gidMatches": True, "nameMatches": False, "homeMatches": True},
+            {"stream": "stderr", "kind": "failureCleanup", "normalRequested": True, "normalReturned": None,
+             "forceRequested": False, "forceReturned": False, "originalTerminated": False, "unknownStateRetained": True}])
+        self.assertEqual([(row["stream"], row["kind"], row["observation"], row["matches"]) for row in value["queryObservations"]],
+                         [("stdout", "renderer", "initial", 0), ("stdout", "dashboard", "initial", 2),
+                          ("stdout", "dashboard", "identifier", 1), ("stderr", "dashboard", "identifier", 1)])
+        self.assertTrue(all(row["nonAtomic"] for row in value["queryObservations"]))
+        self.assertFalse(any(row["exceedsFour"] for row in value["queryObservations"]))
+        self.assertEqual(value["requireFailure"], {"status": "unobserved", "site": None})
+        self.assertEqual(value["status"], "unclassified")  # Context is not a causal failure classification.
+        repeated = MODULE.ui_failure_diagnostics(property_row * 9 + cleanup * 5, b"")
+        self.assertEqual(len(repeated["queryObservations"]), 8)
+        self.assertEqual(len(repeated["contextObservations"]), 4)
+        self.assertEqual(repeated["queryObservations"], [repeated["queryObservations"][0]] * 8)
+        self.assertEqual(repeated["contextObservations"], [repeated["contextObservations"][0]] * 4)
+        self.assertTrue(repeated["findingsTruncated"])
+        # Simultaneously fill every retained category, with maximal closed scalar widths.
+        longest_query = (b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=containingSameStaticText;"
+                         b"matches=4;exceedsFour=0;nonAtomic=1\n")
+        widest_cleanup = (b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=false;normalReturned=false;forceRequested=false;"
+                          b"forceReturned=false;originalTerminated=false;unknownStateRetained=false\n")
+        require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=65535;check=actionable\n"
+        codes = b"".join(f"Error Domain=IDETestOperationsObserverErrorDomain Code={-2147483648 + i}\n".encode() for i in range(8))
+        sites = b"".join(b"NormalAppUITests.swift:" + str(line).encode() + b":4096: error: " + UI_FAILURE_CASE
+                         + b" : fixture-secret\n" for line in range(65532, 65536))
+        maximum = MODULE.ui_failure_diagnostics(b"", require + codes + sites + longest_query * 8 + widest_cleanup * 4)
+        self.assertEqual([len(maximum[key]) for key in ("errorCodes", "sourceFailures", "queryObservations", "contextObservations")],
+                         [8, 4, 8, 4])
+        self.assertEqual(maximum["requireFailure"]["status"], "observed")
+        self.assertFalse(maximum["findingsTruncated"])
+        encoded = MODULE.encoded(maximum, MODULE.UI_FAILURE_LIMIT)
+        self.assertLessEqual(len(encoded), 4096)
+        self.assertNotIn(b"fixture-secret", encoded)
+        # Upper count bucket remains explicitly non-atomic and distinct from4.
+        high = MODULE.ui_failure_diagnostics(longest_query.replace(b"matches=4;exceedsFour=0", b"matches=5;exceedsFour=1"), b"")
+        self.assertEqual(high["queryObservations"][0]["matches"], 5)
+        self.assertIs(high["queryObservations"][0]["exceedsFour"], True)
+
+    def test_ui_failure_marker_lookalikes_partial_and_conflicting_records_stay_closed(self):
+        prefix = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE="
+        valid = prefix + b"v1;line=591;check=actionable\n"
+        malformed = [prefix + b"v1;line=" + line + b";check=condition\n" for line in
+                     (b"0", b"01", b"+1", b"65536", b"999999", b"-1", b"1.0", b"1\xff")]
+        malformed += [prefix, prefix + b"v1;line=1;check=condition", prefix + b"v2;line=1;check=condition\n",
+                      prefix + b"v1;line=1;check=fixture-secret\n", valid[:-1] + b";extra=fixture-secret\n",
+                      valid[:-1] + b"\r\r\n", valid[:-1] + b"\x00\n"]
+        for record in malformed:
+            with self.subTest(malformed=record[:90]):
+                value = MODULE.ui_failure_diagnostics(record, b"")
+                self.assertEqual(value["requireFailure"], {"status": "malformed", "site": None})
+                self.assertEqual(value["status"], "unclassified")
+                self.assertNotIn(b"fixture-secret", MODULE.encoded(value))
+        for record in (b"prefix" + valid, b" " + valid, b"fixture-secret " + valid,
+                       valid.replace(prefix, b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE_EXTRA="), prefix[:-1]):
+            self.assertEqual(MODULE.ui_failure_diagnostics(record, b"")["requireFailure"],
+                             {"status": "unobserved", "site": None})
+        other = prefix + b"v1;line=433;check=condition\n"
+        bad = prefix + b"v2;line=433;check=condition\n"
+        for stdout, stderr in ((valid + valid, b""), (valid + other, b""), (valid, valid),
+                               (bad + valid, b""), (valid, bad), (prefix, valid)):
+            with self.subTest(stdout=stdout[:90], stderr=stderr[:90]):
+                value = MODULE.ui_failure_diagnostics(stdout, stderr)
+                self.assertEqual(value["requireFailure"], {"status": "ambiguous", "site": None})
+                self.assertEqual(value["status"], "unclassified")
+        query = b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=initial;matches=2;exceedsFour=0;nonAtomic=1\n"
+        host = (b"MRK_MACOS_UI_HOST_FACTS=os=26.0.1;nonroot=true;sameUid=true;sameGid=true;"
+                b"runnerName=true;fixedHome=false\n")
+        context = (b"MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=true;originalRecord=true;uidMatches=true;"
+                   b"gidMatches=true;nameMatches=false;homeMatches=true\n")
+        unknown = [query.replace(b"matches=2", b"matches=1"), query.replace(b"matches=2", b"matches=02"),
+                   query.replace(b"matches=2", b"matches=5"), query.replace(b"exceedsFour=0", b"exceedsFour=1"),
+                   query.replace(b"nonAtomic=1", b"nonAtomic=0"), query.replace(b"initial", b"fixture-secret"),
+                   query.replace(b"DASHBOARD", b"RENDERER").replace(b"initial", b"identifier"),
+                   query[:-1], query[:-1] + b";private=fixture-secret\n",
+                   host.replace(b"26.0.1", b"026.0.1"), host.replace(b"26.0.1", b"26.65536.1"),
+                   host.replace(b"true", b"TRUE", 1), host[:-1], context.replace(b"true", b"null", 1),
+                   context.replace(b"homeMatches=true", b"homeMatches=fixture-secret"),
+                   context[:-1] + b";private=fixture-secret\n"]
+        for record in unknown:
+            with self.subTest(unknown=record[:90]):
+                value = MODULE.ui_failure_diagnostics(record, b"")
+                self.assertEqual(value["queryObservations"], [])
+                self.assertEqual(value["contextObservations"], [])
+                self.assertEqual(value["status"], "unclassified")
+                self.assertNotIn(b"fixture-secret", MODULE.encoded(value))
+
     def ui_failure_context(self, original):
         context = MODULE.Context.__new__(MODULE.Context)
         context.work, context.source, context.environment = Path("/synthetic-packaged-ui"), SOURCE, {}
@@ -523,7 +647,10 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
         return context, runner, events
 
     def test_ui_failure_nonzero_keeps_original_refusal_and_skips_success_queries(self):
-        original = subprocess.CompletedProcess([], 65, b"Error Domain=NSPOSIXErrorDomain Code=13\n", b"fixture-secret")
+        original = subprocess.CompletedProcess([], 65, b"Error Domain=NSPOSIXErrorDomain Code=13\n"
+            b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=591;check=actionable\n"
+            b"MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=true;originalRecord=true;uidMatches=true;"
+            b"gidMatches=true;nameMatches=false;homeMatches=true\n", b"fixture-secret")
         context, runner, events = self.ui_failure_context(original)
         formatter = MODULE.ui_failure_diagnostics
         def project(stdout, stderr):
@@ -540,6 +667,9 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
         context.failure(caught.exception)
         self.assertEqual(events, ["helper-return", "format"])
         self.assertEqual(context.report["uiFailureDiagnostics"], formatter(original.stdout, original.stderr))
+        self.assertEqual(context.report["uiFailureDiagnostics"]["requireFailure"], {"status": "observed", "site": {
+            "stream": "stdout", "line": 591, "check": "actionable"}})
+        self.assertFalse(context.report["uiFailureDiagnostics"]["contextObservations"][0]["nameMatches"])
         self.assertEqual(context.report["originalTestReturncode"], 65)
         self.assertEqual(context.report["error"], "original-ui-test-nonzero")
         self.assertTrue(context.report["originalCallReturned"])

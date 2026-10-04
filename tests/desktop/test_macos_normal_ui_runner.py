@@ -330,6 +330,48 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 cleanup_receivers = [state["original"]]  # Identity only, no call.
                 self.assertEqual(cleanup_receivers, [first])
 
+    def test_source_packaged_require_site_is_forwarded_and_first_failure_only(self):
+        source = SWIFT.read_text()
+        self.assertEqual(source.count("line: UInt = #line"), 3)
+        self.assertIn("private enum RequireCheck: String { case condition, singleton, actionable }", source)
+        self.assertEqual(source.count("packagedRequireDiagnosticActive = true"), 1)
+        self.assertEqual(source.count("packagedRequireDiagnosticActive = false"), 2)  # Initial + scoped defer.
+        self.assertEqual(source.count("packagedRequireDiagnosticEmitted = false"), 1)
+        self.assertEqual(source.count("packagedRequireDiagnosticEmitted = true"), 1)
+        selected = source.split("func testPackagedEntryLaunchCancelAndQuit() throws {", 1)[1].split(
+            "\n    @MainActor private func launchCancelAndQuit", 1)[0]
+        self.assertLess(selected.index("packagedRequireDiagnosticActive = true"),
+                        selected.index("defer { packagedRequireDiagnosticActive = false }"))
+        self.assertLess(selected.index("defer { packagedRequireDiagnosticActive = false }"),
+                        selected.index("try launchCancelAndQuit(profile: .packagedEntry)"))
+        require = source.split("private func require(", 1)[1].split("private func unique(", 1)[0]
+        false_guard = require.split("guard value else {", 1)[1].split("\n        if let owner", 1)[0]
+        ordered = ("let originalFailureAbsent = caseClock?.firstFailure == nil",
+                   "let refusal = caseClock?.fail(reason) ?? Refusal.condition(reason)",
+                   "if packagedRequireDiagnosticActive && originalFailureAbsent && !packagedRequireDiagnosticEmitted",
+                   "&& line >= 1 && line <= 65535", "packagedRequireDiagnosticEmitted = true",
+                   'print("MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\\(line);check=\\(check.rawValue)")',
+                   "throw refusal")
+        positions = [false_guard.index(item) for item in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(source.count("MRK_MACOS_PACKAGED_REQUIRE_FAILURE="), 1)
+        self.assertEqual(require.count("caseClock?.fail(reason) ?? Refusal.condition(reason)"), 1)
+        for forbidden in ("XCTFail", "recordIssue", "waitFor", "remaining(", "systemUptime", "owner.", "catch", "try?"):
+            self.assertNotIn(forbidden, false_guard)
+        # A false guard still throws; true values retain BOTH original gates.
+        self.assertIn("throw refusal\n        }\n        if let owner = originalLaunch { try owner.healthy() }\n"
+                      "        if let clock = caseClock { _ = try clock.remaining(1, before: journeyDeadline) }", require)
+        unique = source.split("private func unique(", 1)[1].split("private func click(", 1)[0]
+        click = source.split("private func click(", 1)[1].split("private func dashboard(", 1)[0]
+        self.assertIn("try require(query.count == 1, reason, line: line, check: .singleton)", unique)
+        self.assertIn("return query.element(boundBy: 0)", unique)
+        self.assertIn("let element = try unique(query, reason, line: line)", click)
+        self.assertIn("try require(element.isEnabled && element.isHittable, reason, line: line, check: .actionable)", click)
+        self.assertLess(click.index("try unique(query, reason, line: line)"), click.index("try require("))
+        self.assertLess(click.index("try require("), click.index("element.click()"))
+        clock = source.split("func fail(_ reason: String) -> Refusal {", 1)[1].split("private func now()", 1)[0]
+        self.assertIn("if firstFailure == nil { firstFailure = reason }\n            return .condition(firstFailure!)", clock)
+
     def test_source_uses_nonrenewable_case_clock_and_all_terminal_gates(self):
         source = SWIFT.read_text()
         custody = source.split("    private final class GateObservation {", 1)[0]

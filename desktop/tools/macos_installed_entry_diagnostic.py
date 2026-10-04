@@ -105,6 +105,8 @@ def ui_public_toolchain(values):
 def ui_failure_unavailable():
     return {"schemaVersion": 1, "scope": "captured-ui-failure-diagnostics-only", "status": "unavailable",
             "errorCodes": [], "sourceFailures": [], "findingsTruncated": False,
+            "requireFailure": {"status": "unobserved", "site": None},
+            "queryObservations": [], "contextObservations": [],
             "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
                         "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
 
@@ -136,6 +138,80 @@ def ui_failure_diagnostics(stdout, stderr):
         "xcodebuildError": rb"(?m)^xcodebuild: error:",
     }
 
+    require_prefix = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE="
+    require_pattern = re.escape(require_prefix) + rb"v1;line=([1-9][0-9]{0,4});check=(condition|singleton|actionable)"
+    require_candidates = 0
+    query_pattern = (rb"MRK_MACOS_NORMAL_(RENDERER|DASHBOARD)_QUERY=observation="
+                     rb"(initial|identifier|title|label|value|placeholderValue|containingSameStaticText)"
+                     rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
+    # Four existing closed record shapes, not a general log/schema interpreter.
+    context_patterns = (
+        ("account", rb"MRK_MACOS_UI_ACCOUNT_FACTS=lookupSucceeded=(true|false);originalRecord=(true|false)"
+         rb";uidMatches=(true|false);gidMatches=(true|false);nameMatches=(true|false);homeMatches=(true|false)",
+         ("lookupSucceeded", "originalRecord", "uidMatches", "gidMatches", "nameMatches", "homeMatches")),
+        ("host", rb"MRK_MACOS_UI_HOST_FACTS=os=(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\."
+         rb"(0|[1-9][0-9]{0,4});nonroot=(true|false);sameUid=(true|false);sameGid=(true|false)"
+         rb";runnerName=(true|false);fixedHome=(true|false)",
+         ("nonroot", "sameUid", "sameGid", "runnerName", "fixedHome")),
+        ("environment", rb"MRK_MACOS_UI_HOST_ENV_FACTS=homeIsRunner=(true|false);userIsRunner=(true|false)"
+         rb";lognameIsRunner=(true|false);fixedHomePresent=(true|false);versionCompatPresent=(true|false)",
+         ("homeIsRunner", "userIsRunner", "lognameIsRunner", "fixedHomePresent", "versionCompatPresent")),
+        ("failureCleanup", rb"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=(true|false)"
+         rb";normalReturned=(true|false|null);forceRequested=(true|false);forceReturned=(true|false|null)"
+         rb";originalTerminated=(true|false);unknownStateRetained=(true|false)",
+         ("normalRequested", "normalReturned", "forceRequested", "forceReturned", "originalTerminated", "unknownStateRetained")),
+    )
+
+    def observe(key, finding, maximum):
+        # Preserve repeated/non-atomic observations, not a synthetic last value.
+        if len(value[key]) < maximum:
+            value[key].append(finding)
+        else:
+            value["findingsTruncated"] = True
+
+    def record_observation(stream, record, complete):
+        nonlocal require_candidates
+        if record.startswith(require_prefix):
+            require_candidates = min(2, require_candidates + 1)
+            match = re.fullmatch(require_pattern, record) if complete else None
+            if require_candidates > 1:
+                value["requireFailure"] = {"status": "ambiguous", "site": None}
+            elif match is not None and int(match.group(1)) <= 65535:
+                value["requireFailure"] = {"status": "observed", "site": {
+                    "stream": stream, "line": int(match.group(1)), "check": match.group(2).decode("ascii")}}
+            else:
+                value["requireFailure"] = {"status": "malformed", "site": None}
+            return
+        if not complete:
+            return
+        match = re.fullmatch(query_pattern, record)
+        if match is not None:
+            kind = "renderer" if match.group(1) == b"RENDERER" else "dashboard"
+            observation = match.group(2).decode("ascii")
+            count, exceeds = int(match.group(3)), match.group(4) == b"1"
+            if (kind == "renderer" and observation != "initial") or (observation == "initial" and count == 1):
+                return
+            if exceeds == (count == 5):
+                observe("queryObservations", {"stream": stream, "kind": kind, "observation": observation,
+                        "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 8)
+            return
+        for kind, pattern, fields in context_patterns:
+            match = re.fullmatch(pattern, record)
+            if match is None:
+                continue
+            tokens = match.groups()
+            finding = {"stream": stream, "kind": kind}
+            if kind == "host":
+                version = [int(token) for token in tokens[:3]]
+                if any(component > 65535 for component in version):
+                    return
+                finding["os"] = version
+                tokens = tokens[3:]
+            finding.update((key, {b"true": True, b"false": False, b"null": None}[token])
+                           for key, token in zip(fields, tokens))
+            observe("contextObservations", finding, 4)
+            return
+
     def retain(key, finding, maximum):
         # Only retained entries are remembered; neither descriptions nor an
         # unbounded set of discarded findings accumulates.
@@ -159,7 +235,21 @@ def ui_failure_diagnostics(stdout, stderr):
             if line <= 65535 and (column is None or column <= 4096):
                 retain("sourceFailures", {"stream": stream, "source": "NormalAppUITests.swift",
                        "test": "testPackagedEntryLaunchCancelAndQuit", "line": line, "column": column}, 4)
-    value["status"] = "classified" if value["errorCodes"] or value["sourceFailures"] else "unclassified"
+        # LF is the sole separator; an incomplete final record is not repaired.
+        # Traversal order is preserved per stream, never across stdout/stderr.
+        offset = 0
+        while offset < len(body):
+            end = body.find(b"\n", offset)
+            complete = end != -1
+            if not complete:
+                end = len(body)
+            record = body[offset:end]
+            if complete and record.endswith(b"\r"):
+                record = record[:-1]
+            record_observation(stream, record, complete)
+            offset = end + 1
+    value["status"] = ("classified" if value["errorCodes"] or value["sourceFailures"]
+                       or value["requireFailure"]["status"] == "observed" else "unclassified")
     return value
 
 

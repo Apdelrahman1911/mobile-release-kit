@@ -12,6 +12,9 @@ import XCTest
 // This is UI evidence, not POSIX exit status or all-worker/descriptor finality.
 final class NormalAppUITests: XCTestCase {
     private enum Refusal: Error { case condition(String) }
+    private enum RequireCheck: String { case condition, singleton, actionable }
+    @MainActor private var packagedRequireDiagnosticActive = false
+    @MainActor private var packagedRequireDiagnosticEmitted = false
     @MainActor private var originalLaunch: OrdinaryLaunch?
     @MainActor private var caseClock: CaseClock?
     @MainActor private var normalQuitObserved = false
@@ -396,20 +399,33 @@ final class NormalAppUITests: XCTestCase {
         }
     }
 
-    @MainActor private func require(_ value: Bool, _ reason: String) throws {
-        guard value else { throw caseClock?.fail(reason) ?? Refusal.condition(reason) }
+    @MainActor private func require(_ value: Bool, _ reason: String,
+                                    line: UInt = #line, check: RequireCheck = .condition) throws {
+        guard value else {
+            let originalFailureAbsent = caseClock?.firstFailure == nil
+            let refusal = caseClock?.fail(reason) ?? Refusal.condition(reason)
+            // A later caller must never be paired with an earlier latched reason.
+            if packagedRequireDiagnosticActive && originalFailureAbsent && !packagedRequireDiagnosticEmitted
+                && line >= 1 && line <= 65535 {
+                packagedRequireDiagnosticEmitted = true
+                print("MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=\(line);check=\(check.rawValue)")
+            }
+            throw refusal
+        }
         if let owner = originalLaunch { try owner.healthy() }
         if let clock = caseClock { _ = try clock.remaining(1, before: journeyDeadline) }
     }
 
-    @MainActor private func unique(_ query: XCUIElementQuery, _ reason: String) throws -> XCUIElement {
-        try require(query.count == 1, reason)
+    @MainActor private func unique(_ query: XCUIElementQuery, _ reason: String,
+                                   line: UInt = #line) throws -> XCUIElement {
+        try require(query.count == 1, reason, line: line, check: .singleton)
         return query.element(boundBy: 0)
     }
 
-    @MainActor private func click(_ query: XCUIElementQuery, _ reason: String) throws {
-        let element = try unique(query, reason)
-        try require(element.isEnabled && element.isHittable, reason)
+    @MainActor private func click(_ query: XCUIElementQuery, _ reason: String,
+                                  line: UInt = #line) throws {
+        let element = try unique(query, reason, line: line)
+        try require(element.isEnabled && element.isHittable, reason, line: line, check: .actionable)
         element.click()
     }
 
@@ -560,6 +576,8 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor
     func testPackagedEntryLaunchCancelAndQuit() throws {
+        packagedRequireDiagnosticActive = true
+        defer { packagedRequireDiagnosticActive = false }
         try launchCancelAndQuit(profile: .packagedEntry)
     }
 
