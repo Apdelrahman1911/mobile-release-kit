@@ -58,6 +58,7 @@ PINS = {
     "src/mobile_release/cancellation.py": "5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35",
 }
 LIMIT = 65536
+UI_FAILURE_LIMIT = 4096
 PREFIX = b"MRK_INSTALLED_ENTRY_DIAGNOSTIC="
 BOOLS = frozenset("launchRequested launchReferenceReturned launchErrorReported workDeadlineFailed clockUnavailable normalTerminateRequested forceTerminateRequested terminationObserved ancestorCloseReturned probeClosesReturned finalDeadlineMet observationComplete normalQuitQualified fullUIQualified fullM2Qualified productReady".split())
 NULLABLE_BOOLS = frozenset("referenceTerminatedAtObservation referenceFinishedLaunching referenceActive normalTerminateReturned forceTerminateReturned".split())
@@ -99,6 +100,67 @@ def ui_public_toolchain(values):
     }
     return {key: value for key, value in values.items()
             if key in patterns and len(value) <= 512 and re.fullmatch(patterns[key], value)}
+
+
+def ui_failure_unavailable():
+    return {"schemaVersion": 1, "scope": "captured-ui-failure-diagnostics-only", "status": "unavailable",
+            "errorCodes": [], "sourceFailures": [], "findingsTruncated": False,
+            "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
+                        "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
+
+
+def ui_failure_diagnostics(stdout, stderr):
+    """Closed textual observations only: never assertion/reason tails or native-cause authority."""
+    value = ui_failure_unavailable()
+    if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > LIMIT:
+        return value
+    domains = {domain.encode("ascii"): domain for domain in (
+        "NSCocoaErrorDomain", "NSPOSIXErrorDomain", "NSOSStatusErrorDomain", "NSMachErrorDomain",
+        "XCTestErrorDomain", "XCTRunnerErrorDomain", "com.apple.dt.xctest.error",
+        "IDETestOperationsObserverErrorDomain", "IDEFoundationErrorDomain", "RBSRequestErrorDomain",
+        "RBSServiceErrorDomain", "FBSOpenApplicationServiceErrorDomain", "FBSOpenApplicationErrorDomain",
+        "IXUserPresentableErrorDomain")}
+    case = re.escape(b"-[MRKNormalAppUITests.NormalAppUITests testPackagedEntryLaunchCancelAndQuit]")
+    codes = (rb"(?:\A|(?<=[ \t\r\n({\x5b]))Error[ \t]{1,8}Domain=("
+             + b"|".join(re.escape(domain) for domain in domains)
+             + rb")[ \t]{1,8}Code=(-?(?:0|[1-9][0-9]{0,9}))(?=\Z|[ \t\r\n,;\"')}\x5d])")
+    locations = (rb"(?:\A|(?<=[/ \t\r\n]))NormalAppUITests\.swift:([1-9][0-9]{0,4})"
+                 rb"(?::([1-9][0-9]{0,3}))?:[ \t]{1,8}error:[ \t]{1,8}"
+                 + case + rb"[ \t]{0,8}:")
+    markers = {
+        "selectedCaseStarted": rb"(?m)^Test Case '" + case + rb"' started\.\r?$",
+        "selectedCaseFailed": (rb"(?m)^Test Case '" + case
+                               + rb"' failed(?: \([0-9]{1,6}(?:\.[0-9]{1,9})? seconds\))?\.\r?$"),
+        "testExecuteFailed": rb"(?m)^\*\* TEST EXECUTE FAILED \*\*\r?$",
+        "testingFailed": rb"(?m)^Testing failed:",
+        "xcodebuildError": rb"(?m)^xcodebuild: error:",
+    }
+
+    def retain(key, finding, maximum):
+        # Only retained entries are remembered; neither descriptions nor an
+        # unbounded set of discarded findings accumulates.
+        if finding not in value[key]:
+            if len(value[key]) < maximum:
+                value[key].append(finding)
+            else:
+                value["findingsTruncated"] = True
+
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        for key, pattern in markers.items():
+            value["markers"][key] = value["markers"][key] or re.search(pattern, body) is not None
+        for match in re.finditer(codes, body):
+            token = match.group(2)
+            code = int(token)
+            if token != b"-0" and -2147483648 <= code <= 2147483647:
+                retain("errorCodes", {"stream": stream, "domain": domains[match.group(1)], "code": code}, 8)
+        for match in re.finditer(locations, body):
+            line = int(match.group(1))
+            column = int(match.group(2)) if match.group(2) is not None else None
+            if line <= 65535 and (column is None or column <= 4096):
+                retain("sourceFailures", {"stream": stream, "source": "NormalAppUITests.swift",
+                       "test": "testPackagedEntryLaunchCancelAndQuit", "line": line, "column": column}, 4)
+    value["status"] = "classified" if value["errorCodes"] or value["sourceFailures"] else "unclassified"
+    return value
 
 
 class SelectedUIToolchain:
@@ -720,6 +782,15 @@ class Context:
             result_path, (self.ui_helper.PACKAGED_METHOD,), 60, 180)
         self.report.update(generatedRunner=runner, originalTestReturncode=original.returncode,
                            originalCallReturned=True)
+        if original.returncode != 0:
+            diagnostics = ui_failure_unavailable()
+            try:
+                projected = ui_failure_diagnostics(original.stdout, original.stderr)
+                encoded(projected, UI_FAILURE_LIMIT)
+                diagnostics = projected
+            except Exception:
+                pass  # The original nonzero refusal wins, without exception text.
+            self.report["uiFailureDiagnostics"] = diagnostics
         need(original.returncode == 0, "original-ui-test-nonzero")
         summary = self.zero("original-ui-summary", ["/usr/bin/xcrun", "xcresulttool", "get", "test-results",
             "summary", "--path", str(result_path), "--compact"], 15)

@@ -20,6 +20,7 @@ SPEC = importlib.util.spec_from_file_location("mrk_entry_diagnostic_contract", R
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 SOURCE = "a" * 40
+UI_FAILURE_CASE = b"-[MRKNormalAppUITests.NormalAppUITests testPackagedEntryLaunchCancelAndQuit]"
 
 
 def normal_observation():
@@ -411,6 +412,212 @@ class InstalledEntryDiagnosticContracts(unittest.TestCase):
                     self.assertNotIn("/home/private", json.dumps(context.report))
                 else:
                     self.assertEqual(context.report["toolchain"]["sdkPath"], str(sdk))
+
+    def test_ui_failure_projection_keeps_typed_findings_not_private_tails(self):
+        private = "fixture-secret token=SYNTHETIC https://invalid.example/秘密".encode()
+        stdout = (b"Test Case '" + UI_FAILURE_CASE + b"' started.\n"
+                  b'Error Domain=NSPOSIXErrorDomain Code=13 "' + private + b'"\n'
+                  b"/Users/fixture-secret/NormalAppUITests.swift:321:7: error: "
+                  + UI_FAILURE_CASE + b" : XCTAssertTrue failed - " + private + b"\x00\xff\n"
+                  b"Test Case '" + UI_FAILURE_CASE + b"' failed (1.234 seconds).\n")
+        stderr = (b'Error Domain=com.apple.dt.xctest.error Code=-2147483648 "' + private + b'"\n'
+                  b'{Error Domain=NSCocoaErrorDomain Code=2147483647 "' + private + b'"}\n'
+                  b"/Users/fixture-secret/NormalAppUITests.swift:65535: error: "
+                  + UI_FAILURE_CASE + b": " + private + b"\n"
+                  b"** TEST EXECUTE FAILED **\nTesting failed:\n" + private
+                  + b"\nxcodebuild: error: " + private + b"\n")
+        value = MODULE.ui_failure_diagnostics(stdout, stderr)
+        expected = MODULE.ui_failure_unavailable()
+        expected.update(status="classified", errorCodes=[
+            {"stream": "stdout", "domain": "NSPOSIXErrorDomain", "code": 13},
+            {"stream": "stderr", "domain": "com.apple.dt.xctest.error", "code": -2147483648},
+            {"stream": "stderr", "domain": "NSCocoaErrorDomain", "code": 2147483647}], sourceFailures=[
+            {"stream": stream, "source": "NormalAppUITests.swift", "test": "testPackagedEntryLaunchCancelAndQuit",
+             "line": line, "column": column} for stream, line, column in (("stdout", 321, 7), ("stderr", 65535, None))])
+        expected["markers"] = {key: True for key in expected["markers"]}
+        self.assertEqual(value, expected)
+        serialized = MODULE.encoded(value, MODULE.UI_FAILURE_LIMIT)
+        for forbidden in (b"fixture-secret", b"SYNTHETIC", b"/Users/", b"https://", b"XCTAssertTrue", b"\\u79d8"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_ui_failure_projection_rejects_lookalikes_and_noncanonical_tokens(self):
+        for token in (b"", b"-", b"+1", b"-0", b"01", b"-01", b"1.0", b"1e3", b"1token", b"1_2",
+                      b"1/2", b"1\xff", b"2147483648", b"-2147483649", b"21474836470"):
+            with self.subTest(code=token):
+                value = MODULE.ui_failure_diagnostics(b"Error Domain=NSPOSIXErrorDomain Code=" + token + b"\n", b"")
+                self.assertEqual(value["errorCodes"], [])
+                self.assertEqual(value["status"], "unclassified")
+        unknown = (b"Error Domain=PrivateDomain Code=1\nError Domain=prefixNSPOSIXErrorDomain Code=1\n"
+                   b"Error Domain=NSPOSIXErrorDomain.suffix Code=1\nprefixError Domain=NSPOSIXErrorDomain Code=1\n")
+        for source in (b"OtherNormalAppUITests.swift", b"NormalAppUITests.swiftExtra", b"\xffNormalAppUITests.swift"):
+            unknown += b"/fixture/" + source + b":1: error: " + UI_FAILURE_CASE + b" : fixture-secret\n"
+        for location in (b"0", b"01", b"65536", b"655350", b"-1", b"+1", b"1.0", b"1:0", b"1:01",
+                         b"1:4097", b"1:40960", b"1:-1", b"1:1tail"):
+            unknown += b"NormalAppUITests.swift:" + location + b": error: " + UI_FAILURE_CASE + b" : fixture-secret\n"
+        for case in (UI_FAILURE_CASE.replace(b"Quit]", b"QuitExtra]"), UI_FAILURE_CASE + b"Extra",
+                     UI_FAILURE_CASE.replace(b"MRKNormalAppUITests.", b"OtherTests.")):
+            unknown += b"NormalAppUITests.swift:1: error: " + case + b" : fixture-secret\n"
+            unknown += b"Test Case '" + case + b"' started.\nTest Case '" + case + b"' failed (1.0 seconds).\n"
+        value = MODULE.ui_failure_diagnostics(unknown, b"")
+        self.assertEqual(value["errorCodes"], [])
+        self.assertEqual(value["sourceFailures"], [])
+        self.assertFalse(any(value["markers"].values()))
+        self.assertEqual(value["status"], "unclassified")
+        markers_only = MODULE.ui_failure_diagnostics(b"Testing failed:\n", b"")
+        self.assertTrue(markers_only["markers"]["testingFailed"])
+        self.assertEqual(markers_only["status"], "unclassified")
+
+    def test_ui_failure_projection_bounds_dedup_and_truncation(self):
+        row = b"Error Domain=NSPOSIXErrorDomain Code=1\n"
+        full = (row * (MODULE.LIMIT // len(row))).ljust(MODULE.LIMIT, b"x")
+        value = MODULE.ui_failure_diagnostics(full, b"")
+        self.assertEqual(value["errorCodes"], [{"stream": "stdout", "domain": "NSPOSIXErrorDomain", "code": 1}])
+        self.assertFalse(value["findingsTruncated"])
+        def rows(codes, locations):
+            return (b"".join(f"Error Domain=NSPOSIXErrorDomain Code={code}\n".encode() for code in range(codes))
+                    + b"".join(b"NormalAppUITests.swift:" + str(line).encode() + b":4096: error: "
+                               + UI_FAILURE_CASE + b" : fixture-secret\n" for line in range(1, locations + 1)))
+        value = MODULE.ui_failure_diagnostics(rows(5, 2) + row, rows(6, 5))
+        self.assertEqual([(item["stream"], item["code"]) for item in value["errorCodes"]],
+                         [("stdout", code) for code in range(5)] + [("stderr", code) for code in range(3)])
+        self.assertEqual([(item["stream"], item["line"]) for item in value["sourceFailures"]],
+                         [("stdout", 1), ("stdout", 2), ("stderr", 1), ("stderr", 2)])
+        self.assertTrue(value["findingsTruncated"])
+        self.assertLessEqual(len(MODULE.encoded(value, MODULE.UI_FAILURE_LIMIT)), 4096)
+        self.assertEqual(value, MODULE.ui_failure_diagnostics(rows(5, 2) + row, rows(6, 5)))
+        incomplete = b"\nError Domain=NSPOSIXErrorDomain Code=-"
+        self.assertEqual(MODULE.ui_failure_diagnostics(b"x" * (MODULE.LIMIT - len(incomplete)) + incomplete,
+                                                     b"")["status"], "unclassified")
+        for stdout, stderr in ((None, b""), (b"", ""), (bytearray(), b""),
+                               (b"x" * (MODULE.LIMIT + 1), b""), (b"x" * MODULE.LIMIT, b"x")):
+            self.assertEqual(MODULE.ui_failure_diagnostics(stdout, stderr), MODULE.ui_failure_unavailable())
+
+    def ui_failure_context(self, original):
+        context = MODULE.Context.__new__(MODULE.Context)
+        context.work, context.source, context.environment = Path("/synthetic-packaged-ui"), SOURCE, {}
+        context.owner, context.inflight, context.last_returned = None, False, False
+        context.report = {"commands": [], "error": None, "originalCallReturned": False,
+            "diagnosticValid": False, "diagnosticComplete": False, "uiScenarioObserved": False,
+            "normalQuitQualified": False, "fullUIQualified": False, "fullM2Qualified": False, "productReady": False,
+            "allWorkerFinality": "not-established", "cleanup": {"unknownStateRetained": False}}
+        context.ui_file_budget = lambda phase: self.assertEqual(phase, "test")
+        context.ui_prior = lambda phase: {"buildOriginalZero": True, "applicationRebuilt": False, "toolchain": {}}
+        context.selected = lambda: {"packageSize": MODULE.PACKAGE_BYTES, "packageSha256": MODULE.PACKAGE_SHA}
+        context.readback = context.ui_tools = lambda: None
+        def forbidden(*args, **kwargs):
+            self.fail("No command, result query or post-observation is allowed in this failure fixture")
+        context.call = context.zero = forbidden
+        context.stage = SimpleNamespace(Refused=MODULE.Refused, observation_command=forbidden)
+        runner, events = {"syntheticAdmittedRunner": True, "originalClosesCompleted": True}, []
+        def admitted(call, derived, result, methods, timeout, budget):
+            self.assertIs(call, context.call)
+            self.assertEqual((derived, result), (context.work / "normal-ui/DerivedData", context.work / "normal-ui/test.xcresult"))
+            self.assertEqual((methods, timeout, budget), ((context.ui_helper.PACKAGED_METHOD,), 60, 180))
+            self.assertNotIn("uiFailureDiagnostics", context.report)
+            events.append("helper-return")
+            context.last_returned = True
+            return original, runner
+        context.ui_helper = SimpleNamespace(Refused=MODULE.Refused, run_admitted_test=admitted,
+            PACKAGED_METHOD="MRKNormalAppUITests/NormalAppUITests/testPackagedEntryLaunchCancelAndQuit",
+            packaged_ui_result=forbidden)
+        return context, runner, events
+
+    def test_ui_failure_nonzero_keeps_original_refusal_and_skips_success_queries(self):
+        original = subprocess.CompletedProcess([], 65, b"Error Domain=NSPOSIXErrorDomain Code=13\n", b"fixture-secret")
+        context, runner, events = self.ui_failure_context(original)
+        formatter = MODULE.ui_failure_diagnostics
+        def project(stdout, stderr):
+            self.assertEqual(events, ["helper-return"])
+            self.assertIs(context.report["generatedRunner"], runner)
+            self.assertEqual(context.report["originalTestReturncode"], 65)
+            self.assertIs(stdout, original.stdout); self.assertIs(stderr, original.stderr)
+            events.append("format")
+            return formatter(stdout, stderr)
+        with patch.object(MODULE, "read", return_value=(b"synthetic-build-report", None)), \
+                patch.object(MODULE, "write_new"), patch.object(MODULE, "ui_failure_diagnostics", side_effect=project):
+            with self.assertRaisesRegex(MODULE.Refused, "^original-ui-test-nonzero$") as caught:
+                context.ui_test()
+        context.failure(caught.exception)
+        self.assertEqual(events, ["helper-return", "format"])
+        self.assertEqual(context.report["uiFailureDiagnostics"], formatter(original.stdout, original.stderr))
+        self.assertEqual(context.report["originalTestReturncode"], 65)
+        self.assertEqual(context.report["error"], "original-ui-test-nonzero")
+        self.assertTrue(context.report["originalCallReturned"])
+        self.assertTrue(context.report["cleanup"]["unknownStateRetained"])
+        self.assertEqual(context.report["allWorkerFinality"], "not-established")
+        for key in ("diagnosticValid", "diagnosticComplete", "uiScenarioObserved", "normalQuitQualified",
+                    "fullUIQualified", "fullM2Qualified", "productReady"):
+            self.assertFalse(context.report[key])
+
+    def test_ui_failure_formatter_exception_or_oversize_cannot_replace_original_nonzero(self):
+        for scenario in ("exception", "oversize"):
+            with self.subTest(scenario=scenario):
+                original = subprocess.CompletedProcess([], 65, b"", b"fixture-secret")
+                context, runner, events = self.ui_failure_context(original)
+                with patch.object(MODULE, "read", return_value=(b"synthetic-build-report", None)), \
+                        patch.object(MODULE, "write_new"), patch.object(MODULE, "ui_failure_diagnostics") as formatter:
+                    if scenario == "exception":
+                        formatter.side_effect = RuntimeError("fixture-secret /Users/private/assertion")
+                    else:
+                        formatter.return_value = {"unsafe": "fixture-secret" * MODULE.UI_FAILURE_LIMIT}
+                    with self.assertRaisesRegex(MODULE.Refused, "^original-ui-test-nonzero$") as caught:
+                        context.ui_test()
+                    formatter.assert_called_once_with(original.stdout, original.stderr)
+                context.failure(caught.exception)
+                self.assertEqual(events, ["helper-return"])
+                self.assertIs(context.report["generatedRunner"], runner)
+                self.assertEqual(context.report["uiFailureDiagnostics"], MODULE.ui_failure_unavailable())
+                self.assertEqual(context.report["originalTestReturncode"], 65)
+                self.assertEqual(context.report["error"], "original-ui-test-nonzero")
+                self.assertNotIn("fixture-secret", json.dumps(context.report))
+                self.assertFalse(context.report["diagnosticComplete"])
+                self.assertEqual(context.report["allWorkerFinality"], "not-established")
+
+    def test_ui_failure_success_or_unreturned_helper_never_formats_or_publishes(self):
+        for scenario in ("zero", "admission-refused", "original-close-uncertain"):
+            with self.subTest(scenario=scenario):
+                original = subprocess.CompletedProcess([], 0, b"synthetic-success", b"")
+                context, runner, events = self.ui_failure_context(original)
+                if scenario == "zero":
+                    def zero(role, argv, timeout):
+                        self.assertIn(role, ("original-ui-summary", "original-ui-tests"))
+                        self.assertEqual(timeout, 15)
+                        events.append(role)
+                        return subprocess.CompletedProcess(argv, 0, role.encode(), b"")
+                    def accepted(stdout, summary, tests):
+                        self.assertEqual((stdout, summary, tests), (original.stdout, b"original-ui-summary", b"original-ui-tests"))
+                        events.append("success-parser")
+                        return {"syntheticAccepted": True}
+                    context.zero = zero
+                    context.ui_helper.packaged_ui_result = accepted
+                    context.observation_args = lambda selected: None
+                    context.stage.observation_command = lambda options: events.append("post-observation") or {"syntheticObserved": True}
+                else:
+                    def refused(*args):
+                        raise MODULE.Refused(scenario)
+                    context.ui_helper.run_admitted_test = refused
+                with patch.object(MODULE, "read", return_value=(b"synthetic-build-report", None)), \
+                        patch.object(MODULE, "write_new"), patch.object(MODULE, "ui_failure_diagnostics") as formatter:
+                    if scenario == "zero":
+                        context.ui_test()
+                    else:
+                        with self.assertRaisesRegex(MODULE.Refused, "^" + scenario + "$"):
+                            context.ui_test()
+                    formatter.assert_not_called()
+                self.assertNotIn("uiFailureDiagnostics", context.report)
+                self.assertEqual(context.report["allWorkerFinality"], "not-established")
+                self.assertFalse(context.report["productReady"])
+                if scenario == "zero":
+                    self.assertEqual(events, ["helper-return", "original-ui-summary", "original-ui-tests", "success-parser", "post-observation"])
+                    self.assertIs(context.report["generatedRunner"], runner)
+                    self.assertEqual(context.report["originalTestReturncode"], 0)
+                    self.assertTrue(context.report["diagnosticComplete"])
+                    self.assertTrue(context.report["uiScenarioObserved"])
+                else:
+                    self.assertEqual(events, [])
+                    self.assertNotIn("originalTestReturncode", context.report)
+                    self.assertNotIn("generatedRunner", context.report)
+                    self.assertFalse(context.report["diagnosticComplete"])
 
     def test_fixed_two_host_workflow_and_original_only_native_route(self):
         workflow = (ROOT / MODULE.WORKFLOW).read_text()
