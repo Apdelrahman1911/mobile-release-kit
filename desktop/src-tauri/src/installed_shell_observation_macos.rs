@@ -1005,9 +1005,42 @@ impl Record {
             .map_or(sample, |progress| sample.reconciled(progress.snapshot())))
     }
 }
+// Failure-only scalar projection. No native query, receipt substitute or permission.
+fn project_field_return_scope(case: Case, step: Step, id: u32) -> bool {
+    case == Case::ProjectFields && matches!(step, Step::ProjectFields(project_fields::Step::Native(i))
+        if project_fields::id(i) == Some(id) && project_fields::accepts(i)
+            && project_fields::kind(i) == Some(mrk_macos_installed_native::PanelKind::VersionSource))
+}
+fn input_publication_live(progress: OpenProgress) -> bool {
+    progress.requested && progress.dispatched && progress.entered && !progress.joined && !progress.retired
+        && match progress.state { "entered" => !progress.returned, "returned" => progress.returned, _ => false }
+}
+fn input_return_time_matches(returned_at: Instant, now: Instant, end: Instant) -> bool {
+    returned_at <= now && returned_at < end && now < end
+}
+fn received_input_sample(mut sample: OpenInputSample, progress: OpenProgress,
+    body: OpenActionBody, worker_joined: bool) -> Option<OpenInputSample> {
+    let native = body.native?; let report = native.report?;
+    if !native.entered || body.succeeded() || report.selection_mode != sample.selection
+        || !sample.prepared || !sample.requested || !sample.worker_registered || sample.report.is_some()
+        || !progress.requested || !progress.dispatched || !progress.entered || !progress.returned
+        || progress.joined || progress.retired || !matches!(progress.state, "returned" | "unknown") { return None; }
+    sample = sample.reconciled(progress);
+    sample.native_entered = Some(true);
+    // Body-return timing cannot establish the still-unjoined operation's timeliness.
+    sample.timely = progress.expired.then_some(false);
+    sample.custody_known = Some(body.custody_known() && progress.state != "unknown");
+    sample.worker_joined = worker_joined; // Actual joined handle, never receipt arrival.
+    sample.report = Some(report); sample.diagnostic = Some(report.diagnostic);
+    sample.attempted = Some(report.attempted); sample.press_returned = Some(report.press_returned);
+    sample.triggered = report.triggered;
+    Some(sample)
+}
+
 #[derive(Clone, Copy)]
 struct FailureSnapshot {
     source: &'static str, step: Step, pending: Option<Pending>, native_dispatch: Option<NativeDispatch>,
+    input_body_admission: Option<Option<bool>>,
     bootstrap: Option<BootstrapSample>,
     vault: Option<vault::FailureSample>,
     dom: Option<(u16, Option<ProjectChooserSample>)>,
@@ -1019,7 +1052,7 @@ struct FailureSnapshot {
 }
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
-        Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
+        Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch, input_body_admission: None,
             bootstrap: r.bootstrap_failure, vault: r.vault_failure,
             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
@@ -1035,6 +1068,7 @@ impl FailureSnapshot {
         // Non-accessibility fields are the original pre-arm sample, NOT fresh
         // pending/panel absence observations. The schema labels this explicitly.
         self.source = "prearm-open-progress";
+        self.input_body_admission = None;
         self.dom = None; // No fresh DOM/counter observation at this cached expiry.
         self.bootstrap = None; // A pre-arm cache is not the first failure's Record sample.
         self.vault = None; // Never attach a later original vault sample to an earlier cache.
@@ -1043,9 +1077,29 @@ impl FailureSnapshot {
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
         self
     }
+    fn received_input(self, case: Case, flight: &OpenFlight, now: Instant, end: Instant) -> Option<Self> {
+        let receipt = flight.returned.as_ref()?; let token = &flight.token;
+        let sample = self.accessibility?;
+        if !project_field_return_scope(case, self.step, token.id) || sample.id != token.id || sample.step != self.step
+            || !sample.selection || !token.identity().selects_version_source() || !token.same(&receipt.token)
+            || !input_return_time_matches(receipt.returned_at, now, end)
+            || self.pending != Some(Pending::Accessibility(token.id))
+            || !self.native_dispatch.is_some_and(|native| native.step == self.step && native.entered && native.returned)
+            || !self.last_panel.is_some_and(|panel| panel.step == self.step && panel.id == token.id && panel.kind == "version-source")
+            || !self.identity_binding.is_some_and(|identity| identity.case == case && identity.input_bound(token.id)) { return None; }
+        let progress = token.progress();
+        let returned = received_input_sample(sample, progress, receipt.body, flight.worker_returned.is_some())?;
+        let mut snapshot = self.at_expiry(progress);
+        snapshot.source = "prearm-open-return";
+        snapshot.input_body_admission = Some(receipt.body.admitted);
+        snapshot.accessibility = Some(returned);
+        Some(snapshot)
+    }
     fn frame(self, reason: &'static str) -> Option<Vec<u8>> {
         let step = format!("{:?}", self.step);
         if step.len() > 32 || !step.is_ascii() || !FAILURE_REASONS.contains(&reason) { return None; }
+        if self.input_body_admission.is_some() != (self.source == "prearm-open-return")
+            || self.input_body_admission.is_some() && reason != "native-default-input" { return None; }
         if self.project_selection.is_some() && (self.source != "record" || !project_selection_failure_reason(reason)
             || !matches!(self.step, Step::OpenProject | Step::ProjectSettled)) { return None; }
         if self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason)) { return None; }
@@ -1094,6 +1148,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     if let Some(sample) = r.vault { value["vault"] = sample.value(); }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
+    if let Some(admitted) = r.input_body_admission { value["inputBodyAdmission"] = json!(admitted); }
     if let Some((i,data,name)) = r.field_preparation {
         value["projectFieldPreparation"] = json!({"operationId":project_fields::id(i),"kind":project_fields::kind_name(i),
             "returned":true,"result":data.result,"facts":data.facts,"fileFilter":file_filter_value(data.file_filter),
@@ -1304,6 +1359,16 @@ impl Observation {
             && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {
             return;
         }
+        // Only this live original's publication gap may defer the generic frame.
+        // Queued/no-GO/spawn errors, Unknown and the original endpoint never wait.
+        if reason == "native-default-input" && Instant::now() < self.end && r.prepared_open.is_none()
+            && r.accessibility.is_some_and(|sample| project_field_return_scope(self.case, r.step, sample.id)
+                && r.pending == Some(Pending::Accessibility(sample.id)) && sample.step == r.step && sample.selection
+                && sample.prepared && sample.requested && sample.worker_registered && sample.report.is_none()
+                && sample.native_entered.is_none()
+                && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && native.returned)
+                && r.identity_binding.is_some_and(|identity| identity.case == self.case && identity.input_bound(sample.id)))
+            && r.open_progress.as_ref().is_some_and(|progress| input_publication_live(progress.snapshot())) { return; }
         let snapshot = FailureSnapshot::from_record(&r); drop(r);
         self.diagnostic.submit(snapshot.frame(reason));
     }
@@ -1312,6 +1377,16 @@ impl Observation {
         if let Some(reason) = first_failure_reason(&self.failure_reason) {
             self.diagnostic.submit(snapshot.at_expiry(progress).frame(reason));
         }
+    }
+    fn report_open_return(&self, flight: &OpenFlight, expiry: bool) {
+        if !self.failed.load(Ordering::SeqCst) || !self.diagnostic.available() { return; }
+        if first_failure_reason(&self.failure_reason) == Some("native-default-input") {
+            if let Some(snapshot) = flight.baseline.received_input(self.case, flight, Instant::now(), self.end) {
+                self.diagnostic.submit(snapshot.frame("native-default-input"));
+                return; // A refused/oversized frame still spends the same one-shot writer.
+            }
+        }
+        if expiry { self.report_expiry(flight.baseline, flight.token.progress()); }
     }
     pub(super) fn attach(&self, _: &Supervisor) -> Result<(), BridgeError> {
         let Some(mut r) = self.record() else { return Err(BridgeError::cleanup_unknown()); };
@@ -2261,15 +2336,22 @@ impl Observation {
             // Receipt arrival does not stop this independent deadline owner.
             // Latch BEFORE receiving, inspecting finality, reporting or joining.
             let now = Instant::now();
+            let mut expiry_report = false;
             if now >= end && !deadline_observed {
+                expiry_report = true;
                 deadline_observed = true;
                 token.expire(); self.fail_with("native-default-deadline");
-                self.report_expiry(flight.baseline, token.progress());
             }
-            if now >= self.end { self.open_unknown(&token); return true; }
+            if now >= self.end {
+                if expiry_report { self.report_expiry(flight.baseline, token.progress()); }
+                self.open_unknown(&token); return true;
+            }
             if flight.returned.is_none() {
                 if let Ok(receipt) = flight.receipt.try_recv() { flight.returned = Some(receipt); }
             }
+            // The deadline latch precedes this existing nonblocking receipt choice.
+            // Return DATA may explain a failure; it cannot settle the live worker.
+            self.report_open_return(flight, expiry_report);
             if flight.worker.as_ref().is_some_and(|handle| handle.is_finished()) {
                 let returned = match flight.worker.take().expect("positively finished original").join() {
                     Ok(returned) => returned,
@@ -2278,7 +2360,10 @@ impl Observation {
                 flight.worker_returned = Some(returned); // Actual join, not a receipt or process exit.
                 if Instant::now() >= end {
                     token.expire(); self.fail_with("native-default-deadline");
-                    self.report_expiry(flight.baseline, token.progress());
+                    if Instant::now() < self.end && flight.returned.is_none() {
+                        if let Ok(receipt) = flight.receipt.try_recv() { flight.returned = Some(receipt); }
+                    }
+                    self.report_open_return(flight, true);
                 }
                 break;
             }
@@ -3646,6 +3731,48 @@ fn native_recheck_data_check() -> bool {
     let sample = baseline.reconciled(progress);
     if !sample.dispatch_attempted || sample.entered != Some(true) || !sample.returned || sample.worker_joined
         || sample.custody_known != Some(false) || sample.native_entered.is_some() || sample.report.is_some() { return false; }
+    // Returned-body diagnostics are DATA only, not original token/worker receipts.
+    for i in 0..project_fields::COUNT as u8 {
+        let step = Step::ProjectFields(project_fields::Step::Native(i)); let id = u32::from(i) + 2;
+        let expected = matches!(i, 0 | 6 | 7 | 8);
+        if project_field_return_scope(Case::ProjectFields, step, id) != expected
+            || project_field_return_scope(Case::FirstSave, step, id)
+            || project_field_return_scope(Case::ProjectFields, step, id + 1) { return false; }
+    }
+    let base_progress = OpenProgress { state: "entered", requested: true, dispatched: true, entered: true,
+        returned: false, joined: false, retired: false, expired: false };
+    if !input_publication_live(base_progress)
+        || !input_publication_live(OpenProgress { state: "returned", returned: true, ..base_progress }) { return false; }
+    for state in ["prepared", "requested", "queued", "joined", "retired", "unknown"] {
+        if input_publication_live(OpenProgress { state, ..base_progress }) { return false; }
+    }
+    for change in [OpenProgress { entered: false, ..base_progress }, OpenProgress { dispatched: false, ..base_progress },
+        OpenProgress { joined: true, ..base_progress }, OpenProgress { retired: true, ..base_progress },
+        OpenProgress { state: "returned", ..base_progress }, OpenProgress { returned: true, ..base_progress }] {
+        if input_publication_live(change) { return false; }
+    }
+    let now = Instant::now(); let end = now + Duration::from_secs(1);
+    if !input_return_time_matches(now, now, end) || input_return_time_matches(end, now, end)
+        || input_return_time_matches(end, end, end) || input_return_time_matches(now, end, end) { return false; }
+    let returned_progress = OpenProgress { state: "returned", returned: true, ..base_progress };
+    let mut before_return = OpenInputSample::preparing(2, Step::OpenProject);
+    before_return.prepared = true; before_return.requested(); before_return.worker_registered = true;
+    let native_body = mrk_macos_installed_native::OpenInputReturn { entered: true, report: Some(report), custody_known: true };
+    for admitted in [None, Some(false)] {
+        let body = OpenActionBody { native: Some(native_body), admitted };
+        let progress = if admitted.is_none() { OpenProgress { state: "unknown", ..returned_progress } } else { returned_progress };
+        let Some(sample) = received_input_sample(before_return, progress, body, false) else { return false; };
+        if sample.report != Some(report) || sample.native_entered != Some(true) || sample.timely.is_some()
+            || sample.joined || sample.retired || sample.worker_joined || sample.rechecks_settled.is_some()
+            || sample.succeeded() || sample.custody_known != Some(admitted.is_some()) { return false; }
+        let Some(expired) = received_input_sample(before_return, OpenProgress { expired: true, ..progress }, body, true) else { return false; };
+        if expired.timely != Some(false) || !expired.worker_joined || expired.joined || expired.retired { return false; }
+    }
+    for body in [OpenActionBody { native: Some(native_body), admitted: Some(true) },
+        OpenActionBody { native: Some(mrk_macos_installed_native::OpenInputReturn { report: None, ..native_body }), admitted: Some(false) },
+        OpenActionBody::no_native(Some(false))] {
+        if received_input_sample(before_return, returned_progress, body, false).is_some() { return false; }
+    }
     // Channel DATA only: exercise the real one-shot handoff without a worker,
     // sink, sleep or a fake completion/JoinHandle. Native runs own the actual one.
     let writer = || {
@@ -3690,7 +3817,7 @@ fn bootstrap_diagnostic_data_checks() -> bool {
     latch_failure(&first, &failed, "bootstrap-info-methods-shape");
     latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
     if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
-    let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None,
+    let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None, input_body_admission: None,
         bootstrap: Some(sample), vault: None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
         accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()

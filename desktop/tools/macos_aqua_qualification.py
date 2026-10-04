@@ -101,7 +101,12 @@ def _recovery_report(value):
 
 # A failure record describes one returned precursor, never app success/finality.
 IOS_ACCOUNT_FAILURE_REASONS = ('duplicate-private-key', 'native-account-entry', 'entry-bounds', 'original-clock', 'state-route', 'private-comparison-binding', 'native-account-user', 'original-work-expired', 'original-finality-expired', 'descriptor-not-original', 'descriptor-limit', 'descriptor-inheritance', 'baseline-original-changed', 'directory-route', 'directory-original', 'baseline-not-eligible', 'baseline-path', 'baseline-member-original', 'baseline-member-substitution', 'command-owner', 'fixed-native-command', 'original-account-command-source', 'command-deadline', 'native-original-return', 'native-original-finality', 'private-comparison-file', 'private-comparison-original', 'private-account-binding', 'profile-destination-occupied', 'pending-boundary-unsettled', 'private-comparison-bound', 'persistent-lease-substitution', 'native-baseline-not-restored', 'pending-session-remains', 'account-original-close', 'account-close-state', 'producer-original-finality', 'pending-origin', 'readback-only', 'receipt-bound', 'original-operation-failed')
-PRECURSOR_FAILURE_CATEGORIES = ('none', 'refused', 'runtime', 'os', 'permission', 'missing', 'timeout', 'value', 'type', 'key', 'attribute', 'import', 'assertion', 'interrupted', 'exit', 'process-cleanup', 'other')
+# Role0 is the original producer literal; other fixed role IDs name
+# src/mobile_release/<name>.py in the run's exact source, never an observed path.
+PRECURSOR_FAILURE_SOURCE_ROLES = ('producer-literal', 'build_inputs', 'local_signing', 'init_transaction', 'checked_files', 'cancellation', 'owned_process', '_command_process', '_native_process', '_lifetime_evidence', '_profile_callers', 'errors')
+PRECURSOR_FAILURE_CATEGORIES = ('none', 'refused', 'runtime', 'os', 'permission', 'missing', 'exists', 'timeout', 'blocked', 'broken-pipe', 'child-process', 'is-directory', 'not-directory', 'connection', 'connection-aborted', 'connection-refused', 'connection-reset', 'os-interrupted', 'process-missing', 'value', 'type', 'key', 'attribute', 'import', 'import-missing', 'assertion', 'interrupted', 'exit', 'not-implemented', 'recursion', 'index', 'overflow', 'memory', 'build-input', 'build-input-busy', 'build-input-root-changed', 'build-input-manual', 'desktop-recovery-refused', 'private-publication', 'signing-busy', 'signing-pending', 'init-conflict', 'init-operation-failure', 'init-interrupted', 'process', 'process-cleanup', 'process-outcome-unknown', 'process-interrupted', 'native-process', 'mobile-release', 'configuration', 'validation', 'credential', 'mutation-guard', 'store-operation', 'other')
+PRECURSOR_FAILURE_OS_CATEGORIES = ('os', 'permission', 'missing', 'exists', 'timeout', 'blocked', 'broken-pipe', 'child-process', 'is-directory', 'not-directory', 'connection', 'connection-aborted', 'connection-refused', 'connection-reset', 'os-interrupted', 'process-missing')
+PRECURSOR_FAILURE_LIMIT = 2048
 
 
 def _precursor_spec(kind):
@@ -114,19 +119,79 @@ def _precursor_spec(kind):
             16*1024 if kind == "ios-account-produce" else 2048)
 
 
+def _precursor_exception_graph(value, kind, program):
+    graph = value["exceptionGraph"]
+    need(type(graph) is dict and set(graph) == {"raised", "caught", "nodes", "complete", "boundRoles"}
+         and type(graph["raised"]) is int and graph["raised"] == 0
+         and type(graph["complete"]) is bool, "precursor-diagnostic-graph")
+    nodes, roles, caught = graph["nodes"], graph["boundRoles"], graph["caught"]
+    need(type(nodes) is list and 1 <= len(nodes) <= 4
+         and type(roles) is list and 1 <= len(roles) <= len(PRECURSOR_FAILURE_SOURCE_ROLES)
+         and all(type(role) is int and 0 <= role < len(PRECURSOR_FAILURE_SOURCE_ROLES) for role in roles)
+         and roles == sorted(set(roles)) and roles[0] == 0, "precursor-diagnostic-roles")
+    # Both actual roots were reserved before cause/context expansion. A distinct
+    # project caught object cannot be displaced by a long outer failure chain.
+    need(caught is None or type(caught) is int and caught in (0, 1) and caught < len(nodes),
+         "precursor-diagnostic-caught-root")
+    need(kind == "project-recovery-producer" or caught is None, "precursor-diagnostic-caught-root")
+    omitted = False
+    for node in nodes:
+        need(type(node) is dict and set(node) == {"category", "errno", "sites", "tracebackLinksSeen",
+             "tracebackComplete", "unmappedFrames", "sitesTruncated", "cause", "context", "suppressed"},
+             "precursor-diagnostic-node")
+        need(type(node["category"]) is str and node["category"] in PRECURSOR_FAILURE_CATEGORIES
+             and node["category"] != "none", "precursor-diagnostic-node-category")
+        number = node["errno"]
+        need(number is None or type(number) is int and 0 <= number <= 4095
+             and node["category"] in PRECURSOR_FAILURE_OS_CATEGORIES, "precursor-diagnostic-errno")
+        sites, links, unmapped = node["sites"], node["tracebackLinksSeen"], node["unmappedFrames"]
+        need(type(sites) is list and len(sites) <= 8
+             and type(links) is int and 0 <= links <= 32
+             and type(unmapped) is int and 0 <= unmapped <= links
+             and type(node["tracebackComplete"]) is bool and type(node["sitesTruncated"]) is bool
+             and type(node["suppressed"]) is bool, "precursor-diagnostic-node-bounds")
+        for site in sites:
+            need(type(site) is list and len(site) == 2 and type(site[0]) is int and site[0] in roles
+                 and type(site[1]) is int and 1 <= site[1] <= 1_000_000
+                 and (site[0] != 0 or site[1] <= len(program.splitlines())), "precursor-diagnostic-node-site")
+        need(node["tracebackComplete"] or links == 32, "precursor-diagnostic-node-cutoff")
+        need((len(sites) == 8 and links > len(sites) + unmapped) if node["sitesTruncated"]
+             else links == len(sites) + unmapped, "precursor-diagnostic-node-counts")
+        for key in ("cause", "context"):
+            edge = node[key]
+            need(edge is None or type(edge) is int and -1 <= edge < len(nodes), "precursor-diagnostic-edge")
+            omitted = omitted or edge == -1
+    need(graph["complete"] == (not omitted), "precursor-diagnostic-graph-cutoff")
+    reachable = {0} if caught is None else {0, caught}
+    for _ in nodes:
+        for index in tuple(reachable):
+            for key in ("cause", "context"):
+                edge = nodes[index][key]
+                if edge is not None and edge >= 0:
+                    reachable.add(edge)
+    need(len(reachable) == len(nodes), "precursor-diagnostic-unreachable-node")
+    need(value["exceptionCategory"] == nodes[0]["category"]
+         and value["tracebackLinksSeen"] == nodes[0]["tracebackLinksSeen"]
+         and (not value["sourceSitesComplete"] or nodes[0]["tracebackComplete"]),
+         "precursor-diagnostic-raised-binding")
+    if kind == "project-recovery-producer":
+        need(value["caughtExceptionCategory"] == ("none" if caught is None else nodes[caught]["category"]),
+             "precursor-diagnostic-caught-binding")
+
+
 def _precursor_child_failure(stderr, kind):
     program, marker, reasons, _ = _precursor_spec(kind)
-    if (type(stderr) is not bytes or not 0 < len(stderr) <= 768 or not stderr.startswith(marker)
+    if (type(stderr) is not bytes or not 0 < len(stderr) <= PRECURSOR_FAILURE_LIMIT or not stderr.startswith(marker)
             or not stderr.endswith(b"\n") or b"\n" in stderr[:-1]):
         return None
     try:
         value = json.loads(stderr[len(marker):-1], object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("precursor-diagnostic-json")))
-        expected = {"schemaVersion", "reason", "exceptionCategory", "sourceSites", "tracebackLinksSeen", "sourceSitesComplete"}
+        expected = {"schemaVersion", "reason", "exceptionCategory", "sourceSites", "tracebackLinksSeen", "sourceSitesComplete", "exceptionGraph"}
         if kind == "project-recovery-producer":
             expected.add("caughtExceptionCategory")
         need(type(value) is dict and set(value) == expected and type(value["schemaVersion"]) is int
-             and value["schemaVersion"] == 1, "precursor-diagnostic-schema")
+             and value["schemaVersion"] == 2, "precursor-diagnostic-schema")
         need(type(value["reason"]) is str and value["reason"] in reasons
              and type(value["exceptionCategory"]) is str and value["exceptionCategory"] in PRECURSOR_FAILURE_CATEGORIES
              and value["exceptionCategory"] != "none", "precursor-diagnostic-enum")
@@ -137,10 +202,11 @@ def _precursor_child_failure(stderr, kind):
         if kind == "project-recovery-producer":
             need(type(value["caughtExceptionCategory"]) is str and value["caughtExceptionCategory"] in PRECURSOR_FAILURE_CATEGORIES,
                  "precursor-diagnostic-caught")
+        _precursor_exception_graph(value, kind, program)
         canonical = json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
         need(stderr == marker + canonical + b"\n", "precursor-diagnostic-record")
         return value
-    except (Refused, ValueError, TypeError, UnicodeError, RecursionError):
+    except (Refused, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         return None  # Malformed detail cannot authorize anything or export private bytes.
 
 
@@ -419,41 +485,113 @@ SHELL_RECOVERY_PRODUCER = r'''try:
     sys.stdout.buffer.flush()
 except BaseException as _failure_error:
     try:
-        import json, sys
+        # Retained exceptions and loaded namespaces only: no import, filesystem,
+        # native query, replay, cleanup or arbitrary exception formatting here.
         _failure_globals = globals()
+        _failure_core = None
+        if (type(sys.argv) is list and 1 < len(sys.argv) <= 8 and type(sys.argv[1]) is str
+                and 0 < len(sys.argv[1]) <= 512 and sys.argv[1].startswith("/")):
+            _failure_core = sys.argv[1]
+        _failure_namespaces = [(0, _failure_globals, "<string>")]
+        _failure_types = [(RuntimeError, 'runtime'), (OSError, 'os'), (PermissionError, 'permission'), (FileNotFoundError, 'missing'), (FileExistsError, 'exists'), (TimeoutError, 'timeout'), (BlockingIOError, 'blocked'), (BrokenPipeError, 'broken-pipe'), (ChildProcessError, 'child-process'), (IsADirectoryError, 'is-directory'), (NotADirectoryError, 'not-directory'), (ConnectionError, 'connection'), (ConnectionAbortedError, 'connection-aborted'), (ConnectionRefusedError, 'connection-refused'), (ConnectionResetError, 'connection-reset'), (InterruptedError, 'os-interrupted'), (ProcessLookupError, 'process-missing'), (ValueError, 'value'), (TypeError, 'type'), (KeyError, 'key'), (AttributeError, 'attribute'), (ImportError, 'import'), (ModuleNotFoundError, 'import-missing'), (AssertionError, 'assertion'), (KeyboardInterrupt, 'interrupted'), (SystemExit, 'exit'), (NotImplementedError, 'not-implemented'), (RecursionError, 'recursion'), (IndexError, 'index'), (OverflowError, 'overflow'), (MemoryError, 'memory')]
+        _failure_os_types = (OSError, PermissionError, FileNotFoundError, FileExistsError, TimeoutError, BlockingIOError, BrokenPipeError, ChildProcessError, IsADirectoryError, NotADirectoryError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError, InterruptedError, ProcessLookupError,)
+        _failure_refused = _failure_globals.get("Refused")
+        if type(_failure_refused) is type:
+            _failure_types.append((_failure_refused, "refused"))
+        # IDs match PRECURSOR_FAILURE_SOURCE_ROLES in the original outer reader.
+        _failure_roles = ((1, 'build_inputs', (('BuildInputError', 'build-input'), ('BuildInputBusy', 'build-input-busy'), ('BuildInputRootChanged', 'build-input-root-changed'), ('BuildInputManualRecoveryRequired', 'build-input-manual'), ('_DesktopRecoveryRefused', 'desktop-recovery-refused'), ('_PrivatePublicationError', 'private-publication'))), (2, 'local_signing', (('SigningBusy', 'signing-busy'), ('SigningPending', 'signing-pending'))), (3, 'init_transaction', (('InitConflict', 'init-conflict'), ('InitOperationFailure', 'init-operation-failure'), ('InitInterrupted', 'init-interrupted'))), (4, 'checked_files', ()), (5, 'cancellation', ()), (6, 'owned_process', (('ProcessError', 'process'), ('ProcessCleanupError', 'process-cleanup'), ('ProcessOutcomeUnknown', 'process-outcome-unknown'), ('ProcessInterrupted', 'process-interrupted'))), (7, '_command_process', ()), (8, '_native_process', (('NativeProcessError', 'native-process'),)), (9, '_lifetime_evidence', ()), (10, '_profile_callers', ()), (11, 'errors', (('MobileReleaseError', 'mobile-release'), ('ConfigurationError', 'configuration'), ('ValidationError', 'validation'), ('CredentialError', 'credential'), ('MutationGuardError', 'mutation-guard'), ('StoreOperationError', 'store-operation'))))
+        if _failure_core is not None and type(sys.modules) is dict:
+            for _failure_role, _failure_name, _failure_classes in _failure_roles:
+                _failure_full_name = "mobile_release." + _failure_name
+                _failure_module = sys.modules.get(_failure_full_name)
+                if type(_failure_module) is not type(sys):
+                    continue
+                _failure_namespace = _failure_module.__dict__
+                _failure_filename = _failure_core + "/mobile_release/" + _failure_name + ".py"
+                if (type(_failure_namespace.get("__name__")) is not str
+                        or _failure_namespace["__name__"] != _failure_full_name
+                        or type(_failure_namespace.get("__file__")) is not str
+                        or _failure_namespace["__file__"] != _failure_filename):
+                    continue
+                _failure_namespaces.append((_failure_role, _failure_namespace, _failure_filename))
+                for _failure_class_name, _failure_label in _failure_classes:
+                    _failure_class = _failure_namespace.get(_failure_class_name)
+                    if type(_failure_class) is type:
+                        _failure_types.append((_failure_class, _failure_label))
         def _failure_category(error):
             if error is None: return "none"
-            if type(error) is _failure_globals.get("Refused"): return "refused"
-            if type(error) is _failure_globals.get("ProcessCleanupError"): return "process-cleanup"
-            return {RuntimeError:"runtime", OSError:"os", PermissionError:"permission", FileNotFoundError:"missing",
-                TimeoutError:"timeout", BlockingIOError:"os", BrokenPipeError:"os", ChildProcessError:"os",
-                ValueError:"value", TypeError:"type", KeyError:"key", AttributeError:"attribute",
-                ImportError:"import", ModuleNotFoundError:"import", AssertionError:"assertion",
-                KeyboardInterrupt:"interrupted", SystemExit:"exit"}.get(type(error), "other")
+            for expected, category in _failure_types:
+                if type(error) is expected: return category
+            return "other"
         _failure_args = BaseException.args.__get__(_failure_error)
         _failure_reason = "original-operation-failed"
         if (type(_failure_error) is RuntimeError and type(_failure_args) is tuple and len(_failure_args) == 1
                 and type(_failure_args[0]) is str and _failure_args[0] == "fixed recovery fixture refused"):
             _failure_reason = "fixture-check-failed"
-        _failure_tb = BaseException.__traceback__.__get__(_failure_error)
-        _failure_sites, _failure_links, _failure_omitted = [], 0, False
-        # Bound all links, not merely exported own sites. A foreign <string>
-        # frame is not this program; no names, paths, locals or messages escape.
-        while _failure_tb is not None and _failure_links < 32:
-            _failure_links += 1
-            _failure_frame = _failure_tb.tb_frame
-            if _failure_frame.f_globals is _failure_globals and _failure_frame.f_code.co_filename == "<string>":
-                _failure_line = _failure_tb.tb_lineno
-                if type(_failure_line) is int and 1 <= _failure_line <= 135 and len(_failure_sites) < 4:
-                    _failure_sites.append(_failure_line)
-                else: _failure_omitted = True
-            _failure_tb = _failure_tb.tb_next
-        _failure_detail = {"schemaVersion":1, "reason":_failure_reason, "exceptionCategory":_failure_category(_failure_error),
-            "sourceSites":_failure_sites, "tracebackLinksSeen":_failure_links,
-            "sourceSitesComplete":_failure_tb is None and not _failure_omitted}
-        _failure_detail["caughtExceptionCategory"] = _failure_category(_failure_globals.get("caught"))
+        _failure_objects, _failure_nodes = [], []
+        def _failure_add(error):
+            if error is None: return None
+            for index, original in enumerate(_failure_objects):
+                if original is error: return index
+            if len(_failure_objects) == 4: return -1
+            _failure_objects.append(error)
+            return len(_failure_objects) - 1
+        _failure_raised = _failure_add(_failure_error)
+        _failure_caught = _failure_add(_failure_globals.get("caught"))
+        _failure_complete = True
+        _failure_sites, _failure_own_omitted = [], False
+        _failure_index = 0
+        while _failure_index < len(_failure_objects):
+            _failure_original = _failure_objects[_failure_index]
+            _failure_cause = _failure_add(BaseException.__cause__.__get__(_failure_original))
+            _failure_context = _failure_add(BaseException.__context__.__get__(_failure_original))
+            _failure_complete = _failure_complete and _failure_cause != -1 and _failure_context != -1
+            _failure_tb = BaseException.__traceback__.__get__(_failure_original)
+            _failure_node_sites, _failure_links, _failure_unmapped, _failure_truncated = [], 0, 0, False
+            while _failure_tb is not None and _failure_links < 32:
+                _failure_links += 1
+                _failure_frame, _failure_line = _failure_tb.tb_frame, _failure_tb.tb_lineno
+                _failure_frame_role = None
+                for _failure_role, _failure_namespace, _failure_filename in _failure_namespaces:
+                    if (_failure_frame.f_globals is _failure_namespace
+                            and _failure_frame.f_code.co_filename == _failure_filename):
+                        _failure_frame_role = _failure_role
+                        break
+                _failure_line_ok = (type(_failure_line) is int and 1 <= _failure_line <= 1_000_000
+                    and (_failure_frame_role != 0 or _failure_line <= 207))
+                # Legacy cap4 is independent of the graph's first8 mixed sites.
+                if _failure_index == 0 and _failure_frame_role == 0:
+                    if _failure_line_ok and len(_failure_sites) < 4:
+                        _failure_sites.append(_failure_line)
+                    else:
+                        _failure_own_omitted = True
+                if _failure_frame_role is None or not _failure_line_ok:
+                    _failure_unmapped += 1
+                elif len(_failure_node_sites) < 8:
+                    _failure_node_sites.append([_failure_frame_role, _failure_line])
+                else:
+                    _failure_truncated = True
+                _failure_tb = _failure_tb.tb_next
+            _failure_errno = None
+            if any(type(_failure_original) is expected for expected in _failure_os_types):
+                _failure_number = OSError.errno.__get__(_failure_original)
+                if type(_failure_number) is int and 0 <= _failure_number <= 4095:
+                    _failure_errno = _failure_number
+            _failure_nodes.append({"category": _failure_category(_failure_original), "errno": _failure_errno,
+                "sites": _failure_node_sites, "tracebackLinksSeen": _failure_links,
+                "tracebackComplete": _failure_tb is None, "unmappedFrames": _failure_unmapped,
+                "sitesTruncated": _failure_truncated, "cause": _failure_cause, "context": _failure_context,
+                "suppressed": BaseException.__suppress_context__.__get__(_failure_original)})
+            _failure_index += 1
+        _failure_detail = {"schemaVersion":2, "reason":_failure_reason,
+            "exceptionCategory":_failure_nodes[0]["category"], "sourceSites":_failure_sites,
+            "tracebackLinksSeen":_failure_nodes[0]["tracebackLinksSeen"],
+            "sourceSitesComplete":_failure_nodes[0]["tracebackComplete"] and not _failure_own_omitted,
+            "exceptionGraph":{"raised":_failure_raised, "caught":_failure_caught, "nodes":_failure_nodes,
+                "complete":_failure_complete, "boundRoles":[role for role, _, _ in _failure_namespaces]}}
+        _failure_detail["caughtExceptionCategory"] = "none" if _failure_caught is None else _failure_nodes[_failure_caught]["category"]
         _failure_raw = "MRK_PROJECT_RECOVERY_FIXTURE_FAILURE=" + json.dumps(_failure_detail,sort_keys=True,separators=(",",":"),ensure_ascii=True,allow_nan=False) + "\n"
-        if len(_failure_raw.encode("ascii")) <= 768:
+        if len(_failure_raw.encode("ascii")) <= 2048:
             sys.stderr.write(_failure_raw)
             sys.stderr.flush()
     except BaseException:
@@ -648,40 +786,113 @@ def main():
 try:main()
 except BaseException as _failure_error:
     try:
-        import json, sys
+        # Retained exceptions and loaded namespaces only: no import, filesystem,
+        # native query, replay, cleanup or arbitrary exception formatting here.
         _failure_globals = globals()
+        _failure_core = None
+        if (type(sys.argv) is list and 1 < len(sys.argv) <= 8 and type(sys.argv[1]) is str
+                and 0 < len(sys.argv[1]) <= 512 and sys.argv[1].startswith("/")):
+            _failure_core = sys.argv[1]
+        _failure_namespaces = [(0, _failure_globals, "<string>")]
+        _failure_types = [(RuntimeError, 'runtime'), (OSError, 'os'), (PermissionError, 'permission'), (FileNotFoundError, 'missing'), (FileExistsError, 'exists'), (TimeoutError, 'timeout'), (BlockingIOError, 'blocked'), (BrokenPipeError, 'broken-pipe'), (ChildProcessError, 'child-process'), (IsADirectoryError, 'is-directory'), (NotADirectoryError, 'not-directory'), (ConnectionError, 'connection'), (ConnectionAbortedError, 'connection-aborted'), (ConnectionRefusedError, 'connection-refused'), (ConnectionResetError, 'connection-reset'), (InterruptedError, 'os-interrupted'), (ProcessLookupError, 'process-missing'), (ValueError, 'value'), (TypeError, 'type'), (KeyError, 'key'), (AttributeError, 'attribute'), (ImportError, 'import'), (ModuleNotFoundError, 'import-missing'), (AssertionError, 'assertion'), (KeyboardInterrupt, 'interrupted'), (SystemExit, 'exit'), (NotImplementedError, 'not-implemented'), (RecursionError, 'recursion'), (IndexError, 'index'), (OverflowError, 'overflow'), (MemoryError, 'memory')]
+        _failure_os_types = (OSError, PermissionError, FileNotFoundError, FileExistsError, TimeoutError, BlockingIOError, BrokenPipeError, ChildProcessError, IsADirectoryError, NotADirectoryError, ConnectionError, ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError, InterruptedError, ProcessLookupError,)
+        _failure_refused = _failure_globals.get("Refused")
+        if type(_failure_refused) is type:
+            _failure_types.append((_failure_refused, "refused"))
+        # IDs match PRECURSOR_FAILURE_SOURCE_ROLES in the original outer reader.
+        _failure_roles = ((1, 'build_inputs', (('BuildInputError', 'build-input'), ('BuildInputBusy', 'build-input-busy'), ('BuildInputRootChanged', 'build-input-root-changed'), ('BuildInputManualRecoveryRequired', 'build-input-manual'), ('_DesktopRecoveryRefused', 'desktop-recovery-refused'), ('_PrivatePublicationError', 'private-publication'))), (2, 'local_signing', (('SigningBusy', 'signing-busy'), ('SigningPending', 'signing-pending'))), (3, 'init_transaction', (('InitConflict', 'init-conflict'), ('InitOperationFailure', 'init-operation-failure'), ('InitInterrupted', 'init-interrupted'))), (4, 'checked_files', ()), (5, 'cancellation', ()), (6, 'owned_process', (('ProcessError', 'process'), ('ProcessCleanupError', 'process-cleanup'), ('ProcessOutcomeUnknown', 'process-outcome-unknown'), ('ProcessInterrupted', 'process-interrupted'))), (7, '_command_process', ()), (8, '_native_process', (('NativeProcessError', 'native-process'),)), (9, '_lifetime_evidence', ()), (10, '_profile_callers', ()), (11, 'errors', (('MobileReleaseError', 'mobile-release'), ('ConfigurationError', 'configuration'), ('ValidationError', 'validation'), ('CredentialError', 'credential'), ('MutationGuardError', 'mutation-guard'), ('StoreOperationError', 'store-operation'))))
+        if _failure_core is not None and type(sys.modules) is dict:
+            for _failure_role, _failure_name, _failure_classes in _failure_roles:
+                _failure_full_name = "mobile_release." + _failure_name
+                _failure_module = sys.modules.get(_failure_full_name)
+                if type(_failure_module) is not type(sys):
+                    continue
+                _failure_namespace = _failure_module.__dict__
+                _failure_filename = _failure_core + "/mobile_release/" + _failure_name + ".py"
+                if (type(_failure_namespace.get("__name__")) is not str
+                        or _failure_namespace["__name__"] != _failure_full_name
+                        or type(_failure_namespace.get("__file__")) is not str
+                        or _failure_namespace["__file__"] != _failure_filename):
+                    continue
+                _failure_namespaces.append((_failure_role, _failure_namespace, _failure_filename))
+                for _failure_class_name, _failure_label in _failure_classes:
+                    _failure_class = _failure_namespace.get(_failure_class_name)
+                    if type(_failure_class) is type:
+                        _failure_types.append((_failure_class, _failure_label))
         def _failure_category(error):
             if error is None: return "none"
-            if type(error) is _failure_globals.get("Refused"): return "refused"
-            if type(error) is _failure_globals.get("ProcessCleanupError"): return "process-cleanup"
-            return {RuntimeError:"runtime", OSError:"os", PermissionError:"permission", FileNotFoundError:"missing",
-                TimeoutError:"timeout", BlockingIOError:"os", BrokenPipeError:"os", ChildProcessError:"os",
-                ValueError:"value", TypeError:"type", KeyError:"key", AttributeError:"attribute",
-                ImportError:"import", ModuleNotFoundError:"import", AssertionError:"assertion",
-                KeyboardInterrupt:"interrupted", SystemExit:"exit"}.get(type(error), "other")
+            for expected, category in _failure_types:
+                if type(error) is expected: return category
+            return "other"
         _failure_args = BaseException.args.__get__(_failure_error)
         _failure_reason = "original-operation-failed"
         if (type(_failure_error) is Refused and type(_failure_args) is tuple and len(_failure_args) == 1
                 and type(_failure_args[0]) is str and _failure_args[0] in ('duplicate-private-key', 'native-account-entry', 'entry-bounds', 'original-clock', 'state-route', 'private-comparison-binding', 'native-account-user', 'original-work-expired', 'original-finality-expired', 'descriptor-not-original', 'descriptor-limit', 'descriptor-inheritance', 'baseline-original-changed', 'directory-route', 'directory-original', 'baseline-not-eligible', 'baseline-path', 'baseline-member-original', 'baseline-member-substitution', 'command-owner', 'fixed-native-command', 'original-account-command-source', 'command-deadline', 'native-original-return', 'native-original-finality', 'private-comparison-file', 'private-comparison-original', 'private-account-binding', 'profile-destination-occupied', 'pending-boundary-unsettled', 'private-comparison-bound', 'persistent-lease-substitution', 'native-baseline-not-restored', 'pending-session-remains', 'account-original-close', 'account-close-state', 'producer-original-finality', 'pending-origin', 'readback-only', 'receipt-bound', 'original-operation-failed')):
             _failure_reason = _failure_args[0]
-        _failure_tb = BaseException.__traceback__.__get__(_failure_error)
-        _failure_sites, _failure_links, _failure_omitted = [], 0, False
-        # Bound all links, not merely exported own sites. A foreign <string>
-        # frame is not this program; no names, paths, locals or messages escape.
-        while _failure_tb is not None and _failure_links < 32:
-            _failure_links += 1
-            _failure_frame = _failure_tb.tb_frame
-            if _failure_frame.f_globals is _failure_globals and _failure_frame.f_code.co_filename == "<string>":
-                _failure_line = _failure_tb.tb_lineno
-                if type(_failure_line) is int and 1 <= _failure_line <= 226 and len(_failure_sites) < 4:
-                    _failure_sites.append(_failure_line)
-                else: _failure_omitted = True
-            _failure_tb = _failure_tb.tb_next
-        _failure_detail = {"schemaVersion":1, "reason":_failure_reason, "exceptionCategory":_failure_category(_failure_error),
-            "sourceSites":_failure_sites, "tracebackLinksSeen":_failure_links,
-            "sourceSitesComplete":_failure_tb is None and not _failure_omitted}
+        _failure_objects, _failure_nodes = [], []
+        def _failure_add(error):
+            if error is None: return None
+            for index, original in enumerate(_failure_objects):
+                if original is error: return index
+            if len(_failure_objects) == 4: return -1
+            _failure_objects.append(error)
+            return len(_failure_objects) - 1
+        _failure_raised = _failure_add(_failure_error)
+        _failure_caught = None
+        _failure_complete = True
+        _failure_sites, _failure_own_omitted = [], False
+        _failure_index = 0
+        while _failure_index < len(_failure_objects):
+            _failure_original = _failure_objects[_failure_index]
+            _failure_cause = _failure_add(BaseException.__cause__.__get__(_failure_original))
+            _failure_context = _failure_add(BaseException.__context__.__get__(_failure_original))
+            _failure_complete = _failure_complete and _failure_cause != -1 and _failure_context != -1
+            _failure_tb = BaseException.__traceback__.__get__(_failure_original)
+            _failure_node_sites, _failure_links, _failure_unmapped, _failure_truncated = [], 0, 0, False
+            while _failure_tb is not None and _failure_links < 32:
+                _failure_links += 1
+                _failure_frame, _failure_line = _failure_tb.tb_frame, _failure_tb.tb_lineno
+                _failure_frame_role = None
+                for _failure_role, _failure_namespace, _failure_filename in _failure_namespaces:
+                    if (_failure_frame.f_globals is _failure_namespace
+                            and _failure_frame.f_code.co_filename == _failure_filename):
+                        _failure_frame_role = _failure_role
+                        break
+                _failure_line_ok = (type(_failure_line) is int and 1 <= _failure_line <= 1_000_000
+                    and (_failure_frame_role != 0 or _failure_line <= 299))
+                # Legacy cap4 is independent of the graph's first8 mixed sites.
+                if _failure_index == 0 and _failure_frame_role == 0:
+                    if _failure_line_ok and len(_failure_sites) < 4:
+                        _failure_sites.append(_failure_line)
+                    else:
+                        _failure_own_omitted = True
+                if _failure_frame_role is None or not _failure_line_ok:
+                    _failure_unmapped += 1
+                elif len(_failure_node_sites) < 8:
+                    _failure_node_sites.append([_failure_frame_role, _failure_line])
+                else:
+                    _failure_truncated = True
+                _failure_tb = _failure_tb.tb_next
+            _failure_errno = None
+            if any(type(_failure_original) is expected for expected in _failure_os_types):
+                _failure_number = OSError.errno.__get__(_failure_original)
+                if type(_failure_number) is int and 0 <= _failure_number <= 4095:
+                    _failure_errno = _failure_number
+            _failure_nodes.append({"category": _failure_category(_failure_original), "errno": _failure_errno,
+                "sites": _failure_node_sites, "tracebackLinksSeen": _failure_links,
+                "tracebackComplete": _failure_tb is None, "unmappedFrames": _failure_unmapped,
+                "sitesTruncated": _failure_truncated, "cause": _failure_cause, "context": _failure_context,
+                "suppressed": BaseException.__suppress_context__.__get__(_failure_original)})
+            _failure_index += 1
+        _failure_detail = {"schemaVersion":2, "reason":_failure_reason,
+            "exceptionCategory":_failure_nodes[0]["category"], "sourceSites":_failure_sites,
+            "tracebackLinksSeen":_failure_nodes[0]["tracebackLinksSeen"],
+            "sourceSitesComplete":_failure_nodes[0]["tracebackComplete"] and not _failure_own_omitted,
+            "exceptionGraph":{"raised":_failure_raised, "caught":_failure_caught, "nodes":_failure_nodes,
+                "complete":_failure_complete, "boundRoles":[role for role, _, _ in _failure_namespaces]}}
+
         _failure_raw = "MRK_IOS_ACCOUNT_FIXTURE_FAILURE=" + json.dumps(_failure_detail,sort_keys=True,separators=(",",":"),ensure_ascii=True,allow_nan=False) + "\n"
-        if len(_failure_raw.encode("ascii")) <= 768:
+        if len(_failure_raw.encode("ascii")) <= 2048:
             sys.stderr.write(_failure_raw)
             sys.stderr.flush()
     except BaseException:
@@ -3431,12 +3642,16 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "inputBodyAdmission"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
         if "snapshotSource" in value:
-            need(type(value["snapshotSource"]) is str and value["snapshotSource"] in ("record", "prearm-open-progress"), "failure-context")
+            need(type(value["snapshotSource"]) is str and value["snapshotSource"] in ("record", "prearm-open-progress", "prearm-open-return"), "failure-context")
+        returned_input = value.get("snapshotSource") == "prearm-open-return"
+        need(("inputBodyAdmission" in value) == returned_input, "failure-context")
+        if returned_input:
+            need(value["inputBodyAdmission"] is None or type(value["inputBodyAdmission"]) is bool, "failure-context")
         if "dom" in value:
             value["dom"] = _dom_failure_context(value["dom"], value.get("snapshotSource"))
         if "bootstrap" in value:
@@ -3542,6 +3757,32 @@ def failure_context(stdout, stderr, case=None):
             # Early start failure legitimately has no nativeHandler/lastPanel
             # or Press sample. Bind to the known case, not to invented actions.
             value["accessibilityBinding"] = _accessibility_binding_context(value["accessibilityBinding"], case, allow_files=True, historical=True)
+        if returned_input:
+            # Historical pre-arm binding + positively received original body DATA.
+            # Neither body admission nor native cleanup establishes worker finality.
+            sample, binding = value.get("accessibility"), value.get("accessibilityBinding")
+            field_step = _field_open_step(case, sample["id"]) if sample is not None else None
+            need(case == "project-fields" and field_step is not None
+                 and failure_step(stdout, stderr) == field_step and failure_reason(stdout, stderr) == "native-default-input"
+                 and pending == {"kind": "accessibility", "step": field_step}
+                 and native == {"step": field_step, "entered": True, "returned": True}
+                 and not set(value).intersection(("dom", "bootstrap", "vault", "projectSelection", "completionSelection"))
+                 and panel is not None and panel["kind"] == "version-source"
+                 and sample is not None and sample["mechanism"] == "accessibility-version-source-selection-press-v8"
+                 and sample["prepared"] and sample["requested"] and sample["workerRegistered"]
+                 and sample["dispatchAttempted"] and sample["bodyEntered"] is True and sample["bodyReturned"]
+                 and sample["nativeEntered"] is True and sample["state"] in ("returned", "unknown")
+                 and not sample["receiptJoined"] and not sample["barrierRetired"] and sample["rechecksSettled"] is None
+                 and sample["timely"] is (False if sample["expired"] else None)
+                 and sample["promptButton"] is not None and sample["site"] is not None and sample["error"] is not None
+                 and (value["inputBodyAdmission"] is not None or sample["custodyKnown"] is False)
+                 and (sample["error"] != "none" or value["inputBodyAdmission"] is not True)
+                 and binding is not None and binding["case"] == case and binding["id"] == sample["id"]
+                 and binding["kind"] == "version-source" and binding["mechanism"] == "selection-parent-original-sheet-v3"
+                 and binding["start"] == {"returned": True, "result": "ok"}
+                 and binding["configuration"]["site"] == "complete" and binding["configuration"]["error"] == "none"
+                 and binding["binding"] is not None and binding["binding"]["purpose"] == "selection-parent"
+                 and binding["binding"]["error"] == "none" and all(binding["binding"]["checks"].values()), "failure-context")
         return value
     except (Refused, ValueError, RecursionError, UnicodeError, TypeError):
         return None

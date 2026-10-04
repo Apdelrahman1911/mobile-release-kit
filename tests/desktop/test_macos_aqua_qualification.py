@@ -177,6 +177,25 @@ def accessibility_context_data():
     return value
 
 
+def returned_project_field_context_data(action, admitted, *, expired=False):
+    # Inert parser fixture only, not a worker/native/selection receipt.
+    case, step = "project-fields", "ProjectFields(Native(0))"
+    history = M.expected_result(BINDING, case)["projectFields"]["acceptedOpenHistories"][1]
+    value = accessibility_context_data()
+    value.update(snapshotSource="prearm-open-return", inputBodyAdmission=admitted,
+                 pending={"kind": "accessibility", "step": step},
+                 accessibility=deepcopy(action), accessibilityBinding=deepcopy(history["selectionBinding"]))
+    value["nativeHandler"]["step"] = step
+    value["lastPanel"].update(step=step, id=2, kind="version-source")
+    sample = value["accessibility"]
+    sample.update(state="unknown" if admitted is None or sample["custodyKnown"] is False else "returned",
+                  receiptJoined=False, workerJoined=False, rechecksSettled=None, barrierRetired=False,
+                  expired=expired, timely=False if expired else None)
+    if admitted is None:
+        sample["custodyKnown"] = False
+    return value
+
+
 def completion_context_data(case="first-save"):
     # Saved scalar DATA only; no panel/callback or original poll is simulated.
     return {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None,
@@ -2534,7 +2553,8 @@ class AquaDataTests(unittest.TestCase):
                     "            && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {\n"
                     "            return;\n        }")
         self.assertEqual(report.count(deferred), 1)
-        self.assertEqual(report.count("r.native_dispatch.is_some_and("), 1)
+        # Native-return and narrowly scoped input-publication deferrals each keep their original gate.
+        self.assertEqual(report.count("r.native_dispatch.is_some_and("), 2)
         self.assertLess(report.index("first_failure_reason(&self.failure_reason)"), report.index("let Ok(r) = self.record.try_lock()"))
         self.assertLess(report.index("let Ok(r) = self.record.try_lock()"), report.index(deferred))
         self.assertLess(report.index(deferred), report.index("FailureSnapshot::from_record(&r)"))
@@ -5215,6 +5235,62 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         bad["accessibility"]["selection"]["projectionSummary"]["entryRoots"] = 1
         expected = deepcopy(bad); expected["accessibility"] = None
         self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
+        # Same native DATA before actual worker/receipt retirement, not success.
+        return_marker = f"MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON=native-default-input\n".encode("ascii")
+        original_failure = failures[1][1]["accessibility"]  # Existing no-entry vector.
+        for admitted in (True, False, None):
+            for expired in (False, True):
+                returned = returned_project_field_context_data(original_failure, admitted, expired=expired)
+                self.assertEqual(M.failure_context(b"", return_marker + context_row(returned), case), returned)
+                self.assertFalse(M._accessibility_succeeded(returned["accessibility"]))
+                self.assertIs(returned["inputBodyAdmission"], admitted)
+                self.assertEqual(returned["accessibility"]["site"], "selection-projection")
+                self.assertEqual(returned["accessibility"]["error"], "unsupported")
+        # A successful native report and a false post-return admission are distinct.
+        admission_only = returned_project_field_context_data(history["selectionInput"], False)
+        self.assertEqual(M.failure_context(b"", return_marker + context_row(admission_only), case), admission_only)
+        self.assertEqual(admission_only["accessibility"]["error"], "none")
+        self.assertFalse(M._accessibility_succeeded(admission_only["accessibility"]))
+        good_return = returned_project_field_context_data(original_failure, True)
+        for mutate in (
+            lambda v: v.pop("inputBodyAdmission"),
+            lambda v: v.update(inputBodyAdmission=1),
+            lambda v: v.update(inputBodyAdmission="true"),
+            lambda v: v.update(snapshotSource="record"),
+            lambda v: v.update(snapshotSource="prearm-open-progress"),
+            lambda v: v.update(completionSelection=None),
+            lambda v: v.update(dom=None),
+            lambda v: v.update(accessibilityBinding=None),
+            lambda v: v["accessibility"].update(id=3),
+            lambda v: v["accessibility"].update(step="ProjectFields(Native(1))"),
+            lambda v: v["accessibility"].update(mechanism="accessibility-version-source-selection-press-v7"),
+            lambda v: v["accessibility"].update(state="entered", bodyReturned=False),
+            lambda v: v["accessibility"].update(timely=True),
+            lambda v: v["accessibility"].update(timely=False),
+            lambda v: v["accessibility"].update(receiptJoined=True),
+            lambda v: v["accessibility"].update(barrierRetired=True),
+            lambda v: v["accessibility"].update(rechecksSettled=True),
+            lambda v: v["accessibility"].update(nativeEntered=None),
+            lambda v: v["accessibility"].update(promptButton=None),
+            lambda v: v["accessibilityBinding"].update(id=3),
+            lambda v: v["accessibilityBinding"]["configuration"].update(site="directory-set"),
+            lambda v: v.update(rawLabel="INERT_NONPUBLIC_TEXT"),
+        ):
+            bad = deepcopy(good_return); mutate(bad)
+            with self.subTest(returned_input_mutation=repr(mutate)):
+                self.assertIsNone(M.failure_context(b"", return_marker + context_row(bad), case))
+        bad = deepcopy(admission_only); bad["inputBodyAdmission"] = True
+        self.assertIsNone(M.failure_context(b"", return_marker + context_row(bad), case))
+        for other_case in (None, "first-save", "project-recovery-pending"):
+            self.assertIsNone(M.failure_context(b"", return_marker + context_row(good_return), other_case))
+        for altered in (return_marker.replace(b"native-default-input", b"observer-invariant"),
+                        return_marker.replace(b"Native(0)", b"Native(1)")):
+            self.assertIsNone(M.failure_context(b"", altered + context_row(good_return), case))
+        duplicate = return_marker + context_row(good_return) + context_row(good_return)
+        self.assertIsNone(M.failure_context(b"", duplicate, case))
+        success = deepcopy(good); success["inputBodyAdmission"] = False
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(success), b"", BINDING, case)
         # Old kind4 inputs remain readable as historical failure DATA only.
         historical = deepcopy(frame)
         historical["accessibility"] = deepcopy(good["native"]["projectOpenInput"])
@@ -5332,6 +5408,19 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIsNone(M._accessibility_context(eighth, None, None,
             expected_id=2, case="project-fields", field_history=True))
 
+        # The largest complete pending-history count shares the existing closed
+        # failure envelope, with no raw strings, larger cap or fake native receipt.
+        maximum = stopped(7, 0, "unsupported")
+        bounded = returned_project_field_context_data(maximum, True, expired=True)
+        bounded["projectFieldPreparation"] = {"operationId": 2, "kind": "version-source", "returned": True,
+            "result": "ok", "facts": 6143, "fileFilter": {"facts": 23, "allowedTypes": "unrestricted", "allowsOther": False},
+            "nameFieldPreparation": {"returned": True, "result": "ok", "facts": 31}}
+        marker = b"MRK_MACOS_AQUA_FAILURE_STEP=ProjectFields(Native(0))\nMRK_MACOS_AQUA_FAILURE_REASON=native-default-input\n"
+        payload = json.dumps(bounded, separators=(",", ":")).encode("ascii")
+        self.assertLessEqual(len(payload), M.FAILURE_CONTEXT_LIMIT)
+        self.assertLessEqual(len(marker + context_row(bounded) + b"MRK_MACOS_AQUA=failed\n"), 8448)
+        self.assertEqual(M.failure_context(b"", marker + context_row(bounded), "project-fields"), bounded)
+        self.assertFalse(M._accessibility_succeeded(bounded["accessibility"]))
         # Historical v7 remains readable only as failure DATA. It cannot borrow
         # the v8 history envelope or qualify a new successful field journey.
         old = stopped(0, 0, "unsupported")
@@ -5996,6 +6085,49 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn('value["selectionInput"] = p.sample.reconciled(p.progress.snapshot()).value()', observer)
         self.assertIn('value["selectionBinding"] = p.identity.value()', observer)
         self.assertIn('value["selectionCompletion"] = p.completion.value()', observer)
+
+        # The new failure snapshot copies one original return, never AppKit/AX.
+        diagnostic = observer.split("fn received_input(self,", 1)[1].split("    fn frame(", 1)[0]
+        for required in ("token.same(&receipt.token)", "input_return_time_matches(receipt.returned_at, now, end)",
+                         "project_field_return_scope(case, self.step, token.id)", "sample.step != self.step",
+                         "token.identity().selects_version_source()", "self.pending != Some(Pending::Accessibility(token.id))",
+                         "snapshot.input_body_admission = Some(receipt.body.admitted)", 'snapshot.source = "prearm-open-return"'):
+            self.assertIn(required, diagnostic)
+        projected = observer.split("fn received_input_sample(", 1)[1].split("#[derive(Clone, Copy)]\nstruct FailureSnapshot", 1)[0]
+        for required in ("let native = body.native?; let report = native.report?;",
+                         "report.selection_mode != sample.selection", "sample.timely = progress.expired.then_some(false)",
+                         "sample.worker_joined = worker_joined", "body.succeeded()", "progress.joined || progress.retired"):
+            self.assertIn(required, projected)
+        for forbidden in ("sample.complete(", "Some(true); // timely", "installed_prompt_button(", ".recheck(",
+                          "std::thread", "run_on_main_thread", "mrk_", "Some(\"admission\")"):
+            self.assertNotIn(forbidden, diagnostic + projected)
+        generic = observer.split("    fn report_failure(&self)", 1)[1].split("    fn report_expiry(", 1)[0]
+        for required in ('reason == "native-default-input"', "Instant::now() < self.end", "r.prepared_open.is_none()",
+                         "r.pending == Some(Pending::Accessibility(sample.id))", "sample.native_entered.is_none()",
+                         "input_publication_live(progress.snapshot())"):
+            self.assertIn(required, generic)
+        live = observer.split("fn input_publication_live(", 1)[1].split("fn input_return_time_matches(", 1)[0]
+        self.assertIn('"entered" => !progress.returned, "returned" => progress.returned, _ => false', live)
+        self.assertIn("!progress.joined && !progress.retired", live)
+        worker = observer.split("    fn action_worker(", 1)[1].split("    fn open_unknown(", 1)[0]
+        self.assertLess(worker.index('self.fail_with("native-default-input")'), worker.index("if !token.returned()"))
+        self.assertLess(worker.index("if !token.returned()"), worker.index("done.try_send(receipt)"))
+        relay = observer.split("    fn accessibility_step(", 1)[1].split("    fn native_step(", 1)[0]
+        loop = relay.split("        let mut deadline_observed = false;", 1)[1]
+        first = loop.split("if flight.worker.as_ref()", 1)[0]
+        self.assertLess(first.index('token.expire(); self.fail_with("native-default-deadline")'),
+                        first.index("flight.receipt.try_recv()"))
+        self.assertLess(first.index("if now >= self.end"), first.index("flight.receipt.try_recv()"))
+        self.assertLess(first.index("flight.receipt.try_recv()"), first.index("self.report_open_return(flight, expiry_report)"))
+        late = loop.split("flight.worker_returned = Some(returned)", 1)[1].split("                break;", 1)[0]
+        self.assertLess(late.index('token.expire(); self.fail_with("native-default-deadline")'),
+                        late.index("flight.receipt.try_recv()"))
+        self.assertLess(late.index("Instant::now() < self.end"), late.index("flight.receipt.try_recv()"))
+        self.assertLess(late.index("flight.receipt.try_recv()"), late.index("self.report_open_return(flight, true)"))
+        report = observer.split("    fn report_open_return(", 1)[1].split("    pub(super) fn attach(", 1)[0]
+        self.assertIn("if expiry { self.report_expiry(flight.baseline, flight.token.progress()); }", report)
+        self.assertIn("return; // A refused/oversized frame still spends the same one-shot writer.", report)
+        self.assertNotIn("recv_timeout", report + diagnostic)
 
     def test_original_fixture_restoration_has_only_two_ctime_exceptions(self):
         case = "project-fields"
@@ -6705,6 +6837,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
+            "          - project-fields\n"
             "          - project-recovery-pending\n"
             "          - ios-recovery-pending\n"
             "    runs-on: macos-26\n"
@@ -9114,6 +9247,7 @@ class ShippingVaultHelperAquaDataTests(unittest.TestCase):
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", header)
         self.assertIn(
             "        scope:\n"
+            "          - project-fields\n"
             "          - project-recovery-pending\n"
             "          - ios-recovery-pending\n"
             "    runs-on: macos-26\n", header)
@@ -9815,9 +9949,14 @@ class PrecursorFailureDiagnosticDataTests(unittest.TestCase):
     @staticmethod
     def detail(kind):
         project = kind == "project-recovery-producer"
-        value = {"schemaVersion": 1, "reason": "fixture-check-failed" if project else "native-account-entry",
-                 "exceptionCategory": "runtime" if project else "refused", "sourceSites": [1, 2],
-                 "tracebackLinksSeen": 2, "sourceSitesComplete": True}
+        category = "runtime" if project else "refused"
+        value = {"schemaVersion": 2, "reason": "fixture-check-failed" if project else "native-account-entry",
+                 "exceptionCategory": category, "sourceSites": [1, 2],
+                 "tracebackLinksSeen": 2, "sourceSitesComplete": True,
+                 "exceptionGraph": {"raised": 0, "caught": None, "complete": True, "boundRoles": [0],
+                     "nodes": [{"category": category, "errno": None, "sites": [[0, 1], [0, 2]],
+                         "tracebackLinksSeen": 2, "tracebackComplete": True, "unmappedFrames": 0,
+                         "sitesTruncated": False, "cause": None, "context": None, "suppressed": False}]}}
         if project:
             value["caughtExceptionCategory"] = "none"
         return value
@@ -9866,6 +10005,37 @@ class PrecursorFailureDiagnosticDataTests(unittest.TestCase):
             self.assertNotIn("Traceback", value)
         return stderr.getvalue().encode()
 
+    def footer(self, kind, original, caught=None, *, modules=None, through=None):
+        # Only the actual footer fragment: the synthetic raising prefix is NOT
+        # the producer, native execution, a successful core fixture or finality.
+        program = M._precursor_spec(kind)[0]
+        marker = "except BaseException as _failure_error:\n"
+        _, boundary, body = program.partition(marker)
+        self.assertEqual(boundary, marker)
+        prefix = "try:\n    raise _test_original\n" if through is None else (
+            "def _test_own_failure():\n    raise _test_original\ntry:\n    _test_through(_test_own_failure)\n")
+        fragment = prefix + marker + body
+        namespace = {"__name__": "_inert_precursor_footer", "sys": sys, "json": json,
+                     "Refused": type("Refused", (Exception,), {}), "_test_original": original,
+                     "caught": caught, "_test_through": through}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["-c", "/inert-precursor-core"]), \
+                patch.dict(sys.modules, modules or {}), patch.object(sys, "stdout", stdout), patch.object(sys, "stderr", stderr), \
+                patch.object(builtins, "__import__", side_effect=AssertionError("footer must not import")) as imported, \
+                patch.object(M.os, "open", side_effect=AssertionError("footer must not open")) as opened, \
+                patch.object(M.subprocess, "Popen", side_effect=AssertionError("footer must not dispatch")) as dispatched:
+            with self.assertRaises(SystemExit) as exited:
+                exec(compile(fragment, "<string>", "exec"), namespace)
+        self.assertEqual(exited.exception.code, 1)
+        imported.assert_not_called(); opened.assert_not_called(); dispatched.assert_not_called()
+        self.assertEqual(stdout.getvalue(), "")
+        raw = stderr.getvalue().encode()
+        self.assertNotIn(b"PRIVATE_", raw); self.assertNotIn(b"Traceback", raw)
+        self.assertNotIn(b"/inert-", raw)
+        detail = M._precursor_child_failure(raw, kind)
+        self.assertIsNotNone(detail)
+        return detail
+
     def test_precursor_envelope_is_separate_bounded_and_never_exports_private_buffers(self):
         canary = b"PRIVATE_ACCOUNT_PATH_OR_CREDENTIAL_CANARY"
         for kind in ("project-recovery-producer", "ios-account-produce", "ios-account-observe"):
@@ -9898,10 +10068,10 @@ class PrecursorFailureDiagnosticDataTests(unittest.TestCase):
             good = self.detail(kind); record = self.record(kind, good)
             self.assertEqual(M._precursor_child_failure(record, kind), good)
             bad_records = [record[:-1], record + b"x", record + record, b"prefix" + record,
-                           record.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1'),
-                           record.replace(b'"schemaVersion":1', b'"schemaVersion":NaN'),
-                           record.replace(b'{', b'{ ', 1), b"x"*769]
-            for field, value in (("schemaVersion", True), ("reason", "private-field-canary"),
+                           record.replace(b'"schemaVersion":2', b'"schemaVersion":2,"schemaVersion":2'),
+                           record.replace(b'"schemaVersion":2', b'"schemaVersion":NaN'),
+                           record.replace(b'{', b'{ ', 1), b"x"*(M.PRECURSOR_FAILURE_LIMIT + 1)]
+            for field, value in (("schemaVersion", True), ("schemaVersion", 1), ("reason", "private-field-canary"),
                                  ("exceptionCategory", "private-error-canary"), ("exceptionCategory", "none"),
                                  ("sourceSites", [True]), ("sourceSites", [0]),
                                  ("sourceSites", [len(M._precursor_spec(kind)[0].splitlines()) + 1]),
@@ -9914,11 +10084,48 @@ class PrecursorFailureDiagnosticDataTests(unittest.TestCase):
                 bad_records.append(self.record(kind, {**good, "caughtExceptionCategory": "private-caught-canary"}))
             else:
                 bad_records.append(self.record(kind, {**good, "caughtExceptionCategory": "none"}))
+            for field, changed in (("raised", True), ("raised", 1), ("caught", True), ("caught", 3),
+                                   ("boundRoles", []), ("boundRoles", [0, 0]), ("boundRoles", [0, 12]),
+                                   ("boundRoles", [True]), ("complete", False), ("nodes", []),
+                                   ("nodes", good["exceptionGraph"]["nodes"]*2)):
+                bad = deepcopy(good); bad["exceptionGraph"][field] = changed
+                bad_records.append(self.record(kind, bad))
+            for field, changed in (("category", "PRIVATE_TYPE_CANARY"), ("category", "none"), ("category", "os"),
+                                   ("errno", True), ("errno", 4096), ("errno", 13),
+                                   ("sites", [[1, 1]]), ("sites", [[False, 1]]), ("sites", [[0, True]]),
+                                   ("sites", [[0, 1_000_001]]), ("sites", [[0, 1]]*9),
+                                   ("tracebackComplete", False), ("tracebackComplete", 1),
+                                   ("unmappedFrames", 1), ("unmappedFrames", True), ("sitesTruncated", True),
+                                   ("cause", True), ("cause", -2), ("cause", -1), ("cause", 1),
+                                   ("context", "PRIVATE_CONTEXT_CANARY"), ("suppressed", 1)):
+                bad = deepcopy(good); bad["exceptionGraph"]["nodes"][0][field] = changed
+                bad_records.append(self.record(kind, bad))
+            bad = deepcopy(good); bad["exceptionGraph"]["nodes"][0]["private"] = "private-value-canary"
+            bad_records.append(self.record(kind, bad))
             for bad in bad_records:
                 self.assertIsNone(M._precursor_child_failure(bad, kind))
+                if len(bad) > M._precursor_spec(kind)[3]:
+                    with self.assertRaises(M.Refused):
+                        M._precursor_diagnostic(CompletedProcess([], 1, b"", bad), kind)
+                    continue  # Aggregate command cap remains stricter where applicable.
                 reduced = M._precursor_diagnostic(CompletedProcess([], 1, b"", bad), kind)
                 self.assertNotIn("childFailure", reduced)
                 self.assertNotIn("private-", json.dumps(reduced))
+            # Conservative serialized bound, including both legacy categories,
+            # errno, longest actual closed enums, marker and newline. This is
+            # inert bound arithmetic, not a claimed observation/valid graph.
+            category = max(M.PRECURSOR_FAILURE_CATEGORIES, key=len)
+            worst = deepcopy(good)
+            worst.update(reason=max(M._precursor_spec(kind)[2], key=len), exceptionCategory=category,
+                         sourceSites=[1_000_000]*4, tracebackLinksSeen=32, sourceSitesComplete=False)
+            if kind == "project-recovery-producer": worst["caughtExceptionCategory"] = category
+            node = {"category": category, "errno": 4095, "sites": [[11, 1_000_000]]*8,
+                    "tracebackLinksSeen": 32, "tracebackComplete": False, "unmappedFrames": 32,
+                    "sitesTruncated": False, "cause": None, "context": None, "suppressed": False}
+            worst["exceptionGraph"] = {"raised": 0, "caught": None, "nodes": [node]*4,
+                                       "complete": False, "boundRoles": list(range(12))}
+            self.assertLessEqual(len(self.record(kind, worst)), M.PRECURSOR_FAILURE_LIMIT)
+            self.assertEqual(M.PRECURSOR_FAILURE_LIMIT, 2048)
 
     def test_invalid_entry_exercises_both_actual_footers_without_core_or_native_access(self):
         for kind in ("project-recovery-producer", "ios-account-produce"):
@@ -9930,6 +10137,11 @@ class PrecursorFailureDiagnosticDataTests(unittest.TestCase):
             self.assertEqual(detail["tracebackLinksSeen"], len(detail["sourceSites"]))
             self.assertEqual(detail["reason"], "fixture-check-failed" if kind == "project-recovery-producer" else "native-account-entry")
             self.assertTrue(any("need(len(sys.argv)" in program.splitlines()[site - 1] for site in detail["sourceSites"]))
+            graph = detail["exceptionGraph"]
+            self.assertEqual(graph["boundRoles"], [0]); self.assertIsNone(graph["caught"])
+            self.assertTrue(graph["complete"]); self.assertEqual(len(graph["nodes"]), 1)
+            self.assertEqual(graph["nodes"][0]["sites"], [[0, line] for line in detail["sourceSites"]])
+            self.assertEqual(graph["nodes"][0]["unmappedFrames"], 0)
             self.assertNotIn(b"Traceback", stderr)
 
     def test_foreign_string_frames_and_total_traceback_cutoff_never_become_own_sites(self):
@@ -9948,7 +10160,92 @@ class PrecursorFailureDiagnosticDataTests(unittest.TestCase):
                 self.assertEqual(detail["sourceSitesComplete"], not long)
                 self.assertLessEqual(detail["tracebackLinksSeen"], 32)
                 if long: self.assertEqual(detail["tracebackLinksSeen"], 32)
+                node = detail["exceptionGraph"]["nodes"][0]
+                self.assertEqual(node["tracebackComplete"], not long)
+                self.assertGreater(node["unmappedFrames"], 0)
+                self.assertEqual(node["sites"], [[0, line] for line in detail["sourceSites"]])
                 self.assertNotIn(b"PRIVATE_FOREIGN_TRACE_CANARY", stderr)
+        # Existing namespaces only: these are inert synthetic modules, never
+        # imported first-party code. Their fixed co_filename is not opened.
+        modules = {}
+        for name, class_name in (("build_inputs", "BuildInputError"), ("owned_process", "ProcessCleanupError")):
+            module = ModuleType("mobile_release." + name)
+            module.__file__ = "/inert-precursor-core/mobile_release/" + name + ".py"
+            text = ("class " + class_name + "(Exception):\n"
+                    "    def __str__(self): raise AssertionError('PRIVATE_STR_CANARY')\n"
+                    "    def __repr__(self): raise AssertionError('PRIVATE_REPR_CANARY')\n"
+                    "def fail(depth=0):\n"
+                    "    if depth: return fail(depth-1)\n"
+                    "    raise " + class_name + "('PRIVATE_MESSAGE_CANARY')\n"
+                    "def through(callback, depth=12):\n"
+                    "    if depth: return through(callback, depth-1)\n"
+                    "    callback()\n")
+            exec(compile(text, module.__file__, "exec"), module.__dict__)
+            modules[module.__name__] = module
+        def observed(name, depth=0):
+            try: modules["mobile_release." + name].fail(depth)
+            except BaseException as error: return error
+            self.fail("synthetic exception did not occur")
+        for kind in ("project-recovery-producer", "ios-account-produce"):
+            project = kind == "project-recovery-producer"
+            original = RuntimeError("PRIVATE_OUTER_CANARY") if project else observed("owned_process")
+            caught = observed("build_inputs") if project else None
+            os_error, value_error = PermissionError(13, "PRIVATE_ACCOUNT_PATH_CANARY"), ValueError("PRIVATE_VALUE_CANARY")
+            if project:
+                original.__cause__ = caught
+                caught.__cause__, caught.__context__ = os_error, value_error
+            else:
+                original.__cause__, original.__context__ = os_error, value_error
+            os_error.__cause__ = original  # A cycle is an original edge, not truncation.
+            detail = self.footer(kind, original, caught, modules=modules)
+            graph = detail["exceptionGraph"]
+            self.assertEqual(graph["caught"], 1 if project else None)
+            self.assertTrue(graph["complete"])
+            root = graph["nodes"][1 if project else 0]
+            self.assertEqual(root["category"], "build-input" if project else "process-cleanup")
+            self.assertTrue(any(role == (1 if project else 6) for role, _ in root["sites"]))
+            self.assertTrue(any(node["category"] == "permission" and node["errno"] == 13 for node in graph["nodes"]))
+            self.assertTrue(any(node["cause"] == 0 for node in graph["nodes"]))
+            # A long chain cannot displace the already retained project root.
+            value_error.__cause__ = TypeError("PRIVATE_EXTRA_CAUSE")
+            value_error.__cause__.__context__ = KeyError("PRIVATE_EXTRA_CONTEXT")
+            detail = self.footer(kind, original, caught, modules=modules)
+            graph = detail["exceptionGraph"]
+            self.assertEqual(len(graph["nodes"]), 4); self.assertFalse(graph["complete"])
+            self.assertEqual(graph["caught"], 1 if project else None)
+            self.assertTrue(any(node["cause"] == -1 or node["context"] == -1 for node in graph["nodes"]))
+        # Admit no same-path foreign namespace and no same-name class. Neither
+        # can manufacture a core source/type classification or expose a name.
+        core = modules["mobile_release.owned_process"]
+        foreign = {"Error": core.ProcessCleanupError}
+        exec(compile("def fail():\n    raise Error('PRIVATE_FOREIGN_CORE_CANARY')\n", core.__file__, "exec"), foreign)
+        try: foreign["fail"]()
+        except BaseException as error: original = error
+        detail = self.footer("ios-account-produce", original, modules=modules)
+        self.assertEqual(detail["exceptionCategory"], "process-cleanup")
+        self.assertFalse(any(role == 6 for role, _ in detail["exceptionGraph"]["nodes"][0]["sites"]))
+        unknown = type("ProcessCleanupError", (Exception,), {"__module__": "mobile_release.owned_process"})("PRIVATE_UNKNOWN_CLASS_CANARY")
+        detail = self.footer("ios-account-produce", unknown, modules=modules)
+        self.assertEqual(detail["exceptionCategory"], "other")
+        original = observed("owned_process")
+        core.__file__ = "/PRIVATE_WRONG_CORE_PATH_CANARY"
+        detail = self.footer("ios-account-produce", original, modules=modules)
+        self.assertEqual(detail["exceptionCategory"], "other")
+        self.assertNotIn(6, detail["exceptionGraph"]["boundRoles"])
+        core.__file__ = "/inert-precursor-core/mobile_release/owned_process.py"
+        detail = self.footer("ios-account-produce", observed("owned_process", 12), modules=modules)
+        node = detail["exceptionGraph"]["nodes"][0]
+        self.assertTrue(node["sitesTruncated"]); self.assertTrue(node["tracebackComplete"])
+        self.assertEqual(len(node["sites"]), 8)
+        self.assertTrue(detail["sourceSitesComplete"])
+        # A later own frame survives legacy cap4 even after eight mixed core
+        # sites. Filtering the graph's retained eight would incorrectly lose it.
+        detail = self.footer("ios-account-produce", RuntimeError("PRIVATE_MIXED_TRACE_CANARY"),
+                             modules=modules, through=core.through)
+        node = detail["exceptionGraph"]["nodes"][0]
+        self.assertTrue(node["sitesTruncated"]); self.assertTrue(detail["sourceSitesComplete"])
+        self.assertIn(2, detail["sourceSites"])
+        self.assertNotIn([0, 2], node["sites"])
 
     def test_footer_reduction_and_emission_faults_keep_nonzero_refusal_without_raw_text(self):
         for program in (M.SHELL_RECOVERY_PRODUCER, M.IOS_ACCOUNT_CORE_PROGRAM):
@@ -10127,8 +10424,8 @@ class PendingProjectRecoveryAquaDataTests(unittest.TestCase):
         workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    runs-on:", 1)[0]
         selected = [line.strip()[2:] for line in header.split("        scope:\n", 1)[1].splitlines() if line.strip().startswith("- ")]
-        # Retry only corrected recovery preflights; the failed project-field journey awaits diagnosis.
-        self.assertEqual(selected, [M.RECOVERY_CASE, M.IOS_ACCOUNT_CASE])
+        # Run only the changed project-field and recovery-producer journeys.
+        self.assertEqual(selected, [M.PROJECT_FIELDS_CASE, M.RECOVERY_CASE, M.IOS_ACCOUNT_CASE])
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         step = blocks["One real pending iOS build-input recovery through ordinary Inspect and explicit Recover"]
         self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending'", step)
