@@ -1,0 +1,132 @@
+name: Desktop macOS Intel fresh CPython source supplier
+
+on:
+  push:
+    branches: [verify/desktop-macos-cpython-source-build-intel]
+
+permissions:
+  contents: read
+
+env:
+  BASH_ENV: ''
+  ENV: ''
+
+concurrency:
+  group: desktop-macos-cpython-source-build-intel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  producer:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-cpython-source-build-intel' && github.sha == github.workflow_sha
+    runs-on: macos-26-intel
+    timeout-minutes: 55
+    steps:
+      - id: admission
+        name: Admit only the fixed disposable hosted Intel source-build route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTIONS" == true && "$RUNNER_ENVIRONMENT" == github-hosted ]] || exit 1
+          [[ "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == X64 && "$GITHUB_JOB" == producer ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-cpython-source-build-intel ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_PUSH_EVENT_AFTER" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-cpython-source-build-intel.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          [[ "$RUNNER_TEMP" == /* && "$RUNNER_TEMP" != *$'\n'* && "$RUNNER_TEMP" != *$'\r'* ]] || exit 1
+          [[ "$GITHUB_WORKSPACE" == /* && "$HOME" == /Users/runner ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == x86_64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" =~ ^[1-9][0-9]*$ ]] || exit 1
+
+      - id: checkout
+        name: Check out the exact source without retained Git credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - id: python
+        name: Select the isolated orchestration interpreter, not the supplier
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: x64
+
+      - id: build
+        name: Build and qualify once through the original command owner
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          git_env=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-optional-locks -c core.fsmonitor=false -C "$GITHUB_WORKSPACE")
+          observed_head="$("${git_env[@]}" rev-parse --verify HEAD)"
+          observed_status="$("${git_env[@]}" status --porcelain=v1 --untracked-files=all --ignored)"
+          [[ "$observed_head" == "$GITHUB_SHA" && -z "$observed_status" ]] || exit 1
+          [[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
+          root="$RUNNER_TEMP/mrk-macos-cpython-intel-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          [[ ! -e "$root" && ! -L "$root" ]] || exit 1
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          # The owner alone creates its root, accounts for all children and
+          # retires its scratch. No shell retry, cleanup or status replacement.
+          exec /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_REF="$GITHUB_REF" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" \
+            GITHUB_JOB="$GITHUB_JOB" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_cpython_source_build.py
+
+      - id: source_post
+        name: Check exact unchanged source even after a failed build
+        if: always() && steps.checkout.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git_env=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-optional-locks -c core.fsmonitor=false -C "$GITHUB_WORKSPACE")
+          observed_head="$("${git_env[@]}" rev-parse --verify HEAD)"
+          observed_status="$("${git_env[@]}" status --porcelain=v1 --untracked-files=all --ignored)"
+          [[ "$observed_head" == "$GITHUB_SHA" && -z "$observed_status" ]] || exit 1
+
+      - id: evidence
+        name: Retain only bounded closed public evidence when exported
+        if: always() && steps.build.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-cpython-intel-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # public/ is absent while native work is running or finality is unknown.
+          # Missing evidence on failure is not a pass; the failed outcome remains.
+          path: ${{ steps.build.outputs.root }}/public/evidence/
+          if-no-files-found: ${{ steps.build.outcome == 'success' && 'error' || 'warn' }}
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 14
+
+      - id: supplier
+        name: Retain a successful source supplier without activating any consumer
+        if: success() && steps.build.outcome == 'success' && steps.source_post.outcome == 'success' && steps.evidence.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-cpython-intel-supplier-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Tar preserves modes; Actions' raw-directory transport does not.
+          path: |
+            ${{ steps.build.outputs.root }}/public/supplier.tar
+            ${{ steps.build.outputs.root }}/public/supplier-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 14

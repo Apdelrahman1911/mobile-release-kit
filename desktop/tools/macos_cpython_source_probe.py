@@ -17,6 +17,13 @@ import struct
 import sys
 import time
 
+ARM_TARGET = "aarch64-apple-darwin"
+INTEL_TARGET = "x86_64-apple-darwin"
+_TARGETS = {
+    ARM_TARGET: ("arm64", 0x100000C, 0),
+    INTEL_TARGET: ("x86_64", 0x1000007, 3),
+}
+
 TLS_FILES = {
     "api-valid.pem": (786, "33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2"),
     "root-ca.pem": (761, "3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025"),
@@ -74,11 +81,59 @@ def read(path, limit):
     return b"".join(blocks)
 
 
-def macho(body):
+def target_description(target):
+    need(type(target) is str and target in _TARGETS, "probe-target")
+    return _TARGETS[target]
+
+
+def native_host_data(target, *, sysname, machine, returned, observed_errno, length, translated):
+    """Check native host observations, never query or emulate a host."""
+    if (type(target) is not str or target not in _TARGETS
+            or type(sysname) is not str or sysname != "Darwin"
+            or type(machine) is not str or machine != _TARGETS[target][0]
+            or type(returned) is not int):
+        return False
+    if returned == 0:
+        # Like sysctl's native contract, errno is unspecified on success.
+        return type(length) is int and length == 4 and type(translated) is int and translated == 0
+    # An absent sysctl is the documented native, untranslated fallback. Failed
+    # calls do not establish either output cell, so neither cell is consulted.
+    return returned == -1 and type(observed_errno) is int and observed_errno == errno.ENOENT
+
+
+def native_host(target):
+    """Query only inside this already-owned native probe process."""
+    import ctypes
+    target_description(target)
+    need(ctypes.sizeof(ctypes.c_int) == 4
+         and ctypes.sizeof(ctypes.c_void_p) == ctypes.sizeof(ctypes.c_size_t) == 8,
+         "native-host-abi")
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    query = library.sysctlbyname
+    query.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                      ctypes.c_void_p, ctypes.c_size_t]
+    query.restype = ctypes.c_int
+    translated = ctypes.c_int(0)
+    length = ctypes.c_size_t(ctypes.sizeof(translated))
+    ctypes.set_errno(0)
+    returned = query(b"sysctl.proc_translated", ctypes.byref(translated),
+                     ctypes.byref(length), None, 0)
+    observed_errno = ctypes.get_errno()
+    observed = os.uname()
+    result = {"sysname": observed.sysname, "machine": observed.machine,
+              "returned": returned, "observed_errno": observed_errno,
+              "length": length.value if returned == 0 else None,
+              "translated": translated.value if returned == 0 else None}
+    need(native_host_data(target, **result), "native-host-translation")
+    return result
+
+
+def macho(body, target=ARM_TARGET):
     """Bounded Mach-O DATA parser; rejects fat/foreign/extra-loader routes."""
+    architecture, expected_cpu, expected_subtype = target_description(target)
     need(type(body) is bytes and 32 <= len(body) <= 128 * 1024 * 1024, "macho-bound")
     magic, cpu, subtype, kind, count, extent, flags, reserved = struct.unpack_from("<IiiIIIII", body)
-    need((magic, cpu, subtype, kind, reserved) == (0xFEEDFACF, 0x100000C, 0, 2, 0)
+    need((magic, cpu, subtype, kind, reserved) == (0xFEEDFACF, expected_cpu, expected_subtype, 2, 0)
          and 1 <= count <= 128 and 0 < extent <= 32768 and 32 + extent <= len(body),
          "macho-native-thin-executable")
     allowed = {0x19, 0x2, 0xB, 0xE, 0x1B, 0x24, 0x26, 0x29, 0x2A, 0x1D,
@@ -123,14 +178,22 @@ def macho(body):
     need(cursor == 32 + extent and len(builds) == 1 and dylinkers == ["/usr/lib/dyld"]
          and libraries and len(libraries) == len(set(libraries))
          and 0x80000028 in observed and 0x1D in observed, "macho-complete-load-commands")
-    return {"architecture": "arm64", "fileType": "MH_EXECUTE", "flags": flags,
+    return {"architecture": architecture, "fileType": "MH_EXECUTE", "flags": flags,
             "build": builds[0], "libraries": sorted(libraries), "commands": observed}
 
 
+def decode_context(body, target):
+    target_description(target)
+    context = json.loads(body)
+    need(type(context) is dict and context.get("target") == target, "native-probe-context-target")
+    return context
+
+
 def configuration(context):
-    need(type(context) is dict and set(context) == {"schemaVersion", "payload", "checkout",
+    need(type(context) is dict and set(context) == {"schemaVersion", "target", "payload", "checkout",
          "builtins", "files", "sourceFiles", "scratch", "sourceCommit"}
          and type(context["schemaVersion"]) is int and context["schemaVersion"] == 1, "probe-context-shape")
+    target_description(context["target"])
     payload, checkout, scratch = (Path(context[key]) for key in ("payload", "checkout", "scratch"))
     need(all(path.is_absolute() and path == path.resolve(strict=True)
              for path in (payload, checkout, scratch)), "probe-context-routes")
@@ -162,7 +225,7 @@ def modules(context):
     python = payload / "python"
     need(sys.version_info[:3] == (3, 14, 7) and sys._is_gil_enabled()
          and sysconfig.get_config_var("Py_GIL_DISABLED") in (None, 0)
-         and sys.platform == "darwin" and os.uname().machine == "arm64"
+         and sys.platform == "darwin" and os.uname().machine == target_description(context["target"])[0]
          and struct.calcsize("P") == 8, "native-version-gil-architecture")
     need(sorted(sys.builtin_module_names) == context["builtins"], "native-builtin-roster")
     for name in context["builtins"]:
@@ -248,7 +311,7 @@ def loader(context):
     payload, _, _ = configuration(context)
     executable = payload / "python/bin/python3"
     binary = read(executable, 128 * 1024 * 1024)
-    static = macho(binary)
+    static = macho(binary, context["target"])
     libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
     count, name = libc._dyld_image_count, libc._dyld_get_image_name
     count.argtypes, count.restype = [], ctypes.c_uint32
@@ -481,18 +544,25 @@ def cancellation(context):
 
 
 def main():
-    need(sys.platform == "darwin" and os.uname().machine == "arm64" and os.getuid() != 0
+    need(sys.platform == "darwin" and os.getuid() == os.geteuid() != 0
+         and os.getgid() == os.getegid()
          and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-probe-host")
-    need(len(sys.argv) in {2, 3}, "native-probe-entry")
-    role = sys.argv[1]
-    if role == "network" and len(sys.argv) == 2:
+    need(len(sys.argv) in {3, 4}, "native-probe-entry")
+    role, target = sys.argv[1:3]
+    target_description(target)
+    need((role == "network" and len(sys.argv) == 3)
+         or (role in {"modules", "loader", "tls", "cancellation"} and len(sys.argv) == 4),
+         "native-probe-role")
+    host = native_host(target)
+    if role == "network":
         result = network()
     else:
-        need(len(sys.argv) == 3 and role in {"modules", "loader", "tls", "cancellation"}, "native-probe-role")
-        context = json.loads(read(Path(sys.argv[2]), 2 * 1024 * 1024))
+        context = decode_context(read(Path(sys.argv[3]), 2 * 1024 * 1024), target)
         result = {"modules": modules, "loader": loader, "tls": tls, "cancellation": cancellation}[role](context)
-    raw = canonical({"schemaVersion": 1, "role": role, "result": result}) + b"\n"
+    need(type(result) is dict and "nativeHost" not in result, "native-probe-result-shape")
+    result["nativeHost"] = host
+    raw = canonical({"schemaVersion": 1, "role": role, "target": target, "result": result}) + b"\n"
     need(len(raw) <= 512 * 1024 and sys.stdout.buffer.write(raw) == len(raw), "native-probe-output")
     sys.stdout.buffer.flush()
 

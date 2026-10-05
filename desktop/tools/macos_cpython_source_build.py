@@ -1,7 +1,7 @@
 """One fixed native Darwin CPython SOURCE build, using the existing MRK owner.
 
 The accepted source recipe module is immutable DATA, not execution authority.
-This entry is for the reviewed, disposable, credential-free ARM macOS26 workflow
+This entry is for the two reviewed, disposable, credential-free macOS26 workflows
 only. It does not use a historical supplier, activate a consumer, install tools,
 sign a public release, or run on a shared development machine.
 """
@@ -31,6 +31,15 @@ MIB = 1024 * 1024
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REFERENCE = "refs/heads/verify/desktop-macos-cpython-source-build"
 WORKFLOW = ".github/workflows/desktop-macos-cpython-source-build.yml"
+ARM_TARGET = "aarch64-apple-darwin"
+INTEL_TARGET = "x86_64-apple-darwin"
+_TARGET_PROFILES = {
+    ARM_TARGET: ("arm64", "ARM64", REFERENCE, WORKFLOW, "source-lock.json",
+                 "darwin64-arm64-cc", "mrk-macos-cpython"),
+    INTEL_TARGET: ("x86_64", "X64", "refs/heads/verify/desktop-macos-cpython-source-build-intel",
+                   ".github/workflows/desktop-macos-cpython-source-build-intel.yml",
+                   "source-lock-intel.json", "darwin64-x86_64-cc", "mrk-macos-cpython-intel"),
+}
 CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
 WORK_PARENT = Path("/Users/runner/work/_temp")
 DEVELOPER = Path("/Library/Developer/CommandLineTools")
@@ -60,6 +69,9 @@ PYTHON_CONFIGURE = ("--prefix=/mrk-python-not-installed", "--with-platlibdir=lib
 OPENSSL_CONFIGURE = ("darwin64-arm64-cc", "no-shared", "no-module", "no-dso", "no-engine",
     "no-autoload-config", "no-apps", "no-tests", "no-docs", "no-legacy")
 EVIDENCE_ROLES = ("build", "relocation", "modules", "loader", "tls", "cancellation", "notices")
+TOOL_ROLES = ("sandbox", "xcrun", "shell", "make", "perl", "curl", "codesign", "ls", "orchestrator",
+              "sdk-settings", "clang", "ar", "ranlib", "ld", "sysctl")
+INPUT_BOUND_FAILURES = ("ordinary-input-kind", "ordinary-input-links", "ordinary-input-size")
 
 
 class BuildRefused(ValueError):
@@ -160,8 +172,9 @@ def remaining(deadline, now, maximum=WORK_SECONDS):
 
 def read(path, limit, *, expected=None):
     before = path.lstat()
-    need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
-         and 0 <= before.st_size <= limit, "ordinary-input-bound")
+    need(stat.S_ISREG(before.st_mode), "ordinary-input-kind")
+    need(before.st_nlink == 1, "ordinary-input-links")
+    need(0 <= before.st_size <= limit, "ordinary-input-size")
     with DATA.acquiring(os.open, os.close, path,
                         os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK) as fd:
         need(identity(os.fstat(fd)) == identity(before), "input-open-correspondence")
@@ -254,15 +267,49 @@ def make_value(body, key):
     return values[0].decode("utf-8", "strict").strip()
 
 
-def compiler_flags(sdk):
-    return f"-O2 -g0 -fPIC -arch arm64 -isysroot {sdk} -mmacosx-version-min=26.0"
+def target_profile(target):
+    need(type(target) is str and target in _TARGET_PROFILES, "fixed-producer-target")
+    machine, arch, reference, workflow, lock, openssl, work = _TARGET_PROFILES[target]
+    return {"machine": machine, "runnerArch": arch, "reference": reference, "workflow": workflow,
+            "lock": "desktop/macos-cpython-source-inputs/" + lock, "openssl": openssl, "workPrefix": work}
 
 
-def linker_flags(sdk):
-    return f"-arch arm64 -isysroot {sdk} -mmacosx-version-min=26.0"
+def target_for_route(workflow_ref, reference):
+    need(type(workflow_ref) is str and type(reference) is str, "fixed-producer-target-route")
+    for target in _TARGET_PROFILES:
+        profile = target_profile(target)
+        if (reference == profile["reference"]
+                and workflow_ref == REPOSITORY + "/" + profile["workflow"] + "@" + reference):
+            return target
+    raise BuildRefused("fixed-producer-target-route")
 
 
-def python_configuration(files, prefix, sdk, compiler, orchestrator):
+def compiler_flags(sdk, target=ARM_TARGET):
+    return f"-O2 -g0 -fPIC -arch {target_profile(target)['machine']} -isysroot {sdk} -mmacosx-version-min=26.0"
+
+
+def linker_flags(sdk, target=ARM_TARGET):
+    return f"-arch {target_profile(target)['machine']} -isysroot {sdk} -mmacosx-version-min=26.0"
+
+
+def openssl_configuration(target=ARM_TARGET):
+    return (target_profile(target)["openssl"], *OPENSSL_CONFIGURE[1:])
+
+
+def probe_result(body, role, target, probe):
+    target_profile(target)
+    value = decode(body)
+    need(type(value) is dict and set(value) == {"schemaVersion", "role", "target", "result"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["role"] == role and value["target"] == target
+         and type(value["result"]) is dict, "native-probe-result")
+    host = value["result"].get("nativeHost")
+    need(type(host) is dict and set(host) == {"sysname", "machine", "returned", "observed_errno", "length", "translated"}
+         and probe.native_host_data(target, **host), "native-probe-host-result")
+    return value["result"]
+
+
+def python_configuration(files, prefix, sdk, compiler, orchestrator, target=ARM_TARGET):
     make, header, config = (files[name] for name in ("Makefile", "pyconfig.h", "Modules/config.c"))
     need(make_value(make, "BUILDEXE") in {"", ".exe"}
          and make_value(make, "BUILDPYTHON") == "python$(BUILDEXE)", "python-build-executable")
@@ -270,8 +317,8 @@ def python_configuration(files, prefix, sdk, compiler, orchestrator):
                 "CC": compiler, "LIBEXPAT_A": "Modules/expat/libexpat.a",
                 "PYTHON_FOR_REGEN": orchestrator,
                 "MACOSX_DEPLOYMENT_TARGET": "26.0",
-                "CONFIGURE_CFLAGS": compiler_flags(sdk), "CONFIGURE_CPPFLAGS": "",
-                "CONFIGURE_LDFLAGS": linker_flags(sdk) + " -L" + str(prefix / "lib"),
+                "CONFIGURE_CFLAGS": compiler_flags(sdk, target), "CONFIGURE_CPPFLAGS": "",
+                "CONFIGURE_LDFLAGS": linker_flags(sdk, target) + " -L" + str(prefix / "lib"),
                 "MODULE_ZLIB_LDFLAGS": str(prefix / "lib/libz.a")}
     for key, value in expected.items():
         need(make_value(make, key) == value, "python-material-configuration:" + key)
@@ -344,9 +391,15 @@ def load_module(name, path):
 
 
 class Build:
-    def __init__(self, root, work, source, owner, control, recipe, probe):
+    def __init__(self, root, work, source, owner, control, recipe, probe, target=ARM_TARGET):
         self.root, self.work, self.source = root, work, source
         self.owner, self.control, self.recipe, self.probe = owner, control, recipe, probe
+        self.target, self.profile = target, target_profile(target)
+        self.source_lock = recipe.source_binding(target)
+        descriptor = recipe.target_description(target)
+        need(self.source_lock["path"] == self.profile["lock"]
+             and (descriptor.triple, descriptor.architecture, descriptor.openssl_target, descriptor.minimum_macos)
+             == (target, self.profile["machine"], self.profile["openssl"], "26.0"), "producer-recipe-profile")
         self.started = time.monotonic()
         self.deadline = self.started + WORK_SECONDS
         self.private, self.public = work / "private", work / "public"
@@ -383,7 +436,8 @@ class Build:
     def evidence_json(self, name, value):
         return self.evidence_bytes(name, canonical(value))
 
-    def protected_tool(self, path, *, system=True, executable=True):
+    def protected_tool(self, path, *, role, system=True, executable=True):
+        need(type(role) is str and role in TOOL_ROLES, "tool-diagnostic-role")
         original_path = path
         resolved = path.resolve(strict=True)
         need(path.is_absolute(), "non-absolute-tool-route")
@@ -399,7 +453,14 @@ class Build:
         need(stat.S_ISREG(info.st_mode) and info.st_uid in ({0} if system else {0, os.getuid()})
              and (not executable or info.st_mode & 0o111) and not info.st_mode & 0o022,
              "unprotected-selected-tool")
-        body = read(resolved, 512 * MIB)
+        try:
+            body = read(resolved, 512 * MIB)
+        except BuildRefused as error:
+            # Keep the exact original refusal. Only fixed roles/conditions may
+            # refine diagnostics; no raw tool path or exception text is added.
+            if type(error) is BuildRefused and str(error) in INPUT_BOUND_FAILURES:
+                raise BuildRefused("tool-" + role + "-" + str(error)) from None
+            raise
         row = {"path": str(resolved), "selectedPath": str(original_path), "size": len(body),
                "sha256": digest(body), "identity": identity(info), "AppleSystem": system,
                "executable": executable}
@@ -468,48 +529,51 @@ class Build:
         self.environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.private / "home"),
             "TMPDIR": str(self.private / "tmp") + "/", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
             "DEVELOPER_DIR": str(DEVELOPER), "CONFIG_SITE": "/dev/null", "PYTHONDONTWRITEBYTECODE": "1"}
-        self.sandbox = self.protected_tool(Path("/usr/bin/sandbox-exec"))
-        self.xcrun = self.protected_tool(Path("/usr/bin/xcrun"))
-        self.shell = self.protected_tool(Path("/bin/sh"))
-        self.make = self.protected_tool(Path("/usr/bin/make"))
-        self.perl = self.protected_tool(Path("/usr/bin/perl"))
-        self.curl = self.protected_tool(Path("/usr/bin/curl"))
-        self.codesign = self.protected_tool(Path("/usr/bin/codesign"))
-        self.ls = self.protected_tool(Path("/bin/ls"))
-        self.orchestrator = self.protected_tool(Path(sys.executable), system=False)
+        self.sandbox = self.protected_tool(Path("/usr/bin/sandbox-exec"), role="sandbox")
+        self.xcrun = self.protected_tool(Path("/usr/bin/xcrun"), role="xcrun")
+        self.shell = self.protected_tool(Path("/bin/sh"), role="shell")
+        self.make = self.protected_tool(Path("/usr/bin/make"), role="make")
+        self.perl = self.protected_tool(Path("/usr/bin/perl"), role="perl")
+        self.curl = self.protected_tool(Path("/usr/bin/curl"), role="curl")
+        self.codesign = self.protected_tool(Path("/usr/bin/codesign"), role="codesign")
+        self.ls = self.protected_tool(Path("/bin/ls"), role="ls")
+        self.orchestrator = self.protected_tool(Path(sys.executable), role="orchestrator", system=False)
         self.toolchain["orchestrator"] = {**self.tools[self.orchestrator], "version": sys.version, "shipped": False}
         sdk = self.run("sdk-path", [self.xcrun, "--sdk", "macosx", "--show-sdk-path"], maximum=30).stdout.decode().strip()
         self.sdk = Path(sdk).resolve(strict=True)
         need(self.sdk.is_relative_to(DEVELOPER / "SDKs") and " " not in str(self.sdk), "fixed-Apple-sdk")
-        self.protected_tool(self.sdk / "SDKSettings.json", executable=False)
+        self.protected_tool(self.sdk / "SDKSettings.json", role="sdk-settings", executable=False)
         sdk_version = self.run("sdk-version", [self.xcrun, "--sdk", "macosx", "--show-sdk-version"], maximum=30).stdout.decode().strip()
         need(re.fullmatch(r"26\.[0-9]+(?:\.[0-9]+)?", sdk_version), "sdk-version")
         for name in ("clang", "ar", "ranlib", "ld"):
             path = self.run("tool-path-" + name, [self.xcrun, "--sdk", "macosx", "--find", name], maximum=30).stdout.decode().strip()
-            setattr(self, name, self.protected_tool(Path(path)))
+            setattr(self, name, self.protected_tool(Path(path), role=name))
         self.toolchain.update(sdk=str(self.sdk), sdkVersion=sdk_version,
             compilerVersion=self.run("compiler-version", [self.clang, "--version"], maximum=30).stdout.decode(),
-            platform=platform.mac_ver()[0], architecture=os.uname().machine,
+            platform=platform.mac_ver()[0], architecture=os.uname().machine, target=self.target,
             descriptorLimits=self.descriptor_limits,
             systemLibffi="Apple SDK headers/system dylib; private source 3.4.8 not incorporated")
         self.environment.update(SDKROOT=str(self.sdk), MACOSX_DEPLOYMENT_TARGET="26.0",
             CC=self.clang, AR=self.ar, RANLIB=self.ranlib, LD=self.ld, MAKE=self.make,
             CONFIG_SHELL=self.shell, PYTHON_FOR_REGEN=self.orchestrator,
-            CFLAGS=compiler_flags(self.sdk), CPPFLAGS="", LDFLAGS=linker_flags(self.sdk))
+            CFLAGS=compiler_flags(self.sdk, self.target), CPPFLAGS="", LDFLAGS=linker_flags(self.sdk, self.target))
         probe_path = self.root / "desktop/tools/macos_cpython_source_probe.py"
-        network_result = self.run("network-denial", [self.orchestrator, "-I", "-S", "-B", str(probe_path), "network"], maximum=15)
-        need(decode(network_result.stdout)["result"]["errno"] in {1, 13}, "network-denial-result")
-        memory = self.run("physical-memory", [self.protected_tool(Path("/usr/sbin/sysctl")), "-n", "hw.memsize"], maximum=15)
+        network_result = self.run("network-denial", [self.orchestrator, "-I", "-S", "-B", str(probe_path),
+                                  "network", self.target], maximum=15)
+        network = probe_result(network_result.stdout, "network", self.target, self.probe)
+        need(type(network.get("errno")) is int and network["errno"] in {1, 13}, "network-denial-result")
+        self.toolchain["nativeHost"] = network["nativeHost"]
+        memory = self.run("physical-memory", [self.protected_tool(Path("/usr/sbin/sysctl"), role="sysctl"), "-n", "hw.memsize"], maximum=15)
         need(re.fullmatch(rb"[0-9]+\n", memory.stdout) and int(memory.stdout) >= 4 * 1024 * MIB
              and shutil.disk_usage(self.private).free >= 4 * 1024 * MIB, "build-capacity")
         self.toolchain["tools"] = list(self.tools.values())
         self.evidence_json("toolchain.json", self.toolchain)
 
     def sources(self):
-        lock_path = self.root / "desktop/macos-cpython-source-inputs/source-lock.json"
-        self.lock_body = read(lock_path, self.recipe.SOURCE_LOCK_BYTES,
-                              expected=(self.recipe.SOURCE_LOCK_BYTES, self.recipe.SOURCE_LOCK_SHA256))
-        self.inputs = self.recipe.source_nomination(self.lock_body, self.recipe.ARM_TARGET)
+        lock_path = self.root / self.source_lock["path"]
+        self.lock_body = read(lock_path, self.source_lock["bytes"],
+                              expected=(self.source_lock["bytes"], self.source_lock["sha256"]))
+        self.inputs = self.recipe.source_nomination(self.lock_body, self.target)
         provenance = decode(read(self.root / PROVENANCE[0], PROVENANCE[1], expected=PROVENANCE[1:]))
         self.provenance = {row["id"]: row for row in provenance["sources"]}
         for source in self.inputs:
@@ -518,7 +582,7 @@ class Build:
                         expected=(source.inventory_size, source.inventory_sha256))
             self.source_rows[source.component] = inventory(body, source)
             if source.component == "cpython":
-                self.stdlib = self.recipe.stdlib_projection(self.lock_body, body, self.recipe.ARM_TARGET)
+                self.stdlib = self.recipe.stdlib_projection(self.lock_body, body, self.target)
             archive = self.private / "archives" / (source.component + ".archive")
             need(not archive.exists(), "source-acquisition-collision")
             self.run("download-" + source.component, [self.curl, "-q", "--fail", "--silent", "--show-error",
@@ -636,7 +700,7 @@ class Build:
                     (directory / "zconf.h", prefix / "include/zconf.h"), (directory / "libz.a", prefix / "lib/libz.a")):
                     write(target, read(source_path, 64 * MIB), 0o444)
             else:
-                self.run("openssl-configure", [self.perl, str(source / "Configure"), *OPENSSL_CONFIGURE,
+                self.run("openssl-configure", [self.perl, str(source / "Configure"), *openssl_configuration(self.target),
                     "--prefix=" + str(prefix), "--openssldir=/mrk-openssl-no-system-config"], cwd=directory)
                 self.run("openssl-build", [self.make, "-j2", "build_libs"], cwd=directory)
                 headers = {}
@@ -681,7 +745,7 @@ class Build:
         for name, body in configuration.items():
             self.evidence_bytes("python-" + name.replace("/", "-").lower() + ".txt", body)
         need(configuration["Modules/Setup.local"] == setup, "python-setup-changed")
-        self.configuration = python_configuration(configuration, prefix, self.sdk, self.clang, self.orchestrator)
+        self.configuration = python_configuration(configuration, prefix, self.sdk, self.clang, self.orchestrator, self.target)
         make_args = [self.make, "-j2", "PYTHON_FOR_REGEN=" + self.orchestrator,
                      "PYTHON_FOR_BUILD=./$(BUILDPYTHON) -E -B"]
         self.run("python-builtin-archives", [*make_args, *HACL, "Modules/expat/libexpat.a"], cwd=directory, env=environment)
@@ -763,7 +827,7 @@ class Build:
         os.chmod(executable, 0o555)
         self.run("python-signature-verify", [self.codesign, "--verify", "--strict", str(executable)], maximum=30)
         signed = read(executable, 128 * MIB)
-        self.probe.macho(signed)
+        self.probe.macho(signed, self.target)
         files["python/bin/python3"].update(size=len(signed), sha256=digest(signed))
         self.files = sorted(files.values(), key=lambda row: row["path"])
         seal(self.payload)
@@ -779,7 +843,7 @@ class Build:
         hashes = {name: row["sha256"] for name, row in self.source_binding.items()}
 
         def run_set(label, roles):
-            context = {"schemaVersion": 1, "payload": str(self.payload), "checkout": str(self.root),
+            context = {"schemaVersion": 1, "target": self.target, "payload": str(self.payload), "checkout": str(self.root),
                 "scratch": str(self.private / "probe-scratch"), "sourceCommit": self.source,
                 "builtins": self.configuration["builtins"], "files": self.files, "sourceFiles": hashes}
             path = self.private / (label + "-probe-context.json")
@@ -788,11 +852,8 @@ class Build:
             clean = {key: self.environment[key] for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ")}
             for role in roles:
                 result = self.run(label + "-" + role, [str(self.payload / "python/bin/python3"), "-I", "-S", "-B",
-                    probe, role, str(path)], env=clean, maximum=60)
-                value = decode(result.stdout)
-                need(type(value) is dict and set(value) == {"schemaVersion", "role", "result"}
-                     and value["schemaVersion"] == 1 and value["role"] == role, "native-probe-result")
-                results[role] = value["result"]
+                    probe, role, self.target, str(path)], env=clean, maximum=60)
+                results[role] = probe_result(result.stdout, role, self.target, self.probe)
             self.check_payload()
             return results
 
@@ -895,7 +956,7 @@ class Build:
                         self.native_probes()
                         self.notices()
                         self.recheck_tools(full=True)
-                        need(source_snapshot(self.root) == self.source_binding, "producer-source-post")
+                        need(source_snapshot(self.root, self.target) == self.source_binding, "producer-source-post")
                         self.check()
                     except BaseException as error:
                         self.failure = {"phase": self.phase, "type": type(error).__name__,
@@ -927,7 +988,7 @@ class Build:
             ledger=state, handlers=self.guard.handler_state, scratch_retired=self.scratch_retired,
             data_finality=DATA.known)
         success = success and not self.cleanup_errors
-        report = {"schemaVersion": 1, "sourceCommit": self.source,
+        report = {"schemaVersion": 1, "sourceCommit": self.source, "target": self.target,
             "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "state": "qualified-supplier" if success else "failed-no-supplier", "failure": self.failure,
             "commandsEntered": self.entered, "commandsReturned": self.returned, "lifetime": state,
@@ -953,8 +1014,8 @@ class Build:
         self.payload = supplier
         self.check_payload(deadline=self.deadline + CLEANUP_SECONDS)
         receipt = {"schemaVersion": 1, "kind": "mrk-macos-cpython-source-supplier-v1",
-            "target": "aarch64-apple-darwin", "pythonVersion": "3.14.7", "gil": True,
-            "sourceLockSha256": self.recipe.SOURCE_LOCK_SHA256,
+            "target": self.target, "pythonVersion": "3.14.7", "gil": True,
+            "sourceLockSha256": self.source_lock["sha256"],
             "producerSourceSha256": self.source_binding["desktop/tools/macos_cpython_source_build.py"]["sha256"],
             "recipeSha256": digest(canonical({name: row["sha256"] for name, row in self.source_binding.items()})),
             "toolchainSha256": digest(self.evidence["toolchain.json"]),
@@ -1105,10 +1166,11 @@ def supplier_tar(root, output, files, *, deadline):
             "files": len(files), "directories": len(directories), "modePreservation": True}
 
 
-def source_snapshot(root):
-    fixed = {WORKFLOW, "desktop/tools/macos_cpython_source_build.py", "desktop/tools/macos_cpython_source_probe.py",
+def source_snapshot(root, target=ARM_TARGET):
+    profile = target_profile(target)
+    fixed = {profile["workflow"], "desktop/tools/macos_cpython_source_build.py", "desktop/tools/macos_cpython_source_probe.py",
              "desktop/tools/macos_cpython_source_setup.local", "desktop/tools/macos_cpython_source_recipe.py",
-             "desktop/tools/macos_aqua_qualification.py", "desktop/macos-cpython-source-inputs/source-lock.json",
+             "desktop/tools/macos_aqua_qualification.py", profile["lock"],
              PROVENANCE[0]}
     fixed.update("desktop/cpython-source-inputs/" + name + "-source-inventory.json" for name in ("cpython", "libffi", "openssl", "zlib"))
     fixed.update((directory / name).relative_to(root).as_posix()
@@ -1125,7 +1187,9 @@ def source_snapshot(root):
 
 
 def main():
-    need(len(sys.argv) == 1 and sys.platform == "darwin" and os.uname().machine == "arm64"
+    target = target_for_route(os.environ.get("GITHUB_WORKFLOW_REF"), os.environ.get("GITHUB_REF"))
+    profile = target_profile(target)
+    need(len(sys.argv) == 1 and sys.platform == "darwin" and os.uname().machine == profile["machine"]
          and platform.mac_ver()[0].startswith("26.") and sys.version_info[:3] == (3, 14, 7)
          and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid(), "fixed-native-producer-host")
@@ -1133,9 +1197,9 @@ def main():
     need(re.fullmatch(r"[0-9a-f]{40}", source) and source != "0" * 40
          and all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)), "fixed-native-producer-run")
     route = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
-        "RUNNER_ARCH": "ARM64", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "push",
-        "GITHUB_REF": REFERENCE, "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "producer",
-        "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW + "@" + REFERENCE,
+        "RUNNER_ARCH": profile["runnerArch"], "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF": profile["reference"], "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "producer",
+        "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + profile["workflow"] + "@" + profile["reference"],
         "GITHUB_WORKSPACE": str(CHECKOUT), "RUNNER_TEMP": str(WORK_PARENT)}
     need(all(os.environ.get(key) == value for key, value in route.items()), "fixed-native-producer-route")
     need(read(CHECKOUT / ".git/HEAD", 41) == source.encode() + b"\n", "fixed-detached-source")
@@ -1148,16 +1212,16 @@ def main():
     need(0 < selected_limits[0] <= 1024 and selected_limits[1] == original_limits[1],
          "fixed-native-descriptor-bound")
     os.umask(0o077)
-    before = source_snapshot(CHECKOUT)
+    before = source_snapshot(CHECKOUT, target)
     tools = CHECKOUT / "desktop/tools"
     recipe = load_module("_mrk_macos_source_data", tools / "macos_cpython_source_recipe.py")
     probe = load_module("_mrk_macos_source_probe", tools / "macos_cpython_source_probe.py")
     qualification = load_module("_mrk_macos_source_qualification", tools / "macos_aqua_qualification.py")
     owner = qualification.load_owner(CHECKOUT)
     from mobile_release import cancellation
-    work = WORK_PARENT / f"mrk-macos-cpython-{source}-{run}-{attempt}"
+    work = WORK_PARENT / f"{profile['workPrefix']}-{source}-{run}-{attempt}"
     work.mkdir(mode=0o700)  # No adoption, reset, overwrite or retry of an existing task.
-    build = Build(CHECKOUT, work, source, owner, cancellation, recipe, probe)
+    build = Build(CHECKOUT, work, source, owner, cancellation, recipe, probe, target)
     build.descriptor_limits = {"original": original_limits, "selected": selected_limits}
     build.source_binding = before
     try:

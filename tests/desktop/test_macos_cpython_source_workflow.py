@@ -1,6 +1,6 @@
-"""Source contracts for the one fresh macOS CPython workflow.
+"""Source contracts for the two fixed fresh macOS CPython workflows.
 
-Only this YAML file is read. No producer import, shell, Git, network, build,
+Only the two YAML files are read. No producer import, shell, Git, network, build,
 macOS process or Actions invocation occurs. This intentionally checks a small
 fixed workflow layout, not arbitrary YAML or Bash. Native owner finality and
 supplier correctness require the separate real Mac run.
@@ -13,12 +13,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/desktop-macos-cpython-source-build.yml"
+INTEL_WORKFLOW = ROOT / ".github/workflows/desktop-macos-cpython-source-build-intel.yml"
 
 
 class MacCPythonSourceWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.raw = WORKFLOW.read_text(encoding="utf-8")
+        cls.intel = INTEL_WORKFLOW.read_text(encoding="utf-8")
         starts = list(re.finditer(r"^      - id: ([a-z_]+)$", cls.raw, re.MULTILINE))
         cls.ids = [match[1] for match in starts]
         cls.steps = {match[1]: cls.raw[match.start():
@@ -74,6 +76,25 @@ class MacCPythonSourceWorkflowTests(unittest.TestCase):
         assertions = [line.strip() for line in self.raw.splitlines() if line.strip().startswith("[[ ")]
         self.assertTrue(assertions)
         self.assertTrue(all(line.endswith("]] || exit 1") for line in assertions))
+        # All guards, clean environment, publication and original status checks
+        # below cover both lanes: Intel differs only by this closed nomination.
+        derivative = self.raw
+        for old, new, count in (
+            ("name: Desktop macOS fresh CPython source supplier", "name: Desktop macOS Intel fresh CPython source supplier", 1),
+            ("desktop-macos-cpython-source-build", "desktop-macos-cpython-source-build-intel", 5),
+            ("runs-on: macos-26\n", "runs-on: macos-26-intel\n", 1),
+            ("fixed disposable hosted ARM source-build route", "fixed disposable hosted Intel source-build route", 1),
+            ('"$RUNNER_ARCH" == ARM64', '"$RUNNER_ARCH" == X64', 1),
+            ('"$(/usr/bin/uname -m)" == arm64', '"$(/usr/bin/uname -m)" == x86_64', 1),
+            ("architecture: arm64", "architecture: x64", 1),
+            ("mrk-macos-cpython-$GITHUB_SHA", "mrk-macos-cpython-intel-$GITHUB_SHA", 1),
+            ("name: desktop-macos-cpython-evidence-", "name: desktop-macos-cpython-intel-evidence-", 1),
+            ("name: desktop-macos-cpython-supplier-", "name: desktop-macos-cpython-intel-supplier-", 1),
+        ):
+            self.assertEqual(derivative.count(old), count)
+            self.assertNotIn(new, derivative)
+            derivative = derivative.replace(old, new)
+        self.assertEqual(self.intel, derivative)
 
     def test_entry_uses_exact_clean_environment_and_preserves_original_status(self):
         build = self.steps["build"]

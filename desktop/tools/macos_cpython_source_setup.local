@@ -1,4 +1,4 @@
-# CPython 3.14.7 / macOS 26 ARM64. This template is not an execution grant.
+# CPython 3.14.7 / macOS 26 ARM64 or x86_64. Not an execution grant.
 # 24 optional + 27 bootstrap + 10 intrinsic; no shared extensions.
 # @MRK_PREFIX@ is replaced only by the fixed private build prefix.
 *static*

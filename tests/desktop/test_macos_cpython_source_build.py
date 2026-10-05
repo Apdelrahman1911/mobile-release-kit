@@ -7,6 +7,7 @@ tool/SDK discovery, source build or supplier activation occurs here.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import gzip
 import hashlib
 import importlib.util
@@ -23,6 +24,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import call, patch
 import zlib
 
 
@@ -57,14 +59,14 @@ def scratch():
                         os.chmod(selected, 0o700)
 
 
-def make_configuration(exe=".exe", multiarch="darwin"):
+def make_configuration(exe=".exe", multiarch="darwin", target=BUILD.ARM_TARGET):
     prefix, sdk = Path("/private/task/prefix"), Path("/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk")
     values = {
         "BUILDEXE": exe, "BUILDPYTHON": "python$(BUILDEXE)", "VERSION": "3.14", "MACHDEP": "darwin",
         "ABIFLAGS": "", "PY_ENABLE_SHARED": "0", "CC": "/Apple/clang", "PYTHON_FOR_REGEN": "/chosen/python3",
         "LIBEXPAT_A": "Modules/expat/libexpat.a", "MODULE_ZLIB_LDFLAGS": str(prefix / "lib/libz.a"),
-        "CONFIGURE_CFLAGS": BUILD.compiler_flags(sdk), "CONFIGURE_CPPFLAGS": "",
-        "CONFIGURE_LDFLAGS": BUILD.linker_flags(sdk) + " -L" + str(prefix / "lib"),
+        "CONFIGURE_CFLAGS": BUILD.compiler_flags(sdk, target), "CONFIGURE_CPPFLAGS": "",
+        "CONFIGURE_LDFLAGS": BUILD.linker_flags(sdk, target) + " -L" + str(prefix / "lib"),
         "MACOSX_DEPLOYMENT_TARGET": "26.0",
         "MODBUILT_NAMES": " ".join(BUILD.BOOTSTRAP + BUILD.OPTIONAL), "MODSHARED_NAMES": "",
         "MODDISABLED_NAMES": " ".join(BUILD.DISABLED),
@@ -87,7 +89,8 @@ def make_configuration(exe=".exe", multiarch="darwin"):
     return files, prefix, sdk
 
 
-def mach_o(*, dylib=b"/usr/lib/libSystem.B.dylib", minimum=26 << 16, extra=b""):
+def mach_o(*, dylib=b"/usr/lib/libSystem.B.dylib", minimum=26 << 16, extra=b"",
+           cpu=0x100000C, subtype=0):
     def named(command, header_size, name):
         size = (header_size + len(name) + 1 + 7) & ~7
         head = struct.pack("<III", command, size, header_size)
@@ -100,7 +103,7 @@ def mach_o(*, dylib=b"/usr/lib/libSystem.B.dylib", minimum=26 << 16, extra=b""):
     if extra:
         commands.append(extra)
     body = b"".join(commands)
-    return struct.pack("<IiiIIIII", 0xFEEDFACF, 0x100000C, 0, 2, len(commands), len(body), 0, 0) + body
+    return struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, subtype, 2, len(commands), len(body), 0, 0) + body
 
 
 def archive_fixture(component="zlib", *, trailer=b"", compression_trailer=b"", body=b"public source\n"):
@@ -141,13 +144,17 @@ def parser_instance(path, source, rows, provenance):
 
 class MacPythonSourceBuildTests(unittest.TestCase):
     def test_configuration_keeps_darwin_ffi_scproxy_static_archives_and_generated_names(self):
-        for suffix, multiarch in ((".exe", "darwin"), ("", "")):
-            files, prefix, sdk = make_configuration(suffix, multiarch)
-            result = BUILD.python_configuration(files, prefix, sdk, "/Apple/clang", "/chosen/python3")
-            self.assertEqual(result["executable"], "python" + suffix)
-            self.assertEqual(result["generated"], ["_sysconfigdata__darwin_" + multiarch + ".py",
-                "_sysconfig_vars__darwin_" + multiarch + ".json", "build-details.json"])
-            self.assertEqual(len(result["builtins"]), 61)
+        for target in (BUILD.ARM_TARGET, BUILD.INTEL_TARGET):
+            for suffix, multiarch in ((".exe", "darwin"), ("", "")):
+                files, prefix, sdk = make_configuration(suffix, multiarch, target)
+                result = BUILD.python_configuration(files, prefix, sdk, "/Apple/clang", "/chosen/python3", target)
+                self.assertEqual(result["executable"], "python" + suffix)
+                self.assertEqual(result["generated"], ["_sysconfigdata__darwin_" + multiarch + ".py",
+                    "_sysconfig_vars__darwin_" + multiarch + ".json", "build-details.json"])
+                self.assertEqual(len(result["builtins"]), 61)
+            other = BUILD.INTEL_TARGET if target == BUILD.ARM_TARGET else BUILD.ARM_TARGET
+            with self.assertRaises(BUILD.BuildRefused):
+                BUILD.python_configuration(files, prefix, sdk, "/Apple/clang", "/chosen/python3", other)
         files, prefix, sdk = make_configuration()
         mutations = [
             ("Makefile", b"BUILDEXE=.exe", b"BUILDEXE=/other/python"),
@@ -171,14 +178,65 @@ class MacPythonSourceBuildTests(unittest.TestCase):
 
     def test_macho_refuses_foreign_deployment_loader_injection_and_truncation(self):
         self.assertEqual(PROBE.macho(mach_o())["architecture"], "arm64")
-        wrong_cpu = bytearray(mach_o())
-        struct.pack_into("<i", wrong_cpu, 4, 0x1000007)
-        for body in (bytes(wrong_cpu), mach_o(minimum=25 << 16), mach_o(dylib=b"@rpath/libssl.dylib"),
-                     mach_o(extra=struct.pack("<IIQ", 0x8000001C, 16, 0)), mach_o()[:-1],
-                     b"\xca\xfe\xba\xbe" + mach_o()[4:]):
-            with self.subTest(prefix=body[:8]):
-                with self.assertRaises(PROBE.ProbeRefused):
-                    PROBE.macho(body)
+        for target, machine, cpu, subtype in ((BUILD.ARM_TARGET, "arm64", 0x100000C, 0),
+                                              (BUILD.INTEL_TARGET, "x86_64", 0x1000007, 3)):
+            options = {"cpu": cpu, "subtype": subtype}
+            native = mach_o(**options)
+            self.assertEqual(PROBE.macho(native, target)["architecture"], machine)
+            foreign = mach_o(cpu=0x1000007, subtype=3) if target == BUILD.ARM_TARGET else mach_o()
+            for body in (foreign, mach_o(cpu=cpu, subtype=subtype + 1),
+                         mach_o(**options, minimum=25 << 16), mach_o(**options, dylib=b"@rpath/libssl.dylib"),
+                         mach_o(**options, extra=struct.pack("<IIQ", 0x8000001C, 16, 0)), native[:-1],
+                         b"\xca\xfe\xba\xbe" + native[4:]):
+                with self.subTest(target=target, prefix=body[:12]), self.assertRaises(PROBE.ProbeRefused):
+                    PROBE.macho(body, target)
+
+    def test_paired_native_host_and_report_data_do_not_cross_target_or_translation(self):
+        # These are scalar observations only: no ctypes/sysctl/process or
+        # simulated native receipt is executed or admitted by this DATA test.
+        for target, machine, openssl in ((BUILD.ARM_TARGET, "arm64", "darwin64-arm64-cc"),
+                                         (BUILD.INTEL_TARGET, "x86_64", "darwin64-x86_64-cc")):
+            host = {"sysname": "Darwin", "machine": machine, "returned": 0,
+                    "observed_errno": errno.EACCES, "length": 4, "translated": 0}
+            self.assertTrue(PROBE.native_host_data(target, **host))  # errno ignored on success.
+            absent = {**host, "returned": -1, "observed_errno": errno.ENOENT,
+                      "length": None, "translated": None}
+            self.assertTrue(PROBE.native_host_data(target, **absent))
+            self.assertTrue(PROBE.native_host_data(target, **{**absent, "length": 99, "translated": 1}))
+            for change in ({"translated": 1}, {"translated": True}, {"length": 8}, {"length": True},
+                           {"returned": True}, {"returned": 1}, {"returned": -1, "observed_errno": errno.EACCES},
+                           {"returned": -1, "observed_errno": True}, {"sysname": "Linux"},
+                           {"machine": "x86_64" if machine == "arm64" else "arm64"}):
+                with self.subTest(target=target, change=change):
+                    self.assertFalse(PROBE.native_host_data(target, **{**host, **change}))
+            profile = BUILD.target_profile(target)
+            workflow_ref = BUILD.REPOSITORY + "/" + profile["workflow"] + "@" + profile["reference"]
+            self.assertEqual(BUILD.target_for_route(workflow_ref, profile["reference"]), target)
+            self.assertEqual(BUILD.openssl_configuration(target), (openssl, *BUILD.OPENSSL_CONFIGURE[1:]))
+            other = BUILD.INTEL_TARGET if target == BUILD.ARM_TARGET else BUILD.ARM_TARGET
+            with self.assertRaises(BUILD.BuildRefused):
+                BUILD.target_for_route(workflow_ref, BUILD.target_profile(other)["reference"])
+            context = {"target": target, "fixture": "DATA only"}
+            self.assertEqual(PROBE.decode_context(BUILD.canonical(context), target), context)
+            with self.assertRaisesRegex(PROBE.ProbeRefused, "^native-probe-context-target$"):
+                PROBE.decode_context(BUILD.canonical(context), other)
+            report = {"schemaVersion": 1, "target": target, "role": "network",
+                      "result": {"nativeHost": host, "errno": errno.EPERM}}
+            self.assertEqual(BUILD.probe_result(BUILD.canonical(report), "network", target, PROBE), report["result"])
+            for changed in ({**report, "target": other}, {**report, "role": "loader"},
+                            {**report, "schemaVersion": True},
+                            {**report, "result": {"nativeHost": {**host, "translated": 1}}},
+                            {**report, "result": {"nativeHost": {**host, "extra": 0}}}):
+                with self.assertRaises(BUILD.BuildRefused):
+                    BUILD.probe_result(BUILD.canonical(changed), "network", target, PROBE)
+        for unknown in ("arm64-apple-darwin", "x86_64-unknown-linux-gnu", True, None):
+            self.assertFalse(PROBE.native_host_data(unknown, **host))
+            with self.assertRaises(BUILD.BuildRefused):
+                BUILD.target_profile(unknown)
+            context = {"schemaVersion": 1, "target": unknown, "payload": None, "checkout": None,
+                       "builtins": [], "files": [], "sourceFiles": {}, "scratch": None, "sourceCommit": ""}
+            with self.assertRaisesRegex(PROBE.ProbeRefused, "^probe-target$"):
+                PROBE.configuration(context)  # Refuses before any filesystem access.
 
     def test_inventory_does_not_admit_aliases_modes_or_unbound_shapes(self):
         source = SimpleNamespace(original_prefix="/work/inputs/sources/cpython/")
@@ -242,6 +300,78 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             pass
         self.assertFalse(lost.known)  # No repair by an independent acquisition.
         self.assertTrue(BUILD.DATA.known)  # Faults used separate inert DATA state.
+
+    def test_input_admission_refusals_keep_exact_predicates_and_tool_roles(self):
+        # Inert originals only. No real tool, descriptor, native call or file is
+        # opened. Exercise actual read/close sequencing and contextual refusal.
+        info = dict(st_dev=1, st_ino=2, st_mode=BUILD.stat.S_IFREG | 0o555,
+                    st_uid=0, st_gid=0, st_nlink=1, st_size=3, st_mtime_ns=1, st_ctime_ns=1)
+        self.assertEqual(BUILD.INPUT_BOUND_FAILURES,
+                         ("ordinary-input-kind", "ordinary-input-links", "ordinary-input-size"))
+        for change, reason in (({"st_mode": BUILD.stat.S_IFLNK | 0o777}, "ordinary-input-kind"),
+                               ({"st_nlink": 2}, "ordinary-input-links"),
+                               ({"st_nlink": 0}, "ordinary-input-links"),
+                               ({"st_size": -1}, "ordinary-input-size"),
+                               ({"st_size": 4}, "ordinary-input-size")):
+            original = SimpleNamespace(**{**info, **change})
+            selected = SimpleNamespace(lstat=lambda: original)
+            with patch.object(BUILD.os, "open") as opened:
+                with self.assertRaisesRegex(BUILD.BuildRefused, "^" + reason + "$"):
+                    BUILD.read(selected, 3)
+                opened.assert_not_called()
+            self.assertTrue(BUILD.DATA.known)
+
+        original = SimpleNamespace(**info)
+        selected = SimpleNamespace(lstat=lambda: original)
+        with patch.object(BUILD.os, "open", return_value=713) as opened, \
+                patch.object(BUILD.os, "read", side_effect=[b"abc", b""]) as reads, \
+                patch.object(BUILD.os, "fstat", return_value=original), \
+                patch.object(BUILD.os, "close") as closed:
+            self.assertEqual(BUILD.read(selected, 3), b"abc")
+            opened.assert_called_once_with(selected, BUILD.os.O_RDONLY | BUILD.os.O_NOFOLLOW
+                                           | BUILD.os.O_CLOEXEC | BUILD.os.O_NONBLOCK)
+            self.assertEqual(reads.call_args_list, [call(713, 3), call(713, 1)])
+            closed.assert_called_once_with(713)
+        self.assertTrue(BUILD.DATA.known)
+
+        parent = SimpleNamespace(parents=(), stat=lambda: SimpleNamespace(st_mode=BUILD.stat.S_IFDIR | 0o755, st_uid=0))
+        class ToolPath:
+            def resolve(self, *, strict):
+                if strict is not True:
+                    raise AssertionError("original strict resolution changed")
+                return self
+            def is_absolute(self):
+                return True
+            def lstat(self):
+                return original
+            def __str__(self):
+                return "/usr/bin/synthetic-admission-only"
+        ToolPath.parent = parent
+        selected = ToolPath()
+        owner = object.__new__(BUILD.Build)
+        owner.tools = {}
+        for role in BUILD.TOOL_ROLES:
+            for reason in BUILD.INPUT_BOUND_FAILURES:
+                with patch.object(BUILD, "read", side_effect=BUILD.BuildRefused(reason)) as reading:
+                    with self.assertRaisesRegex(BUILD.BuildRefused, "^tool-" + role + "-" + reason + "$"):
+                        owner.protected_tool(selected, role=role)
+                    reading.assert_called_once_with(selected, 512 * BUILD.MIB)
+                self.assertEqual(owner.tools, {})
+        for role in (True, None, "unknown", "make/other"):
+            with patch.object(BUILD, "read") as reading:
+                with self.assertRaisesRegex(BUILD.BuildRefused, "^tool-diagnostic-role$"):
+                    owner.protected_tool(selected, role=role)
+                reading.assert_not_called()
+        class OtherRefused(BUILD.BuildRefused):
+            pass
+        for error in (BUILD.BuildRefused("input-post-correspondence"),
+                      OtherRefused("ordinary-input-links"), OSError("inert read failure")):
+            with patch.object(BUILD, "read", side_effect=error):
+                with self.assertRaises(type(error)) as caught:
+                    owner.protected_tool(selected, role="make")
+                self.assertIs(caught.exception, error)
+            self.assertEqual(owner.tools, {})
+        self.assertTrue(BUILD.DATA.known)
 
     def test_real_small_source_projection_preserves_bytes_modes_and_inventory(self):
         for component in ("cpython", "zlib"):

@@ -16,6 +16,9 @@ import re
 SOURCE_PROFILE = "cpython-3.14.7-macos26-arm64-source-v1"
 SOURCE_LOCK_BYTES = 5158
 SOURCE_LOCK_SHA256 = "cbfc5dd6a120131efc8ca3c134b1da9798ffee464282a4ba8774b85a14f44688"
+INTEL_SOURCE_PROFILE = "cpython-3.14.7-macos26-x86_64-source-v1"
+INTEL_SOURCE_LOCK_BYTES = 5158
+INTEL_SOURCE_LOCK_SHA256 = "e5196ca58c79a5381788e596744fee52385698fb1d3cfa998eaefc7295769430"
 PYTHON_VERSION = "3.14.7"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
@@ -35,7 +38,7 @@ MAX_RETAINED_DIAGNOSTIC_BYTES = 32 * 1024 * 1024
 PLANNED_PHASES = (
     "source-admission", "tool-admission", "network-denial",
     "zlib-configure", "zlib-build", "zlib-stage",
-    "libffi-configure", "libffi-build", "libffi-stage",
+    "Apple-sdk-libffi-configuration",  # Private libffi source is not incorporated.
     "openssl-configure", "openssl-build", "openssl-stage",
     "python-configure", "python-configuration-check", "builtin-archives",
     "python-build", "python-projection", "native-signature",
@@ -126,7 +129,7 @@ def _bound_json(body: bytes, size: int, expected: str, limit: int) -> dict:
 
 
 def target_description(target: str) -> NativeTarget:
-    """Describe both intended native targets; this does not nominate Intel."""
+    """Describe the two closed targets; this is not native qualification."""
     if type(target) is str and target == ARM_TARGET:
         return NativeTarget(target, "arm64", "darwin64-arm64-cc", "26.0")
     if type(target) is str and target == INTEL_TARGET:
@@ -134,14 +137,23 @@ def target_description(target: str) -> NativeTarget:
     raise RecipeRefused("unsupported-macos-target")
 
 
-def source_nomination(lock_body: bytes, target: str) -> tuple[SourceInput, ...]:
-    """Validate the fixed ARM input nomination, never its approval flags."""
+def source_binding(target: str) -> dict:
+    """Return fixed SOURCE pins, never a caller-selected digest or permission."""
     target_description(target)
-    # The current source lock explicitly nominates ARM only. A target descriptor
-    # must never turn those source-selection bytes into native Intel authority.
-    _need(target == ARM_TARGET, "target-not-source-nominated")
-    lock = _bound_json(lock_body, SOURCE_LOCK_BYTES, SOURCE_LOCK_SHA256, 64 * 1024)
-    _need(lock["schemaVersion"] == 1 and lock["profile"] == SOURCE_PROFILE
+    if target == ARM_TARGET:
+        name, profile, size, sha = "source-lock.json", SOURCE_PROFILE, SOURCE_LOCK_BYTES, SOURCE_LOCK_SHA256
+    else:
+        name, profile, size, sha = ("source-lock-intel.json", INTEL_SOURCE_PROFILE,
+                                   INTEL_SOURCE_LOCK_BYTES, INTEL_SOURCE_LOCK_SHA256)
+    return {"path": "desktop/macos-cpython-source-inputs/" + name,
+            "profile": profile, "bytes": size, "sha256": sha}
+
+
+def source_nomination(lock_body: bytes, target: str) -> tuple[SourceInput, ...]:
+    """Validate the exact selected target's nomination, never approval flags."""
+    binding = source_binding(target)
+    lock = _bound_json(lock_body, binding["bytes"], binding["sha256"], 64 * 1024)
+    _need(lock["schemaVersion"] == 1 and lock["profile"] == binding["profile"]
           and lock["target"] == {"triple": target, "minimumMacOS": "26.0",
                                  "pythonVersion": PYTHON_VERSION, "gil": True},
           "source-nomination-identity")
