@@ -640,6 +640,107 @@ jobs:
                       bootstrap_ok = False
           if not bootstrap_ok:
               raise SystemExit("E2 summary DATA source admission refused.")
+          OWNER_DIAGNOSTIC_ROLES = (
+              "metadata-observer-build", "metadata-initial", "initial-receipt-query", "client-build",
+              "resident-build", "entry-build", "client-facade-build", "resident-facade-build", "sign-0",
+              "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0", "verify-sign-1", "verify-sign-2",
+              "verify-sign-3", "verify-sign-4", "package-analyze", "package-build", "metadata-before-install",
+              "before-install-receipt-query", "standard-installer", "metadata-installed", "installed-receipt",
+              "installed-signature-0", "installed-signature-1", "installed-signature-2",
+              "installed-signature-3", "installed-signature-4", "native-run", "metadata-after-native",
+          )
+
+          OWNER_DIAGNOSTIC_PHASES = (
+              "prepare", "bundle-staging", "package-components", "metadata-observer-build", "metadata-initial",
+              "initial-receipt-query", "client-build", "resident-build", "entry-build", "client-facade-build",
+              "resident-facade-build", "sign-0", "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0",
+              "verify-sign-1", "verify-sign-2", "verify-sign-3", "verify-sign-4", "package-analyze",
+              "package-build", "metadata-before-install", "before-install-receipt-query", "standard-installer",
+              "metadata-installed", "installed-receipt", "installed-signature-0", "installed-signature-1",
+              "installed-signature-2", "installed-signature-3", "installed-signature-4", "native-run",
+              "metadata-after-native",
+          )
+
+          OWNER_DIAGNOSTIC_REFUSALS = (
+              "aggregate-auxiliary-budget", "ambient-cargo-configuration", "cargo-artifact-shape",
+              "cargo-bound", "cargo-finish", "cargo-finished", "cargo-lines", "cargo-order",
+              "compiler-alias-original", "compiler-alias-roster", "compiler-copy-changed",
+              "compiler-one-alias", "detached-checkout", "directory-owner-mode", "directory-spelling",
+              "duplicate-json-key", "effective-cargo-clock-version", "effective-rust-binding",
+              "effective-rust-clock-version", "effective-rust-tool", "empty-fixture-entitlements",
+              "facade-copy-changed", "file-original-policy", "fixture-administrative-domain",
+              "fixture-cargo-binding", "fixture-cargo-target", "fixture-cpio-bound", "fixture-cpio-complete",
+              "fixture-cpio-count", "fixture-cpio-data-bound", "fixture-cpio-directory",
+              "fixture-cpio-entry-bound", "fixture-cpio-file-correspondence", "fixture-cpio-format",
+              "fixture-cpio-name", "fixture-cpio-root", "fixture-cpio-roster-owner",
+              "fixture-cpio-special-entry", "fixture-directory-policy", "fixture-exact-roster",
+              "fixture-flat-package", "fixture-gate-bytes", "fixture-image-bound", "fixture-image-command",
+              "fixture-image-fixed-closure", "fixture-image-header", "fixture-image-library",
+              "fixture-image-library-offset", "fixture-image-library-padding",
+              "fixture-image-library-termination", "fixture-image-loader-command", "fixture-image-sections",
+              "fixture-image-segment", "fixture-image-version", "fixture-newc-header", "fixture-odc-header",
+              "fixture-package-bound", "fixture-package-bundle-reference", "fixture-package-bundle-route",
+              "fixture-package-inflate", "fixture-package-info", "fixture-package-info-xml",
+              "fixture-package-relocation", "fixture-receipt-collision", "fixture-receipt-query-inconclusive",
+              "fixture-release-profile", "fixture-root-collision", "fixture-system-dependency",
+              "fixture-total-bytes", "fixture-xar-encoding", "fixture-xar-header", "fixture-xar-member-bound",
+              "fixture-xar-member-range", "fixture-xar-roster", "fixture-xar-size", "fixture-xar-toc",
+              "fixture-xar-xml", "fresh-case-incarnation", "fresh-sealing-original", "genuine-no-f-tail",
+              "genuine-unregister-contract", "hosted-source-route", "image-release-size", "installed-group",
+              "installed-originals-changed", "installed-payload-correspondence", "installed-receipt-binding",
+              "installed-receipt-owner", "installed-receipt-query", "json-byte-bound", "json-constant",
+              "json-shape", "json-shape-bound", "local-f-admission-contract", "metadata-absent-fixture",
+              "metadata-fixture-collision", "metadata-full9", "metadata-observer-original",
+              "metadata-original-correspondence", "metadata-original-policy", "metadata-original-result",
+              "metadata-required-directory-absent", "metadata-result-binding", "metadata-row-shape",
+              "metadata-same-original-policy", "missing-b-refusal-contract", "native-admission-prerequisites",
+              "native-aggregate-outcome", "native-case-count", "native-case-identities", "native-case-order",
+              "native-case-shape", "native-empty-cwd", "native-entry-route", "native-filesystem-postcondition",
+              "native-platform-account", "native-resource-finality", "native-resource-states",
+              "native-result-binding", "native-result-scope", "native-return-finality", "native-role-features",
+              "observer-source-changed", "observer-source-original", "one-fixture-image",
+              "one-native-result-line", "one-native-role-library", "original-changed",
+              "original-command-failed", "original-grew", "original-handle-bound",
+              "original-operation-refused-or-unknown", "original-owner-return", "original-short-read",
+              "original-unbound", "output-bound", "output-close-unknown", "output-readback",
+              "output-short-write", "owner-result-bound", "owner-result-original-close", "owner-summary-write",
+              "package-component-children", "package-component-path", "package-component-root",
+              "package-component-shape", "package-components", "package-inputs-changed",
+              "package-original-changed", "passed-native-originals", "prepared-tool-home-route",
+              "private-original-work", "protected-write-forbidden", "required-source-roster",
+              "result-expected-binding", "run-shape", "scratch-directory-original-after-mode",
+              "scratch-directory-original-before-mode", "scratch-directory-requested-mode",
+              "scratch-original-before-retirement", "scratch-retirement-incomplete", "sealing-close-unknown",
+              "separate-fixture-image-graph", "source-bytes", "source-executable-mode",
+              "source-inventory-binding", "source-inventory-row", "source-module-already-loaded",
+              "source-module-loader", "source-original-descriptor-capacity", "source-original-roster-bound",
+              "source-run-binding", "source-shape", "tail-binding", "tail-finality-contract", "tail-header",
+              "tail-shape", "target-original-before-retirement", "target-original-closes",
+              "target-owner-finality", "target-retirement-incomplete", "timestamp-canonical",
+              "timestamp-range", "unexecuted-case-facts", "unlisted-source", "watch-without-registration",
+              "work-route",
+          )
+
+          def native_owner_failure_data(phase, failure, calls):
+              """Closed diagnostic DATA; never a successful wait or acceptance receipt."""
+              safe_phase = phase if type(phase) is str and phase in OWNER_DIAGNOSTIC_PHASES else "unknown"
+              safe_failure = (None if failure is None else failure
+                              if type(failure) is str and failure in OWNER_DIAGNOSTIC_REFUSALS else "unknown")
+              last = None
+              if type(calls) is list and 0 < len(calls) <= 64:
+                  row = calls[-1]
+                  if (type(row) is dict and row.get("entered") is True
+                          and type(row.get("role")) is str and type(row.get("returned")) is bool):
+                      role = row["role"] if row["role"] in OWNER_DIAGNOSTIC_ROLES else "unknown"
+                      returned, code = row["returned"], row.get("returncode")
+                      if not returned:
+                          last = {"role": role, "returned": False, "returncode": None}
+                      elif type(code) is int and 0 <= code <= 255:
+                          last = {"role": role, "returned": True, "returncode": code}
+              return {"diagnosticOnly": True, "phase": safe_phase, "failure": safe_failure,
+                      "lastOriginalCall": last}
+
+
           module_hash = hashlib.sha256(module_bytes).hexdigest()
           book = fixture.Originals()
           summary = {
@@ -651,6 +752,7 @@ jobs:
               "ownerResultAdmitted": False, "ownerResultSha256": None, "tree": None,
               "bindingSha256": None, "sourceInventorySha256": None, "sourceReleaseId": None,
               "ownerOutcome": None, "originalCallCount": 0, "ownerFinality": None, "native": None,
+              "ownerDiagnostic": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -751,13 +853,14 @@ jobs:
                   and all(call["returned"] and call["returncode"] == 0 for call in calls)
                   and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
               )
-              # Explicit whitelist only: do not project failure/phase text,
-              # compiler captures, environment, package bytes or arbitrary keys.
+              # Only fixed diagnostic labels and returned call facts are added;
+              # never compiler captures, environment, package bytes or arbitrary keys.
               summary.update(
                   ownerResultAdmitted=True, ownerResultSha256=fixture.digest(result_body), tree=binding["tree"],
                   bindingSha256=fixture.digest(binding_body), sourceInventorySha256=fixture.digest(inventory_body),
                   sourceReleaseId=release, ownerOutcome=result["outcome"], originalCallCount=len(calls),
                   ownerFinality={key: result[key] for key in flags}, native=native, accepted=bool(known_pass),
+                  ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
           except BaseException:

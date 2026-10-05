@@ -348,6 +348,34 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('CARGO_NET_OFFLINE="true"', compiler)
         self.assertEqual(active(self.steps[STEP_NAMES[4]]), active(EXPECTED_NATIVE))
 
+    def native_owner_diagnostic(self):
+        """Extract literal tables and ONE pure function, not publication/owner code."""
+        publish = self.steps[STEP_NAMES[5]]
+        body = textwrap.dedent(section(publish, "          import hashlib", "          PY_PUBLISH"))
+        tree = ast.parse(body)
+        names = {"OWNER_DIAGNOSTIC_PHASES", "OWNER_DIAGNOSTIC_REFUSALS", "OWNER_DIAGNOSTIC_ROLES"}
+        namespace, functions = {}, []
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if name in names:
+                    self.assertNotIn(name, namespace)
+                    value = ast.literal_eval(node.value)
+                    self.assertIs(type(value), tuple)
+                    self.assertTrue(value and all(type(item) is str for item in value))
+                    self.assertEqual(len(value), len(set(value)))
+                    namespace[name] = value
+            elif isinstance(node, ast.FunctionDef) and node.name == "native_owner_failure_data":
+                self.assertEqual(node.decorator_list, [])
+                self.assertEqual(node.args.defaults, [])
+                functions.append(node)
+        self.assertEqual(set(namespace), names)
+        self.assertEqual(len(functions), 1)
+        # No publication imports/top-level statements or native program run.
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "<fixed-native-owner-diagnostic>", "exec"), namespace)
+        return namespace["native_owner_failure_data"], namespace
+
+
     def test_acceptance_requires_actual_outcome_and_bounded_closed_summary(self):
         publish, upload, final = (self.steps[name] for name in STEP_NAMES[5:])
         self.assertIn("MRK_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}", active(publish))
@@ -365,6 +393,56 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired",
             "protectedRetentionRequired")"""))
         self.assertIn('accepted=bool(known_pass)', active(publish))
+        report, tables = self.native_owner_diagnostic()
+        call = {"role": "initial-receipt-query", "entered": True, "returned": True,
+                "returncode": 1, "stdoutSha256": "0" * 64, "stderrSha256": "1" * 64}
+        diagnostic = report("initial-receipt-query", "original-command-failed", [call])
+        self.assertEqual(diagnostic, {
+            "diagnosticOnly": True, "phase": "initial-receipt-query", "failure": "original-command-failed",
+            "lastOriginalCall": {"role": "initial-receipt-query", "returned": True, "returncode": 1},
+        })
+        self.assertIsNot(diagnostic["lastOriginalCall"], call)
+        successful = dict(call, returncode=0)
+        diagnostic = report("client-build", "ambient-cargo-configuration", [successful])
+        self.assertEqual(diagnostic["phase"], "client-build")
+        self.assertEqual(diagnostic["lastOriginalCall"]["returncode"], 0)
+        self.assertIsNone(report("prepare", None, [])["failure"])
+        self.assertIsNone(report("prepare", None, [])["lastOriginalCall"])
+        self.assertEqual(report("native-run", None, [dict(call, role="native-run", returned=False)])["lastOriginalCall"],
+                         {"role": "native-run", "returned": False, "returncode": None})
+        marker = "synthetic-private-message-never-published"
+        for phase, failure in ((marker, marker), (True, True), (None, 0), ([], {})):
+            value = report(phase, failure, [dict(call, role=marker, stderr=marker, environment=marker)])
+            self.assertEqual(value["phase"], "unknown")
+            self.assertEqual(value["failure"], "unknown")
+            self.assertEqual(value["lastOriginalCall"]["role"], "unknown")
+            self.assertNotIn(marker, repr(value))
+            self.assertNotIn("stdoutSha256", value["lastOriginalCall"])
+            self.assertNotIn("stderrSha256", value["lastOriginalCall"])
+            self.assertLess(len(repr(value)), 512)
+        malformed = (None, (), {}, [None], [dict(call, role=None)], [dict(call, entered=1)],
+                     [dict(call, returned=1)], [dict(call, returncode=True)],
+                     [dict(call, returncode=-1)], [dict(call, returncode=256)],
+                     [dict(call, returncode="0")], [dict(call, returncode=None)], [call] * 65)
+        for calls in malformed:
+            self.assertIsNone(report("initial-receipt-query", "original-command-failed", calls)["lastOriginalCall"])
+        self.assertEqual(report("native-run", "new-unlisted-reason", [dict(call, returncode=255)])["lastOriginalCall"]["returncode"], 255)
+        # The fixed allowlist covers actual source refusal labels, not error text.
+        labels = {"original-operation-refused-or-unknown"}
+        for node in ast.walk(ast.parse(self.owner)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in {"need", "Refused"} and node.args
+                    and isinstance(node.args[-1], ast.Constant) and type(node.args[-1].value) is str):
+                labels.add(node.args[-1].value)
+        self.assertEqual(labels, set(tables["OWNER_DIAGNOSTIC_REFUSALS"]))
+        self.assertTrue(set(tables["OWNER_DIAGNOSTIC_ROLES"]) <= set(tables["OWNER_DIAGNOSTIC_PHASES"]))
+        self.assertIn('"ownerDiagnostic": None,', publish)
+        self.assertIn('ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),', publish)
+        projection = publish.index('ownerDiagnostic=native_owner_failure_data(')
+        self.assertGreater(projection, publish.index('"summary-owner-binding"'))
+        self.assertGreater(projection, publish.index('"summary-returned-call"'))
+        self.assertGreater(projection, publish.index('              known_pass = ('))
+        self.assertLess(projection, publish.index('              book.check()', projection))
         acceptance_assignments = [line.strip() for line in active(publish).splitlines()
                                   if 'summary["accepted"] =' in line]
         self.assertEqual(acceptance_assignments, [
