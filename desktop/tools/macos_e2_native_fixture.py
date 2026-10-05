@@ -49,6 +49,7 @@ CASES = ("missing-b-refused", "local-f-before-admission", "genuine-tail-unregist
 WORK_SECONDS, HARD_SECONDS = 990, 993
 CAPTURE_LIMIT, RESULT_LIMIT = 65536, 32768
 IMAGE_LIMIT = 32 * 1024 * 1024
+RECEIPT_CENSUS_LIMIT = 1024 * 1024
 MAX_RAW = (1 << 61) - 1
 AUXILIARY_NS = 60_000_000_000
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -248,6 +249,21 @@ def completed(result, argv, limit):
          and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= limit,
          "original-owner-return")
     return result
+
+
+def receipt_census_absent(stdout, stderr):
+    """Validate complete DATA from an already-successful owned receipt census."""
+    need(type(stdout) is bytes and 0 < len(stdout) <= RECEIPT_CENSUS_LIMIT
+         and type(stderr) is bytes and not stderr, "fixture-receipt-query-inconclusive")
+    try:
+        identifiers = plistlib.loads(stdout)
+    except Exception as error:
+        raise Refused("fixture-receipt-query-inconclusive") from error
+    need(type(identifiers) is list and len(identifiers) <= 4096
+         and all(type(identifier) is str and 0 < len(identifier) <= 1024
+                 for identifier in identifiers), "fixture-receipt-query-inconclusive")
+    need(len(set(identifiers)) == len(identifiers), "fixture-receipt-query-inconclusive")
+    need(PACKAGE not in identifiers, "fixture-receipt-collision")
 
 
 def cargo_artifact(messages, role, checkout, target):
@@ -1463,10 +1479,14 @@ class Operation:
                 pass
             else:
                 raise Refused("fixture-receipt-collision")
+        # A filtered no-match can return nonzero, which is not proof of absence.
+        # Require one successful complete root-volume census; never accept a
+        # failed lookup, truncate output, or normalize unrelated identifiers.
         result = self.command(role + "-receipt-query",
-                              ["/usr/sbin/pkgutil", "--pkgs=^dev[.]mobile-release-kit[.]fixture[.]e2[.]pkg[.]v1$"],
-                              self.native_environment(), cwd=self.scratch, timeout=15, limit=4096)
-        need(not result.stdout and not result.stderr, "fixture-receipt-query-inconclusive")
+                              ["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"],
+                              self.native_environment(), cwd=self.scratch, timeout=15,
+                              limit=RECEIPT_CENSUS_LIMIT)
+        receipt_census_absent(result.stdout, result.stderr)
         self.protected.check()
 
     def package_fixture(self):

@@ -548,6 +548,145 @@ class OriginalCallTests(unittest.TestCase):
         self.assertEqual(value.published, [])
 
 
+class ReceiptAbsenceTests(unittest.TestCase):
+    @staticmethod
+    def operation(stdout, returncode=0, stderr=b"", error=None):
+        def run_owned(argv, **kwargs):
+            value.invocations.append((list(argv), kwargs))
+            if error is not None:
+                raise error
+            return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+        value = OriginalCallTests.operation(run_owned)
+        value.scratch = Path("/synthetic/receipt-census")
+        value.source.binding = {"fixtureAdministrativeDomain": {
+            "schemaVersion": 1, "allocation": "fresh-github-hosted-single-job",
+            "writer": "macos_e2_native_fixture.py", "root": str(fixture.ROOT),
+            "receipt": fixture.PACKAGE, "priorFixtureUse": False}}
+        value.invocations, value.observations = [], []
+        value.observe_metadata = lambda role, *, present: value.observations.append((role, present))
+        directories = {fixture.ROOT.parent: 90, Path("/private/var/db/receipts"): 91}
+        value.protected = SimpleNamespace(
+            directory=lambda path: {"fd": directories[path]},
+            check=lambda: value.observations.append("protected-check"))
+        value.installer_entered = value.native_entered = False
+        return value
+
+    def test_successful_complete_census_preserves_both_absence_call_sites(self):
+        samples = (("initial", [], plistlib.FMT_XML),
+                   ("before-install", ["com.example.unrelated", fixture.PACKAGE + ".different"], plistlib.FMT_XML),
+                   ("initial", ["com.example.other"], plistlib.FMT_BINARY))
+        for role, identifiers, fmt in samples:
+            with self.subTest(role=role, fmt=fmt):
+                value = self.operation(plistlib.dumps(identifiers, fmt=fmt))
+                with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()) as observe:
+                    value.absence(role)
+                self.assertEqual([call.args[0] for call in observe.call_args_list],
+                                 [fixture.ROOT.name, fixture.PACKAGE + ".plist", fixture.PACKAGE + ".bom"])
+                self.assertEqual([call.kwargs for call in observe.call_args_list],
+                                 [{"dir_fd": fd, "follow_symlinks": False} for fd in (90, 91, 91)])
+                self.assertEqual(value.invocations, [
+                    (["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"], {
+                        "environ": value.native_environment(), "cwd": value.scratch,
+                        "timeout": 15, "capture": True, "text": False,
+                        "output_limit": 1024 * 1024})])
+                self.assertEqual(value.observations, [(role, False), "protected-check"])
+                self.assertEqual(len(value.calls), 1)
+                self.assertEqual(value.calls[0]["role"], role + "-receipt-query")
+                self.assertIs(value.calls[0]["returned"], True)
+                self.assertEqual(value.calls[0]["returncode"], 0)
+                self.assertFalse(value.installer_entered or value.native_entered)
+
+    def test_nonzero_unknown_or_diagnostic_return_never_establishes_absence(self):
+        valid = plistlib.dumps([])
+        for code, body, stderr in ((1, b"", b""), (1, valid, b""), (2, valid, b""),
+                                   (-9, valid, b""), (0, valid, b"synthetic diagnostic")):
+            with self.subTest(code=code, empty=not body, diagnostic=bool(stderr)):
+                value = self.operation(body, code, stderr)
+                with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()), \
+                        patch.object(fixture, "receipt_census_absent", wraps=fixture.receipt_census_absent) as parser:
+                    with self.assertRaises(fixture.Refused) as refused:
+                        value.absence("initial")
+                    self.assertEqual(parser.call_count, 1 if code == 0 else 0)
+                self.assertEqual(refused.exception.args,
+                                 ("fixture-receipt-query-inconclusive" if code == 0 else "original-command-failed",))
+                self.assertEqual(value.observations, [("initial", False)])
+                self.assertEqual(value.calls[0]["returncode"], code)
+                self.assertFalse(value.installer_entered or value.native_entered)
+        class UnknownOriginal(Exception):
+            dispatched, contained, cleanup_complete = True, False, False
+        value = self.operation(valid, error=UnknownOriginal())
+        with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()), \
+                patch.object(fixture, "receipt_census_absent") as parser:
+            with self.assertRaises(UnknownOriginal):
+                value.absence("initial")
+            parser.assert_not_called()
+        self.assertFalse(value.calls[0]["returned"])
+        self.assertEqual(value.published, [])
+        self.assertEqual(value.observations, [("initial", False)])
+        self.assertFalse(value.installer_entered or value.native_entered)
+
+    def test_malformed_incomplete_oversized_or_ambiguous_census_is_refused(self):
+        valid = plistlib.dumps([])
+        bodies = [b"", b"not a plist", valid[:-10], valid + b"trailing non-plist bytes"]
+        bodies.extend(plistlib.dumps(value) for value in (
+            {}, "com.example.not-an-array", [False], [float("nan")], [float("inf")], [[]], [""],
+            ["com.example.duplicate", "com.example.duplicate"], ["x" * 1025],
+            ["com.example.item" + str(index) for index in range(4097)]))
+        for index, body in enumerate(bodies):
+            with self.subTest(case=index):
+                value = self.operation(body)
+                with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()):
+                    with self.assertRaises(fixture.Refused) as refused:
+                        value.absence("before-install")
+                self.assertEqual(refused.exception.args, ("fixture-receipt-query-inconclusive",))
+                self.assertEqual(value.observations, [("before-install", False)])
+                self.assertFalse(value.installer_entered or value.native_entered)
+        # Oversized or non-byte original output must fail even before plist parsing.
+        for body in (b"x" * (1024 * 1024 + 1), "not-bytes"):
+            value = self.operation(body)
+            with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()), \
+                    patch.object(fixture, "receipt_census_absent") as parser:
+                with self.assertRaises(fixture.Refused) as refused:
+                    value.absence("initial")
+                parser.assert_not_called()
+            self.assertEqual(refused.exception.args, ("original-owner-return",))
+            self.assertFalse(value.calls[0]["returned"])
+            self.assertEqual(value.published, [])
+
+    def test_exact_receipt_path_or_same_original_conflict_cannot_authorize_work(self):
+        for present in (fixture.ROOT.name, fixture.PACKAGE + ".plist", fixture.PACKAGE + ".bom"):
+            with self.subTest(present=present):
+                def observe(name, **_kwargs):
+                    if name == present:
+                        return SimpleNamespace()
+                    raise FileNotFoundError()
+                value = self.operation(plistlib.dumps([]))
+                with patch.object(fixture.os, "stat", side_effect=observe):
+                    with self.assertRaises(fixture.Refused) as refused:
+                        value.absence("initial")
+                self.assertEqual(refused.exception.args,
+                                 ("fixture-root-collision" if present == fixture.ROOT.name else "fixture-receipt-collision",))
+                self.assertEqual(value.invocations, [])
+                self.assertEqual(value.observations, [("initial", False)])
+                self.assertFalse(value.installer_entered or value.native_entered)
+        value = self.operation(plistlib.dumps(["com.example.other", fixture.PACKAGE]))
+        with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()):
+            with self.assertRaises(fixture.Refused) as refused:
+                value.absence("before-install")
+        self.assertEqual(refused.exception.args, ("fixture-receipt-collision",))
+        self.assertEqual(value.observations, [("before-install", False)])
+        self.assertEqual(len(value.invocations), 1)
+        value = self.operation(plistlib.dumps([]))
+        def changed_original():
+            raise fixture.Refused("synthetic-protected-original-changed")
+        value.protected.check = changed_original
+        with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()):
+            with self.assertRaises(fixture.Refused) as refused:
+                value.absence("before-install")
+        self.assertEqual(refused.exception.args, ("synthetic-protected-original-changed",))
+        self.assertFalse(value.installer_entered or value.native_entered)
+
+
 def metadata(present=False):
     snapshots, rows = [], []
     for index in range(8):
