@@ -170,10 +170,11 @@ def remaining(deadline, now, maximum=WORK_SECONDS):
     return min(seconds, maximum)
 
 
-def read(path, limit, *, expected=None):
+def read(path, limit, *, expected=None, expected_links=1):
+    need(type(expected_links) is int and expected_links >= 1, "ordinary-input-links")
     before = path.lstat()
     need(stat.S_ISREG(before.st_mode), "ordinary-input-kind")
-    need(before.st_nlink == 1, "ordinary-input-links")
+    need(before.st_nlink == expected_links, "ordinary-input-links")
     need(0 <= before.st_size <= limit, "ordinary-input-size")
     with DATA.acquiring(os.open, os.close, path,
                         os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK) as fd:
@@ -454,7 +455,9 @@ class Build:
              and (not executable or info.st_mode & 0o111) and not info.st_mode & 0o022,
              "unprotected-selected-tool")
         try:
-            body = read(resolved, 512 * MIB)
+            # Only the admitted protected system original may have multiple
+            # names. Other inputs remain single-link; pin this original count.
+            body = read(resolved, 512 * MIB, expected_links=info.st_nlink if system else 1)
         except BuildRefused as error:
             # Keep the exact original refusal. Only fixed roles/conditions may
             # refine diagnostics; no raw tool path or exception text is added.
@@ -478,7 +481,10 @@ class Build:
             # and finality. No adversarial same-UID isolation is claimed for the
             # action-provided orchestration interpreter (which is not shipped).
             if full:
-                need(digest(read(path, row["size"])) == row["sha256"], "original-tool-content-changed")
+                # Never rebaseline the count from a later path observation.
+                links = row["identity"][5] if row["AppleSystem"] else 1
+                need(digest(read(path, row["size"], expected_links=links)) == row["sha256"],
+                     "original-tool-content-changed")
 
     def run(self, role, argv, *, cwd=None, env=None, maximum=WORK_SECONDS, online=False):
         self.check()

@@ -355,7 +355,7 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 with patch.object(BUILD, "read", side_effect=BUILD.BuildRefused(reason)) as reading:
                     with self.assertRaisesRegex(BUILD.BuildRefused, "^tool-" + role + "-" + reason + "$"):
                         owner.protected_tool(selected, role=role)
-                    reading.assert_called_once_with(selected, 512 * BUILD.MIB)
+                    reading.assert_called_once_with(selected, 512 * BUILD.MIB, expected_links=1)
                 self.assertEqual(owner.tools, {})
         for role in (True, None, "unknown", "make/other"):
             with patch.object(BUILD, "read") as reading:
@@ -371,6 +371,138 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     owner.protected_tool(selected, role="make")
                 self.assertIs(caught.exception, error)
             self.assertEqual(owner.tools, {})
+        self.assertTrue(BUILD.DATA.known)
+
+    def test_protected_system_tool_pins_original_link_count_only_after_admission(self):
+        # Synthetic original identities only: no link, tool, native call or real
+        # descriptor is created. The same actual read/admission/recheck executes.
+        values = dict(st_dev=1, st_ino=2, st_mode=BUILD.stat.S_IFREG | 0o555,
+                      st_uid=0, st_gid=0, st_nlink=3, st_size=3, st_mtime_ns=1, st_ctime_ns=1)
+        original = SimpleNamespace(**values)
+        changed_count = SimpleNamespace(**{**values, "st_nlink": 4})
+        protected_parent = SimpleNamespace(st_mode=BUILD.stat.S_IFDIR | 0o755, st_uid=0)
+
+        class ToolPath:
+            def __init__(self, info=original, parent=protected_parent, text="/usr/bin/synthetic-links-only"):
+                self.info, self.text = info, text
+                self.parent = SimpleNamespace(parents=(), stat=lambda: parent)
+            def resolve(self, *, strict):
+                if strict is not True:
+                    raise AssertionError("strict original resolution changed")
+                return self
+            def is_absolute(self):
+                return self.text.startswith("/")
+            def lstat(self):
+                return self.info
+            def __str__(self):
+                return self.text
+
+        selected = ToolPath()
+        for expected in (0, -1, True, False, 3.0, None, "3", 1, 4):
+            with self.subTest(expected=expected), patch.object(BUILD.os, "open") as opened:
+                with self.assertRaisesRegex(BUILD.BuildRefused, "^ordinary-input-links$"):
+                    BUILD.read(selected, 3, expected_links=expected)
+                opened.assert_not_called()
+        with patch.object(BUILD.os, "open") as opened:
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^ordinary-input-links$"):
+                BUILD.read(selected, 3)  # Generic SOURCE/archive/output default stays1.
+            opened.assert_not_called()
+
+        def owner():
+            result = object.__new__(BUILD.Build)
+            result.tools = {}
+            return result
+
+        admitted = owner()
+        with patch.object(BUILD.os, "open", return_value=714) as opened, \
+                patch.object(BUILD.os, "read", side_effect=[b"abc", b""]) as reads, \
+                patch.object(BUILD.os, "fstat", return_value=original), \
+                patch.object(BUILD.os, "close") as closed:
+            self.assertEqual(admitted.protected_tool(selected, role="make"), str(selected))
+            opened.assert_called_once_with(selected, BUILD.os.O_RDONLY | BUILD.os.O_NOFOLLOW
+                                           | BUILD.os.O_CLOEXEC | BUILD.os.O_NONBLOCK)
+            self.assertEqual(reads.call_args_list, [call(714, 3), call(714, 1)])
+            closed.assert_called_once_with(714)
+        row = admitted.tools[str(selected)]
+        self.assertEqual(row, {"path": str(selected), "selectedPath": str(selected), "size": 3,
+                              "sha256": BUILD.digest(b"abc"), "identity": BUILD.identity(original),
+                              "AppleSystem": True, "executable": True})
+        with patch.object(BUILD, "Path", return_value=selected), \
+                patch.object(BUILD, "read", return_value=b"abc") as reading:
+            admitted.recheck_tools(full=True)
+            reading.assert_called_once_with(selected, 3, expected_links=3)
+        for delta in ({"st_nlink": 4}, {"st_uid": 501}, {"st_mode": BUILD.stat.S_IFREG | 0o575},
+                      {"st_size": 4}, {"st_mtime_ns": 2}):
+            selected.info = SimpleNamespace(**{**values, **delta})
+            with self.subTest(delta=delta), patch.object(BUILD, "Path", return_value=selected), \
+                    patch.object(BUILD, "read") as reading:
+                with self.assertRaisesRegex(BUILD.BuildRefused, "^original-tool-changed$"):
+                    admitted.recheck_tools(full=True)
+                reading.assert_not_called()
+        selected.info = original
+        with patch.object(BUILD, "Path", return_value=selected), \
+                patch.object(BUILD, "read", return_value=b"xyz"):
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^original-tool-content-changed$"):
+                admitted.recheck_tools(full=True)
+        with patch.object(BUILD, "Path", return_value=selected), \
+                patch.object(selected, "resolve", return_value=ToolPath(text="/usr/bin/other")), \
+                patch.object(BUILD, "read") as reading:
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^original-tool-changed$"):
+                admitted.recheck_tools(full=True)
+            reading.assert_not_called()
+
+        # Action/user-controlled tools do not inherit the system exception.
+        non_system = owner()
+        with patch.object(BUILD.os, "open") as opened:
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^tool-orchestrator-ordinary-input-links$"):
+                non_system.protected_tool(selected, role="orchestrator", system=False)
+            opened.assert_not_called()
+        self.assertEqual(non_system.tools, {})
+        single = ToolPath(info=SimpleNamespace(**{**values, "st_nlink": 1}))
+        with patch.object(BUILD, "read", return_value=b"abc") as reading:
+            non_system.protected_tool(single, role="orchestrator", system=False)
+            reading.assert_called_once_with(single, 512 * BUILD.MIB, expected_links=1)
+        with patch.object(BUILD, "Path", return_value=single), \
+                patch.object(BUILD, "read", return_value=b"abc") as reading:
+            non_system.recheck_tools(full=True)
+            reading.assert_called_once_with(single, 3, expected_links=1)
+
+        for bad, reason in (
+                (ToolPath(info=SimpleNamespace(**{**values, "st_uid": 501})), "unprotected-selected-tool"),
+                (ToolPath(info=SimpleNamespace(**{**values, "st_mode": BUILD.stat.S_IFREG | 0o575})), "unprotected-selected-tool"),
+                (ToolPath(parent=SimpleNamespace(st_mode=BUILD.stat.S_IFDIR | 0o777, st_uid=0)), "unprotected-Apple-tool-parent"),
+                (ToolPath(parent=SimpleNamespace(st_mode=BUILD.stat.S_IFDIR | 0o755, st_uid=501)), "unprotected-Apple-tool-parent"),
+                (ToolPath(text="/work/unprotected"), "non-Apple-tool-route")):
+            rejected = owner()
+            with self.subTest(reason=reason), patch.object(BUILD, "read") as reading:
+                with self.assertRaisesRegex(BUILD.BuildRefused, "^" + reason + "$"):
+                    rejected.protected_tool(bad, role="make")
+                reading.assert_not_called()
+            self.assertEqual(rejected.tools, {})
+
+        # Every observation stays bound to the original count, including inside
+        # the consuming read. Late count changes must close only that original.
+        for fstats, lstats, reads, reason in (
+                ([changed_count], [original], [], "input-open-correspondence"),
+                ([original, changed_count], [original], [b"abc", b""], "input-post-correspondence"),
+                ([original, original], [original, changed_count], [b"abc", b""], "input-post-correspondence"),
+                ([original], [original], [b"abc", b"x"], "input-post-correspondence")):
+            with self.subTest(reason=reason), patch.object(selected, "lstat", side_effect=lstats), \
+                    patch.object(BUILD.os, "open", return_value=714), \
+                    patch.object(BUILD.os, "fstat", side_effect=fstats), \
+                    patch.object(BUILD.os, "read", side_effect=reads), \
+                    patch.object(BUILD.os, "close") as closed:
+                with self.assertRaisesRegex(BUILD.BuildRefused, "^" + reason + "$"):
+                    BUILD.read(selected, 3, expected_links=3)
+                closed.assert_called_once_with(714)
+            self.assertTrue(BUILD.DATA.known)
+        with patch.object(BUILD.os, "open", return_value=714), \
+                patch.object(BUILD.os, "fstat", return_value=original), \
+                patch.object(BUILD.os, "read", side_effect=[b"abc", b""]), \
+                patch.object(BUILD.os, "close") as closed:
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^input-byte-binding$"):
+                BUILD.read(selected, 3, expected_links=3, expected=(3, BUILD.digest(b"xyz")))
+            closed.assert_called_once_with(714)
         self.assertTrue(BUILD.DATA.known)
 
     def test_real_small_source_projection_preserves_bytes_modes_and_inventory(self):
