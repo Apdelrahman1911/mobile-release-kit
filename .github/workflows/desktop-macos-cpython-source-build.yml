@@ -20,13 +20,12 @@ jobs:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-cpython-source-build' && github.sha == github.workflow_sha
     runs-on: macos-26
     timeout-minutes: 55
-    env:
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - id: admission
         name: Admit only the fixed disposable hosted ARM source-build route
         shell: bash
         env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
         run: |
           set -euo pipefail
@@ -64,6 +63,7 @@ jobs:
         name: Build and qualify once through the original command owner
         shell: bash
         env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail

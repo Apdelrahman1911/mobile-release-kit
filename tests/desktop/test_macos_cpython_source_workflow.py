@@ -28,6 +28,12 @@ class MacCPythonSourceWorkflowTests(unittest.TestCase):
     def test_fixed_hosted_source_route_and_pinned_actions(self):
         self.assertEqual(self.ids, ["admission", "checkout", "python", "build",
                                    "source_post", "evidence", "supplier"])
+        # The runner context is valid at step env, not at job env.
+        self.assertNotIn("${{ runner.", self.raw.split("    steps:", 1)[0])
+        self.assertEqual(self.raw.count("RUNNER_ENVIRONMENT: ${{ runner.environment }}"), 2)
+        for step in ("admission", "build"):
+            self.assertIn("\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n",
+                          self.steps[step])
         jobs = self.raw.split("jobs:\n", 1)[1]
         self.assertEqual(re.findall(r"^  ([a-z_]+):$", jobs, re.MULTILINE), ["producer"])
         for required in (
