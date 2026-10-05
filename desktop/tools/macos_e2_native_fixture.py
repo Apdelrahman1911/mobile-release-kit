@@ -369,10 +369,13 @@ def fixture_image_macho(body, role):
             need(length >= 24, "fixture-image-version")
             minimum.append(struct.unpack_from("<II", body, offset + 8))
         offset += length
-    need(offset == 32 + size and minimum == [(1, 26 << 16)]
-         and identifiers == [("@rpath/libmrk_e2_native_" + role + ".dylib").encode("ascii")]
-         and len(libraries) == len(set(libraries)) and libraries.count(b"/usr/lib/libSystem.B.dylib") == 1,
-         "fixture-image-fixed-closure")
+    # Distinguish existing fixed checks without publishing image bytes or names.
+    need(offset == 32 + size, "fixture-image-command-span")
+    need(minimum == [(1, 26 << 16)], "fixture-image-platform-minimum")
+    need(identifiers == [("@rpath/libmrk_e2_native_" + role + ".dylib").encode("ascii")],
+         "fixture-image-role-identity")
+    need(len(libraries) == len(set(libraries)) and libraries.count(b"/usr/lib/libSystem.B.dylib") == 1,
+         "fixture-image-system-closure")
 
 METADATA_PATHS = (Path("/"), Path("/Library"), ROOT.parent, Path("/private"),
                   Path("/private/var"), Path("/private/var/db"),

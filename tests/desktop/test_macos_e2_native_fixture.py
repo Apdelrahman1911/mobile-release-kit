@@ -499,8 +499,21 @@ class ImageTests(unittest.TestCase):
         for role in ("client", "resident"):
             fixture.fixture_image_macho(image(role), role)
         wrong_role = image("client")
-        with self.assertRaises(fixture.Refused):
+        with self.assertRaises(fixture.Refused) as mismatch:
             fixture.fixture_image_macho(wrong_role, "resident")
+        self.assertEqual(mismatch.exception.args, ("fixture-image-role-identity",))
+        # Each mutation reaches the named original predicate with earlier checks valid.
+        span = bytearray(wrong_role)
+        struct.pack_into("<I", span, 16, 2)  # Complete command bytes, smaller claimed command count.
+        minimum = bytearray(wrong_role)
+        struct.pack_into("<I", minimum, len(minimum) - 12, 25 << 16)
+        system = wrong_role.replace(b"/usr/lib/libSystem.B.dylib", b"/usr/lib/libSystem.C.dylib")
+        for changed, label in ((bytes(span), "fixture-image-command-span"),
+                               (bytes(minimum), "fixture-image-platform-minimum"),
+                               (system, "fixture-image-system-closure")):
+            with self.subTest(label=label), self.assertRaises(fixture.Refused) as refused:
+                fixture.fixture_image_macho(changed, "client")
+            self.assertEqual(refused.exception.args, (label,))
         for offset, value in ((4, 0x01000007), (12, 2), (28, 1), (32, 0x8000001C)):
             changed = bytearray(wrong_role)
             struct.pack_into("<I", changed, offset, value)

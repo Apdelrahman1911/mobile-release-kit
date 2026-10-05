@@ -116,9 +116,11 @@ fn main() {
         build.file("src/e2_native_fixture_identity.m");
         println!("cargo:rustc-cfg=mrk_e2_native_fixture_native");
         if desktop_image {
-            // The other examples require mutually excluded observation.
-            println!("cargo:rustc-link-arg-examples=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib");
-            println!("cargo:rustc-link-arg-examples=-mmacosx-version-min=26.0");
+            // Cargo's example-only and cdylib-only directives both exclude
+            // ExampleLib. These current-package args stay inside the exclusive
+            // fixture/desktop guard; the owner selects the one cdylib example.
+            println!("cargo:rustc-link-arg=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib");
+            println!("cargo:rustc-link-arg=-mmacosx-version-min=26.0");
         }
     }
     if let Some((source,release))=projection.as_ref() {
