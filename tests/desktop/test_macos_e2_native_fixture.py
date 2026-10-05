@@ -53,6 +53,8 @@ def cases():
                    eof=index != 0)
         row["resourceStates"] = {"main": "settled", "client": "settled", "worker": "joined", "identity": "settled"}
         row["preServiceStop"] = None
+        row["mainBundleLookup"] = {"bundle": "fixture-client", "executable": "fixture-client",
+                                  "identifier": "fixture-client", "plist": "held-client-match"}
         row["mainObservations"] = {
             "observe": {"status": "not-registered", "outcome": "observed"},
             "register": {"status": "enabled", "outcome": "registration-requested"}}
@@ -79,7 +81,7 @@ def unexecuted(name):
     row = {key: False for key in fixture.CASE_FLAGS}
     row.update(case=name, outcome="unexecuted", startedNs="0", finishedNs="0", firstFailureNs="0",
                operationHex="", instanceHex="", tailHex="",
-               preServiceStop=None, mainObservations={"observe": None, "register": None},
+               preServiceStop=None, mainObservations={"observe": None, "register": None}, mainBundleLookup=None,
                resourceStates={"main": "not-entered", "client": "not-entered",
                                "worker": "not-started", "identity": "not-entered"})
     return row
@@ -187,6 +189,45 @@ class NativeResultTests(unittest.TestCase):
         self.assertEqual(observed["cases"][0]["mainObservations"], row["mainObservations"])
         self.assertEqual(observed["outcome"], "unavailable")
         self.assertFalse(observed["cases"][0]["registered"])
+        # Real native lookup diagnostics remain DATA, never permission to treat
+        # NotFound as absence. Each relation is finite and no raw path escapes.
+        examples = (("fixture-client", "fixture-client", "fixture-client", "held-client-match"),
+                    ("fixture-client", "fixture-client", "fixture-client", "client-identity-mismatch"),
+                    ("fixture-client", "unavailable", "other", "unavailable"),
+                    ("fixture-outer", "fixture-entry", "fixture-outer", "outer-library-absent"),
+                    ("fixture-outer", "fixture-entry", "fixture-outer", "outer-library-present"),
+                    ("fixture-outer", "unavailable", "other", "unavailable"),
+                    ("other", "other", "other", "other-bundle-not-read"),
+                    ("unavailable", "unavailable", "unavailable", "unavailable"))
+        for fields in examples:
+            changed = copy.deepcopy(value)
+            location = dict(zip(("bundle", "executable", "identifier", "plist"), fields))
+            changed["cases"][0]["mainBundleLookup"] = location
+            actual = parse(changed, 77)
+            self.assertEqual(actual["cases"][0]["mainBundleLookup"], location)
+            self.assertEqual(actual["cases"][0]["mainObservations"]["observe"]["status"], "not-found")
+            self.assertEqual(actual["outcome"], "unavailable")
+            self.assertFalse(actual["cases"][0]["registered"])
+        valid_lookup = dict(zip(("bundle", "executable", "identifier", "plist"), examples[0]))
+        for malformed_lookup in (False, [], {}, dict(valid_lookup, raw="private"),
+                                 dict(valid_lookup, bundle="/private/unreported/app"),
+                                 dict(valid_lookup, executable=None), dict(valid_lookup, identifier=[]),
+                                 dict(valid_lookup, plist="outer-library-absent"),
+                                 dict(valid_lookup, bundle="fixture-outer"),
+                                 dict(valid_lookup, bundle="unavailable", plist="unavailable")):
+            changed = copy.deepcopy(value)
+            changed["cases"][0]["mainBundleLookup"] = malformed_lookup
+            with self.assertRaises(fixture.Refused):
+                parse(changed, 77)
+        changed = copy.deepcopy(value)
+        changed["cases"][0]["mainBundleLookup"] = valid_lookup
+        changed["cases"][0]["mainObservations"]["observe"] = None
+        with self.assertRaises(fixture.Refused):
+            parse(changed, 77)
+        changed = copy.deepcopy(value)
+        changed["cases"][1]["mainBundleLookup"] = valid_lookup
+        with self.assertRaises(fixture.Refused):
+            parse(changed, 77)
         later = copy.deepcopy(value)
         later["cases"][0].update(preServiceStop="registration-not-returned", mainObservations={
             "observe": {"status": "not-registered", "outcome": "observed"}, "register": None})

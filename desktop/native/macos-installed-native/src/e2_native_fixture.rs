@@ -12,7 +12,7 @@ use crate::{
         FixtureIdentityFacts,FixtureIdentityCustody},
     android_service_management::{self as management,Action,Status,Outcome,Phase,Checkpoint,
         Decision,Progress as MainProgress,Observation,Custody,CellCustody,ServiceCustody,
-        ServiceManager,FixtureMainIdentity,FixtureIdentityCheckpoint,FixtureIdentityOutcome},
+        ServiceManager,FixtureMainIdentity,FixtureIdentityCheckpoint,FixtureIdentityOutcome,FixtureBundleLookup},
     vault_helper_wire::{ClockBridge,uptime},
 };
 use nix::libc;
@@ -203,6 +203,7 @@ struct ActionRecord {
     service_acquired:bool,service_released:bool,mutation_entered:bool,mutation_returned:bool,
     mutation_uncertain:bool,unregistered:bool,unknown:bool,
     before:Option<(Phase,Instant)>,last:Option<Observation>,positive_unregister:Option<Observation>,
+    bundle_lookup:Option<FixtureBundleLookup>,
 }
 impl ActionRecord {
     fn returned(&mut self,phase:Phase,at:Instant,custody:Custody)->bool {
@@ -593,6 +594,7 @@ struct Row {
     kind:Case,outcome:ResultKind,started:u64,finished:u64,first:Option<u64>,
     operation:Option<[u8;16]>,binding:Option<Binding>,tail:Option<[u8;wire::BYTES]>,
     pre_service_stop:Option<PreServiceStop>,main_observations:[Option<(Status,Outcome)>;2],
+    main_bundle_lookup:Option<FixtureBundleLookup>,
     registered:bool,watch:bool,refused:bool,admission_issued:bool,
     tested_entered:bool,cleanup_entered:bool,eof:bool,note_exit:bool,resources:Resources,
 }
@@ -600,7 +602,7 @@ impl Row {
     const fn unexecuted(kind:Case)->Self { Self {
         kind,outcome:ResultKind::Unexecuted,started:0,finished:0,first:None,
         operation:None,binding:None,tail:None,registered:false,watch:false,refused:false,
-        pre_service_stop:None,main_observations:[None,None],
+        pre_service_stop:None,main_observations:[None,None],main_bundle_lookup:None,
         admission_issued:false,tested_entered:false,cleanup_entered:false,eof:false,
         note_exit:false,resources:Resources::unentered(),
     } }
@@ -608,11 +610,15 @@ impl Row {
         if self.outcome==ResultKind::Unexecuted {
             return self.started==0 && self.finished==0 && self.first.is_none()
                 && self.operation.is_none() && self.binding.is_none() && self.tail.is_none()
-                && self.pre_service_stop.is_none() && self.main_observations==[None,None]
+                && self.pre_service_stop.is_none() && self.main_observations==[None,None] && self.main_bundle_lookup.is_none()
                 && !self.registered && !self.watch && !self.refused && !self.admission_issued
                 && !self.tested_entered && !self.cleanup_entered && !self.eof && !self.note_exit
                 && self.resources.main==Closed::NotEntered && self.resources.client==Closed::NotEntered
                 && self.resources.identity==Closed::NotEntered && !self.resources.worker_joined;
+        }
+        if self.main_bundle_lookup.is_some_and(|lookup|lookup.labels().is_none()
+            || self.main_observations[0].is_none_or(|(status,outcome)|status==Status::Unavailable || outcome==Outcome::NotEntered)) {
+            return false;
         }
         if self.started==0 || self.finished<self.started || self.finished>wire::MAX_RAW
             || self.pre_service_stop.is_some() && self.outcome!=ResultKind::Unavailable
@@ -741,6 +747,8 @@ impl CaseOwner {
         record.invoked=true;
         let progress=manager.perform_fixture_phased(action,&mut self.identity,
             &mut |point|manager_point(&mut gate,cutoff,point,record));
+        // Copy this exact initial action now; later registration resets the manager.
+        if action==Action::Observe { record.bundle_lookup=manager.fixture_bundle_lookup(); }
         match progress {
             MainProgress::Finished(observation) if observation.native_settled && manager_idle(manager)=>{
                 record.finished=true;
@@ -984,6 +992,7 @@ impl CaseOwner {
         let row=Row { kind:self.kind,outcome:ResultKind::Unavailable,started:self.started,finished,first:self.first,
             operation:Some(self.operation),binding:None,tail:None,registered:false,watch:false,refused:false,
             pre_service_stop:Some(stop),main_observations:self.main_observations(),
+            main_bundle_lookup:self.records[OBSERVE].bundle_lookup,
             admission_issued:false,tested_entered:false,cleanup_entered:false,eof:false,note_exit:false,
             resources:Resources { main:self.main_closed()?,client:Closed::NotEntered,identity,worker_joined:self.worker_joined } };
         self.settled=true;
@@ -1033,6 +1042,7 @@ impl CaseOwner {
         let row=Row { kind:self.kind,outcome:if passed {ResultKind::Passed}else{ResultKind::Failed},
             started:self.started,finished,first:self.first,operation:Some(self.operation),
             pre_service_stop:None,main_observations:self.main_observations(),
+            main_bundle_lookup:self.records[OBSERVE].bundle_lookup,
             binding:observation.binding,tail:observation.tail,registered:true,watch:observation.watch_registered,
             refused:observation.refused,admission_issued:observation.admission_issued,
             tested_entered:self.records[TESTED_UNREGISTER].mutation_entered,
@@ -1127,6 +1137,16 @@ impl ResultBuffer {
         })?;
         self.text("}")
     }
+    fn main_bundle_lookup(&mut self,value:Option<FixtureBundleLookup>)->Option<()> {
+        let Some(value)=value else { return self.text("null"); };
+        let fields=value.labels()?;
+        self.text("{")?;
+        for (index,(key,text)) in fields.into_iter().enumerate() {
+            if index!=0 { self.text(",")?; }
+            self.key(key)?;self.string(text)?;
+        }
+        self.text("}")
+    }
     fn case(&mut self,row:&Row)->Option<()> {
         self.text("{")?;
         self.key("case")?;self.string(row.kind.name())?;
@@ -1143,6 +1163,7 @@ impl ResultBuffer {
         self.key("observe")?;self.main_observation(row.main_observations[0])?;
         self.text(",")?;self.key("register")?;self.main_observation(row.main_observations[1])?;
         self.text("}")?;
+        self.text(",")?;self.key("mainBundleLookup")?;self.main_bundle_lookup(row.main_bundle_lookup)?;
         for (key,value) in [
             ("registered",row.registered),("watchRegistered",row.watch),("refused",row.refused),
             ("tailAdmissionIssued",row.admission_issued),("testedUnregisterEntered",row.tested_entered),
@@ -1482,6 +1503,32 @@ mod fixture_data_tests {
         assert!(text.contains("\"outcome\":\"unavailable\""));
         assert!(text.contains("\"registered\":false,\"watchRegistered\":false"));
         assert_eq!(text.bytes().filter(|byte|*byte==b'\n').count(),1);
+        let outer=FixtureBundleLookup {words:[2,2,2,3]};
+        assert_eq!(size_of::<FixtureBundleLookup>(),16);
+        first.main_bundle_lookup=Some(outer);
+        assert!(first.data_valid(&build()));
+        let mut diagnostic=ResultBuffer::new();
+        diagnostic.result(&build(),&[first,rows[1],rows[2]],ResultKind::Unavailable,17).unwrap();
+        let text=std::str::from_utf8(&diagnostic.bytes[..diagnostic.used]).unwrap();
+        assert!(text.contains("\"mainBundleLookup\":{\"bundle\":\"fixture-outer\",\"executable\":\"fixture-entry\",\"identifier\":\"fixture-outer\",\"plist\":\"outer-library-absent\"}"));
+        assert!(text.contains("\"status\":\"not-found\",\"outcome\":\"observed\""));
+        assert!(text.contains("\"registered\":false,\"watchRegistered\":false"));
+        assert_eq!(text.matches("\"mainBundleLookup\":null").count(),2);
+        for words in [[1,1,1,1],[1,1,1,2],[1,4,3,6],[2,2,2,3],[2,2,2,4],[2,4,3,6],[3,3,3,5],[4,4,4,6]] {
+            assert!(FixtureBundleLookup {words}.labels().is_some());
+        }
+        for words in [[0,1,1,1],[1,0,1,1],[1,1,0,1],[1,1,1,0],[5,1,1,1],[1,1,1,7],
+            [1,1,1,3],[2,2,2,1],[3,3,3,1],[4,1,4,6],[4,4,4,5]] {
+            assert!(!FixtureBundleLookup {words}.valid());
+        }
+        assert!(FixtureBundleLookup::default().valid());
+        assert!(FixtureBundleLookup::default().labels().is_none());
+        let mut untouched=Row::unexecuted(Case::LocalF);untouched.main_bundle_lookup=Some(outer);
+        assert!(!untouched.data_valid(&build()));
+        let mut missing=first;missing.main_observations[0]=None;
+        assert!(!missing.data_valid(&build()));
+        missing=first;missing.main_bundle_lookup=Some(FixtureBundleLookup::default());
+        assert!(!missing.data_valid(&build()));
         first.outcome=ResultKind::Failed;
         assert!(!first.data_valid(&build()));
     }

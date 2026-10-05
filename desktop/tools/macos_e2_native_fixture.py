@@ -64,7 +64,7 @@ CASE_FLAGS = ("registered", "watchRegistered", "refused", "tailAdmissionIssued",
               "noteExit") + CLOSE_FLAGS
 CASE_KEYS = {"case", "outcome", "startedNs", "finishedNs", "firstFailureNs",
              "operationHex", "instanceHex", "tailHex", "resourceStates",
-             "preServiceStop", "mainObservations", *CASE_FLAGS}
+             "preServiceStop", "mainObservations", "mainBundleLookup", *CASE_FLAGS}
 RESULT_KEYS = {"schemaVersion", "type", "fixtureProfile", "sourceCommit", "releaseId",
                "target", "outcome", "nativeFinalityKnown", "auxiliaryNanoseconds",
                "syntheticIdentity", "productionIdentityQualified",
@@ -189,6 +189,21 @@ def main_observations(row):
                  "not-entered", "observed", "registration-requested", "already-registered", "needs-approval",
                  "settings-requested", "refused", "error", "unknown", "denied-by-user", "stopped",
                  "unregister-accepted")), "native-case-shape")
+    lookup = row["mainBundleLookup"]
+    if lookup is not None:
+        need(type(lookup) is dict and set(lookup) == {"bundle", "executable", "identifier", "plist"}
+             and all(type(item) is str for item in lookup.values())
+             and lookup["bundle"] in ("fixture-client", "fixture-outer", "other", "unavailable")
+             and lookup["executable"] in ("fixture-client", "fixture-entry", "other", "unavailable")
+             and lookup["identifier"] in ("fixture-client", "fixture-outer", "other", "unavailable")
+             and value["observe"] is not None and value["observe"]["status"] != "unavailable"
+             and value["observe"]["outcome"] != "not-entered", "native-case-shape")
+        admitted = {"fixture-client": ("held-client-match", "client-identity-mismatch", "unavailable"),
+                    "fixture-outer": ("outer-library-absent", "outer-library-present", "unavailable"),
+                    "other": ("other-bundle-not-read",), "unavailable": ("unavailable",)}
+        need(lookup["plist"] in admitted[lookup["bundle"]]
+             and (lookup["bundle"] != "unavailable"
+                  or lookup["executable"] == lookup["identifier"] == "unavailable"), "native-case-shape")
     return value
 
 
@@ -229,6 +244,7 @@ def native_result(stdout, returncode, source, release):
             need(terminal and start == finish == first == 0
                  and row["operationHex"] == row["instanceHex"] == row["tailHex"] == ""
                  and row["preServiceStop"] is None and observations == {"observe": None, "register": None}
+                  and row["mainBundleLookup"] is None
                  and not any(row[key] for key in CASE_FLAGS)
                  and resources == {"main": "not-entered", "client": "not-entered",
                                    "worker": "not-started", "identity": "not-entered"},

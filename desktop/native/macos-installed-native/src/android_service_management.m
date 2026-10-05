@@ -36,6 +36,9 @@ enum {
 typedef struct {
     uint32_t version,action,status,outcome,entered,returned,cleanup_known,unknown;
     uint32_t phase,service_state,called,reserved;
+#if defined(MRK_E2_NATIVE_FIXTURE)
+    mrk_e2_fixture_bundle_lookup fixture_lookup;
+#endif
 } mrk_android_management_report;
 typedef struct {
     uint64_t magic;
@@ -46,7 +49,11 @@ typedef struct {
 #endif
 } mrk_android_management;
 _Static_assert(sizeof(mrk_android_management)<=1024u,"supplied cell, not framework heap");
+#if defined(MRK_E2_NATIVE_FIXTURE)
+_Static_assert(sizeof(mrk_android_management_report)==64u,"fixture Rust/C phase report layout");
+#else
 _Static_assert(sizeof(mrk_android_management_report)==48u,"Rust/C phase report layout");
+#endif
 static int manager_valid(mrk_android_management *original) {
     return original && original->magic==MRK_ANDROID_MANAGEMENT_MAGIC && pthread_main_np()==1;
 }
@@ -147,6 +154,14 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
             }
             case MRK_SERVICE_STATUS: {
                 original->report.status=status_data((SMAppService *)original->service);
+#if defined(MRK_E2_NATIVE_FIXTURE)
+                /* Observe ONLY after the original status. This does not select
+                 * SMAppService's bundle or change any status/mutation policy. */
+                if (original->report.action==0 && original->fixture_identity
+                    && !mrk_e2_fixture_main_bundle_lookup(original->fixture_identity,&original->report.fixture_lookup)) {
+                    manager_unknown(original);break;
+                }
+#endif
                 if (original->report.status==5) original->report.outcome=7;
                 else if (original->report.action==0) original->report.outcome=1;
                 else if (original->report.action==3) {
