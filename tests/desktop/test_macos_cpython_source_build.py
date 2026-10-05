@@ -371,6 +371,60 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     owner.protected_tool(selected, role="make")
                 self.assertIs(caught.exception, error)
             self.assertEqual(owner.tools, {})
+        # Preserve each selected-original predicate and its short-circuit
+        # result, while retaining finite scalar diagnostics without any path.
+        for change, system, condition in (
+                ({"st_mode": BUILD.stat.S_IFDIR | 0o755}, True, "kind"),
+                ({"st_uid": 501}, True, "owner"),
+                ({"st_uid": 502}, False, "owner"),
+                ({"st_mode": BUILD.stat.S_IFREG | 0o444}, True, "executable"),
+                ({"st_mode": BUILD.stat.S_IFREG | 0o575}, True, "mode"),
+                ({"st_mode": BUILD.stat.S_IFREG | 0o557}, False, "mode")):
+            original = SimpleNamespace(**{**info, **change})
+            diagnostic = object.__new__(BUILD.Build)
+            diagnostic.tools, diagnostic.evidence = {}, {}
+            with patch.object(BUILD.os, "getuid", return_value=501), \
+                    patch.object(BUILD, "read") as reading:
+                with self.assertRaisesRegex(BUILD.BuildRefused,
+                        "^tool-make-unprotected-selected-tool-" + condition + "$"):
+                    diagnostic.protected_tool(selected, role="make", system=system)
+                reading.assert_not_called()
+            self.assertEqual(diagnostic.tools, {})
+            self.assertEqual(set(diagnostic.evidence), {"tool-admission-failure.json"})
+            detail = json.loads(diagnostic.evidence["tool-admission-failure.json"])
+            self.assertEqual(detail, {"schemaVersion": 1, "role": "make", "condition": condition,
+                "AppleSystem": system, "executableRequired": True, "uid": original.st_uid,
+                "gid": original.st_gid, "mode": original.st_mode, "nlink": original.st_nlink,
+                "hostUid": 501})
+            self.assertNotIn(str(selected).encode(), diagnostic.evidence["tool-admission-failure.json"])
+
+        original = SimpleNamespace(**{**info, "st_mode": BUILD.stat.S_IFREG | 0o444})
+        diagnostic = object.__new__(BUILD.Build)
+        diagnostic.tools, diagnostic.evidence = {}, {}
+        with patch.object(BUILD, "read", return_value=b"abc") as reading:
+            self.assertEqual(diagnostic.protected_tool(selected, role="sdk-settings", executable=False), str(selected))
+            reading.assert_called_once_with(selected, 512 * BUILD.MIB, expected_links=1)
+        self.assertEqual(diagnostic.evidence, {})
+
+        # An accounting/shape failure is still a refusal, never tool authority.
+        original = SimpleNamespace(**{**info, "st_mode": BUILD.stat.S_IFREG | 0o575})
+        diagnostic = object.__new__(BUILD.Build)
+        diagnostic.tools = {}
+        diagnostic.evidence = {"tool-admission-failure.json": b"retained-original"}
+        with patch.object(BUILD, "read") as reading:
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^retained-evidence-bound$"):
+                diagnostic.protected_tool(selected, role="make")
+            reading.assert_not_called()
+        self.assertEqual(diagnostic.tools, {})
+        self.assertEqual(diagnostic.evidence, {"tool-admission-failure.json": b"retained-original"})
+        original = SimpleNamespace(**{**info, "st_mode": BUILD.stat.S_IFREG | 0o575, "st_gid": True})
+        diagnostic.evidence = {}
+        with patch.object(BUILD, "read") as reading:
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^tool-diagnostic-scalar$"):
+                diagnostic.protected_tool(selected, role="make")
+            reading.assert_not_called()
+        self.assertEqual(diagnostic.tools, {})
+        self.assertEqual(diagnostic.evidence, {})
         self.assertTrue(BUILD.DATA.known)
 
     def test_protected_system_tool_pins_original_link_count_only_after_admission(self):
@@ -410,7 +464,7 @@ class MacPythonSourceBuildTests(unittest.TestCase):
 
         def owner():
             result = object.__new__(BUILD.Build)
-            result.tools = {}
+            result.tools, result.evidence = {}, {}
             return result
 
         admitted = owner()
@@ -468,8 +522,8 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             reading.assert_called_once_with(single, 3, expected_links=1)
 
         for bad, reason in (
-                (ToolPath(info=SimpleNamespace(**{**values, "st_uid": 501})), "unprotected-selected-tool"),
-                (ToolPath(info=SimpleNamespace(**{**values, "st_mode": BUILD.stat.S_IFREG | 0o575})), "unprotected-selected-tool"),
+                (ToolPath(info=SimpleNamespace(**{**values, "st_uid": 501})), "tool-make-unprotected-selected-tool-owner"),
+                (ToolPath(info=SimpleNamespace(**{**values, "st_mode": BUILD.stat.S_IFREG | 0o575})), "tool-make-unprotected-selected-tool-mode"),
                 (ToolPath(parent=SimpleNamespace(st_mode=BUILD.stat.S_IFDIR | 0o777, st_uid=0)), "unprotected-Apple-tool-parent"),
                 (ToolPath(parent=SimpleNamespace(st_mode=BUILD.stat.S_IFDIR | 0o755, st_uid=501)), "unprotected-Apple-tool-parent"),
                 (ToolPath(text="/work/unprotected"), "non-Apple-tool-route")):

@@ -451,9 +451,27 @@ class Build:
                     need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
                          "unprotected-Apple-tool-parent")
         info = resolved.lstat()
-        need(stat.S_ISREG(info.st_mode) and info.st_uid in ({0} if system else {0, os.getuid()})
-             and (not executable or info.st_mode & 0o111) and not info.st_mode & 0o022,
-             "unprotected-selected-tool")
+        # Preserve the original admission order. Diagnostics do not turn a
+        # failed predicate into an admitted tool or expose its filesystem path.
+        condition = None
+        if not stat.S_ISREG(info.st_mode):
+            condition = "kind"
+        elif info.st_uid not in ({0} if system else {0, os.getuid()}):
+            condition = "owner"
+        elif executable and not info.st_mode & 0o111:
+            condition = "executable"
+        elif info.st_mode & 0o022:
+            condition = "mode"
+        if condition is not None:
+            scalars = {"uid": info.st_uid, "gid": info.st_gid, "mode": info.st_mode,
+                       "nlink": info.st_nlink, "hostUid": os.getuid()}
+            bounds = {"uid": 2**32, "gid": 2**32, "mode": 2**16, "nlink": 2**64, "hostUid": 2**32}
+            need(all(type(value) is int and 0 <= value < bounds[name]
+                     for name, value in scalars.items()), "tool-diagnostic-scalar")
+            self.evidence_json("tool-admission-failure.json", {
+                "schemaVersion": 1, "role": role, "condition": condition,
+                "AppleSystem": bool(system), "executableRequired": bool(executable), **scalars})
+            raise BuildRefused("tool-" + role + "-unprotected-selected-tool-" + condition)
         try:
             # Only the admitted protected system original may have multiple
             # names. Other inputs remain single-link; pin this original count.
