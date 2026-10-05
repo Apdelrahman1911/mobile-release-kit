@@ -90,6 +90,82 @@ jobs:
           scratch_identity = None
           entered_calls = []
           failure = False
+          source_ordinal = 0
+
+          PREPARATION_COMMANDS = (
+              "git-tree", "git-roster", "rustup", "rustc-version", "cargo-version", "fetch-0", "fetch-1",
+          )
+          PREPARATION_PHASES = (
+              "route", "source-inventory", "git-tree", "git-roster", "source-roster-decode",
+              "source-roster-entry", "source-file-inventory", "source-required-roster",
+              "cargo-home-admission", "cargo-configuration", "locked-manifests",
+              "repository-toolchain", "rustup-admission", "rustup", "rust-tool-admission",
+              "rustc-version", "cargo-version", "fetch-0", "fetch-1", "source-recheck",
+              "input-publication",
+          )
+          PREPARATION_REFUSALS = (
+              "ambient-cargo-configuration", "ambient-cargo-directory", "bootstrap-close-unknown",
+              "bootstrap-directory", "bootstrap-directory-changed", "bootstrap-import-changed",
+              "bootstrap-loader", "bootstrap-short-read", "bootstrap-source", "bootstrap-source-changed",
+              "bootstrap-source-grew", "effective-rust-clock-binding", "effective-tool-version",
+              "hosted-rustup-tool", "local-source-checksum", "locked-package-shape", "locked-public-source",
+              "locked-registry-shape", "preparation-bootstrap-binding", "preparation-detached-source",
+              "preparation-original-command-failed", "preparation-platform-account", "preparation-route",
+              "preparation-scratch-original", "preparation-scratch-remains", "prepared-input-bound",
+              "prepared-rust-tool", "private-work", "repository-toolchain-default", "source-bootstrap-roster",
+              "source-file-close-unknown", "source-file-correspondence", "source-roster-bound",
+              "source-roster-bytes-mode", "source-roster-entry", "step-output-changed", "step-output-original",
+              "step-output-route", "step-output-value", "step-output-write", "tree-shape",
+              # Fixed imported fixture filesystem/result predicates, not arbitrary exception text.
+              "directory-spelling", "directory-owner-mode", "original-handle-bound", "original-unbound",
+              "original-changed", "file-original-policy", "original-short-read", "original-grew",
+              "original-owner-return", "output-bound", "output-short-write", "output-readback",
+              "output-close-unknown", "required-source-roster", "source-shape", "run-shape",
+              "source-run-binding", "source-inventory-binding", "source-inventory-row",
+              "effective-rust-binding", "effective-rust-tool", "effective-rust-clock-version",
+          )
+
+          def preparation_failure_data(error, stage, ordinal, calls):
+              """Closed diagnostic DATA only; no output or lifetime authority."""
+              reason, category, number = "unknown", "other", None
+              if isinstance(error, UnicodeError):
+                  category = "unicode-error"
+              elif isinstance(error, ValueError):
+                  category = "value-error"
+              elif isinstance(error, OSError):
+                  category = "os-error"
+                  value = OSError.errno.__get__(error)
+                  if type(value) is int and 1 <= value <= 255:
+                      number = value
+              elif type(error) is KeyError:
+                  category = "key-error"
+              elif type(error) is TypeError:
+                  category = "type-error"
+              elif type(error) is KeyboardInterrupt:
+                  category = "interrupted"
+              elif type(error) is SystemExit:
+                  category = "exit"
+              if isinstance(error, ValueError):
+                  args = BaseException.args.__get__(error)
+                  if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in PREPARATION_REFUSALS:
+                      reason = args[0]
+              safe_stage = stage if type(stage) is str and stage in PREPARATION_PHASES else "unknown"
+              safe_ordinal = (ordinal if safe_stage in ("source-roster-entry", "source-file-inventory", "source-recheck")
+                              and type(ordinal) is int and 1 <= ordinal <= 4096 else None)
+              safe_calls = None
+              if type(calls) is list and len(calls) <= len(PREPARATION_COMMANDS):
+                  checked = []
+                  for index, row in enumerate(calls):
+                      if (type(row) is not dict or set(row) != {"role", "returned"}
+                              or type(row["role"]) is not str or row["role"] != PREPARATION_COMMANDS[index]
+                              or type(row["returned"]) is not bool):
+                          break
+                      checked.append({"role": row["role"], "returned": row["returned"]})
+                  else:
+                      safe_calls = checked
+              return {"schemaVersion": 1, "diagnosticOnly": True, "phase": safe_stage,
+                      "reason": reason, "exceptionKind": category, "errno": number,
+                      "sourceOrdinal": safe_ordinal, "originalCalls": safe_calls}
 
           def need(value, label):
               if not value:
@@ -257,6 +333,7 @@ jobs:
               need(re.fullmatch(rb"[0-9a-f]{40}\n", tree_output), "tree-shape")
               tree = tree_output.decode("ascii").strip()
               roster = call("git-roster", git_prefix + ["ls-tree", "-r", "-z", "--full-tree", SOURCE], git_env, 15, 2097152)
+              phase = "source-roster-decode"
               raw_rows = roster.split(b"\0")
               need(raw_rows[-1] == b"" and 1 < len(raw_rows) <= 4097, "source-roster-bound")
               rows = []
@@ -279,7 +356,8 @@ jobs:
                   finally:
                       need(reader.finish(), "source-file-close-unknown")
 
-              for raw in raw_rows[:-1]:
+              for source_ordinal, raw in enumerate(raw_rows[:-1], 1):
+                  phase = "source-roster-entry"
                   header, encoded = raw.split(b"\t", 1)
                   mode, kind, blob = header.split(b" ")
                   name = encoded.decode("utf-8", "strict")
@@ -287,9 +365,12 @@ jobs:
                        and name not in names and not name.startswith("/") and "\\" not in name and "\0" not in name
                        and all(piece not in ("", ".", "..") for piece in name.split("/")), "source-roster-entry")
                   names.add(name)
+                  phase = "source-file-inventory"
                   row, _content = source_file(name)
                   need(row["gitMode"].encode("ascii") == mode and row["blob"].encode("ascii") == blob, "source-roster-bytes-mode")
                   rows.append(row)
+              source_ordinal = 0
+              phase = "source-required-roster"
               by_name = {row["path"]: row for row in rows}
               fixture.source_names(by_name)  # Includes this committed workflow.
               need(by_name["desktop/tools/macos_e2_native_fixture.py"]["sha256"] == fixture_hash
@@ -298,6 +379,7 @@ jobs:
 
               manifests = ("desktop/native/macos-installed-native", "desktop/helpers/macos-android-register")
               cargo_home, rustup_home = HOME / ".cargo", HOME / ".rustup"
+              phase = "cargo-home-admission"
               book.directory(cargo_home)
               book.directory(rustup_home)
               configuration_parents = {cargo_home}
@@ -321,7 +403,9 @@ jobs:
                           else:
                               raise ValueError("ambient-cargo-configuration")
 
+              phase = "cargo-configuration"
               no_configuration()
+              phase = "locked-manifests"
               for directory in manifests:
                   lock_name = directory + "/Cargo.lock"
                   _row, content = source_file(lock_name, by_name[lock_name])
@@ -336,6 +420,7 @@ jobs:
                                and re.fullmatch(r"[0-9a-f]{64}", package["checksum"]), "locked-public-source")
                       else:
                           need("checksum" not in package, "local-source-checksum")
+              phase = "repository-toolchain"
               _row, toolchain_bytes = source_file("desktop/rust-toolchain.toml", by_name["desktop/rust-toolchain.toml"])
               need(tomllib.loads(toolchain_bytes.decode("utf-8"))["toolchain"]["channel"] == "1.98.0",
                    "repository-toolchain-default")
@@ -345,18 +430,21 @@ jobs:
                                       RUSTUP_DIST_SERVER="https://static.rust-lang.org",
                                       RUSTUP_UPDATE_ROOT="https://static.rust-lang.org/rustup")
               rustup = cargo_home / "bin/rustup"
+              phase = "rustup-admission"
               rustup_parent = book.directory(rustup.parent)
               rustup_info = os.stat(rustup.name, dir_fd=rustup_parent["fd"], follow_symlinks=False)
               need(stat.S_ISREG(rustup_info.st_mode) and rustup_info.st_uid in (0, os.getuid())
                    and not rustup_info.st_mode & 0o022 and rustup_info.st_mode & 0o111, "hosted-rustup-tool")
               call("rustup", [str(rustup), "toolchain", "install", TOOLCHAIN, "--profile", "minimal",
                              "--target", TARGET, "--no-self-update"], tool_environment, 240)
+              phase = "rust-tool-admission"
               bin_directory = rustup_home / "toolchains" / (TOOLCHAIN + "-" + TARGET) / "bin"
               book.directory(bin_directory)
               tool_environment["PATH"] = str(bin_directory) + ":/usr/bin:/bin:/usr/sbin:/sbin"
               tool_environment["RUSTC"] = str(bin_directory / "rustc")
               tools = {}
               for tool in ("rustc", "cargo"):
+                  phase = "rust-tool-admission"
                   executable = bin_directory / tool
                   info = os.stat(executable, follow_symlinks=False)
                   need(stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid())
@@ -377,14 +465,17 @@ jobs:
                                        CARGO_HTTP_TIMEOUT="30", CARGO_HTTP_SSL_VERIFY="true",
                                        CARGO_NET_GIT_FETCH_WITH_CLI="false")
               for index, directory in enumerate(manifests):
+                  phase = "cargo-configuration"
                   no_configuration()
                   call("fetch-" + str(index), [str(bin_directory / "cargo"), "fetch", "--manifest-path",
                                              str(CHECKOUT / directory / "Cargo.toml"), "--locked", "--target", TARGET],
                        fetch_environment, 240, 262144)
+              phase = "cargo-configuration"
               no_configuration()
               phase = "source-recheck"
-              for row in rows:
+              for source_ordinal, row in enumerate(rows, 1):
                   source_file(row["path"], row)
+              source_ordinal = 0
               book.check()
 
               common = {"schemaVersion": 1, "source": SOURCE, "workflowSource": SOURCE,
@@ -408,10 +499,17 @@ jobs:
                   need(len(body) <= limit, "prepared-input-bound")
                   book.publish(work / name, body, 0o600)
               book.check()
-          except BaseException:
+          except BaseException as error:
               failure = True
-              # Only closed phase labels, no tool/environment/source traceback.
-              print("E2 preparation refused in " + phase + "; native fixture was not entered.", file=sys.stderr)
+              # No arbitrary exception text, pathname, capture, environment or traceback.
+              # Returned flags describe only the existing validated call return, not finality.
+              try:
+                  diagnostic = preparation_failure_data(error, phase, source_ordinal, entered_calls)
+                  print("E2 preparation refused in " + diagnostic["phase"] + "; native fixture was not entered.", file=sys.stderr)
+                  print("E2 preparation diagnostic " + json.dumps(diagnostic, sort_keys=True, separators=(",", ":")), file=sys.stderr)
+              except BaseException:
+                  # Diagnostic failure cannot replace the original failure or skip cleanup.
+                  pass
           finally:
               closes_known = book is None or book.finish()
               if not closes_known:

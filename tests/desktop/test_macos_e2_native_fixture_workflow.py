@@ -1,6 +1,8 @@
-"""Fixed E2 workflow source contracts; never YAML/heredoc or native execution."""
+"""Fixed E2 source contracts and pure diagnostic DATA; never workflow/native execution."""
+import ast
 from pathlib import Path
 import re
+import textwrap
 import unittest
 
 ROOT = Path(__file__).absolute().parents[2]
@@ -169,7 +171,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             'call("fetch-" + str(index), [str(bin_directory / "cargo"), "fetch", "--manifest-path", str(CHECKOUT / directory / "Cargo.toml"), "--locked", "--target", TARGET], fetch_environment, 240, 262144)',
             "fixture.source_names(by_name)",
             "fixture.binding_data(os.environ, binding, inventory, rust, sig(work_info))",
-            'for row in rows: source_file(row["path"], row)',
+            'for source_ordinal, row in enumerate(rows, 1): source_file(row["path"], row)',
             'book.publish(work / name, body, 0o600)',
         ):
             with self.subTest(preparation=required):
@@ -182,6 +184,128 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                          "/usr/sbin/installer", "/bin/launchctl"):
             with self.subTest(unowned_workflow_path=raw_path):
                 self.assertNotIn(raw_path, active(self.workflow))
+
+    def preparation_diagnostic(self):
+        """Extract literal tables and ONE pure function, not the preparation program."""
+        prepare = self.steps[STEP_NAMES[3]]
+        body = textwrap.dedent(section(prepare, "          import hashlib", "          PY_PREPARE"))
+        tree = ast.parse(body)
+        names = {"PREPARATION_COMMANDS", "PREPARATION_PHASES", "PREPARATION_REFUSALS"}
+        namespace = {}
+        functions = []
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+                if name in names:
+                    self.assertNotIn(name, namespace)
+                    value = ast.literal_eval(node.value)
+                    self.assertIs(type(value), tuple)
+                    self.assertTrue(value and all(type(item) is str for item in value))
+                    self.assertEqual(len(value), len(set(value)))
+                    namespace[name] = value
+            elif isinstance(node, ast.FunctionDef) and node.name == "preparation_failure_data":
+                self.assertEqual(node.decorator_list, [])
+                self.assertEqual(node.args.defaults, [])
+                functions.append(node)
+        self.assertEqual(set(namespace), names)
+        self.assertEqual(len(functions), 1)
+        # No imports, assignments from the program, calls, try/finally, or native
+        # entry is evaluated. This function uses only its four DATA arguments,
+        # the three literal tables and ordinary builtins.
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "<fixed-preparation-diagnostic>", "exec"), namespace)
+        return namespace["preparation_failure_data"], namespace, tree
+
+    def test_preparation_diagnostic_reports_only_closed_bounded_data(self):
+        report, tables, _tree = self.preparation_diagnostic()
+        calls = [{"role": "git-tree", "returned": True}, {"role": "git-roster", "returned": True}]
+        value = report(ValueError("file-original-policy"), "source-file-inventory", 17, calls)
+        self.assertEqual(value, {
+            "schemaVersion": 1, "diagnosticOnly": True, "phase": "source-file-inventory",
+            "reason": "file-original-policy", "exceptionKind": "value-error", "errno": None,
+            "sourceOrdinal": 17, "originalCalls": calls,
+        })
+        self.assertIsNot(value["originalCalls"], calls)
+        self.assertIsNot(value["originalCalls"][0], calls[0])
+        class FixtureRefused(ValueError):
+            pass
+        self.assertEqual(report(FixtureRefused("directory-owner-mode"), "cargo-home-admission", 0, calls)["reason"],
+                         "directory-owner-mode")
+        marker = "synthetic-private-message-never-published"
+        for error in (ValueError(marker), KeyError(marker), RuntimeError(marker),
+                      ValueError({"private": marker}), OSError(13, marker, "/synthetic/private-input"),
+                      UnicodeDecodeError("utf8", b"\xff", 0, 1, marker), SystemExit(marker), None):
+            with self.subTest(category=type(error).__name__):
+                result = report(error, "cargo-home-admission", 1, calls)
+                self.assertNotIn(marker, repr(result))
+                self.assertNotIn("/synthetic/private-input", repr(result))
+                self.assertEqual(result["reason"], "unknown")
+                self.assertIsNone(result["sourceOrdinal"])
+        for number in (True, -1, 0, 256, "13", None):
+            self.assertIsNone(report(OSError(number, marker), "cargo-home-admission", 0, calls)["errno"])
+        self.assertEqual(report(OSError(13, marker), "cargo-home-admission", 0, calls)["errno"], 13)
+        for ordinal in (True, -1, 0, 4097, "17", None):
+            self.assertIsNone(report(ValueError(marker), "source-file-inventory", ordinal, calls)["sourceOrdinal"])
+        self.assertEqual(report(ValueError(marker), "source-recheck", 4096, calls)["sourceOrdinal"], 4096)
+        for stage in (marker, "git-roster " , None, True):
+            result = report(ValueError(marker), stage, 17, calls)
+            self.assertEqual(result["phase"], "unknown")
+            self.assertIsNone(result["sourceOrdinal"])
+        bad_calls = (None, tuple(calls), [{"role": marker, "returned": True}],
+                     [{"role": "git-tree", "returned": 1}],
+                     [{"role": "git-tree", "returned": True, "private": marker}],
+                     [calls[1], calls[0]], calls * 4)
+        for malformed in bad_calls:
+            self.assertIsNone(report(ValueError(marker), "route", 0, malformed)["originalCalls"])
+        self.assertEqual(report(ValueError(marker), "route", 0, [dict(calls[0], returned=False)])["originalCalls"],
+                         [{"role": "git-tree", "returned": False}])
+        self.assertEqual(tables["PREPARATION_COMMANDS"],
+                         ("git-tree", "git-roster", "rustup", "rustc-version", "cargo-version", "fetch-0", "fetch-1"))
+
+    def test_preparation_diagnostic_stages_do_not_change_original_failure_or_cleanup(self):
+        _report, tables, tree = self.preparation_diagnostic()
+        prepare = self.steps[STEP_NAMES[3]]
+        self.assertIn('SOURCE], git_env, 15, 2097152)\n              phase = "source-roster-decode"', prepare)
+        for phase, operation in (
+            ("source-roster-decode", 'raw_rows = roster.split(b"\\0")'),
+            ("source-roster-entry", 'header, encoded = raw.split(b"\\t", 1)'),
+            ("source-file-inventory", 'row, _content = source_file(name)'),
+            ("source-required-roster", 'by_name = {row["path"]: row for row in rows}'),
+            ("cargo-home-admission", 'book.directory(cargo_home)'),
+            ("locked-manifests", 'for directory in manifests:'),
+            ("repository-toolchain", '_row, toolchain_bytes = source_file('),
+            ("rustup-admission", 'rustup_parent = book.directory(rustup.parent)'),
+        ):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, tables["PREPARATION_PHASES"])
+                self.assertRegex(prepare, 'phase = "' + phase + '"\n +'+re.escape(operation))
+        labels = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "need":
+                self.assertEqual(len(node.args), 2)
+                self.assertIsInstance(node.args[1], ast.Constant)
+                labels.append(node.args[1].value)
+        self.assertTrue(set(labels) <= set(tables["PREPARATION_REFUSALS"]))
+        catcher = section(prepare, "          except BaseException as error:", "          finally:\n              closes_known")
+        self.assertEqual(flat(catcher), flat('''
+          except BaseException as error:
+              failure = True
+              try:
+                  diagnostic = preparation_failure_data(error, phase, source_ordinal, entered_calls)
+                  print("E2 preparation refused in " + diagnostic["phase"] + "; native fixture was not entered.", file=sys.stderr)
+                  print("E2 preparation diagnostic " + json.dumps(diagnostic, sort_keys=True, separators=(",", ":")), file=sys.stderr)
+              except BaseException:
+                  pass
+        '''))
+        finality = section(prepare, "          finally:\n              closes_known", "          if failure:")
+        for required in (
+            "closes_known = book is None or book.finish()",
+            'all_returned = all(record["returned"] for record in entered_calls)',
+            "if scratch is not None and scratch_identity is not None and closes_known and all_returned:",
+            'need(sig(os.stat(scratch.name, dir_fd=parent["fd"], follow_symlinks=False))[:5] == scratch_identity and shutil.rmtree.avoids_symlink_attacks, "preparation-scratch-original")',
+            "if not cleanup.finish(): failure = True",
+        ):
+            self.assertIn(flat(required), flat(finality))
+        self.assertIn("          if failure:\n              raise SystemExit(1)", prepare)
 
     def test_acceptance_requires_actual_outcome_and_bounded_closed_summary(self):
         publish, upload, final = (self.steps[name] for name in STEP_NAMES[5:])
