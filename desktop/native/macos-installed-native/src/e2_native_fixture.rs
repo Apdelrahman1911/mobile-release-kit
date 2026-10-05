@@ -564,6 +564,17 @@ const REGISTER:usize=1;
 const TESTED_UNREGISTER:usize=2;
 const FIXTURE_CLEANUP:usize=3;
 
+/// Closed branch DATA only: these labels never admit work or settle custody.
+#[derive(Clone,Copy)]
+enum PreServiceStop { IdentityPreparation,WorkerStart,ObserveNotAbsent,RegistrationNotReturned,RegistrationNotOwned }
+impl PreServiceStop {
+    fn text(self)->&'static str { match self {
+        Self::IdentityPreparation=>"identity-preparation",Self::WorkerStart=>"worker-start",
+        Self::ObserveNotAbsent=>"observe-not-absent",Self::RegistrationNotReturned=>"registration-not-returned",
+        Self::RegistrationNotOwned=>"registration-not-owned",
+    } }
+}
+
 #[derive(Clone,Copy)]
 struct Resources { main:Closed,client:Closed,identity:Closed,worker_joined:bool }
 impl Resources {
@@ -578,6 +589,7 @@ impl Resources {
 struct Row {
     kind:Case,outcome:ResultKind,started:u64,finished:u64,first:Option<u64>,
     operation:Option<[u8;16]>,binding:Option<Binding>,tail:Option<[u8;wire::BYTES]>,
+    pre_service_stop:Option<PreServiceStop>,main_observations:[Option<(Status,Outcome)>;2],
     registered:bool,watch:bool,refused:bool,admission_issued:bool,
     tested_entered:bool,cleanup_entered:bool,eof:bool,note_exit:bool,resources:Resources,
 }
@@ -585,6 +597,7 @@ impl Row {
     const fn unexecuted(kind:Case)->Self { Self {
         kind,outcome:ResultKind::Unexecuted,started:0,finished:0,first:None,
         operation:None,binding:None,tail:None,registered:false,watch:false,refused:false,
+        pre_service_stop:None,main_observations:[None,None],
         admission_issued:false,tested_entered:false,cleanup_entered:false,eof:false,
         note_exit:false,resources:Resources::unentered(),
     } }
@@ -592,12 +605,14 @@ impl Row {
         if self.outcome==ResultKind::Unexecuted {
             return self.started==0 && self.finished==0 && self.first.is_none()
                 && self.operation.is_none() && self.binding.is_none() && self.tail.is_none()
+                && self.pre_service_stop.is_none() && self.main_observations==[None,None]
                 && !self.registered && !self.watch && !self.refused && !self.admission_issued
                 && !self.tested_entered && !self.cleanup_entered && !self.eof && !self.note_exit
                 && self.resources.main==Closed::NotEntered && self.resources.client==Closed::NotEntered
                 && self.resources.identity==Closed::NotEntered && !self.resources.worker_joined;
         }
         if self.started==0 || self.finished<self.started || self.finished>wire::MAX_RAW
+            || self.pre_service_stop.is_some() && self.outcome!=ResultKind::Unavailable
             || self.first.is_some_and(|first|first<self.started || first>self.finished)
             || self.operation.is_some_and(|value|value==[0;16])
             || self.watch && !self.registered { return false; }
@@ -934,6 +949,11 @@ impl CaseOwner {
         for record in &self.records { all=merge_closed(all,record.closed()?); }
         Some(all)
     }
+    fn main_observations(&self)->[Option<(Status,Outcome)>;2] {
+        // Only original returned checkpoint DATA. None is not proof of nonentry.
+        [self.records[OBSERVE].last.map(|value|(value.status,value.outcome)),
+         self.records[REGISTER].last.map(|value|(value.status,value.outcome))]
+    }
     fn slots_final(&self,protocol:bool)->bool {
         if self.admission.is_some() || self.offered.as_ref().is_some_and(|offer|offer.admission.is_some()) { return false; }
         let Ok(slot)=self.shared.offer.try_lock() else { return false; };
@@ -946,7 +966,8 @@ impl CaseOwner {
                 && self.shared.go.get().is_none_or(|go|*go==Go::Cancel)
         }
     }
-    fn finish_pre_service(&mut self,manager:&ServiceManager,auxiliary:&mut Auxiliary,clock:&ClockBridge)->Option<Row> {
+    fn finish_pre_service(&mut self,manager:&ServiceManager,auxiliary:&mut Auxiliary,clock:&ClockBridge,
+        stop:PreServiceStop)->Option<Row> {
         // No receipt is allowed merely because registration failed: a real or
         // uncertain mutation, active manager or native ownership vetoes this.
         if self.protocol_started || self.population_possible || self.registration.is_some()
@@ -959,6 +980,7 @@ impl CaseOwner {
         if self.unknown || self.panic.is_some() { return None; }
         let row=Row { kind:self.kind,outcome:ResultKind::Unavailable,started:self.started,finished,first:self.first,
             operation:Some(self.operation),binding:None,tail:None,registered:false,watch:false,refused:false,
+            pre_service_stop:Some(stop),main_observations:self.main_observations(),
             admission_issued:false,tested_entered:false,cleanup_entered:false,eof:false,note_exit:false,
             resources:Resources { main:self.main_closed()?,client:Closed::NotEntered,identity,worker_joined:self.worker_joined } };
         self.settled=true;
@@ -1007,6 +1029,7 @@ impl CaseOwner {
             && self.signal.first()==expected_first && !self.signal.unknown();
         let row=Row { kind:self.kind,outcome:if passed {ResultKind::Passed}else{ResultKind::Failed},
             started:self.started,finished,first:self.first,operation:Some(self.operation),
+            pre_service_stop:None,main_observations:self.main_observations(),
             binding:observation.binding,tail:observation.tail,registered:true,watch:observation.watch_registered,
             refused:observation.refused,admission_issued:observation.admission_issued,
             tested_entered:self.records[TESTED_UNREGISTER].mutation_entered,
@@ -1019,20 +1042,28 @@ impl CaseOwner {
     }
     fn run(&mut self,manager:&mut ServiceManager,auxiliary:&mut Auxiliary,clock:&Arc<ClockBridge>,
         build:&Build,previous:&[Row],account:u32)->Option<Row> {
-        if !self.prepare_identity(auxiliary,clock) { return self.finish_pre_service(manager,auxiliary,clock); }
-        if !self.start_worker(auxiliary,clock) { return self.finish_pre_service(manager,auxiliary,clock); }
+        if !self.prepare_identity(auxiliary,clock) {
+            return self.finish_pre_service(manager,auxiliary,clock,PreServiceStop::IdentityPreparation);
+        }
+        if !self.start_worker(auxiliary,clock) {
+            return self.finish_pre_service(manager,auxiliary,clock,PreServiceStop::WorkerStart);
+        }
         let observed=self.action(manager,auxiliary,clock,Action::Observe,OBSERVE,false);
         if observed.is_none_or(|value|value.outcome!=Outcome::Observed || value.status!=Status::NotRegistered
             || value.mutation_entered || value.mutation_returned || value.mutation_uncertain) {
-            return self.finish_pre_service(manager,auxiliary,clock);
+            return self.finish_pre_service(manager,auxiliary,clock,PreServiceStop::ObserveNotAbsent);
         }
         let registered=self.action(manager,auxiliary,clock,Action::RequestRegistration,REGISTER,false);
         self.population_possible=self.records[REGISTER].mutation_entered || self.records[REGISTER].mutation_uncertain
             || manager.custody().observation.is_some_and(|value|value.mutation_entered || value.mutation_uncertain);
-        let Some(registered)=registered else { return self.finish_pre_service(manager,auxiliary,clock); };
+        let Some(registered)=registered else {
+            return self.finish_pre_service(manager,auxiliary,clock,PreServiceStop::RegistrationNotReturned);
+        };
         self.registration=OwnFixtureRegistration::from_returned(self.kind,self.operation,
             &self.records[OBSERVE],&self.records[REGISTER],registered);
-        if self.registration.is_none() { return self.finish_pre_service(manager,auxiliary,clock); }
+        if self.registration.is_none() {
+            return self.finish_pre_service(manager,auxiliary,clock,PreServiceStop::RegistrationNotOwned);
+        }
         self.arm_go(auxiliary)?;
         self.take_offer(auxiliary)?;
         self.validate_offer(auxiliary,clock,build,previous,account)?;
@@ -1076,6 +1107,23 @@ impl ResultBuffer {
         }
         self.text("\"")
     }
+    fn main_observation(&mut self,value:Option<(Status,Outcome)>)->Option<()> {
+        let Some((status,outcome))=value else { return self.text("null"); };
+        self.text("{")?;self.key("status")?;self.string(match status {
+            Status::NotRegistered=>"not-registered",Status::Enabled=>"enabled",
+            Status::RequiresApproval=>"requires-approval",Status::NotFound=>"not-found",
+            Status::Unavailable=>"unavailable",Status::Error=>"error",
+        })?;
+        self.text(",")?;self.key("outcome")?;self.string(match outcome {
+            Outcome::NotEntered=>"not-entered",Outcome::Observed=>"observed",
+            Outcome::RegistrationRequested=>"registration-requested",Outcome::AlreadyRegistered=>"already-registered",
+            Outcome::NeedsApproval=>"needs-approval",Outcome::SettingsRequested=>"settings-requested",
+            Outcome::Refused=>"refused",Outcome::Error=>"error",Outcome::Unknown=>"unknown",
+            Outcome::DeniedByUser=>"denied-by-user",Outcome::Stopped=>"stopped",
+            Outcome::UnregisterAccepted=>"unregister-accepted",
+        })?;
+        self.text("}")
+    }
     fn case(&mut self,row:&Row)->Option<()> {
         self.text("{")?;
         self.key("case")?;self.string(row.kind.name())?;
@@ -1086,6 +1134,12 @@ impl ResultBuffer {
         self.text(",")?;self.key("operationHex")?;self.hex(row.operation.as_ref().map(|value|value.as_slice()))?;
         self.text(",")?;self.key("instanceHex")?;self.hex(row.binding.as_ref().map(|value|value.instance.as_slice()))?;
         self.text(",")?;self.key("tailHex")?;self.hex(row.tail.as_ref().map(|value|value.as_slice()))?;
+        self.text(",")?;self.key("preServiceStop")?;
+        match row.pre_service_stop { Some(stop)=>self.string(stop.text())?,None=>self.text("null")?, }
+        self.text(",")?;self.key("mainObservations")?;self.text("{")?;
+        self.key("observe")?;self.main_observation(row.main_observations[0])?;
+        self.text(",")?;self.key("register")?;self.main_observation(row.main_observations[1])?;
+        self.text("}")?;
         for (key,value) in [
             ("registered",row.registered),("watchRegistered",row.watch),("refused",row.refused),
             ("tailAdmissionIssued",row.admission_issued),("testedUnregisterEntered",row.tested_entered),
@@ -1382,6 +1436,12 @@ mod fixture_data_tests {
         assert!(!row.data_valid(&build()));
         row=Row::unexecuted(Case::MissingB);row.resources.worker_joined=true;
         assert!(!row.data_valid(&build()));
+        row=Row::unexecuted(Case::MissingB);
+        row.main_observations[0]=Some((Status::NotFound,Outcome::Observed));
+        assert!(!row.data_valid(&build()));
+        row=Row::unexecuted(Case::MissingB);
+        row.pre_service_stop=Some(PreServiceStop::ObserveNotAbsent);
+        assert!(!row.data_valid(&build()));
         assert!(!Resources {main:Closed::ReturnedEmpty,client:Closed::Settled,
             identity:Closed::Settled,worker_joined:true}.passed());
         assert!(identity_closed(FixtureIdentityCustody::Unresolved).is_none());
@@ -1400,12 +1460,27 @@ mod fixture_data_tests {
         assert_eq!(text.bytes().filter(|byte|*byte==b'\n').count(),1);
         assert!(text.contains("\"mainReturned\":true,\"mainClosed\":false,\"clientClosed\":false,\"workerJoined\":false"));
         assert!(text.contains("\"resourceStates\":{\"main\":\"returned-empty\",\"client\":\"not-entered\",\"worker\":\"not-started\",\"identity\":\"not-entered\"}"));
+        assert!(text.contains("\"preServiceStop\":null,\"mainObservations\":{\"observe\":null,\"register\":null}"));
         assert!(text.contains("\"auxiliaryNanoseconds\":\"17\""));
         assert!(output.result(&build(),&rows,ResultKind::Unavailable,17).is_none());
         let mut full=ResultBuffer::new();full.used=RESULT_BYTES;
         assert!(full.text("x").is_none());
         assert_eq!(full.used,RESULT_BYTES);
         assert!(ResultBuffer::new().string("private\nmessage").is_none());
+        first.resources=Resources {main:Closed::Settled,client:Closed::NotEntered,
+            identity:Closed::Settled,worker_joined:true};
+        first.pre_service_stop=Some(PreServiceStop::ObserveNotAbsent);
+        first.main_observations=[Some((Status::NotFound,Outcome::Observed)),None];
+        assert!(first.data_valid(&build()));
+        let mut observed=ResultBuffer::new();
+        observed.result(&build(),&[first,rows[1],rows[2]],ResultKind::Unavailable,17).unwrap();
+        let text=std::str::from_utf8(&observed.bytes[..observed.used]).unwrap();
+        assert!(text.contains("\"preServiceStop\":\"observe-not-absent\",\"mainObservations\":{\"observe\":{\"status\":\"not-found\",\"outcome\":\"observed\"},\"register\":null}"));
+        assert!(text.contains("\"outcome\":\"unavailable\""));
+        assert!(text.contains("\"registered\":false,\"watchRegistered\":false"));
+        assert_eq!(text.bytes().filter(|byte|*byte==b'\n').count(),1);
+        first.outcome=ResultKind::Failed;
+        assert!(!first.data_valid(&build()));
     }
     #[test]
     fn full_declared_project_census_includes_native_identity_and_one_worker_stack() {

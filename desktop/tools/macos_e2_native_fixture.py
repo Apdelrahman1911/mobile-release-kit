@@ -58,7 +58,8 @@ CASE_FLAGS = ("registered", "watchRegistered", "refused", "tailAdmissionIssued",
               "testedUnregisterEntered", "fixtureCleanupUnregisterEntered", "eof",
               "noteExit") + CLOSE_FLAGS
 CASE_KEYS = {"case", "outcome", "startedNs", "finishedNs", "firstFailureNs",
-             "operationHex", "instanceHex", "tailHex", "resourceStates", *CASE_FLAGS}
+             "operationHex", "instanceHex", "tailHex", "resourceStates",
+             "preServiceStop", "mainObservations", *CASE_FLAGS}
 RESULT_KEYS = {"schemaVersion", "type", "fixtureProfile", "sourceCommit", "releaseId",
                "target", "outcome", "nativeFinalityKnown", "auxiliaryNanoseconds",
                "syntheticIdentity", "productionIdentityQualified",
@@ -165,6 +166,27 @@ def resource_states(row):
     return value
 
 
+def main_observations(row):
+    """Closed original checkpoint DATA, never call/nonentry or success authority."""
+    stop = row["preServiceStop"]
+    need(stop is None or (type(stop) is str and stop in (
+        "identity-preparation", "worker-start", "observe-not-absent",
+        "registration-not-returned", "registration-not-owned")
+        and row["outcome"] == "unavailable"), "native-case-shape")
+    value = row["mainObservations"]
+    need(type(value) is dict and set(value) == {"observe", "register"}, "native-case-shape")
+    for observation in value.values():
+        need(observation is None or (type(observation) is dict
+             and set(observation) == {"status", "outcome"}
+             and type(observation["status"]) is str and observation["status"] in (
+                 "not-registered", "enabled", "requires-approval", "not-found", "unavailable", "error")
+             and type(observation["outcome"]) is str and observation["outcome"] in (
+                 "not-entered", "observed", "registration-requested", "already-registered", "needs-approval",
+                 "settings-requested", "refused", "error", "unknown", "denied-by-user", "stopped",
+                 "unregister-accepted")), "native-case-shape")
+    return value
+
+
 def native_result(stdout, returncode, source, release):
     """Validate only an actually returned owner's bounded native result DATA."""
     need(identity(source, 40) and source != "0" * 40 and type(release) is str
@@ -194,12 +216,14 @@ def native_result(stdout, returncode, source, release):
              and row["outcome"] in ("passed", "failed", "unavailable", "unexecuted")
              and all(type(row[key]) is bool for key in CASE_FLAGS), "native-case-shape")
         resources = resource_states(row)
+        observations = main_observations(row)
         start, finish, first = (decimal(row[key]) for key in ("startedNs", "finishedNs", "firstFailureNs"))
         need(identity(row["operationHex"], 32, empty=True) and identity(row["instanceHex"], 32, empty=True)
              and identity(row["tailHex"], 768, empty=True), "native-case-identities")
         if row["outcome"] == "unexecuted":
             need(terminal and start == finish == first == 0
                  and row["operationHex"] == row["instanceHex"] == row["tailHex"] == ""
+                 and row["preServiceStop"] is None and observations == {"observe": None, "register": None}
                  and not any(row[key] for key in CASE_FLAGS)
                  and resources == {"main": "not-entered", "client": "not-entered",
                                    "worker": "not-started", "identity": "not-entered"},

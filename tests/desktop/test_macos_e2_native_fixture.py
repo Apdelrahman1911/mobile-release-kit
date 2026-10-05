@@ -52,6 +52,10 @@ def cases():
                    testedUnregisterEntered=index == 2, fixtureCleanupUnregisterEntered=index != 2,
                    eof=index != 0)
         row["resourceStates"] = {"main": "settled", "client": "settled", "worker": "joined", "identity": "settled"}
+        row["preServiceStop"] = None
+        row["mainObservations"] = {
+            "observe": {"status": "not-registered", "outcome": "observed"},
+            "register": {"status": "enabled", "outcome": "registration-requested"}}
         if index:
             row["tailHex"] = tail(row)
         rows.append(row)
@@ -75,6 +79,7 @@ def unexecuted(name):
     row = {key: False for key in fixture.CASE_FLAGS}
     row.update(case=name, outcome="unexecuted", startedNs="0", finishedNs="0", firstFailureNs="0",
                operationHex="", instanceHex="", tailHex="",
+               preServiceStop=None, mainObservations={"observe": None, "register": None},
                resourceStates={"main": "not-entered", "client": "not-entered",
                                "worker": "not-started", "identity": "not-entered"})
     return row
@@ -167,9 +172,51 @@ class NativeResultTests(unittest.TestCase):
         for code in (0, 1, -9, True):
             with self.assertRaises(fixture.Refused):
                 parse(value, code)
-        value["cases"][1] = cases()[1]
+        changed = copy.deepcopy(value)
+        changed["cases"][1] = cases()[1]
         with self.assertRaises(fixture.Refused):
-            parse(value, 77)
+            parse(changed, 77)
+
+        # Different original stop sites/observations stay distinguishable,
+        # without turning unavailable native work into a passed case.
+        row.update(mainReturned=True, mainClosed=True, identityClosed=True, workerJoined=True,
+                   preServiceStop="observe-not-absent")
+        row["resourceStates"].update(main="settled", identity="settled", worker="joined")
+        row["mainObservations"]["observe"] = {"status": "not-found", "outcome": "observed"}
+        observed = parse(value, 77)
+        self.assertEqual(observed["cases"][0]["mainObservations"], row["mainObservations"])
+        self.assertEqual(observed["outcome"], "unavailable")
+        self.assertFalse(observed["cases"][0]["registered"])
+        later = copy.deepcopy(value)
+        later["cases"][0].update(preServiceStop="registration-not-returned", mainObservations={
+            "observe": {"status": "not-registered", "outcome": "observed"}, "register": None})
+        self.assertNotEqual(parse(later, 77)["cases"][0]["mainObservations"], row["mainObservations"])
+        for stop in (False, [], {}, "private native error", "unknown"):
+            changed = copy.deepcopy(value)
+            changed["cases"][0]["preServiceStop"] = stop
+            with self.assertRaises(fixture.Refused):
+                parse(changed, 77)
+        malformed = (None, False, [], {}, {"observe": None},
+                     {"observe": None, "register": None, "raw": "private native error"},
+                     {"observe": False, "register": None},
+                     {"observe": {"status": [], "outcome": "observed"}, "register": None},
+                     {"observe": {"status": "private native error", "outcome": "observed"}, "register": None},
+                     {"observe": {"status": "not-found", "outcome": {}}, "register": None},
+                     {"observe": {"status": "not-found", "outcome": "private native error"}, "register": None},
+                     {"observe": {"status": "not-found", "outcome": "observed", "raw": "private"}, "register": None})
+        for observations in malformed:
+            changed = copy.deepcopy(value)
+            changed["cases"][0]["mainObservations"] = observations
+            with self.assertRaises(fixture.Refused):
+                parse(changed, 77)
+        changed = copy.deepcopy(value)
+        changed["cases"][1]["mainObservations"]["observe"] = {"status": "not-found", "outcome": "observed"}
+        with self.assertRaises(fixture.Refused):
+            parse(changed, 77)
+        changed = result()
+        changed["cases"][0]["preServiceStop"] = "observe-not-absent"
+        with self.assertRaises(fixture.Refused):
+            parse(changed)
 
 
     def test_early_empty_allocations_do_not_fabricate_a_close_or_join(self):
