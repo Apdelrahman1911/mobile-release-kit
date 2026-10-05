@@ -93,13 +93,13 @@ jobs:
           source_ordinal = 0
 
           PREPARATION_COMMANDS = (
-              "git-tree", "git-roster", "rustup", "rustc-version", "cargo-version", "fetch-0", "fetch-1",
+              "git-tree", "git-roster", "rustc-version", "cargo-version", "fetch-0", "fetch-1",
           )
           PREPARATION_PHASES = (
               "route", "source-inventory", "git-tree", "git-roster", "source-roster-decode",
               "source-roster-entry", "source-file-inventory", "source-required-roster",
               "cargo-home-admission", "cargo-configuration", "locked-manifests",
-              "repository-toolchain", "rustup-admission", "rustup", "rust-tool-admission",
+              "repository-toolchain", "rust-tool-admission",
               "rustc-version", "cargo-version", "fetch-0", "fetch-1", "source-recheck",
               "input-publication",
           )
@@ -107,8 +107,8 @@ jobs:
               "ambient-cargo-configuration", "ambient-cargo-directory", "bootstrap-close-unknown",
               "bootstrap-directory", "bootstrap-directory-changed", "bootstrap-import-changed",
               "bootstrap-loader", "bootstrap-short-read", "bootstrap-source", "bootstrap-source-changed",
-              "bootstrap-source-grew", "effective-rust-clock-binding", "effective-tool-version",
-              "hosted-rustup-tool", "local-source-checksum", "locked-package-shape", "locked-public-source",
+              "bootstrap-source-grew", "effective-cargo-clock-binding", "effective-rust-clock-binding", "effective-tool-version",
+              "local-source-checksum", "locked-package-shape", "locked-public-source",
               "locked-registry-shape", "preparation-bootstrap-binding", "preparation-detached-source",
               "preparation-original-command-failed", "preparation-platform-account", "preparation-route",
               "preparation-scratch-original", "preparation-scratch-remains", "prepared-input-bound",
@@ -122,7 +122,7 @@ jobs:
               "original-owner-return", "output-bound", "output-short-write", "output-readback",
               "output-close-unknown", "required-source-roster", "source-shape", "run-shape",
               "source-run-binding", "source-inventory-binding", "source-inventory-row",
-              "effective-rust-binding", "effective-rust-tool", "effective-rust-clock-version",
+              "effective-rust-binding", "effective-rust-tool", "effective-rust-clock-version", "effective-cargo-clock-version",
           )
 
           def preparation_failure_data(error, stage, ordinal, calls):
@@ -425,20 +425,12 @@ jobs:
               need(tomllib.loads(toolchain_bytes.decode("utf-8"))["toolchain"]["channel"] == "1.98.0",
                    "repository-toolchain-default")
 
+              # Admit the image's fixed direct tools by their actual version outputs.
+              # Only rustup distribution/install network is removed; the two locked fetches remain.
               tool_environment = dict(clean, CARGO_HOME=str(cargo_home), RUSTUP_HOME=str(rustup_home),
-                                      RUSTUP_TOOLCHAIN=TOOLCHAIN, RUSTUP_AUTO_INSTALL="0",
-                                      RUSTUP_DIST_SERVER="https://static.rust-lang.org",
-                                      RUSTUP_UPDATE_ROOT="https://static.rust-lang.org/rustup")
-              rustup = cargo_home / "bin/rustup"
-              phase = "rustup-admission"
-              rustup_parent = book.directory(rustup.parent)
-              rustup_info = os.stat(rustup.name, dir_fd=rustup_parent["fd"], follow_symlinks=False)
-              need(stat.S_ISREG(rustup_info.st_mode) and rustup_info.st_uid in (0, os.getuid())
-                   and not rustup_info.st_mode & 0o022 and rustup_info.st_mode & 0o111, "hosted-rustup-tool")
-              call("rustup", [str(rustup), "toolchain", "install", TOOLCHAIN, "--profile", "minimal",
-                             "--target", TARGET, "--no-self-update"], tool_environment, 240)
+                                      RUSTUP_TOOLCHAIN=TOOLCHAIN, RUSTUP_AUTO_INSTALL="0")
               phase = "rust-tool-admission"
-              bin_directory = rustup_home / "toolchains" / (TOOLCHAIN + "-" + TARGET) / "bin"
+              bin_directory = rustup_home / "toolchains" / "stable-aarch64-apple-darwin" / "bin"
               book.directory(bin_directory)
               tool_environment["PATH"] = str(bin_directory) + ":/usr/bin:/bin:/usr/sbin:/sbin"
               tool_environment["RUSTC"] = str(bin_directory / "rustc")
@@ -457,6 +449,8 @@ jobs:
                       need("release: 1.98.1" in text.splitlines()
                            and "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985" in text.splitlines(),
                            "effective-rust-clock-binding")
+                  else:
+                      need("release: 1.98.1" in text.splitlines(), "effective-cargo-clock-binding")
                   tools[tool] = {"command": [tool, "--version", "--verbose"], "output": text}
               # Acquisition only: no build scripts, credential helpers, alternate
               # registries, token/proxy/SSL overrides or inherited Cargo settings.

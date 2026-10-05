@@ -259,7 +259,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(report(ValueError(marker), "route", 0, [dict(calls[0], returned=False)])["originalCalls"],
                          [{"role": "git-tree", "returned": False}])
         self.assertEqual(tables["PREPARATION_COMMANDS"],
-                         ("git-tree", "git-roster", "rustup", "rustc-version", "cargo-version", "fetch-0", "fetch-1"))
+                         ("git-tree", "git-roster", "rustc-version", "cargo-version", "fetch-0", "fetch-1"))
 
     def test_preparation_diagnostic_stages_do_not_change_original_failure_or_cleanup(self):
         _report, tables, tree = self.preparation_diagnostic()
@@ -273,7 +273,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             ("cargo-home-admission", 'book.directory(cargo_home)'),
             ("locked-manifests", 'for directory in manifests:'),
             ("repository-toolchain", '_row, toolchain_bytes = source_file('),
-            ("rustup-admission", 'rustup_parent = book.directory(rustup.parent)'),
+            ("rust-tool-admission", 'bin_directory = rustup_home / "toolchains" / "stable-aarch64-apple-darwin" / "bin"'),
         ):
             with self.subTest(phase=phase):
                 self.assertIn(phase, tables["PREPARATION_PHASES"])
@@ -306,6 +306,47 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         ):
             self.assertIn(flat(required), flat(finality))
         self.assertIn("          if failure:\n              raise SystemExit(1)", prepare)
+
+    def test_direct_image_tools_keep_exact_versions_and_only_locked_fetch_network(self):
+        report, tables, _tree = self.preparation_diagnostic()
+        prepare = self.steps[STEP_NAMES[3]]
+        compiler = section(self.owner, "    def compiler_environment(self, target):", "    def begin(self):")
+        assignment = 'bin_directory = rustup_home / "toolchains" / "stable-aarch64-apple-darwin" / "bin"'
+        self.assertEqual(prepare.count(assignment), 1)
+        self.assertEqual(compiler.count(assignment), 1)
+        for source in (prepare, compiler):
+            for forbidden in ('(TOOLCHAIN + "-" + TARGET)', 'call("rustup"', '"bin/rustup"',
+                              "RUSTUP_DIST_SERVER", "RUSTUP_UPDATE_ROOT",
+                              ".resolve(", "os.readlink(", "os.symlink("):
+                with self.subTest(forbidden=forbidden):
+                    self.assertNotIn(forbidden, active(source))
+            self.assertIn('RUSTUP_TOOLCHAIN=TOOLCHAIN, RUSTUP_AUTO_INSTALL="0"', flat(source))
+        self.assertNotIn("rustup-admission", tables["PREPARATION_PHASES"])
+        self.assertNotIn("rustup", tables["PREPARATION_PHASES"])
+        self.assertNotIn("hosted-rustup-tool", tables["PREPARATION_REFUSALS"])
+        old_calls = [{"role": role, "returned": True} for role in ("git-tree", "git-roster", "rustup")]
+        self.assertIsNone(report(ValueError("unused"), "route", 0, old_calls)["originalCalls"])
+        self.assertIn('book.directory(bin_directory)', prepare)
+        self.assertIn('info = os.stat(executable, follow_symlinks=False)', prepare)
+        self.assertIn(flat('need(stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid()) '
+                           'and not info.st_mode & 0o022 and info.st_mode & 0o111, "prepared-rust-tool")'), flat(prepare))
+        self.assertIn('self.outputs.directory(bin_directory)', compiler)
+        self.assertIn('tool_environment["RUSTC"] = str(bin_directory / "rustc")', prepare)
+        self.assertIn('RUSTC=str(rustc)', compiler)
+        self.assertIn(flat('raw = call(tool + "-version", [str(executable), "--version", "--verbose"], '
+                           'tool_environment, 15, 4096, cwd=CHECKOUT / "desktop/src-tauri")'), flat(prepare))
+        self.assertIn(flat('else: need("release: 1.98.1" in text.splitlines(), "effective-cargo-clock-binding") '
+                           'tools[tool] = {"command": [tool, "--version", "--verbose"], "output": text}'), flat(prepare))
+        self.assertIn(flat('need("release: 1.98.1" in text.splitlines() and '
+                           '"commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985" in text.splitlines(), '
+                           '"effective-rust-clock-binding")'), flat(prepare))
+        self.assertIn('CARGO_NET_OFFLINE="false"', prepare)
+        self.assertIn('for index, directory in enumerate(manifests):', prepare)
+        self.assertIn(flat('call("fetch-" + str(index), [str(bin_directory / "cargo"), "fetch", "--manifest-path", '
+                           'str(CHECKOUT / directory / "Cargo.toml"), "--locked", "--target", TARGET], '
+                           'fetch_environment, 240, 262144)'), flat(prepare))
+        self.assertIn('CARGO_NET_OFFLINE="true"', compiler)
+        self.assertEqual(active(self.steps[STEP_NAMES[4]]), active(EXPECTED_NATIVE))
 
     def test_acceptance_requires_actual_outcome_and_bounded_closed_summary(self):
         publish, upload, final = (self.steps[name] for name in STEP_NAMES[5:])

@@ -761,6 +761,8 @@ def binding_data(environment, binding, inventory, rust, work_identity):
     need("release: " + TOOLCHAIN in rust["tools"]["rustc"]["output"].splitlines()
          and "commit-hash: " + RUST_COMMIT in rust["tools"]["rustc"]["output"].splitlines(),
          "effective-rust-clock-version")
+    need("release: " + TOOLCHAIN in rust["tools"]["cargo"]["output"].splitlines(),
+         "effective-cargo-clock-version")
     return rows
 
 
@@ -1134,8 +1136,8 @@ class Operation:
              and self.environment.get("CARGO_HOME", str(home / ".cargo")) == str(home / ".cargo"),
              "prepared-tool-home-route")
         cargo_home, rustup_home = home / ".cargo", home / ".rustup"
-        # Rust is already installed/prepared by the reviewed workflow. No
-        # auto-install, inherited flags/wrappers, credentials, or online fetch.
+        # The workflow admits these preinstalled direct tools by actual version
+        # outputs. No auto-install, inherited flags/wrappers, credentials, or online fetch.
         for parent in (cargo_home, *CHECKOUT.parents, CHECKOUT, CHECKOUT / "desktop",
                        CHECKOUT / NATIVE, CHECKOUT / HELPER):
             directory = parent if parent == cargo_home else parent / ".cargo"
@@ -1146,7 +1148,7 @@ class Operation:
                     pass
                 else:
                     raise Refused("ambient-cargo-configuration")
-        bin_directory = rustup_home / "toolchains" / (TOOLCHAIN + "-" + TARGET) / "bin"
+        bin_directory = rustup_home / "toolchains" / "stable-aarch64-apple-darwin" / "bin"
         self.outputs.directory(bin_directory)
         cargo = bin_directory / "cargo"
         rustc = bin_directory / "rustc"

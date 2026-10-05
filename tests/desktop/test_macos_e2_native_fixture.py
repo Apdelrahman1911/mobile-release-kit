@@ -225,7 +225,7 @@ def bindings():
             "selectedMacToolchain": "1.98.1", "tools": {
                 "rustc": {"command": ["rustc", "--version", "--verbose"],
                           "output": "rustc 1.98.1\nrelease: 1.98.1\ncommit-hash: " + fixture.RUST_COMMIT},
-                "cargo": {"command": ["cargo", "--version", "--verbose"], "output": "cargo 1.98.1"}}}
+                "cargo": {"command": ["cargo", "--version", "--verbose"], "output": "cargo 1.98.1\nrelease: 1.98.1"}}}
     return environment, binding, inventory, rust
 
 
@@ -249,6 +249,64 @@ class BindingAndOriginalTests(unittest.TestCase):
                 change(value)
                 with self.assertRaises(fixture.Refused):
                     fixture.binding_data(*value, WORK)
+
+    def test_exact_cargo_release_is_required_in_the_existing_bound_output(self):
+        self.assertIn("src/example.rs", fixture.binding_data(*bindings(), WORK))
+        for output in ("cargo 1.98.1", "cargo 1.98.1\nrelease: 1.98.0",
+                       "cargo 1.98.1\nrelease: 1.98.10", "cargo 1.98.1\nrelease: 1.98.1-nightly",
+                       "cargo 1.98.1\nprerelease: 1.98.1"):
+            with self.subTest(output=output):
+                value = bindings()
+                value[3]["tools"]["cargo"]["output"] = output
+                with self.assertRaisesRegex(fixture.Refused, "^effective-cargo-clock-version$"):
+                    fixture.binding_data(*value, WORK)
+
+    def test_compiler_environment_uses_only_the_fixed_direct_image_bin(self):
+        operation = object.__new__(fixture.Operation)
+        operation.environment = {
+            "HOME": "/Users/runner", "GITHUB_SHA": SOURCE,
+            "DEVELOPER_DIR": "/Library/Developer/CommandLineTools",
+            "PATH": "/unreviewed/bin", "RUSTUP_TOOLCHAIN": "nightly",
+            "RUSTUP_AUTO_INSTALL": "1", "CARGO_NET_OFFLINE": "false",
+        }
+        operation.scratch, operation.release = Path("/synthetic/work"), RELEASE
+        observed = []
+        operation.outputs = SimpleNamespace(directory=observed.append)
+        target = Path("/synthetic/target")
+        direct = Path("/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin")
+        with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()), \
+                patch.object(fixture.Path, "resolve", side_effect=AssertionError("no runtime path resolution")):
+            cargo_path, environment = operation.compiler_environment(target)
+        self.assertEqual(observed, [direct])
+        self.assertEqual(cargo_path, str(direct / "cargo"))
+        self.assertEqual(environment["PATH"], str(direct) + ":/usr/bin:/bin:/usr/sbin:/sbin")
+        self.assertEqual(environment["RUSTC"], str(direct / "rustc"))
+        self.assertEqual(environment["RUSTUP_TOOLCHAIN"], "1.98.1")
+        self.assertEqual(environment["RUSTUP_AUTO_INSTALL"], "0")
+        self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
+        self.assertEqual(environment["CARGO_TARGET_DIR"], str(target))
+        self.assertNotIn("RUSTUP_DIST_SERVER", environment)
+        self.assertNotIn("RUSTUP_UPDATE_ROOT", environment)
+        self.assertEqual(fixture.RUST_COMMIT, "48a229ceaefd4985c50990b14116b6d856af0985")
+
+    def test_missing_or_unadmitted_direct_image_bin_has_no_fallback(self):
+        operation = object.__new__(fixture.Operation)
+        operation.environment = {"HOME": "/Users/runner", "GITHUB_SHA": SOURCE,
+                                 "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}
+        operation.scratch, operation.release = Path("/synthetic/work"), RELEASE
+        direct = Path("/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin")
+        for error in (FileNotFoundError("fixed image bin missing"), fixture.Refused("directory-owner-mode")):
+            with self.subTest(reason=type(error).__name__):
+                observed = []
+                def refuse(path):
+                    observed.append(path)
+                    raise error
+                operation.outputs = SimpleNamespace(directory=refuse)
+                with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()), \
+                        patch.object(fixture.Path, "resolve", side_effect=AssertionError("no path repair")):
+                    with self.assertRaises(type(error)):
+                        operation.compiler_environment(Path("/synthetic/target"))
+                self.assertEqual(observed, [direct])
 
     def test_domain_declaration_is_narrow_and_no_retry_or_integer_false_alias(self):
         domain = {"schemaVersion": 1, "allocation": "fresh-github-hosted-single-job",
