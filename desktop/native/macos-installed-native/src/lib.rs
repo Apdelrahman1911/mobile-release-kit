@@ -1,6 +1,6 @@
 //! Small Darwin ABI boundary, not an operation owner or an execution permit.
 //! The application retains its original slots/tasks and supplies every deadline.
-#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#![cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
 // The fixture requires its paired native build and one isolated image graph.
@@ -76,6 +76,9 @@ use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
 
 unsafe extern "C" {
     fn mrk_platform() -> c_int;
+    #[cfg(test)]
+    fn mrk_platform_native_data(sysname: *const c_char, machine: *const c_char, returned: c_int,
+        observed_errno: c_int, length: usize, translated: c_int) -> c_int;
     fn mrk_user(uid: *mut u32) -> c_int;
     fn mrk_reveal_installation() -> c_int;
     fn mrk_acl_empty(fd: c_int, phase: *mut c_int, call_result: *mut c_int, native_errno: *mut c_int,
@@ -2706,6 +2709,48 @@ fn evidence_folder_abi_data_check() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts() {
+        use nix::errno::Errno;
+        #[cfg(target_arch = "aarch64")]
+        let (native, opposite) = (c"arm64", c"x86_64");
+        #[cfg(target_arch = "x86_64")]
+        let (native, opposite) = (c"x86_64", c"arm64");
+        let check = |sysname: *const c_char, machine: *const c_char, returned: c_int,
+            observed_errno: c_int, length: usize, translated: c_int| {
+            // SAFETY: only static terminated strings or null; the private C
+            // predicate consumes DATA, with no native queries or acquisitions.
+            unsafe { mrk_platform_native_data(sysname, machine, returned, observed_errno, length, translated) }
+        };
+        let width = std::mem::size_of::<c_int>();
+        let missing = Errno::ENOENT as c_int;
+        let error = Errno::EIO as c_int;
+        let refused = Errno::ENOTSUP as c_int;
+        assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, 0, width, 0), 0);
+        assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, error, width, 0), 0);
+        // Neither output scalar is a fact after the documented missing key.
+        assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), -1, missing, usize::MAX, c_int::MIN), 0);
+        for translated in [-1, 1, 2] {
+            assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, missing, width, translated), refused);
+        }
+        for length in [0, width - 1, width + 1, usize::MAX] {
+            assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), 0, 0, length, 0), refused);
+        }
+        for (returned, observed_errno) in [(-1, 0), (-1, error), (1, missing), (-2, missing)] {
+            assert_eq!(check(c"Darwin".as_ptr(), native.as_ptr(), returned, observed_errno, width, 0), refused);
+        }
+        // Native/absent-key paths both require the independent compiled-machine
+        // literal and Darwin. Null/empty values cannot authorize either path.
+        for (sysname, machine) in [
+            (c"Linux".as_ptr(), native.as_ptr()), (c"".as_ptr(), native.as_ptr()),
+            (std::ptr::null(), native.as_ptr()), (c"Darwin".as_ptr(), opposite.as_ptr()),
+            (c"Darwin".as_ptr(), c"".as_ptr()), (c"Darwin".as_ptr(), std::ptr::null()),
+        ] {
+            for (returned, observed_errno) in [(0, 0), (-1, missing)] {
+                assert_eq!(check(sysname, machine, returned, observed_errno, width, 0), refused);
+            }
+        }
+    }
     #[test]
     fn bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches() {
         // Literal public Darwin packed DATA: length, returned attributes,

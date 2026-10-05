@@ -386,6 +386,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             and result["failure"] is None and all(result[key] for key in flags)
             and result["cleanupErrors"] == [] and calls
             and all(call["returned"] and call["returncode"] == 0 for call in calls)
+            and native_rust_tests is not None
             and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
         )"""))
         flags = section(publish, "              flags = (", "              fixture.need(all(type(result[key])")
@@ -393,6 +394,27 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired",
             "protectedRetentionRequired")"""))
         self.assertIn('accepted=bool(known_pass)', active(publish))
+        units = section(publish, "              native_rust_tests = None", "              native = None")
+        self.assertEqual(flat(units), flat("""native_rust_tests = None
+            if result["nativeRustTests"] is not None:
+                unit_calls = [call for call in calls if call["role"] == "native-rust-tests"]
+                fixture.need(len(unit_calls) == 1 and unit_calls[0]["returned"]
+                             and unit_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release,
+                             "summary-native-rust-tests-call")
+                unit_record = fixture.native_rust_tests_data(result["nativeRustTests"])
+                if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                        and all(call["returned"] for call in calls)):
+                    native_rust_tests = unit_record"""))
+        self.assertGreater(publish.index(units), publish.index('"summary-returned-call"'))
+        self.assertLess(publish.index(units), publish.index("              known_pass = ("))
+        self.assertIn('receiptOriginals native nativeRustTests', active(publish))
+        self.assertIn('"nativeRustTests": None,', publish)
+        self.assertIn('nativeRustTests=native_rust_tests,', publish)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["nativeRustTests"] =' in line], ['summary["nativeRustTests"] = None'] * 2)
+        for refused in ('except BaseException: summary["accepted"] = False summary["nativeRustTests"] = None',
+                        'if not book.finish(): summary["accepted"] = False summary["nativeRustTests"] = None'):
+            self.assertIn(refused, flat(publish))
         report, tables = self.native_owner_diagnostic()
         call = {"role": "initial-receipt-query", "entered": True, "returned": True,
                 "returncode": 1, "stdoutSha256": "0" * 64, "stderrSha256": "1" * 64}
@@ -406,6 +428,10 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         diagnostic = report("client-build", "ambient-cargo-configuration", [successful])
         self.assertEqual(diagnostic["phase"], "client-build")
         self.assertEqual(diagnostic["lastOriginalCall"]["returncode"], 0)
+        unit_diagnostic = report("native-rust-tests", "native-rust-test-roster", [dict(successful, role="native-rust-tests")])
+        self.assertEqual(unit_diagnostic, {
+            "diagnosticOnly": True, "phase": "native-rust-tests", "failure": "native-rust-test-roster",
+            "lastOriginalCall": {"role": "native-rust-tests", "returned": True, "returncode": 0}})
         self.assertIsNone(report("prepare", None, [])["failure"])
         self.assertIsNone(report("prepare", None, [])["lastOriginalCall"])
         self.assertEqual(report("native-run", None, [dict(call, role="native-run", returned=False)])["lastOriginalCall"],

@@ -33,7 +33,10 @@ const IDENTITY_PROVIDER_BYTES:usize=24_576;
 const IDENTITY_EXTRA_BYTES:usize=65_536;
 const POLL:Duration=Duration::from_millis(2);
 const RETAIN_POLL:Duration=Duration::from_secs(1);
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const TARGET:&str="aarch64-apple-darwin";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const TARGET:&str="x86_64-apple-darwin";
 // Same fixed provider ABI; actual header phases are independently source-bound.
 const POOL_ALLOCATE:u32=management::FIXTURE_IDENTITY_POOL_ALLOCATE;
 const POOL_INIT:u32=management::FIXTURE_IDENTITY_POOL_INIT;

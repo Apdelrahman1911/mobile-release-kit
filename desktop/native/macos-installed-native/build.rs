@@ -29,7 +29,10 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification_native)");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_MRK_WRAPPING_KEYCHAIN_QUALIFICATION");
-    assert_eq!(std::env::var("TARGET").as_deref(), Ok("aarch64-apple-darwin"), "fixed macOS ARM64 native seam only");
+    assert!(matches!(std::env::var("TARGET").as_deref(),
+        Ok("aarch64-apple-darwin" | "x86_64-apple-darwin")), "fixed supported macOS native target required");
+    assert_eq!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos"), "native target must be macOS");
+    assert_eq!(std::env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref(), Ok("64"), "native target must be LP64");
     // Only a flag cfg supplied to this owned Cargo build enables the source
     // seam. Neither an environment fixture path nor a runtime switch exists.
     let qualification = match std::env::var_os("CARGO_CFG_MRK_WRAPPING_KEYCHAIN_QUALIFICATION") {
@@ -115,13 +118,8 @@ fn main() {
         build.define("MRK_E2_NATIVE_FIXTURE", Some("1"));
         build.file("src/e2_native_fixture_identity.m");
         println!("cargo:rustc-cfg=mrk_e2_native_fixture_native");
-        if desktop_image {
-            // Cargo's example-only and cdylib-only directives both exclude
-            // ExampleLib. These current-package args stay inside the exclusive
-            // fixture/desktop guard; the owner selects the one cdylib example.
-            println!("cargo:rustc-link-arg=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib");
-            println!("cargo:rustc-link-arg=-mmacosx-version-min=26.0");
-        }
+        // The fixed owner passes the client identity to cargo rustc's selected
+        // example only. Shared build-script arguments would also reach libtest.
     }
     if let Some((source,release))=projection.as_ref() {
         let source=format!("{source:?}");let release=format!("{release:?}");

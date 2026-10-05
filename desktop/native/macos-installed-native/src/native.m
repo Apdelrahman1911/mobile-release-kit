@@ -27,12 +27,39 @@
 #include <time.h>
 #endif
 
+#if !defined(__APPLE__) || !defined(__LP64__) || !defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
+#error "the installed native seam requires macOS LP64"
+#endif
+#if defined(__arm64__) && !defined(__x86_64__)
+#define MRK_NATIVE_MACHINE "arm64"
+#elif defined(__x86_64__) && !defined(__arm64__)
+#define MRK_NATIVE_MACHINE "x86_64"
+#else
+#error "the installed native seam requires exactly one supported Mac architecture"
+#endif
+_Static_assert(sizeof(int) == 4 && sizeof(void *) == 8 && sizeof(size_t) == 8,
+    "documented macOS int32 and LP64 scalar widths required");
+
+// Private query-free DATA predicate, shared only with the cfg(test) Rust FFI.
+// These supplied scalars never replace the actual zero-argument observation.
+int mrk_platform_native_data(const char *sysname, const char *machine, int returned,
+                             int observed_errno, size_t length, int translated) {
+    if (!sysname || !machine || strcmp(sysname, "Darwin") || strcmp(machine, MRK_NATIVE_MACHINE)) return ENOTSUP;
+    // errno is unspecified on success. Failed-call output cells are not facts.
+    if (returned == 0) return length == sizeof(int) && translated == 0 ? 0 : ENOTSUP;
+    // Apple's documented absent-key native case, after compiled-machine match.
+    return returned == -1 && observed_errno == ENOENT ? 0 : ENOTSUP;
+}
 int mrk_platform(void) {
     struct utsname u; char version[64] = {0}; size_t length = sizeof(version);
-    if (uname(&u) || strcmp(u.sysname, "Darwin") || strcmp(u.machine, "arm64")) return ENOTSUP;
+    if (uname(&u) || strcmp(u.sysname, "Darwin") || strcmp(u.machine, MRK_NATIVE_MACHINE)) return ENOTSUP;
     if (sysctlbyname("kern.osproductversion", version, &length, NULL, 0) || length == 0 || length >= sizeof(version)
         || strncmp(version, "26.", 3)) return ENOTSUP;
-    return 0;
+    int translated = 0; size_t translated_length = sizeof(translated);
+    errno = 0;
+    int returned = sysctlbyname("sysctl.proc_translated", &translated, &translated_length, NULL, 0);
+    int observed_errno = errno;
+    return mrk_platform_native_data(u.sysname, u.machine, returned, observed_errno, translated_length, translated);
 }
 int mrk_user(uint32_t *uid) {
     if (!uid || getuid() == 0 || getuid() != geteuid() || getgid() != getegid() || issetugid()) return EPERM;

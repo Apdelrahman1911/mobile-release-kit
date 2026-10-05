@@ -641,7 +641,7 @@ jobs:
           if not bootstrap_ok:
               raise SystemExit("E2 summary DATA source admission refused.")
           OWNER_DIAGNOSTIC_ROLES = (
-              "metadata-observer-build", "metadata-initial", "initial-receipt-query", "client-build",
+              "metadata-observer-build", "metadata-initial", "initial-receipt-query", "native-rust-tests", "client-build",
               "resident-build", "entry-build", "client-facade-build", "resident-facade-build", "sign-0",
               "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0", "verify-sign-1", "verify-sign-2",
               "verify-sign-3", "verify-sign-4", "package-analyze", "package-build", "metadata-before-install",
@@ -652,7 +652,7 @@ jobs:
 
           OWNER_DIAGNOSTIC_PHASES = (
               "prepare", "bundle-staging", "package-components", "metadata-observer-build", "metadata-initial",
-              "initial-receipt-query", "client-build", "resident-build", "entry-build", "client-facade-build",
+              "initial-receipt-query", "native-rust-tests", "client-build", "resident-build", "entry-build", "client-facade-build",
               "resident-facade-build", "sign-0", "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0",
               "verify-sign-1", "verify-sign-2", "verify-sign-3", "verify-sign-4", "package-analyze",
               "package-build", "metadata-before-install", "before-install-receipt-query", "standard-installer",
@@ -699,6 +699,8 @@ jobs:
               "native-case-shape", "native-empty-cwd", "native-entry-route", "native-filesystem-postcondition",
               "native-platform-account", "native-resource-finality", "native-resource-states",
               "native-result-binding", "native-result-scope", "native-return-finality", "native-role-features",
+              "native-rust-test-bound", "native-rust-test-framing", "native-rust-test-record",
+              "native-rust-test-result", "native-rust-test-roster",
               "observer-source-changed", "observer-source-original", "one-fixture-image",
               "one-native-result-line", "one-native-role-library", "original-changed",
               "original-command-failed", "original-grew", "original-handle-bound",
@@ -753,7 +755,7 @@ jobs:
               "ownerResultAdmitted": False, "ownerResultSha256": None, "tree": None,
               "bindingSha256": None, "sourceInventorySha256": None, "sourceReleaseId": None,
               "ownerOutcome": None, "originalCallCount": 0, "ownerFinality": None, "native": None,
-              "ownerDiagnostic": None,
+              "ownerDiagnostic": None, "nativeRustTests": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -793,7 +795,7 @@ jobs:
               expected_keys = set("""schemaVersion type source tree workflowSource workflow runId runAttempt platform toolchain
                   sourceInventorySha256 sourceOriginalHandleCount sourceOriginalHandleReserve bindingSha256 sourceReleaseId
                   outcome failure phase originalCalls workTimeoutSeconds hardTimeoutSeconds auxiliaryBudgetNanoseconds
-                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native
+                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests
                   installerEntered installationReturnedSuccess nativeEntered nativeOwnerReturned sourceClosesKnown
                   protectedClosesKnown outputClosesKnown cleanupErrors scratchRetired protectedRootRetired exactReceiptRetired
                   protectedRetentionRequired administrativeDomain arbitraryConcurrentPrivilegedWriterResistance flatPayloadAtomicNoReplace
@@ -839,6 +841,16 @@ jobs:
                       fixture.need(type(call.get("returncode")) is int and 0 <= call["returncode"] <= 255
                                    and fixture.identity(call.get("stdoutSha256"), 64)
                                    and fixture.identity(call.get("stderrSha256"), 64), "summary-returned-call")
+              native_rust_tests = None
+              if result["nativeRustTests"] is not None:
+                  unit_calls = [call for call in calls if call["role"] == "native-rust-tests"]
+                  fixture.need(len(unit_calls) == 1 and unit_calls[0]["returned"]
+                               and unit_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release,
+                               "summary-native-rust-tests-call")
+                  unit_record = fixture.native_rust_tests_data(result["nativeRustTests"])
+                  if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                          and all(call["returned"] for call in calls)):
+                      native_rust_tests = unit_record
               native = None
               if result["native"] is not None:
                   native_calls = [call for call in calls if call["role"] == "native-run"]
@@ -852,6 +864,7 @@ jobs:
                   and result["failure"] is None and all(result[key] for key in flags)
                   and result["cleanupErrors"] == [] and calls
                   and all(call["returned"] and call["returncode"] == 0 for call in calls)
+                  and native_rust_tests is not None
                   and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
               )
               # Only fixed diagnostic labels and returned call facts are added;
@@ -861,15 +874,18 @@ jobs:
                   bindingSha256=fixture.digest(binding_body), sourceInventorySha256=fixture.digest(inventory_body),
                   sourceReleaseId=release, ownerOutcome=result["outcome"], originalCallCount=len(calls),
                   ownerFinality={key: result[key] for key in flags}, native=native, accepted=bool(known_pass),
+                  nativeRustTests=native_rust_tests,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
           except BaseException:
               summary["accepted"] = False
+              summary["nativeRustTests"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
                   summary["accepted"] = False
+                  summary["nativeRustTests"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:

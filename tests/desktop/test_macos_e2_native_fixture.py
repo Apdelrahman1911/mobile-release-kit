@@ -427,6 +427,18 @@ def cargo(role):
     return checkout, target, binary, [native, row, {"reason": "build-finished", "success": True}]
 
 
+NATIVE_TEST_NAMES = (
+    "tests::compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts",
+    "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
+    "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
+)
+
+
+def native_test_stdout(names=NATIVE_TEST_NAMES):
+    return ("\nrunning 3 tests\n" + "".join("test " + name + " ... ok\n" for name in names)
+            + "\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.01s\n\n").encode("ascii")
+
+
 class CargoTests(unittest.TestCase):
     def test_exact_separate_example_and_resident_compiler_rosters(self):
         for role in ("client", "resident"):
@@ -450,6 +462,146 @@ class CargoTests(unittest.TestCase):
                 change(rows)
                 with self.assertRaises(fixture.Refused):
                     fixture.cargo_artifact(b"".join(fixture.canonical(row) for row in rows), "client", checkout, target)
+
+    def test_native_rust_batch_preserves_fixed_target_scope_and_original_lifecycle(self):
+        # Instance-only inert originals: real build_images/call/command/receipt,
+        # but no compiler, native action, filesystem mutation or process runs.
+        build = (PATH.parents[1] / "native/macos-installed-native/build.rs").read_text(encoding="utf-8")
+        self.assertNotIn("cargo:rustc-link-arg=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib", build)
+        self.assertNotIn("cargo:rustc-link-arg=-mmacosx-version-min=26.0", build)
+        self.assertEqual(fixture.NATIVE_RUST_TESTS, NATIVE_TEST_NAMES)
+
+        class UnknownOriginal(Exception):
+            dispatched, contained, cleanup_complete = True, False, False
+
+        modes = (("success", 3, 2, True), ("unit-nonzero", 1, 1, False),
+                 ("unit-unknown", 1, 0, False), ("unit-malformed", 1, 1, False),
+                 ("client-nonzero", 2, 1, True), ("client-unknown", 2, 0, True))
+        for mode, count, retired_count, unit_passed in modes:
+            with self.subTest(mode=mode):
+                invocations, created, retired, copied, published, checks = [], [], [], [], [], []
+                source = SimpleNamespace(book=SimpleNamespace(check=lambda: checks.append(True)),
+                                         binding={"tree": "b" * 40}, inventory_digest="c" * 64,
+                                         source_handle_count=1, source_handle_reserve=64, binding_digest="d" * 64)
+                environment = {"GITHUB_SHA": SOURCE, "GITHUB_WORKFLOW_SHA": SOURCE,
+                               "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+                value = fixture.Operation(None, source, None, Path("/synthetic/build-scope"), environment)
+                value.mkdir = lambda path: created.append(path) or {"identity": WORK[:5]}
+                value.compiler_environment = lambda target: ("/synthetic/cargo", {"CARGO_TARGET_DIR": str(target)})
+                value.retire_target = retired.append
+                value.publish = lambda name, body: published.append((name, body))
+
+                def copy_image(role, binary, target):
+                    copied.append((role, binary, target))
+                    value.artifacts[role] = {}
+                value.copy_image = copy_image
+
+                def owned(argv, **kwargs):
+                    invocations.append((list(argv), kwargs))
+                    unit = argv[1] == "test"
+                    if (unit and mode == "unit-unknown") or (argv[1] == "rustc" and mode == "client-unknown"):
+                        raise UnknownOriginal("inert unknown original")
+                    code = 1 if (unit and mode == "unit-nonzero") or (argv[1] == "rustc" and mode == "client-nonzero") else 0
+                    if unit:
+                        body = b"\nrunning 0 tests\n" if mode == "unit-malformed" else native_test_stdout()
+                    else:
+                        role = "client" if argv[1] == "rustc" else "resident"
+                        checkout, target, _binary, rows = cargo(role)
+                        body = b"".join(fixture.canonical(row) for row in rows)
+                        body = body.replace(str(checkout).encode(), str(fixture.CHECKOUT).encode())
+                        body = body.replace(str(target).encode(), kwargs["environ"]["CARGO_TARGET_DIR"].encode())
+                    return subprocess.CompletedProcess(argv, code, body, b"")
+                value.owner = SimpleNamespace(run_owned=owned, ProcessOutcomeUnknown=UnknownOriginal)
+                self.assertIsNone(value.native_rust_tests)
+                if mode == "success":
+                    value.build_images()
+                else:
+                    error = UnknownOriginal if mode.endswith("unknown") else fixture.Refused
+                    with self.assertRaises(error):
+                        value.build_images()
+                self.assertEqual(len(invocations), count)
+                self.assertEqual([row["role"] for row in value.calls],
+                                 ["native-rust-tests", "client-build", "resident-build"][:count])
+                self.assertEqual([row["returned"] for row in value.calls],
+                                 [True] * (count - 1) + [not mode.endswith("unknown")])
+                self.assertEqual(retired, [value.scratch / (role + "-target") for role in ("client", "resident")][:retired_count])
+                self.assertEqual(created, [value.scratch / (role + "-target") for role in ("client", "resident")][:2 if mode == "success" else 1])
+                self.assertEqual(len(copied), 2 if mode == "success" else 0)
+                self.assertEqual(len(checks), 2 * count - int(mode.endswith("unknown")))
+                self.assertEqual(len(published), 2 * (count - int(mode.endswith("unknown"))))
+                self.assertEqual(value.native_rust_tests is not None, unit_passed)
+                if mode.endswith("unknown"):
+                    self.assertEqual(value.calls[-1]["errorType"], "ProcessOutcomeUnknown")
+                    self.assertFalse(value.calls[-1]["cleanup_complete"])
+                if mode.endswith("nonzero"):
+                    self.assertEqual(value.calls[-1]["returncode"], 1)
+
+                def common(directory, features):
+                    return ["--manifest-path", str(fixture.CHECKOUT / directory / "Cargo.toml"),
+                            "--locked", "--offline", "--release", "--jobs", "1", "--target", "aarch64-apple-darwin",
+                            "--no-default-features", "--features", features]
+                expected = [
+                    ["/synthetic/cargo", "test", *common(fixture.NATIVE, "desktop-image,e2-native-fixture"),
+                     "--lib", "--message-format=short", "--color", "never", "--", "--exact", "--test-threads=1",
+                     "--format", "pretty", "--color", "never", *NATIVE_TEST_NAMES],
+                    ["/synthetic/cargo", "rustc", *common(fixture.NATIVE, "desktop-image,e2-native-fixture"),
+                     "--example", "e2_maintenance_client", "--message-format=json-render-diagnostics", "--", "-C",
+                     "link-arg=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib", "-C", "link-arg=-mmacosx-version-min=26.0"],
+                    ["/synthetic/cargo", "build", *common(fixture.HELPER, "e2-native-fixture"),
+                     "--lib", "--message-format=json-render-diagnostics"],
+                ]
+                self.assertEqual([argv for argv, _kwargs in invocations], expected[:count])
+                for index, (_argv, kwargs) in enumerate(invocations):
+                    self.assertEqual(kwargs, {"environ": {"CARGO_TARGET_DIR": str(value.scratch / (
+                        "resident-target" if index == 2 else "client-target"))}, "cwd": fixture.CHECKOUT,
+                        "timeout": 480, "capture": True, "text": False, "output_limit": 4 * 1024 * 1024})
+                if count >= 2:
+                    self.assertIs(invocations[0][1]["environ"], invocations[1][1]["environ"])
+                if mode == "success":
+                    # Owner success cannot silently omit the now-required unit batch.
+                    value.native, value.release = {"outcome": "passed"}, RELEASE
+                    for key in ("native_entered", "native_returned", "sources_closed", "outputs_closed",
+                                "protected_closed", "scratch_retired", "installer_entered", "installed"):
+                        setattr(value, key, True)
+                    self.assertTrue(value.receipt(None)["passed"])
+                    self.assertEqual(value.receipt(None)["nativeRustTests"], value.native_rust_tests)
+                    value.native_rust_tests = None
+                    self.assertFalse(value.receipt(None)["passed"])
+
+    def test_native_rust_results_require_three_actual_successes_and_exact_closed_record(self):
+        expected = {"schemaVersion": 1, "type": "mrk-macos-native-rust-tests-v1", "target": "aarch64-apple-darwin",
+                    "tests": list(NATIVE_TEST_NAMES), "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
+        body = native_test_stdout()
+        for data in (body, native_test_stdout(tuple(reversed(NATIVE_TEST_NAMES))), body.replace(b"0.01s", b"480.00s")):
+            self.assertEqual(fixture.native_rust_tests_result(data), expected)
+        projected = fixture.native_rust_tests_data(expected)
+        self.assertEqual(projected, expected)
+        self.assertIsNot(projected, expected)
+        self.assertIsNot(projected["tests"], expected["tests"])
+        bad_output = (None, "not bytes", b"", b"x" * 65537, body + b"\xff", body[:-1], b"extra\n" + body,
+                      body.replace(b"running 3 tests", b"running 0 tests"),
+                      native_test_stdout(NATIVE_TEST_NAMES[:2]),
+                      native_test_stdout((NATIVE_TEST_NAMES[0], NATIVE_TEST_NAMES[0], NATIVE_TEST_NAMES[2])),
+                      body.replace(NATIVE_TEST_NAMES[0].encode(), b"unknown::test"),
+                      body.replace(b" ... ok\n", b" ... ignored\n", 1),
+                      body.replace(b" ... ok\n", b" ... FAILED\n", 1),
+                      body.replace(b"3 passed; 0 failed", b"2 passed; 1 failed"),
+                      body.replace(b"0 ignored", b"1 ignored"), body.replace(b"127 filtered", b"0127 filtered"),
+                      body.replace(b"0.01s", b"NaNs"), body.replace(b"0.01s", b"480.01s"),
+                      body.replace(b" ... ok\n", b" ... \x1b[32mok\x1b[0m\n", 1))
+        for index, data in enumerate(bad_output):
+            with self.subTest(output=index), self.assertRaises(fixture.Refused):
+                fixture.native_rust_tests_result(data)
+        mutations = [{key: bool(expected[key])} for key in ("schemaVersion", "passed", "failed", "ignored", "measured")]
+        mutations += [{"target": "x86_64-apple-darwin"}, {"tests": tuple(NATIVE_TEST_NAMES)},
+                      {"tests": [NATIVE_TEST_NAMES[0]] * 3}, {"tests": [None, *NATIVE_TEST_NAMES[1:]]},
+                      {"rawOutput": "synthetic-private-output"}, {"type": "other"}]
+        for index, change in enumerate(mutations):
+            with self.subTest(record=index), self.assertRaises(fixture.Refused):
+                fixture.native_rust_tests_data(dict(expected, **change))
+        for data in (None, [], {key: item for key, item in expected.items() if key != "failed"}):
+            with self.assertRaises(fixture.Refused):
+                fixture.native_rust_tests_data(data)
 
 
 def cpio(entries):

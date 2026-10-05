@@ -46,6 +46,11 @@ HELPER = "desktop/helpers/macos-android-register"
 TOOLCHAIN = "1.98.1"
 RUST_COMMIT = "48a229ceaefd4985c50990b14116b6d856af0985"
 CASES = ("missing-b-refused", "local-f-before-admission", "genuine-tail-unregister")
+NATIVE_RUST_TESTS = (
+    "tests::compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts",
+    "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
+    "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
+)
 WORK_SECONDS, HARD_SECONDS = 990, 993
 CAPTURE_LIMIT, RESULT_LIMIT = 65536, 32768
 IMAGE_LIMIT = 32 * 1024 * 1024
@@ -288,6 +293,43 @@ def receipt_census_absent(stdout, stderr):
                  for identifier in identifiers), "fixture-receipt-query-inconclusive")
     need(len(set(identifiers)) == len(identifiers), "fixture-receipt-query-inconclusive")
     need(PACKAGE not in identifiers, "fixture-receipt-collision")
+
+
+def native_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-native-rust-tests-v1", "target": TARGET,
+            "tests": list(NATIVE_RUST_TESTS), "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def native_rust_tests_data(value):
+    """A closed projection, never authority to execute a test or native action."""
+    expected = native_rust_test_record()
+    need(type(value) is dict and set(value) == set(expected)
+         and all(type(value[key]) is int and value[key] == expected[key]
+                 for key in ("schemaVersion", "passed", "failed", "ignored", "measured"))
+         and all(type(value[key]) is str and value[key] == expected[key] for key in ("type", "target"))
+         and type(value["tests"]) is list and len(value["tests"]) == 3
+         and all(type(name) is str for name in value["tests"])
+         and value["tests"] == expected["tests"], "native-rust-test-record")
+    return expected
+
+
+def native_rust_tests_result(stdout):
+    """Complete pinned libtest pretty output from an already-successful original."""
+    need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), "native-rust-test-bound")
+    lines = stdout.split(b"\n")
+    need(len(lines) == 9 and lines[:2] == [b"", b"running 3 tests"]
+         and lines[5] == b"" and lines[7:] == [b"", b""], "native-rust-test-framing")
+    names = []
+    for line in lines[2:5]:
+        match = re.fullmatch(rb"test ([A-Za-z0-9_:]+) +\.\.\. ok", line)
+        need(match is not None, "native-rust-test-roster")
+        names.append(match[1].decode("ascii"))
+    need(len(set(names)) == 3 and set(names) == set(NATIVE_RUST_TESTS), "native-rust-test-roster")
+    finish = re.fullmatch(
+        rb"test result: ok\. 3 passed; 0 failed; 0 ignored; 0 measured; (0|[1-9][0-9]{0,3}) filtered out; "
+        rb"finished in (0|[1-9][0-9]{0,2})\.([0-9]{2})s", lines[6])
+    need(finish is not None and int(finish[2]) * 100 + int(finish[3]) <= 48000, "native-rust-test-result")
+    return native_rust_test_record()
 
 
 def cargo_artifact(messages, role, checkout, target):
@@ -1100,6 +1142,7 @@ class Operation:
         self.calls, self.cleanup_errors, self.scratch_origins = [], [], {}
         self.phase = "prepare"
         self.native = None
+        self.native_rust_tests = None
         self.package = None
         self.installer_entered = False
         self.installed = False
@@ -1278,13 +1321,24 @@ class Operation:
             self.scratch_origins[target] = entry["identity"]
             cargo, environment = self.compiler_environment(target)
             directory = NATIVE if role == "client" else HELPER
-            argv = [cargo, "build", "--manifest-path", str(CHECKOUT / directory / "Cargo.toml"),
-                    "--locked", "--offline", "--release", "--jobs", "1", "--target", TARGET,
-                    "--no-default-features", "--features",
-                    "desktop-image,e2-native-fixture" if role == "client" else "e2-native-fixture"]
+            common = ["--manifest-path", str(CHECKOUT / directory / "Cargo.toml"),
+                      "--locked", "--offline", "--release", "--jobs", "1", "--target", TARGET,
+                      "--no-default-features", "--features",
+                      "desktop-image,e2-native-fixture" if role == "client" else "e2-native-fixture"]
+            argv = [cargo, "rustc" if role == "client" else "build", *common]
             argv += (["--example", "e2_maintenance_client"] if role == "client" else ["--lib"])
             argv += ["--message-format=json-render-diagnostics"]
+            if role == "client":
+                argv += ["--", "-C", "link-arg=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib",
+                         "-C", "link-arg=-mmacosx-version-min=26.0"]
             try:
+                if role == "client":
+                    tests = [cargo, "test", *common, "--lib", "--message-format=short", "--color", "never",
+                             "--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
+                             *NATIVE_RUST_TESTS]
+                    result = self.command("native-rust-tests", tests, environment, cwd=CHECKOUT,
+                                          timeout=480, limit=4 * 1024 * 1024)
+                    self.native_rust_tests = native_rust_tests_result(result.stdout)
                 result = self.command(role + "-build", argv, environment, cwd=CHECKOUT,
                                       timeout=480, limit=4 * 1024 * 1024)
                 binary = cargo_artifact(result.stdout, role, CHECKOUT, target)
@@ -1643,7 +1697,9 @@ class Operation:
 
     def receipt(self, failure):
         native_passed = self.native is not None and self.native["outcome"] == "passed"
+        unit_passed = self.native_rust_tests is not None and native_rust_tests_data(self.native_rust_tests) is not None
         passed = (failure is None and native_passed and self.native_entered and self.native_returned
+                  and unit_passed
                   and self.sources_closed and self.outputs_closed and self.protected_closed
                   and self.scratch_retired and not self.cleanup_errors
                   and all(call["returned"] and call["returncode"] == 0 for call in self.calls))
@@ -1663,6 +1719,7 @@ class Operation:
                 "protectedMetadataObservations": self.metadata,
                 "package": self.package, "installedArtifactRoster": getattr(self, "stage_roster", None),
                 "receiptOriginals": getattr(self, "receipt_originals", []), "native": self.native,
+                "nativeRustTests": self.native_rust_tests,
                 "installerEntered": self.installer_entered, "installationReturnedSuccess": self.installed,
                 "nativeEntered": self.native_entered, "nativeOwnerReturned": self.native_returned,
                 "sourceClosesKnown": self.sources_closed, "protectedClosesKnown": self.protected_closed,
