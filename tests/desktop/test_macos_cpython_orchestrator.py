@@ -5,6 +5,7 @@ Mach-O byte fixtures describe parser boundaries, not working macOS binaries.
 """
 from __future__ import annotations
 
+import ast
 import copy
 from contextlib import nullcontext
 import importlib.util
@@ -165,6 +166,81 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
         for number, body in enumerate(bad):
             with self.subTest(malformed_package_info=number), self.assertRaises(PREP.PreparationRefused):
                 PREP.framework_component(body)
+
+
+        # Only public, narrowly selected pkgutil facts may leave the task.
+        # A modern status is useful diagnostic DATA, NOT newly accepted trust.
+        subject = "Developer ID Installer: Python Software Foundation (PUBLIC1234)"
+        modern = "signed by a developer certificate issued by Apple for distribution"
+        legacy = "signed by a certificate trusted by macOS"
+        prefix = b'Package "/private/MRK-OUTPUT-CANARY.pkg":\n'
+        suffix = ("\nCertificate Chain:\n    1. " + subject + "\n"
+                  "Other private fixture field: MRK-OUTPUT-CANARY\n").encode()
+        fields = {"stdoutSize", "stdoutSha256", "utf8", "legacyTrustPhrasePresent",
+                  "psfInstallerSubjectPresent", "statusShape", "statusText", "psfSubjectShape", "psfSubject"}
+        for status_text in (legacy, modern):
+            raw = prefix + ("   Status: " + status_text).encode() + suffix
+            row = PREP.package_signature_observation(raw)
+            self.assertEqual(set(row), fields)
+            self.assertEqual((row["stdoutSize"], row["stdoutSha256"]),
+                             (len(raw), PREP.hashlib.sha256(raw).hexdigest()))
+            self.assertIs(row["utf8"], True)
+            self.assertIs(row["legacyTrustPhrasePresent"], status_text == legacy)
+            self.assertIs(row["psfInstallerSubjectPresent"], True)
+            self.assertEqual((row["statusShape"], row["statusText"]), ("single", status_text))
+            self.assertEqual((row["psfSubjectShape"], row["psfSubject"]), ("single", subject))
+            serialized = PREP.json.dumps(row)
+            self.assertNotIn("MRK-OUTPUT-CANARY", serialized)
+            self.assertNotIn("/private/", serialized)
+
+        for status_field in (b"\t" + modern.encode(), modern.encode() + b"\r",
+                             modern.encode() + b"\x00", b"\x1b[31msigned", b"private/path",
+                             b"private\\path", b"private@example", b"A" * 201,
+                             "signed\u00a0certificate".encode()):
+            with self.subTest(unpublishable_status=status_field):
+                row = PREP.package_signature_observation(prefix + b"Status: " + status_field + suffix)
+                self.assertEqual((row["statusShape"], row["statusText"]), ("unpublishable", None))
+        row = PREP.package_signature_observation(prefix + b"Status: " + b"A" * 200 + suffix)
+        self.assertEqual((row["statusShape"], row["statusText"]), ("single", "A" * 200))
+        for other in (b"Status: unsigned", b"Status:\tMALFORMED", b"Status: /private/CANARY"):
+            row = PREP.package_signature_observation(b"Status: " + modern.encode() + b"\n" + other)
+            self.assertEqual((row["statusShape"], row["statusText"]), ("multiple", None))
+        row = PREP.package_signature_observation(prefix + b"NotStatus: " + modern.encode())
+        self.assertEqual((row["statusShape"], row["statusText"]), ("absent", None))
+        row = PREP.package_signature_observation(b"Status: unsigned\nDeveloper ID Installer: Other (PRIVATE123)")
+        self.assertEqual((row["psfSubjectShape"], row["psfSubject"]), ("absent", None))
+        self.assertIs(row["psfInstallerSubjectPresent"], False)
+        row = PREP.package_signature_observation((subject + "\n" + subject).encode())
+        self.assertEqual((row["psfSubjectShape"], row["psfSubject"]), ("multiple", None))
+        self.assertIs(row["psfInstallerSubjectPresent"], True)
+        row = PREP.package_signature_observation(b"Status: signed\n\xff" + subject.encode())
+        self.assertIs(row["utf8"], False)
+        for key in ("statusText", "psfSubject", "legacyTrustPhrasePresent", "psfInstallerSubjectPresent"):
+            self.assertIsNone(row[key])
+        self.assertEqual((row["statusShape"], row["psfSubjectShape"]), ("invalid-utf8", "invalid-utf8"))
+
+        # The same original result feeds observation before the unchanged
+        # authentication guard. Only original-known publication can export it.
+        source = Path(PREP.__file__).read_text()
+        preparation = source[source.index("def prepare(ctx):"):source.index("\ndef main():")]
+        original_call = 'signature = engine.run("package", ["--check-signature", str(package)], environment=env)'
+        observation = ('package_signature = {"commandIndex": len(engine.records) - 1,\n'
+                       '                                 **package_signature_observation(signature["stdout"])}')
+        original_guard = ('text = signature["stdout"].decode("utf-8", "strict")\n'
+                          '            need("signed by a certificate trusted by" in text\n'
+                          '                 and re.search(r"Developer ID Installer: Python Software Foundation \\([A-Z0-9]{10}\\)", text),\n'
+                          '                 "package-trusted-PSF-signature")')
+        self.assertIn("package_signature = None", preparation)
+        self.assertIn(original_guard, preparation)
+        self.assertLess(preparation.index(original_call), preparation.index(observation))
+        self.assertLess(preparation.index(observation), preparation.index(original_guard))
+        self.assertLess(preparation.index(original_guard), preparation.index('["--expand-full"'))
+        known_publication = preparation[preparation.index('if known:\n        public = root / "public"'):]
+        self.assertIn('"packageSignature": package_signature', known_publication)
+        preparation_ast = ast.parse(preparation)
+        loads = [node for node in ast.walk(preparation_ast)
+                 if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == "package_signature"]
+        self.assertEqual(len(loads), 1)  # report only, never a permission/READY predicate
 
     def test_native_slices_and_load_command_bounds_refuse_ambiguous_data(self):
         load = cstring_command(0xC, "/usr/lib/libSystem.B.dylib")

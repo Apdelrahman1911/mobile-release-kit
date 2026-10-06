@@ -80,6 +80,42 @@ def package_binding(size, sha256):
          and sha256 == PACKAGE_SHA256, "package-byte-authority")
 
 
+def package_signature_observation(body):
+    """Public-package diagnostic fields only; never signature authority.
+
+    The caller has authenticated the fixed public package and retained the
+    original pkgutil call. No arbitrary output, paths or other subjects escape.
+    """
+    result = {"stdoutSize": len(body), "stdoutSha256": hashlib.sha256(body).hexdigest(),
+              "utf8": False, "legacyTrustPhrasePresent": None, "psfInstallerSubjectPresent": None,
+              "statusShape": "invalid-utf8", "statusText": None,
+              "psfSubjectShape": "invalid-utf8", "psfSubject": None}
+    try:
+        text = body.decode("utf-8", "strict")
+    except UnicodeError:
+        return result
+    subjects = re.findall(r"Developer ID Installer: Python Software Foundation \([A-Z0-9]{10}\)", text)
+    statuses = []
+    for line in text.split("\n"):
+        prefix = re.match(r"[ \t]*Status:", line)
+        if prefix is not None:
+            statuses.append(line[prefix.end():])
+    result.update(utf8=True, legacyTrustPhrasePresent="signed by a certificate trusted by" in text,
+                  psfInstallerSubjectPresent=bool(subjects),
+                  statusShape="absent" if not statuses else "multiple",
+                  psfSubjectShape="absent" if not subjects else "multiple")
+    if len(statuses) == 1:
+        # Count ALL anchored fields first. Do not strip controls or normalize
+        # Unicode into a publishable sentence; only structural ASCII spaces.
+        match = re.fullmatch(r" *(?P<value>[A-Za-z][A-Za-z0-9 ()'.,;:_-]{0,199})", statuses[0])
+        result["statusShape"] = "single" if match is not None else "unpublishable"
+        if match is not None:
+            result["statusText"] = match.group("value")
+    if len(subjects) == 1:
+        result.update(psfSubjectShape="single", psfSubject=subjects[0])
+    return result
+
+
 def framework_component(body):
     """Read authenticated PackageInfo DATA; never select by guessed filename."""
     need(type(body) is bytes and 0 < len(body) <= 65536, "package-info-bound")
@@ -1021,6 +1057,7 @@ def prepare(ctx):
     scoped_env = {**env, **route}
     script = str(b.CHECKOUT / "desktop/tools/macos_cpython_orchestrator.py")
     policy_known, ready, failure, cancellation = False, None, None, None
+    package_signature = None
     try:
         with cancellation_state() as cancellation:
             engine.cancellation = cancellation
@@ -1046,6 +1083,8 @@ def prepare(ctx):
             package_binding(len(package_body), hashlib.sha256(package_body).hexdigest())
             del package_body
             signature = engine.run("package", ["--check-signature", str(package)], environment=env)
+            package_signature = {"commandIndex": len(engine.records) - 1,
+                                 **package_signature_observation(signature["stdout"])}
             text = signature["stdout"].decode("utf-8", "strict")
             need("signed by a certificate trusted by" in text
                  and re.search(r"Developer ID Installer: Python Software Foundation \([A-Z0-9]{10}\)", text),
@@ -1167,6 +1206,7 @@ def prepare(ctx):
             "schemaVersion": 1, "identity": identity_fields(ctx), "packageSha256": PACKAGE_SHA256,
             "prepared": failure is None, "originalsKnown": known, "handlersRestored": True,
             "cleanupRecorded": cleanup_recorded, "commands": engine.records,
+            "packageSignature": package_signature,
             "failure": None if failure is None else {"code": code, "type": type(failure).__name__}})
     if failure is not None:
         raise failure
