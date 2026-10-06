@@ -1009,13 +1009,32 @@ def _context_metadata_observation(element, child, check, parent):
     }
 
 
+def _context_required_observation(element, parent):
+    """Only finite shape of the SAME already-bounded element; no raw names."""
+    names, types = element.findall("name"), element.findall("type")
+    name = names[0].text if len(names) == 1 else None
+    name = parent + name if type(name) is str else None
+    members = {"PackageInfo", "Scripts", "Bom", "Distribution", CONTEXT_PACKAGES[1],
+               *(CONTEXT_PACKAGES[1] + "/" + item for item in ("PackageInfo", "Scripts", "Bom"))}
+    values = {"file": 0, "directory": 0, "empty": 0, "other": 0}
+    for node in types:
+        value = node.text
+        values[value if value in ("file", "directory") else "empty" if value in (None, "") else "other"] += 1
+    return {"member": name if name in members else "unknown", "check": "required-shape",
+            "nameCount": len(names), "typeCount": len(types), "typeValues": values,
+            "childCounts": {"data": len(element.findall("data")), "file": len(element.findall("file")),
+                            "other": sum(node.tag not in ("data", "file") for node in element)}}
+
+
 def context_metadata_diagnostic_data(value, phase, failure, calls):
     """Closed, failure-only observations; malformed DATA has no publication."""
     keys = {"schemaVersion", "type", "diagnosticOnly", "phase", "package", "packageSha256", "packageBytes",
             "parsedArchiveSha256", "parsedArchiveBytes", "buildCallIndex", "metadata"}
     if (type(value) is not dict or set(value) != keys or type(value["schemaVersion"]) is not int
-            or value["schemaVersion"] != 1 or value["type"] != "mrk-context-xar-metadata-diagnostic-v1"
-            or value["diagnosticOnly"] is not True or failure != "context-xar-member-metadata"
+            or (value["schemaVersion"], value["type"], failure) not in (
+                (1, "mrk-context-xar-metadata-diagnostic-v1", "context-xar-member-metadata"),
+                (2, "mrk-context-xar-required-diagnostic-v2", "context-xar-member-required"))
+            or value["diagnosticOnly"] is not True
             or phase not in ("context-component-audit", "context-product-audit") or value["phase"] != phase
             or type(value["package"]) is not str or value["package"] not in CONTEXT_PACKAGE_LABELS
             or type(calls) is not list or not 1 <= len(calls) <= 64):
@@ -1035,6 +1054,27 @@ def context_metadata_diagnostic_data(value, phase, failure, calls):
         if type(size) is not int or not 28 <= size <= CONTEXT_PACKAGE_LIMIT or not identity(sha, 64):
             return None
     metadata = value["metadata"]
+    if value["schemaVersion"] == 2:
+        members = {"PackageInfo", "Scripts", "Bom", "Distribution", CONTEXT_PACKAGES[1], "unknown",
+                   *(CONTEXT_PACKAGES[1] + "/" + item for item in ("PackageInfo", "Scripts", "Bom"))}
+        keys = {"member", "check", "nameCount", "typeCount", "typeValues", "childCounts"}
+        if (type(metadata) is not dict or set(metadata) != keys
+                or type(metadata["member"]) is not str or metadata["member"] not in members
+                or metadata["check"] != "required-shape"
+                or any(type(metadata[key]) is not int or not 0 <= metadata[key] <= 256
+                       for key in ("nameCount", "typeCount"))
+                or metadata["nameCount"] == metadata["typeCount"] == 1
+                or metadata["member"] != "unknown" and metadata["nameCount"] != 1):
+            return None
+        types, children = metadata["typeValues"], metadata["childCounts"]
+        if (type(types) is not dict or set(types) != {"file", "directory", "empty", "other"}
+                or type(children) is not dict or set(children) != {"data", "file", "other"}
+                or any(type(number) is not int or not 0 <= number <= 256
+                       for number in (*types.values(), *children.values()))
+                or sum(types.values()) != metadata["typeCount"] or sum(children.values()) > 256
+                or children["other"] < metadata["nameCount"] + metadata["typeCount"]):
+            return None
+        return value if len(canonical(value)) <= 2048 else None
     metadata_keys = {"member", "tag", "check", "attributes", "children", "textPresent", "tailPresent",
                      "timeChildren", "nanosecondChildren", "otherChildren", "leafAttributes", "leafChildren",
                      "leafTailText", "timestamp", "nanoseconds", "number"}
@@ -1136,8 +1176,16 @@ def context_xar(body, *, product=False):
         need(not any(child.tag == "device" for child in element), "context-xar-member-tags-device")
         need(not any(child.tag == "link" for child in element), "context-xar-member-tags-link")
         need(all(child.tag in metadata for child in element), "context-xar-member-tags")
-        need(all(len(element.findall(tag)) == 1 for tag in ("name", "type")),
-             "context-xar-member-required")
+        try:
+            need(all(len(element.findall(tag)) == 1 for tag in ("name", "type")),
+                 "context-xar-member-required")
+        except Refused as error:
+            try:
+                error._context_metadata = {"metadata": _context_required_observation(element, parent),
+                                           "parsedArchiveSha256": digest(body), "parsedArchiveBytes": len(body)}
+            except BaseException:
+                pass  # Diagnostic failure never replaces this original refusal.
+            raise
         need(all(len(element.findall(tag)) <= 1 for tag in metadata - {"file"}),
              "context-xar-member-duplicate")
         for child in element:
@@ -2591,12 +2639,14 @@ class Operation:
                     package, call_index = CONTEXT_PACKAGE_LABELS[position], len(self.calls) - 1
                     admitted = context_audit_call_data(package, self.phase, call_index, self.calls)
                     diagnostic_known = True
-                    if admitted and error.args == ("context-xar-member-metadata",):
+                    if admitted and error.args in (("context-xar-member-metadata",), ("context-xar-member-required",)):
                         observed = getattr(error, "_context_metadata", None)
                         diagnostic_known = (type(observed) is dict
                                             and set(observed) == {"metadata", "parsedArchiveSha256", "parsedArchiveBytes"})
                         if diagnostic_known:
-                            value = {"schemaVersion": 1, "type": "mrk-context-xar-metadata-diagnostic-v1",
+                            required = error.args == ("context-xar-member-required",)
+                            value = {"schemaVersion": 2 if required else 1,
+                                     "type": "mrk-context-xar-required-diagnostic-v2" if required else "mrk-context-xar-metadata-diagnostic-v1",
                                      "diagnosticOnly": True, "phase": self.phase,
                                      "package": package, "packageSha256": digest(body),
                                      "packageBytes": len(body), "buildCallIndex": call_index, **observed}

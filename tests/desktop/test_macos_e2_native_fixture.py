@@ -2162,6 +2162,47 @@ class InstallerContextTests(unittest.TestCase):
             with self.subTest(member_shape=shape), self.assertRaisesRegex(
                     fixture.Refused, "^context-xar-member-" + label + "$"):
                 fixture.context_xar(self.xar(members, mutate=bad_member))
+        # Productbuild's required-field refusal needs shape, not guessed defaults.
+        # All fixtures below STILL refuse; only closed diagnostics are observed.
+        calls = [{"role": "context-product-build", "entered": True, "returned": True, "returncode": 0}]
+        for tag in ("name", "type"):
+            for duplicate in (False, True):
+                def required_shape(toc):
+                    element = toc.find("file")
+                    node = element.find(tag)
+                    if duplicate:
+                        element.append(copy.deepcopy(node))
+                    else:
+                        element.remove(node)
+                body = self.xar({"Distribution": fixture.context_distribution(),
+                                 fixture.CONTEXT_PACKAGES[1]: component}, mutate=required_shape)
+                with self.subTest(required_tag=tag, duplicate=duplicate), self.assertRaises(fixture.Refused) as caught:
+                    fixture.context_xar(body, product=True)
+                self.assertEqual(caught.exception.args, ("context-xar-member-required",))
+                observed = caught.exception._context_metadata
+                self.assertEqual(observed["metadata"][tag + "Count"], 2 if duplicate else 0)
+                self.assertEqual(observed["parsedArchiveSha256"], fixture.digest(body))
+                diagnostic = {"schemaVersion": 2, "type": "mrk-context-xar-required-diagnostic-v2", "diagnosticOnly": True,
+                              "phase": "context-product-audit", "package": fixture.CONTEXT_PACKAGE_LABELS[2],
+                              "packageSha256": fixture.digest(body), "packageBytes": len(body), "buildCallIndex": 0, **observed}
+                decode = lambda row: fixture.context_metadata_diagnostic_data(row, "context-product-audit", "context-xar-member-required", calls)
+                self.assertIs(decode(diagnostic), diagnostic)
+                for field, value in (("nameCount", True), ("typeCount", 257), ("member", "/private/not-public"),
+                                     ("check", "accept"), ("typeValues", {"file": 0}),
+                                     ("childCounts", {"data": 0, "file": 0, "other": 0})):
+                    changed = copy.deepcopy(diagnostic);changed["metadata"][field] = value
+                    self.assertIsNone(decode(changed))
+                for field, value in (("schemaVersion", 1), ("type", "mrk-context-xar-metadata-diagnostic-v1"),
+                                     ("buildCallIndex", True), ("diagnosticOnly", 1)):
+                    self.assertIsNone(decode(dict(diagnostic, **{field: value})))
+                changed = copy.deepcopy(diagnostic)
+                changed["metadata"].update(nameCount=1, typeCount=1, typeValues={"file": 1, "directory": 0, "empty": 0, "other": 0})
+                self.assertIsNone(decode(changed))
+        private = ET.fromstring('<file><name>/private/not-public</name><type>private-type</type><type/></file>')
+        closed = fixture._context_required_observation(private, "")
+        self.assertEqual(closed["member"], "unknown")
+        self.assertEqual(closed["typeValues"], {"file": 0, "directory": 0, "empty": 1, "other": 1})
+        self.assertNotIn("private", fixture.canonical(closed).decode("ascii"))
         # Remaining live guards, not a guessed acceptance format. Preserve
         # each original Refused; only bounded annotation/number spellings show.
         # finder-calendar stays in the closed vocabulary for old diagnostics,
@@ -2511,12 +2552,15 @@ class InstallerContextTests(unittest.TestCase):
         good_body = self.xar({"PackageInfo": self.package_info(0), "Scripts": b"inert"})
         package_body = self.xar({"PackageInfo": self.package_info(0).replace(b' install-location="/"', b''), "Scripts": b"inert"})
         product_body = self.xar({"Distribution": fixture.context_distribution(), fixture.CONTEXT_PACKAGES[1]: b"different component"})
-        known = {"known-pure", "known-package", "known-cpio", "known-product", "known-checksum"}
+        def absent_type(toc):
+            element = toc.find("file");element.remove(element.find("type"))
+        required_body = self.xar({"PackageInfo": self.package_info(0), "Scripts": b"inert"}, mutate=absent_type)
+        known = {"known-pure", "known-package", "known-cpio", "known-product", "known-checksum", "known-required"}
         scenarios = (*sorted(known), "read-refused", "read-unknown", "parser-unexpected", "parser-unmarked",
                       "diagnostic-unknown", "foreign-original", "context-entered", "installer-entered",
                      "native-entered", "wrong-phase", "build-nonzero", "build-duplicated", "package-diagnostic-unknown",
                      "call-unknown", "source-close-unknown", "output-close-unknown", "protected-close-unknown",
-                      "secondary-unknown")
+                      "secondary-unknown", "required-diagnostic-unknown")
         stat_info = SimpleNamespace(**dict(zip(
             ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), WORK)))
         for scenario in scenarios:
@@ -2526,7 +2570,8 @@ class InstallerContextTests(unittest.TestCase):
                 op.installer_context.update(started=True, deadlineNs="100000000000")
                 op.phase = "context-component-audit"
                 op.calls = [{"role": "context-component-build", "entered": True, "returned": True, "returncode": 0}]
-                body = (package_body if scenario in ("known-package", "package-diagnostic-unknown") else good_body if scenario == "known-cpio"
+                body = (required_body if scenario in ("known-required", "required-diagnostic-unknown")
+                        else package_body if scenario in ("known-package", "package-diagnostic-unknown") else good_body if scenario == "known-cpio"
                         else product_body if scenario == "known-product" else good_body[:-1] + bytes([good_body[-1] ^ 1]) if scenario == "known-checksum"
                         else finder_body)
                 position = 2 if scenario == "known-product" else 0
@@ -2590,6 +2635,7 @@ class InstallerContextTests(unittest.TestCase):
                 parse = fixture.context_xar
                 observation = fixture._context_metadata_observation
                 package_observation = fixture._context_package_info_observation
+                required_observation = fixture._context_required_observation
                 unmarked = fixture.Refused("context-xar-member-metadata")
                 def selected_parse(data, **kwargs):
                     if scenario == "parser-unexpected":
@@ -2605,10 +2651,15 @@ class InstallerContextTests(unittest.TestCase):
                     if scenario == "package-diagnostic-unknown":
                         raise KeyboardInterrupt()
                     return package_observation(*args)
+                def selected_required_observation(*args):
+                    if scenario == "required-diagnostic-unknown":
+                        raise KeyboardInterrupt()
+                    return required_observation(*args)
                 cleanup = SimpleNamespace(directory=lambda _path: {"fd": 93}, finish=lambda: True)
                 with patch.object(fixture, "context_xar", selected_parse), \
                      patch.object(fixture, "_context_metadata_observation", selected_observation), \
                      patch.object(fixture, "_context_package_info_observation", selected_package_observation), \
+                     patch.object(fixture, "_context_required_observation", selected_required_observation), \
                      patch.object(fixture, "Originals", return_value=cleanup) as originals, \
                      patch.object(fixture.os, "stat", side_effect=[stat_info, FileNotFoundError()]) as named, \
                      patch.object(fixture.shutil, "rmtree") as retire:
@@ -2619,8 +2670,9 @@ class InstallerContextTests(unittest.TestCase):
                         self.assertIs(events[1], op._context_audit_refusal)
                         self.assertTrue(op.context_pure_audit_refused)
                         self.assertEqual(failure, events[1].args[0])
-                        if scenario == "known-pure":
+                        if scenario in ("known-pure", "known-required"):
                             self.assertIn(fixture.CONTEXT_METADATA_ARTIFACT, op.artifacts)
+                            self.assertEqual(op.artifacts[fixture.CONTEXT_METADATA_ARTIFACT]["schemaVersion"], 2 if scenario == "known-required" else 1)
                         elif scenario == "known-package":
                             self.assertEqual(failure, "context-package-identity")
                             self.assertIn(fixture.CONTEXT_PACKAGE_INFO_ARTIFACT, op.artifacts)
