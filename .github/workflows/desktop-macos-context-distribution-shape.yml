@@ -1,0 +1,62 @@
+name: Desktop macOS Distribution normalization DATA
+
+on:
+  push:
+    branches: [verify/desktop-macos-context-distribution-shape]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-context-distribution-shape-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  distribution_shape:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-context-distribution-shape'
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - name: Check out exact diagnostic source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Select the existing isolated Python version
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reproduce only synthetic Distribution metadata
+        id: capture
+        shell: bash
+        timeout-minutes: 3
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -n 512 || exit 1
+          ulimit -c 0 || exit 1
+          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+            TMPDIR=/Users/runner/work/_temp LANG=C LC_ALL=C TZ=UTC \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            "$MRK_PYTHON" -I -S -B -u \
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_context_distribution_shape.py
+      - name: Preserve only completed synthetic XML and the closed original record
+        if: success() && steps.capture.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: context-distribution-shape-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /Users/runner/work/_temp/mrk-context-distribution-shape-${{ github.run_id }}-${{ github.run_attempt }}/report/source-Distribution.xml
+            /Users/runner/work/_temp/mrk-context-distribution-shape-${{ github.run_id }}-${{ github.run_attempt }}/report/generated-Distribution.xml
+            /Users/runner/work/_temp/mrk-context-distribution-shape-${{ github.run_id }}-${{ github.run_attempt }}/report/result.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
