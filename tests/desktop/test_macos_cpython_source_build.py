@@ -6484,6 +6484,153 @@ class MacPythonSourceBuildTests(unittest.TestCase):
         self.assertFalse(lost.known)  # No repair by an independent acquisition.
         self.assertTrue(BUILD.DATA.known)  # Faults used separate inert DATA state.
 
+
+        # Exercise the actual probe boundary without signals, threads, processes,
+        # filesystem work or importing the native core owner. This inert scope
+        # models cancellation.py CleanupScope's cited first_primary contract:
+        # incoming primary survives; a normal cancelled exit rechecks after
+        # restoration; cleanup faults poison the verdict even with a primary.
+        class ProcessError(Exception):
+            def __init__(self, **changes):
+                super().__init__("inert original timeout")
+                self.dispatched = self.contained = self.cleanup_complete = True
+                self.fatal = False
+                self.__dict__.update(changes)
+
+        class FirstPrimaryScope:
+            def __init__(self, guard, verdict, events, *, exit_error=None,
+                         cleanup_error=None, handlers="RESTORED", suppress=False):
+                self.guard, self.verdict, self.events = guard, verdict, events
+                self.exit_error, self.cleanup_error = exit_error, cleanup_error
+                self.handlers, self.suppress = handlers, suppress
+                self.claimed, self.primary, self.exits = False, None, []
+
+            def __enter__(self):
+                self.events.append("enter")
+                return self
+
+            def __exit__(self, kind, error, traceback):
+                self.exits.append(error)
+                if self.claimed:
+                    return False
+                self.claimed, self.primary = True, error
+                self.events.append("cleanup")
+                if self.cleanup_error is not None:
+                    self.verdict.fatal = True
+                    self.verdict.cleanup_complete = False
+                self.events.append("restore")
+                self.guard.handler_state = self.handlers
+                if self.exit_error is not None:
+                    raise self.exit_error
+                if self.cleanup_error is not None and error is None:
+                    raise self.cleanup_error
+                if error is not None:
+                    return self.suppress
+                if self.guard.cancelled:
+                    raise KeyboardInterrupt("inert post-restore cancellation check")
+                return False
+
+        def boundary_case(raised, *, kind="cancellation", cancelled=True,
+                          begin_error=None, ledger=None, sent=None, errors=None, **scope_options):
+            verdict = SimpleNamespace(complete=True, fatal=False, contained=True,
+                                      cleanup_complete=True, commands=1, command_dispatched=True)
+            verdict.__dict__.update(ledger or {})
+            guard = SimpleNamespace(cancelled=cancelled, handler_state="ACTIVE",
+                                    lifetime_ledger=SimpleNamespace(verdict=lambda: verdict))
+            events = []
+            scope = FirstPrimaryScope(guard, verdict, events, **scope_options)
+
+            def begin():
+                events.append("begin")
+                if begin_error is not None:
+                    raise begin_error
+
+            def invoke():
+                events.append("invoke")
+                if raised is not None:
+                    raise raised
+
+            def observe():
+                return PROBE._negative_lifecycle(kind, guard, scope, begin, invoke, ProcessError,
+                                                 [True] if sent is None else sent,
+                                                 [] if errors is None else errors)
+
+            return observe, scope, verdict, events
+
+        interruption = KeyboardInterrupt("inert original interruption")
+        observe, scope, verdict, events = boundary_case(interruption)
+        outcome, returned = observe()
+        self.assertEqual(outcome, "original-interruption")
+        self.assertIs(returned, verdict)
+        self.assertIs(scope.primary, interruption)
+        self.assertEqual(scope.exits, [interruption, interruption])
+        self.assertEqual(events, ["enter", "begin", "invoke", "cleanup", "restore"])
+        self.assertEqual(scope.guard.handler_state, "RESTORED")
+
+        timeout = ProcessError()
+        observe, scope, verdict, events = boundary_case(timeout, kind="timeout", cancelled=False, sent=[])
+        self.assertEqual(observe(), ("typed-timeout", verdict))
+        self.assertEqual(scope.exits, [None, None])
+        self.assertEqual(events, ["enter", "begin", "invoke", "cleanup", "restore"])
+
+        # An interruption outside the actual run is never adopted as its result.
+        for where in ("begin_error", "exit_error"):
+            foreign = KeyboardInterrupt("inert foreign interruption")
+            observe, scope, _, events = boundary_case(interruption, **{where: foreign})
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                observe()
+            self.assertIs(caught.exception, foreign)
+            self.assertIs(scope.exits[-1], foreign)
+            self.assertEqual(events.count("cleanup"), 1)
+            self.assertEqual(events.count("restore"), 1)
+            self.assertEqual(events.count("invoke"), int(where != "begin_error"))
+
+        for options in ({"kind": "timeout"}, {"cancelled": False}):
+            observe, _, _, _ = boundary_case(interruption, **options)
+            with self.assertRaisesRegex(PROBE.ProbeRefused, "^native-cancellation-kind$"):
+                observe()
+
+        for changes in ({"dispatched": False}, {"contained": False},
+                        {"cleanup_complete": False}, {"fatal": True}):
+            observe, _, _, _ = boundary_case(ProcessError(**changes), kind="timeout", cancelled=False)
+            with self.assertRaisesRegex(PROBE.ProbeRefused, "^native-timeout-lifetime$"):
+                observe()
+        observe, _, _, _ = boundary_case(ProcessError())
+        with self.assertRaisesRegex(PROBE.ProbeRefused, "^native-timeout-lifetime$"):
+            observe()
+        observe, _, _, _ = boundary_case(None)
+        with self.assertRaisesRegex(PROBE.ProbeRefused, "^native-lifecycle-negative-returned$"):
+            observe()
+        original_error = OSError("inert original failure")
+        observe, scope, _, _ = boundary_case(original_error)
+        with self.assertRaises(OSError) as caught:
+            observe()
+        self.assertIs(caught.exception, original_error)
+        self.assertEqual(scope.exits, [original_error, original_error])
+
+        cleanup_error = RuntimeError("inert cleanup failure")
+        observe, scope, verdict, _ = boundary_case(interruption, cleanup_error=cleanup_error)
+        with self.assertRaisesRegex(PROBE.ProbeRefused, "^native-original-lifecycle-finality$"):
+            observe()
+        self.assertIs(scope.primary, interruption)
+        self.assertIs(scope.cleanup_error, cleanup_error)
+        self.assertTrue(verdict.fatal)
+        self.assertFalse(verdict.cleanup_complete)
+        observe, _, _, _ = boundary_case(timeout, kind="timeout", cancelled=False, cleanup_error=cleanup_error)
+        with self.assertRaises(RuntimeError) as caught:
+            observe()
+        self.assertIs(caught.exception, cleanup_error)
+
+        for options in ({"ledger": {"complete": False}}, {"ledger": {"fatal": True}},
+                        {"ledger": {"contained": False}}, {"ledger": {"cleanup_complete": False}},
+                        {"ledger": {"commands": 0}}, {"ledger": {"command_dispatched": False}},
+                        {"handlers": "UNKNOWN"}, {"sent": []}, {"sent": [True, True]},
+                        {"errors": ["inert watcher failure"]}, {"suppress": True}):
+            observe, _, _, _ = boundary_case(interruption, **options)
+            with self.assertRaisesRegex(PROBE.ProbeRefused, "^native-original-lifecycle-finality$"):
+                observe()
+        self.assertTrue(BUILD.DATA.known)  # Local doubles never mutate shared DATA.
+
     def test_input_admission_refusals_keep_exact_predicates_and_tool_roles(self):
         # Inert originals only. No real tool, descriptor, native call or file is
         # opened. Exercise actual read/close sequencing and contextual refusal.

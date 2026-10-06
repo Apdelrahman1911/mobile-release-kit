@@ -431,6 +431,46 @@ def descriptor_snapshot():
     return result
 
 
+def _negative_lifecycle(kind, guard, scope, begin, invoke, process_error, sent, errors):
+    """Observe a negative original only after its same cleanup scope has exited.
+
+    The caller retains the guard, scope, watcher, command and all native custody.
+    This synchronous boundary creates no owner and cannot repair its verdict.
+    """
+    observed = None
+    interruption = None
+    try:
+        try:
+            with scope:
+                begin()
+                try:
+                    invoke()
+                except process_error as error:
+                    need(kind == "timeout" and error.dispatched is True and error.contained is True
+                         and error.cleanup_complete is True and not error.fatal,
+                         "native-timeout-lifetime")
+                    observed = "typed-timeout"
+                except KeyboardInterrupt as error:
+                    # first_primary must see this original, not a normal exit.
+                    interruption = error
+                    raise
+                else:
+                    raise ProbeRefused("native-lifecycle-negative-returned")
+        finally:
+            scope.__exit__(*sys.exc_info())
+    except KeyboardInterrupt as error:
+        if error is not interruption:
+            raise
+        need(kind == "cancellation" and guard.cancelled, "native-cancellation-kind")
+        observed = "original-interruption"
+    verdict = guard.lifetime_ledger.verdict()
+    need(observed is not None and verdict.complete and not verdict.fatal and verdict.contained
+         and verdict.cleanup_complete and verdict.commands == 1
+         and verdict.command_dispatched is True and guard.handler_state == "RESTORED"
+         and not errors and (kind == "timeout" or sent == [True]), "native-original-lifecycle-finality")
+    return observed, verdict
+
+
 def cancellation(context):
     import importlib.util
     import signal
@@ -487,37 +527,23 @@ def cancellation(context):
                 watch.join(timeout=2)
                 need(not watch.is_alive(), "native-watcher-not-joined")
 
+        def begin_original():
+            nonlocal watch
+            guard.install()
+            guard.activate()
+            if kind == "cancellation":
+                watch = threading.Thread(target=observe_ready, name="mrk-source-cancel", daemon=False)
+                watch.start()
+
+        def invoke_original():
+            return owner.run_owned([executable, "-I", "-S", "-B", "-c", CHILD, str(ready)],
+                environ=environment, cwd=scratch, timeout=3 if kind == "timeout" else 12,
+                capture=True, text=False, output_limit=4096, cancellation=guard)
+
         scope = control.CleanupScope(guard, settle_watch, owns_cancellation=True, first_primary=True)
-        observed = None
         try:
-            try:
-                with scope:
-                    guard.install()
-                    guard.activate()
-                    if kind == "cancellation":
-                        watch = threading.Thread(target=observe_ready, name="mrk-source-cancel", daemon=False)
-                        watch.start()
-                    try:
-                        owner.run_owned([executable, "-I", "-S", "-B", "-c", CHILD, str(ready)],
-                            environ=environment, cwd=scratch, timeout=3 if kind == "timeout" else 12,
-                            capture=True, text=False, output_limit=4096, cancellation=guard)
-                    except owner.ProcessError as error:
-                        need(kind == "timeout" and error.dispatched is True and error.contained is True
-                             and error.cleanup_complete is True and not error.fatal,
-                             "native-timeout-lifetime")
-                        observed = "typed-timeout"
-                    except KeyboardInterrupt:
-                        need(kind == "cancellation" and guard.cancelled, "native-cancellation-kind")
-                        observed = "original-interruption"
-                    else:
-                        raise ProbeRefused("native-lifecycle-negative-returned")
-            finally:
-                scope.__exit__(*sys.exc_info())
-            verdict = guard.lifetime_ledger.verdict()
-            need(observed is not None and verdict.complete and not verdict.fatal and verdict.contained
-                 and verdict.cleanup_complete and verdict.commands == 1
-                 and verdict.command_dispatched is True and guard.handler_state == "RESTORED"
-                 and not errors and (kind == "timeout" or sent == [True]), "native-original-lifecycle-finality")
+            observed, verdict = _negative_lifecycle(kind, guard, scope, begin_original,
+                                                   invoke_original, owner.ProcessError, sent, errors)
             need(read(ready, len(READY)) == READY, "native-target-did-not-run")
             ready.unlink()
             results[kind] = {"outcome": observed, "targetReady": True, "commands": verdict.commands,
