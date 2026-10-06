@@ -59,6 +59,1195 @@ def scratch():
                         os.chmod(selected, 0o700)
 
 
+# Complete generated Apple linker object-table DATA from the nominated public
+# CPython 3.14.7/OpenSSL/zlib build, native run37459521777/1 (not executable code).
+# Existing source-lock requiredPublicNoticeInputs and Build.project notice assembly
+# continue to carry the CPython/OpenSSL/zlib/HACL/Expat upstream notices unchanged.
+# Original whole-map SHA256: 386529c561703fc3d41e985b97952cabfc23ade4b2366266de1f71e3e3bbcc58
+# Original selected-table SHA256: 4a7f6a892c2afdb1672866589b0229d6249a9dc0c4aa7b2bdc3aeac393e52e64
+# Only original prefix/SDK role substitutions (909/18); build-root occurrences0.
+NATIVE_LINK_MAP_OBJECTS = b"""[  0] linker synthesized
+[  1] /Apple/SDK/MacOSX26.sdk/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd
+[  2] Programs/python.o
+[  3] Modules/getbuildinfo.o
+[  4] Parser/token.o
+[  5] Parser/pegen.o
+[  6] Parser/pegen_errors.o
+[  7] Parser/action_helpers.o
+[  8] Parser/parser.o
+[  9] Parser/string_parser.o
+[ 10] Parser/peg_api.o
+[ 11] Parser/lexer/buffer.o
+[ 12] Parser/lexer/lexer.o
+[ 13] Parser/lexer/state.o
+[ 14] Parser/tokenizer/file_tokenizer.o
+[ 15] Parser/tokenizer/readline_tokenizer.o
+[ 16] Parser/tokenizer/string_tokenizer.o
+[ 17] Parser/tokenizer/utf8_tokenizer.o
+[ 18] Parser/tokenizer/helpers.o
+[ 19] Parser/myreadline.o
+[ 20] Objects/abstract.o
+[ 21] Objects/boolobject.o
+[ 22] Objects/bytes_methods.o
+[ 23] Objects/bytearrayobject.o
+[ 24] Objects/bytesobject.o
+[ 25] Objects/call.o
+[ 26] Objects/capsule.o
+[ 27] Objects/cellobject.o
+[ 28] Objects/classobject.o
+[ 29] Objects/codeobject.o
+[ 30] Objects/complexobject.o
+[ 31] Objects/descrobject.o
+[ 32] Objects/enumobject.o
+[ 33] Objects/exceptions.o
+[ 34] Objects/genericaliasobject.o
+[ 35] Objects/genobject.o
+[ 36] Objects/fileobject.o
+[ 37] Objects/floatobject.o
+[ 38] Objects/frameobject.o
+[ 39] Objects/funcobject.o
+[ 40] Objects/interpolationobject.o
+[ 41] Objects/iterobject.o
+[ 42] Objects/listobject.o
+[ 43] Objects/longobject.o
+[ 44] Objects/dictobject.o
+[ 45] Objects/odictobject.o
+[ 46] Objects/memoryobject.o
+[ 47] Objects/methodobject.o
+[ 48] Objects/moduleobject.o
+[ 49] Objects/namespaceobject.o
+[ 50] Objects/object.o
+[ 51] Objects/obmalloc.o
+[ 52] Objects/picklebufobject.o
+[ 53] Objects/rangeobject.o
+[ 54] Objects/setobject.o
+[ 55] Objects/sliceobject.o
+[ 56] Objects/structseq.o
+[ 57] Objects/templateobject.o
+[ 58] Objects/tupleobject.o
+[ 59] Objects/typeobject.o
+[ 60] Objects/typevarobject.o
+[ 61] Objects/unicodeobject.o
+[ 62] Objects/unicodectype.o
+[ 63] Objects/unionobject.o
+[ 64] Objects/weakrefobject.o
+[ 65] Python/_contextvars.o
+[ 66] Python/_warnings.o
+[ 67] Python/Python-ast.o
+[ 68] Python/Python-tokenize.o
+[ 69] Python/asdl.o
+[ 70] Python/assemble.o
+[ 71] Python/ast.o
+[ 72] Python/ast_preprocess.o
+[ 73] Python/ast_unparse.o
+[ 74] Python/bltinmodule.o
+[ 75] Python/brc.o
+[ 76] Python/ceval.o
+[ 77] Python/codecs.o
+[ 78] Python/codegen.o
+[ 79] Python/compile.o
+[ 80] Python/context.o
+[ 81] Python/critical_section.o
+[ 82] Python/crossinterp.o
+[ 83] Python/dynamic_annotations.o
+[ 84] Python/errors.o
+[ 85] Python/flowgraph.o
+[ 86] Python/frame.o
+[ 87] Python/frozenmain.o
+[ 88] Python/future.o
+[ 89] Python/gc.o
+[ 90] Python/gc_free_threading.o
+[ 91] Python/gc_gil.o
+[ 92] Python/getargs.o
+[ 93] Python/getcompiler.o
+[ 94] Python/getcopyright.o
+[ 95] Python/getplatform.o
+[ 96] Python/getversion.o
+[ 97] Python/ceval_gil.o
+[ 98] Python/hamt.o
+[ 99] Python/hashtable.o
+[100] Python/import.o
+[101] Python/importdl.o
+[102] Python/index_pool.o
+[103] Python/initconfig.o
+[104] Python/interpconfig.o
+[105] Python/instrumentation.o
+[106] Python/instruction_sequence.o
+[107] Python/intrinsics.o
+[108] Python/jit.o
+[109] Python/legacy_tracing.o
+[110] Python/lock.o
+[111] Python/marshal.o
+[112] Python/modsupport.o
+[113] Python/mysnprintf.o
+[114] Python/mystrtoul.o
+[115] Python/object_stack.o
+[116] Python/optimizer.o
+[117] Python/optimizer_analysis.o
+[118] Python/optimizer_symbols.o
+[119] Python/parking_lot.o
+[120] Python/pathconfig.o
+[121] Python/preconfig.o
+[122] Python/pyarena.o
+[123] Python/pyctype.o
+[124] Python/pyfpe.o
+[125] Python/pyhash.o
+[126] Python/pylifecycle.o
+[127] Python/pymath.o
+[128] Python/pystate.o
+[129] Python/pythonrun.o
+[130] Python/pytime.o
+[131] Python/qsbr.o
+[132] Python/bootstrap_hash.o
+[133] Python/specialize.o
+[134] Python/stackrefs.o
+[135] Python/structmember.o
+[136] Python/symtable.o
+[137] Python/sysmodule.o
+[138] Python/thread.o
+[139] Python/traceback.o
+[140] Python/tracemalloc.o
+[141] Python/uniqueid.o
+[142] Python/getopt.o
+[143] Python/pystrcmp.o
+[144] Python/pystrtod.o
+[145] Python/pystrhex.o
+[146] Python/dtoa.o
+[147] Python/formatter_unicode.o
+[148] Python/fileutils.o
+[149] Python/suggestions.o
+[150] Python/perf_trampoline.o
+[151] Python/perf_jit_trampoline.o
+[152] Python/remote_debugging.o
+[153] Python/dynload_shlib.o
+[154] Modules/config.o
+[155] Modules/main.o
+[156] Modules/gcmodule.o
+[157] Modules/_bisectmodule.o
+[158] Modules/_heapqmodule.o
+[159] Modules/_json.o
+[160] Modules/_randommodule.o
+[161] Modules/_struct.o
+[162] Modules/mathmodule.o
+[163] Modules/binascii.o
+[164] Modules/zlibmodule.o
+[165] Modules/fcntlmodule.o
+[166] Modules/_posixsubprocess.o
+[167] Modules/selectmodule.o
+[168] Modules/unicodedata.o
+[169] Modules/_ctypes/_ctypes.o
+[170] Modules/_ctypes/callbacks.o
+[171] Modules/_ctypes/callproc.o
+[172] Modules/_ctypes/stgdict.o
+[173] Modules/_ctypes/cfield.o
+[174] Modules/_ctypes/malloc_closure.o
+[175] Modules/socketmodule.o
+[176] Modules/_ssl.o
+[177] Modules/pyexpat.o
+[178] Modules/resource.o
+[179] Modules/_scproxy.o
+[180] Modules/md5module.o
+[181] Modules/sha1module.o
+[182] Modules/sha2module.o
+[183] Modules/sha3module.o
+[184] Modules/blake2module.o
+[185] Modules/hmacmodule.o
+[186] Modules/atexitmodule.o
+[187] Modules/faulthandler.o
+[188] Modules/posixmodule.o
+[189] Modules/signalmodule.o
+[190] Modules/_tracemalloc.o
+[191] Modules/_suggestions.o
+[192] Modules/_datetimemodule.o
+[193] Modules/_codecsmodule.o
+[194] Modules/_collectionsmodule.o
+[195] Modules/errnomodule.o
+[196] Modules/_io/_iomodule.o
+[197] Modules/_io/iobase.o
+[198] Modules/_io/fileio.o
+[199] Modules/_io/bytesio.o
+[200] Modules/_io/bufferedio.o
+[201] Modules/_io/textio.o
+[202] Modules/_io/stringio.o
+[203] Modules/itertoolsmodule.o
+[204] Modules/_sre/sre.o
+[205] Modules/_sysconfig.o
+[206] Modules/_threadmodule.o
+[207] Modules/timemodule.o
+[208] Modules/_typesmodule.o
+[209] Modules/_typingmodule.o
+[210] Modules/_weakref.o
+[211] Modules/_abc.o
+[212] Modules/_functoolsmodule.o
+[213] Modules/_localemodule.o
+[214] Modules/_opcode.o
+[215] Modules/_operator.o
+[216] Modules/_stat.o
+[217] Modules/symtablemodule.o
+[218] Modules/pwdmodule.o
+[219] Modules/getpath.o
+[220] Python/frozen.o
+[221] /Apple/SDK/MacOSX26.sdk/usr/lib/libdl.tbd
+[222] /private/test/prefix/lib/libz.a(adler32.o)
+[223] /private/test/prefix/lib/libz.a(crc32.o)
+[224] /private/test/prefix/lib/libz.a(deflate.o)
+[225] /private/test/prefix/lib/libz.a(inffast.o)
+[226] /private/test/prefix/lib/libz.a(inflate.o)
+[227] /private/test/prefix/lib/libz.a(inftrees.o)
+[228] /private/test/prefix/lib/libz.a(trees.o)
+[229] /private/test/prefix/lib/libz.a(zutil.o)
+[230] /Apple/SDK/MacOSX26.sdk/usr/lib/libffi.tbd
+[231] /private/test/prefix/lib/libssl.a(libssl-lib-d1_lib.o)
+[232] /private/test/prefix/lib/libssl.a(libssl-lib-d1_msg.o)
+[233] /private/test/prefix/lib/libssl.a(libssl-lib-d1_srtp.o)
+[234] /private/test/prefix/lib/libssl.a(libssl-lib-methods.o)
+[235] /private/test/prefix/lib/libssl.a(libssl-lib-pqueue.o)
+[236] /private/test/prefix/lib/libssl.a(libssl-lib-s3_enc.o)
+[237] /private/test/prefix/lib/libssl.a(libssl-lib-s3_lib.o)
+[238] /private/test/prefix/lib/libssl.a(libssl-lib-s3_msg.o)
+[239] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_asn1.o)
+[240] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_cert.o)
+[241] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_ciph.o)
+[242] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_conf.o)
+[243] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_init.o)
+[244] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_lib.o)
+[245] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_mcnf.o)
+[246] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_rsa.o)
+[247] /private/test/prefix/lib/libssl.a(libssl-lib-ssl_sess.o)
+[248] /private/test/prefix/lib/libssl.a(libssl-lib-t1_enc.o)
+[249] /private/test/prefix/lib/libssl.a(libssl-lib-t1_lib.o)
+[250] /private/test/prefix/lib/libssl.a(libssl-lib-tls13_enc.o)
+[251] /private/test/prefix/lib/libssl.a(libssl-lib-tls_depr.o)
+[252] /private/test/prefix/lib/libssl.a(libssl-lib-tls_srp.o)
+[253] /private/test/prefix/lib/libssl.a(libssl-lib-cc_newreno.o)
+[254] /private/test/prefix/lib/libssl.a(libssl-lib-json_enc.o)
+[255] /private/test/prefix/lib/libssl.a(libssl-lib-qlog.o)
+[256] /private/test/prefix/lib/libssl.a(libssl-lib-qlog_event_helpers.o)
+[257] /private/test/prefix/lib/libssl.a(libssl-lib-quic_ackm.o)
+[258] /private/test/prefix/lib/libssl.a(libssl-lib-quic_cfq.o)
+[259] /private/test/prefix/lib/libssl.a(libssl-lib-quic_channel.o)
+[260] /private/test/prefix/lib/libssl.a(libssl-lib-quic_demux.o)
+[261] /private/test/prefix/lib/libssl.a(libssl-lib-quic_engine.o)
+[262] /private/test/prefix/lib/libssl.a(libssl-lib-quic_fc.o)
+[263] /private/test/prefix/lib/libssl.a(libssl-lib-quic_fifd.o)
+[264] /private/test/prefix/lib/libssl.a(libssl-lib-quic_impl.o)
+[265] /private/test/prefix/lib/libssl.a(libssl-lib-quic_lcidm.o)
+[266] /private/test/prefix/lib/libssl.a(libssl-lib-quic_method.o)
+[267] /private/test/prefix/lib/libssl.a(libssl-lib-quic_obj.o)
+[268] /private/test/prefix/lib/libssl.a(libssl-lib-quic_port.o)
+[269] /private/test/prefix/lib/libssl.a(libssl-lib-quic_reactor.o)
+[270] /private/test/prefix/lib/libssl.a(libssl-lib-quic_reactor_wait_ctx.o)
+[271] /private/test/prefix/lib/libssl.a(libssl-lib-quic_record_rx.o)
+[272] /private/test/prefix/lib/libssl.a(libssl-lib-quic_record_shared.o)
+[273] /private/test/prefix/lib/libssl.a(libssl-lib-quic_record_tx.o)
+[274] /private/test/prefix/lib/libssl.a(libssl-lib-quic_record_util.o)
+[275] /private/test/prefix/lib/libssl.a(libssl-lib-quic_rstream.o)
+[276] /private/test/prefix/lib/libssl.a(libssl-lib-quic_rx_depack.o)
+[277] /private/test/prefix/lib/libssl.a(libssl-lib-quic_sf_list.o)
+[278] /private/test/prefix/lib/libssl.a(libssl-lib-quic_srtm.o)
+[279] /private/test/prefix/lib/libssl.a(libssl-lib-quic_sstream.o)
+[280] /private/test/prefix/lib/libssl.a(libssl-lib-quic_statm.o)
+[281] /private/test/prefix/lib/libssl.a(libssl-lib-quic_stream_map.o)
+[282] /private/test/prefix/lib/libssl.a(libssl-lib-quic_thread_assist.o)
+[283] /private/test/prefix/lib/libssl.a(libssl-lib-quic_tls.o)
+[284] /private/test/prefix/lib/libssl.a(libssl-lib-quic_txp.o)
+[285] /private/test/prefix/lib/libssl.a(libssl-lib-quic_txpim.o)
+[286] /private/test/prefix/lib/libssl.a(libssl-lib-quic_types.o)
+[287] /private/test/prefix/lib/libssl.a(libssl-lib-quic_wire.o)
+[288] /private/test/prefix/lib/libssl.a(libssl-lib-quic_wire_pkt.o)
+[289] /private/test/prefix/lib/libssl.a(libssl-lib-uint_set.o)
+[290] /private/test/prefix/lib/libssl.a(libssl-lib-rec_layer_d1.o)
+[291] /private/test/prefix/lib/libssl.a(libssl-lib-rec_layer_s3.o)
+[292] /private/test/prefix/lib/libssl.a(libssl-lib-dtls_meth.o)
+[293] /private/test/prefix/lib/libssl.a(libssl-lib-ssl3_meth.o)
+[294] /private/test/prefix/lib/libssl.a(libssl-lib-tls13_meth.o)
+[295] /private/test/prefix/lib/libssl.a(libssl-lib-tls1_meth.o)
+[296] /private/test/prefix/lib/libssl.a(libssl-lib-tls_common.o)
+[297] /private/test/prefix/lib/libssl.a(libssl-lib-tls_multib.o)
+[298] /private/test/prefix/lib/libssl.a(libssl-lib-tlsany_meth.o)
+[299] /private/test/prefix/lib/libssl.a(libssl-lib-rio_notifier.o)
+[300] /private/test/prefix/lib/libssl.a(libssl-lib-extensions.o)
+[301] /private/test/prefix/lib/libssl.a(libssl-lib-extensions_clnt.o)
+[302] /private/test/prefix/lib/libssl.a(libssl-lib-extensions_cust.o)
+[303] /private/test/prefix/lib/libssl.a(libssl-lib-extensions_srvr.o)
+[304] /private/test/prefix/lib/libssl.a(libssl-lib-statem.o)
+[305] /private/test/prefix/lib/libssl.a(libssl-lib-statem_clnt.o)
+[306] /private/test/prefix/lib/libssl.a(libssl-lib-statem_dtls.o)
+[307] /private/test/prefix/lib/libssl.a(libssl-lib-statem_lib.o)
+[308] /private/test/prefix/lib/libssl.a(libssl-lib-statem_srvr.o)
+[309] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-aes_cbc.o)
+[310] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-aes_core.o)
+[311] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-aesv8-armx.o)
+[312] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bsaes-armv8.o)
+[313] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-vpaes-armv8.o)
+[314] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-aria.o)
+[315] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_bitstr.o)
+[316] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_d2i_fp.o)
+[317] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_digest.o)
+[318] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_dup.o)
+[319] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_gentm.o)
+[320] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_i2d_fp.o)
+[321] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_int.o)
+[322] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_mbstr.o)
+[323] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_object.o)
+[324] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_octet.o)
+[325] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_print.o)
+[326] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_sign.o)
+[327] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_strex.o)
+[328] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_strnid.o)
+[329] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_time.o)
+[330] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_type.o)
+[331] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_utctm.o)
+[332] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_utf8.o)
+[333] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-a_verify.o)
+[334] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ameth_lib.o)
+[335] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn1_err.o)
+[336] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn1_gen.o)
+[337] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn1_lib.o)
+[338] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn1_parse.o)
+[339] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn_moid.o)
+[340] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn_mstbl.o)
+[341] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn_pack.o)
+[342] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-d2i_pr.o)
+[343] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_asn1.o)
+[344] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-f_int.o)
+[345] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-f_string.o)
+[346] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-i2d_evp.o)
+[347] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-nsseq.o)
+[348] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p5_pbe.o)
+[349] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p5_pbev2.o)
+[350] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p5_scrypt.o)
+[351] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p8_pkey.o)
+[352] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-t_pkey.o)
+[353] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-tasn_dec.o)
+[354] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-tasn_enc.o)
+[355] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-tasn_fre.o)
+[356] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-tasn_new.o)
+[357] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-tasn_prn.o)
+[358] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-tasn_typ.o)
+[359] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-tasn_utl.o)
+[360] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_algor.o)
+[361] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_bignum.o)
+[362] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_info.o)
+[363] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_int64.o)
+[364] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_pkey.o)
+[365] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_sig.o)
+[366] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_spki.o)
+[367] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_val.o)
+[368] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-async_posix.o)
+[369] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-async.o)
+[370] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-async_err.o)
+[371] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-async_wait.o)
+[372] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_cfb64.o)
+[373] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_ecb.o)
+[374] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_enc.o)
+[375] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_ofb64.o)
+[376] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_skey.o)
+[377] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_buff.o)
+[378] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_prefix.o)
+[379] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bf_readbuff.o)
+[380] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_addr.o)
+[381] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_dump.o)
+[382] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_err.o)
+[383] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_lib.o)
+[384] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_meth.o)
+[385] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_print.o)
+[386] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_sock.o)
+[387] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_sock2.o)
+[388] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_conn.o)
+[389] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_core.o)
+[390] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_dgram.o)
+[391] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_dgram_pair.o)
+[392] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_fd.o)
+[393] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_file.o)
+[394] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_mem.o)
+[395] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_null.o)
+[396] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bss_sock.o)
+[397] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ossl_core_bio.o)
+[398] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-armv8-mont.o)
+[399] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_add.o)
+[400] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_asm.o)
+[401] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_blind.o)
+[402] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_const.o)
+[403] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_conv.o)
+[404] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_ctx.o)
+[405] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_dh.o)
+[406] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_div.o)
+[407] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_err.o)
+[408] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_exp.o)
+[409] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_exp2.o)
+[410] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_gcd.o)
+[411] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_gf2m.o)
+[412] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_intern.o)
+[413] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_kron.o)
+[414] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_lib.o)
+[415] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_mod.o)
+[416] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_mont.o)
+[417] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_mul.o)
+[418] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_prime.o)
+[419] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_print.o)
+[420] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_rand.o)
+[421] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_recp.o)
+[422] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_rsa_fips186_4.o)
+[423] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_shift.o)
+[424] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_sqr.o)
+[425] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_sqrt.o)
+[426] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_srp.o)
+[427] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bn_word.o)
+[428] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-buf_err.o)
+[429] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-buffer.o)
+[430] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-camellia.o)
+[431] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cmll_cbc.o)
+[432] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cmll_misc.o)
+[433] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_cfb64.o)
+[434] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_ecb.o)
+[435] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_enc.o)
+[436] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_ofb64.o)
+[437] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_skey.o)
+[438] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-chacha-armv8-sve.o)
+[439] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-chacha-armv8.o)
+[440] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cmac.o)
+[441] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cmp_err.o)
+[442] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cmp_util.o)
+[443] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cms_err.o)
+[444] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_brotli.o)
+[445] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_zlib.o)
+[446] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_zstd.o)
+[447] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-comp_err.o)
+[448] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-comp_lib.o)
+[449] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_api.o)
+[450] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_def.o)
+[451] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_err.o)
+[452] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_lib.o)
+[453] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_mall.o)
+[454] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_mod.o)
+[455] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_sap.o)
+[456] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-conf_ssl.o)
+[457] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-crmf_err.o)
+[458] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_b64.o)
+[459] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_err.o)
+[460] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_log.o)
+[461] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_oct.o)
+[462] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_policy.o)
+[463] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_prn.o)
+[464] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_sct.o)
+[465] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_sct_ctx.o)
+[466] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_vfy.o)
+[467] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ct_x509v3.o)
+[468] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cfb64ede.o)
+[469] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cfb64enc.o)
+[470] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cfb_enc.o)
+[471] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-des_enc.o)
+[472] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecb3_enc.o)
+[473] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecb_enc.o)
+[474] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ofb64ede.o)
+[475] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ofb64enc.o)
+[476] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-set_key.o)
+[477] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-xcbc_enc.o)
+[478] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_ameth.o)
+[479] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_asn1.o)
+[480] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_backend.o)
+[481] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_check.o)
+[482] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_err.o)
+[483] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_gen.o)
+[484] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_group_params.o)
+[485] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_kdf.o)
+[486] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_key.o)
+[487] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_lib.o)
+[488] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_pmeth.o)
+[489] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_ameth.o)
+[490] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_asn1.o)
+[491] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_backend.o)
+[492] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_check.o)
+[493] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_err.o)
+[494] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_gen.o)
+[495] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_key.o)
+[496] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_lib.o)
+[497] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_ossl.o)
+[498] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_pmeth.o)
+[499] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_sign.o)
+[500] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_vrf.o)
+[501] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dso_err.o)
+[502] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dso_lib.o)
+[503] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dso_openssl.o)
+[504] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-f_impl64.o)
+[505] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-curve448.o)
+[506] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-curve448_tables.o)
+[507] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-eddsa.o)
+[508] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-f_generic.o)
+[509] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-scalar.o)
+[510] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-curve25519.o)
+[511] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec2_oct.o)
+[512] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec2_smpl.o)
+[513] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_ameth.o)
+[514] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_asn1.o)
+[515] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_backend.o)
+[516] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_check.o)
+[517] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_curve.o)
+[518] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_cvt.o)
+[519] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_err.o)
+[520] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_key.o)
+[521] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_kmeth.o)
+[522] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_lib.o)
+[523] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_mult.o)
+[524] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_oct.o)
+[525] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_pmeth.o)
+[526] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecdh_kdf.o)
+[527] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecdh_ossl.o)
+[528] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecdsa_ossl.o)
+[529] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecdsa_sign.o)
+[530] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecdsa_vrf.o)
+[531] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-eck_prn.o)
+[532] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_mont.o)
+[533] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_nistz256-armv8.o)
+[534] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_nistz256.o)
+[535] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_oct.o)
+[536] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_sm2p256-armv8.o)
+[537] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_sm2p256.o)
+[538] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_sm2p256_table.o)
+[539] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecp_smpl.o)
+[540] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecx_backend.o)
+[541] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecx_key.o)
+[542] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ecx_meth.o)
+[543] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-decoder_lib.o)
+[544] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-decoder_meth.o)
+[545] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-decoder_pkey.o)
+[546] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-encoder_lib.o)
+[547] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-encoder_meth.o)
+[548] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-encoder_pkey.o)
+[549] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-err.o)
+[550] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-err_all.o)
+[551] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-err_blocks.o)
+[552] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-err_mark.o)
+[553] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-err_prn.o)
+[554] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-err_save.o)
+[555] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ess_err.o)
+[556] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asymcipher.o)
+[557] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_enc.o)
+[558] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bio_md.o)
+[559] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_allc.o)
+[560] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-c_alld.o)
+[561] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ctrl_params_translate.o)
+[562] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_ctrl.o)
+[563] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dh_support.o)
+[564] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-digest.o)
+[565] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-dsa_ctrl.o)
+[566] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_aes.o)
+[567] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_aes_cbc_hmac_sha1.o)
+[568] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_aes_cbc_hmac_sha256.o)
+[569] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_aria.o)
+[570] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_bf.o)
+[571] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_camellia.o)
+[572] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_cast.o)
+[573] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_chacha20_poly1305.o)
+[574] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_des.o)
+[575] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_des3.o)
+[576] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_idea.o)
+[577] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_rc2.o)
+[578] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_rc4.o)
+[579] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_rc4_hmac_md5.o)
+[580] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_seed.o)
+[581] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_sm4.o)
+[582] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-e_xcbc_d.o)
+[583] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_ctrl.o)
+[584] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ec_support.o)
+[585] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-encode.o)
+[586] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_cnf.o)
+[587] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_enc.o)
+[588] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_err.o)
+[589] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_fetch.o)
+[590] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_key.o)
+[591] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_lib.o)
+[592] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_pbe.o)
+[593] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_pkey.o)
+[594] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_rand.o)
+[595] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-evp_utils.o)
+[596] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-exchange.o)
+[597] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-kdf_lib.o)
+[598] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-kdf_meth.o)
+[599] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-kem.o)
+[600] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-keymgmt_lib.o)
+[601] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-keymgmt_meth.o)
+[602] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_blake2.o)
+[603] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_md4.o)
+[604] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_md5.o)
+[605] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_md5_sha1.o)
+[606] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_mdc2.o)
+[607] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_ripemd.o)
+[608] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_sha.o)
+[609] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_wp.o)
+[610] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-m_null.o)
+[611] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-m_sigver.o)
+[612] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-mac_lib.o)
+[613] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-mac_meth.o)
+[614] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-names.o)
+[615] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p5_crpt.o)
+[616] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p5_crpt2.o)
+[617] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p_legacy.o)
+[618] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p_lib.o)
+[619] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p_sign.o)
+[620] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p_verify.o)
+[621] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pbe_scrypt.o)
+[622] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pmeth_check.o)
+[623] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pmeth_gn.o)
+[624] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pmeth_lib.o)
+[625] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-s_lib.o)
+[626] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-signature.o)
+[627] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-skeymgmt_meth.o)
+[628] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ffc_backend.o)
+[629] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ffc_dh.o)
+[630] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ffc_key_generate.o)
+[631] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ffc_key_validate.o)
+[632] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ffc_params.o)
+[633] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ffc_params_generate.o)
+[634] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ffc_params_validate.o)
+[635] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-hashfunc.o)
+[636] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-hashtable.o)
+[637] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-hmac.o)
+[638] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-hpke_util.o)
+[639] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-http_client.o)
+[640] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-http_err.o)
+[641] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-http_lib.o)
+[642] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-i_cbc.o)
+[643] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-i_cfb64.o)
+[644] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-i_ecb.o)
+[645] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-i_ofb64.o)
+[646] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-i_skey.o)
+[647] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-lhash.o)
+[648] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-arm64cpuid.o)
+[649] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-armcap.o)
+[650] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-asn1_dsa.o)
+[651] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-bsearch.o)
+[652] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-comp_methods.o)
+[653] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-context.o)
+[654] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-core_algorithm.o)
+[655] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-core_fetch.o)
+[656] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-core_namemap.o)
+[657] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cpt_err.o)
+[658] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cryptlib.o)
+[659] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ctype.o)
+[660] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cversion.o)
+[661] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-defaults.o)
+[662] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-der_writer.o)
+[663] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-deterministic_nonce.o)
+[664] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ex_data.o)
+[665] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-getenv.o)
+[666] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-indicator_core.o)
+[667] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-info.o)
+[668] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-init.o)
+[669] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-initthread.o)
+[670] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-mem.o)
+[671] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-mem_sec.o)
+[672] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-o_dir.o)
+[673] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-o_fopen.o)
+[674] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-o_str.o)
+[675] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-o_time.o)
+[676] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-packet.o)
+[677] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-param_build.o)
+[678] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-param_build_set.o)
+[679] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-params.o)
+[680] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-params_dup.o)
+[681] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-params_from_text.o)
+[682] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-params_idx.o)
+[683] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-passphrase.o)
+[684] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-provider.o)
+[685] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-provider_child.o)
+[686] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-provider_conf.o)
+[687] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-provider_core.o)
+[688] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-provider_predefined.o)
+[689] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-punycode.o)
+[690] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-quic_vlint.o)
+[691] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-self_test_core.o)
+[692] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sleep.o)
+[693] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sparse_array.o)
+[694] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ssl_err.o)
+[695] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-threads_pthread.o)
+[696] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-time.o)
+[697] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-trace.o)
+[698] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-uid.o)
+[699] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-md4_dgst.o)
+[700] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-md5-aarch64.o)
+[701] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-md5_dgst.o)
+[702] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-md5_sha1.o)
+[703] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-mdc2dgst.o)
+[704] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_encoders.o)
+[705] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_key.o)
+[706] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_key_compress.o)
+[707] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_matrix.o)
+[708] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_ntt.o)
+[709] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_params.o)
+[710] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_sample.o)
+[711] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_dsa_sign.o)
+[712] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ml_kem.o)
+[713] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-aes-gcm-armv8-unroll8_64.o)
+[714] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-aes-gcm-armv8_64.o)
+[715] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cbc128.o)
+[716] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ccm128.o)
+[717] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-cfb128.o)
+[718] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ctr128.o)
+[719] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-gcm128.o)
+[720] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ghashv8-armx.o)
+[721] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ocb128.o)
+[722] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ofb128.o)
+[723] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-siv128.o)
+[724] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-wrap128.o)
+[725] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-xts128.o)
+[726] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-xts128gb.o)
+[727] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-o_names.o)
+[728] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-obj_dat.o)
+[729] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-obj_err.o)
+[730] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-obj_lib.o)
+[731] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-obj_xref.o)
+[732] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ocsp_asn.o)
+[733] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ocsp_cl.o)
+[734] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ocsp_err.o)
+[735] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ocsp_ext.o)
+[736] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ocsp_lib.o)
+[737] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_ocsp.o)
+[738] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_all.o)
+[739] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_err.o)
+[740] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_info.o)
+[741] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_lib.o)
+[742] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_oth.o)
+[743] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_pk8.o)
+[744] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_pkey.o)
+[745] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_x509.o)
+[746] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pem_xaux.o)
+[747] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pvkfmt.o)
+[748] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_add.o)
+[749] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_asn.o)
+[750] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_attr.o)
+[751] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_crpt.o)
+[752] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_decr.o)
+[753] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_init.o)
+[754] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_key.o)
+[755] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_kiss.o)
+[756] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_mutl.o)
+[757] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_p8d.o)
+[758] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_p8e.o)
+[759] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_sbag.o)
+[760] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-p12_utl.o)
+[761] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pk12err.o)
+[762] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pk7_asn1.o)
+[763] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pk7_attr.o)
+[764] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pk7_doit.o)
+[765] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pk7_lib.o)
+[766] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pkcs7err.o)
+[767] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-poly1305-armv8.o)
+[768] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-poly1305.o)
+[769] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-defn_cache.o)
+[770] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-property.o)
+[771] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-property_err.o)
+[772] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-property_parse.o)
+[773] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-property_query.o)
+[774] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-property_string.o)
+[775] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-prov_seed.o)
+[776] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rand_err.o)
+[777] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rand_lib.o)
+[778] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rand_meth.o)
+[779] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rand_pool.o)
+[780] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rand_uniform.o)
+[781] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rc2_cbc.o)
+[782] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rc2_ecb.o)
+[783] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rc2_skey.o)
+[784] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rc2cfb64.o)
+[785] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rc2ofb64.o)
+[786] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rc4_enc.o)
+[787] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rc4_skey.o)
+[788] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rmd_dgst.o)
+[789] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_ameth.o)
+[790] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_asn1.o)
+[791] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_backend.o)
+[792] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_chk.o)
+[793] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_crpt.o)
+[794] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_err.o)
+[795] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_gen.o)
+[796] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_lib.o)
+[797] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_mp.o)
+[798] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_mp_names.o)
+[799] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_none.o)
+[800] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_oaep.o)
+[801] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_ossl.o)
+[802] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_pk1.o)
+[803] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_pmeth.o)
+[804] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_pss.o)
+[805] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_saos.o)
+[806] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_schemes.o)
+[807] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_sign.o)
+[808] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_sp800_56b_check.o)
+[809] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_sp800_56b_gen.o)
+[810] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-rsa_x931.o)
+[811] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-seed.o)
+[812] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-seed_cbc.o)
+[813] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-seed_cfb.o)
+[814] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-seed_ecb.o)
+[815] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-seed_ofb.o)
+[816] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-keccak1600-armv8.o)
+[817] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha1-armv8.o)
+[818] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha1_one.o)
+[819] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha1dgst.o)
+[820] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha256-armv8.o)
+[821] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha256.o)
+[822] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha3.o)
+[823] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha512-armv8.o)
+[824] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sha512.o)
+[825] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-siphash.o)
+[826] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_adrs.o)
+[827] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_dsa.o)
+[828] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_dsa_hash_ctx.o)
+[829] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_dsa_key.o)
+[830] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_fors.o)
+[831] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_hash.o)
+[832] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_hypertree.o)
+[833] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_params.o)
+[834] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_wots.o)
+[835] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-slh_xmss.o)
+[836] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm2_crypt.o)
+[837] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm2_err.o)
+[838] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm2_key.o)
+[839] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm2_sign.o)
+[840] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-legacy_sm3.o)
+[841] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm3-armv8.o)
+[842] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm3.o)
+[843] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm4-armv8.o)
+[844] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-sm4.o)
+[845] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-vpsm4-armv8.o)
+[846] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-vpsm4_ex-armv8.o)
+[847] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-srp_lib.o)
+[848] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-srp_vfy.o)
+[849] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-stack.o)
+[850] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-store_err.o)
+[851] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-store_init.o)
+[852] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-store_lib.o)
+[853] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-store_meth.o)
+[854] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-store_register.o)
+[855] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-store_result.o)
+[856] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-thread_posix.o)
+[857] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-arch.o)
+[858] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-internal.o)
+[859] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ts_err.o)
+[860] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-txt_db.o)
+[861] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ui_err.o)
+[862] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ui_lib.o)
+[863] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ui_null.o)
+[864] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ui_openssl.o)
+[865] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-ui_util.o)
+[866] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-wp_block.o)
+[867] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-wp_dgst.o)
+[868] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-by_dir.o)
+[869] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-by_file.o)
+[870] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-by_store.o)
+[871] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pcy_cache.o)
+[872] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pcy_data.o)
+[873] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pcy_lib.o)
+[874] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pcy_map.o)
+[875] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pcy_node.o)
+[876] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-pcy_tree.o)
+[877] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-t_x509.o)
+[878] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_aaa.o)
+[879] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_ac_tgt.o)
+[880] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_addr.o)
+[881] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_admis.o)
+[882] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_akeya.o)
+[883] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_akid.o)
+[884] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_asid.o)
+[885] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_attrdesc.o)
+[886] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_attrmap.o)
+[887] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_audit_id.o)
+[888] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_authattid.o)
+[889] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_battcons.o)
+[890] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_bcons.o)
+[891] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_bitst.o)
+[892] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_conf.o)
+[893] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_cpols.o)
+[894] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_crld.o)
+[895] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_enum.o)
+[896] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_extku.o)
+[897] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_genn.o)
+[898] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_group_ac.o)
+[899] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_ia5.o)
+[900] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_ind_iss.o)
+[901] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_info.o)
+[902] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_int.o)
+[903] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_iobo.o)
+[904] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_ist.o)
+[905] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_lib.o)
+[906] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_ncons.o)
+[907] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_no_ass.o)
+[908] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_no_rev_avail.o)
+[909] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_pci.o)
+[910] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_pcia.o)
+[911] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_pcons.o)
+[912] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_pku.o)
+[913] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_pmaps.o)
+[914] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_prn.o)
+[915] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_purp.o)
+[916] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_rolespec.o)
+[917] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_san.o)
+[918] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_sda.o)
+[919] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_single_use.o)
+[920] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_skid.o)
+[921] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_soa_id.o)
+[922] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_sxnet.o)
+[923] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_timespec.o)
+[924] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_tlsf.o)
+[925] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_usernotice.o)
+[926] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_utf8.o)
+[927] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3_utl.o)
+[928] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-v3err.o)
+[929] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_acert.o)
+[930] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_att.o)
+[931] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_cmp.o)
+[932] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_d2.o)
+[933] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_def.o)
+[934] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_err.o)
+[935] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_ext.o)
+[936] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_lu.o)
+[937] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_obj.o)
+[938] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_req.o)
+[939] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_set.o)
+[940] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_trust.o)
+[941] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_txt.o)
+[942] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_v3.o)
+[943] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_vfy.o)
+[944] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509_vpm.o)
+[945] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509cset.o)
+[946] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509name.o)
+[947] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x509rset.o)
+[948] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_all.o)
+[949] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_attrib.o)
+[950] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_crl.o)
+[951] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_exten.o)
+[952] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_name.o)
+[953] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_pubkey.o)
+[954] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_req.o)
+[955] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_x509.o)
+[956] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-x_x509a.o)
+[957] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-baseprov.o)
+[958] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-defltprov.o)
+[959] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-nullprov.o)
+[960] /private/test/prefix/lib/libcrypto.a(libcrypto-lib-prov_running.o)
+[961] /private/test/prefix/lib/libcrypto.a(libdefault-lib-der_rsa_sig.o)
+[962] /private/test/prefix/lib/libcrypto.a(libdefault-lib-der_sm2_gen.o)
+[963] /private/test/prefix/lib/libcrypto.a(libdefault-lib-der_sm2_sig.o)
+[964] /private/test/prefix/lib/libcrypto.a(libdefault-lib-bio_prov.o)
+[965] /private/test/prefix/lib/libcrypto.a(libdefault-lib-capabilities.o)
+[966] /private/test/prefix/lib/libcrypto.a(libdefault-lib-digest_to_nid.o)
+[967] /private/test/prefix/lib/libcrypto.a(libdefault-lib-provider_seeding.o)
+[968] /private/test/prefix/lib/libcrypto.a(libdefault-lib-provider_util.o)
+[969] /private/test/prefix/lib/libcrypto.a(libdefault-lib-securitycheck.o)
+[970] /private/test/prefix/lib/libcrypto.a(libdefault-lib-securitycheck_default.o)
+[971] /private/test/prefix/lib/libcrypto.a(libdefault-lib-rsa_enc.o)
+[972] /private/test/prefix/lib/libcrypto.a(libdefault-lib-sm2_enc.o)
+[973] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes.o)
+[974] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_cbc_hmac_sha.o)
+[975] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_cbc_hmac_sha1_hw.o)
+[976] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_cbc_hmac_sha256_hw.o)
+[977] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_ccm.o)
+[978] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_ccm_hw.o)
+[979] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_gcm.o)
+[980] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_gcm_hw.o)
+[981] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_gcm_siv.o)
+[982] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_gcm_siv_hw.o)
+[983] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_gcm_siv_polyval.o)
+[984] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_hw.o)
+[985] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_ocb.o)
+[986] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_ocb_hw.o)
+[987] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_siv.o)
+[988] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_siv_hw.o)
+[989] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_wrp.o)
+[990] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_xts.o)
+[991] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_xts_fips.o)
+[992] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aes_xts_hw.o)
+[993] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aria.o)
+[994] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aria_ccm.o)
+[995] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aria_ccm_hw.o)
+[996] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aria_gcm.o)
+[997] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aria_gcm_hw.o)
+[998] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_aria_hw.o)
+[999] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_camellia.o)
+[1000] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_camellia_hw.o)
+[1001] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_chacha20.o)
+[1002] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_chacha20_hw.o)
+[1003] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_chacha20_poly1305.o)
+[1004] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_chacha20_poly1305_hw.o)
+[1005] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_cts.o)
+[1006] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_null.o)
+[1007] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4.o)
+[1008] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4_ccm.o)
+[1009] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4_ccm_hw.o)
+[1010] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4_gcm.o)
+[1011] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4_gcm_hw.o)
+[1012] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4_hw.o)
+[1013] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4_xts.o)
+[1014] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_sm4_xts_hw.o)
+[1015] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_tdes.o)
+[1016] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_tdes_common.o)
+[1017] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_tdes_default.o)
+[1018] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_tdes_default_hw.o)
+[1019] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_tdes_hw.o)
+[1020] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_tdes_wrap.o)
+[1021] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cipher_tdes_wrap_hw.o)
+[1022] /private/test/prefix/lib/libcrypto.a(libdefault-lib-blake2_prov.o)
+[1023] /private/test/prefix/lib/libcrypto.a(libdefault-lib-blake2b_prov.o)
+[1024] /private/test/prefix/lib/libcrypto.a(libdefault-lib-blake2s_prov.o)
+[1025] /private/test/prefix/lib/libcrypto.a(libdefault-lib-md5_prov.o)
+[1026] /private/test/prefix/lib/libcrypto.a(libdefault-lib-md5_sha1_prov.o)
+[1027] /private/test/prefix/lib/libcrypto.a(libdefault-lib-null_prov.o)
+[1028] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ripemd_prov.o)
+[1029] /private/test/prefix/lib/libcrypto.a(libdefault-lib-sha2_prov.o)
+[1030] /private/test/prefix/lib/libcrypto.a(libdefault-lib-sha3_prov.o)
+[1031] /private/test/prefix/lib/libcrypto.a(libdefault-lib-sm3_prov.o)
+[1032] /private/test/prefix/lib/libcrypto.a(libdefault-lib-decode_der2key.o)
+[1033] /private/test/prefix/lib/libcrypto.a(libdefault-lib-decode_epki2pki.o)
+[1034] /private/test/prefix/lib/libcrypto.a(libdefault-lib-decode_msblob2key.o)
+[1035] /private/test/prefix/lib/libcrypto.a(libdefault-lib-decode_pem2der.o)
+[1036] /private/test/prefix/lib/libcrypto.a(libdefault-lib-decode_pvk2key.o)
+[1037] /private/test/prefix/lib/libcrypto.a(libdefault-lib-decode_spki2typespki.o)
+[1038] /private/test/prefix/lib/libcrypto.a(libdefault-lib-encode_key2any.o)
+[1039] /private/test/prefix/lib/libcrypto.a(libdefault-lib-encode_key2blob.o)
+[1040] /private/test/prefix/lib/libcrypto.a(libdefault-lib-encode_key2ms.o)
+[1041] /private/test/prefix/lib/libcrypto.a(libdefault-lib-encode_key2text.o)
+[1042] /private/test/prefix/lib/libcrypto.a(libdefault-lib-endecoder_common.o)
+[1043] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ml_common_codecs.o)
+[1044] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ml_dsa_codecs.o)
+[1045] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ml_kem_codecs.o)
+[1046] /private/test/prefix/lib/libcrypto.a(libdefault-lib-dh_exch.o)
+[1047] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ecdh_exch.o)
+[1048] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ecx_exch.o)
+[1049] /private/test/prefix/lib/libcrypto.a(libdefault-lib-kdf_exch.o)
+[1050] /private/test/prefix/lib/libcrypto.a(libdefault-lib-argon2.o)
+[1051] /private/test/prefix/lib/libcrypto.a(libdefault-lib-hkdf.o)
+[1052] /private/test/prefix/lib/libcrypto.a(libdefault-lib-hmacdrbg_kdf.o)
+[1053] /private/test/prefix/lib/libcrypto.a(libdefault-lib-kbkdf.o)
+[1054] /private/test/prefix/lib/libcrypto.a(libdefault-lib-krb5kdf.o)
+[1055] /private/test/prefix/lib/libcrypto.a(libdefault-lib-pbkdf2.o)
+[1056] /private/test/prefix/lib/libcrypto.a(libdefault-lib-pbkdf2_fips.o)
+[1057] /private/test/prefix/lib/libcrypto.a(libdefault-lib-pkcs12kdf.o)
+[1058] /private/test/prefix/lib/libcrypto.a(libdefault-lib-scrypt.o)
+[1059] /private/test/prefix/lib/libcrypto.a(libdefault-lib-sshkdf.o)
+[1060] /private/test/prefix/lib/libcrypto.a(libdefault-lib-sskdf.o)
+[1061] /private/test/prefix/lib/libcrypto.a(libdefault-lib-tls1_prf.o)
+[1062] /private/test/prefix/lib/libcrypto.a(libdefault-lib-x942kdf.o)
+[1063] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ec_kem.o)
+[1064] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ecx_kem.o)
+[1065] /private/test/prefix/lib/libcrypto.a(libdefault-lib-kem_util.o)
+[1066] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ml_kem_kem.o)
+[1067] /private/test/prefix/lib/libcrypto.a(libdefault-lib-mlx_kem.o)
+[1068] /private/test/prefix/lib/libcrypto.a(libdefault-lib-rsa_kem.o)
+[1069] /private/test/prefix/lib/libcrypto.a(libdefault-lib-dh_kmgmt.o)
+[1070] /private/test/prefix/lib/libcrypto.a(libdefault-lib-dsa_kmgmt.o)
+[1071] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ec_kmgmt.o)
+[1072] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ecx_kmgmt.o)
+[1073] /private/test/prefix/lib/libcrypto.a(libdefault-lib-kdf_legacy_kmgmt.o)
+[1074] /private/test/prefix/lib/libcrypto.a(libdefault-lib-mac_legacy_kmgmt.o)
+[1075] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ml_dsa_kmgmt.o)
+[1076] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ml_kem_kmgmt.o)
+[1077] /private/test/prefix/lib/libcrypto.a(libdefault-lib-mlx_kmgmt.o)
+[1078] /private/test/prefix/lib/libcrypto.a(libdefault-lib-rsa_kmgmt.o)
+[1079] /private/test/prefix/lib/libcrypto.a(libdefault-lib-slh_dsa_kmgmt.o)
+[1080] /private/test/prefix/lib/libcrypto.a(libdefault-lib-blake2b_mac.o)
+[1081] /private/test/prefix/lib/libcrypto.a(libdefault-lib-blake2s_mac.o)
+[1082] /private/test/prefix/lib/libcrypto.a(libdefault-lib-cmac_prov.o)
+[1083] /private/test/prefix/lib/libcrypto.a(libdefault-lib-gmac_prov.o)
+[1084] /private/test/prefix/lib/libcrypto.a(libdefault-lib-hmac_prov.o)
+[1085] /private/test/prefix/lib/libcrypto.a(libdefault-lib-kmac_prov.o)
+[1086] /private/test/prefix/lib/libcrypto.a(libdefault-lib-poly1305_prov.o)
+[1087] /private/test/prefix/lib/libcrypto.a(libdefault-lib-siphash_prov.o)
+[1088] /private/test/prefix/lib/libcrypto.a(libdefault-lib-drbg.o)
+[1089] /private/test/prefix/lib/libcrypto.a(libdefault-lib-drbg_ctr.o)
+[1090] /private/test/prefix/lib/libcrypto.a(libdefault-lib-drbg_hash.o)
+[1091] /private/test/prefix/lib/libcrypto.a(libdefault-lib-drbg_hmac.o)
+[1092] /private/test/prefix/lib/libcrypto.a(libdefault-lib-seed_src.o)
+[1093] /private/test/prefix/lib/libcrypto.a(libdefault-lib-test_rng.o)
+[1094] /private/test/prefix/lib/libcrypto.a(libdefault-lib-rand_unix.o)
+[1095] /private/test/prefix/lib/libcrypto.a(libdefault-lib-dsa_sig.o)
+[1096] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ecdsa_sig.o)
+[1097] /private/test/prefix/lib/libcrypto.a(libdefault-lib-eddsa_sig.o)
+[1098] /private/test/prefix/lib/libcrypto.a(libdefault-lib-mac_legacy_sig.o)
+[1099] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ml_dsa_sig.o)
+[1100] /private/test/prefix/lib/libcrypto.a(libdefault-lib-rsa_sig.o)
+[1101] /private/test/prefix/lib/libcrypto.a(libdefault-lib-slh_dsa_sig.o)
+[1102] /private/test/prefix/lib/libcrypto.a(libdefault-lib-sm2_sig.o)
+[1103] /private/test/prefix/lib/libcrypto.a(libdefault-lib-aes_skmgmt.o)
+[1104] /private/test/prefix/lib/libcrypto.a(libdefault-lib-generic.o)
+[1105] /private/test/prefix/lib/libcrypto.a(libdefault-lib-file_store.o)
+[1106] /private/test/prefix/lib/libcrypto.a(libdefault-lib-file_store_any2obj.o)
+[1107] /private/test/prefix/lib/libcrypto.a(libdefault-lib-ssl3_cbc.o)
+[1108] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_dsa_gen.o)
+[1109] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_dsa_sig.o)
+[1110] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_ec_gen.o)
+[1111] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_ec_sig.o)
+[1112] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_ecx_gen.o)
+[1113] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_ecx_key.o)
+[1114] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_ml_dsa_gen.o)
+[1115] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_ml_dsa_key.o)
+[1116] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_rsa_gen.o)
+[1117] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_rsa_key.o)
+[1118] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_slh_dsa_gen.o)
+[1119] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_slh_dsa_key.o)
+[1120] /private/test/prefix/lib/libcrypto.a(libcommon-lib-der_wrap_gen.o)
+[1121] /private/test/prefix/lib/libcrypto.a(libcommon-lib-provider_ctx.o)
+[1122] /private/test/prefix/lib/libcrypto.a(libcommon-lib-provider_err.o)
+[1123] /private/test/prefix/lib/libcrypto.a(libcommon-lib-ciphercommon.o)
+[1124] /private/test/prefix/lib/libcrypto.a(libcommon-lib-ciphercommon_block.o)
+[1125] /private/test/prefix/lib/libcrypto.a(libcommon-lib-ciphercommon_ccm.o)
+[1126] /private/test/prefix/lib/libcrypto.a(libcommon-lib-ciphercommon_ccm_hw.o)
+[1127] /private/test/prefix/lib/libcrypto.a(libcommon-lib-ciphercommon_gcm.o)
+[1128] /private/test/prefix/lib/libcrypto.a(libcommon-lib-ciphercommon_gcm_hw.o)
+[1129] /private/test/prefix/lib/libcrypto.a(libcommon-lib-ciphercommon_hw.o)
+[1130] /private/test/prefix/lib/libcrypto.a(libcommon-lib-digestcommon.o)
+[1131] /private/test/prefix/lib/libcrypto.a(libcommon-lib-tls_pad.o)
+[1132] /Apple/SDK/MacOSX26.sdk/usr/lib/libm.tbd
+[1133] Modules/expat/libexpat.a(xmlparse.o)
+[1134] Modules/expat/libexpat.a(xmlrole.o)
+[1135] Modules/expat/libexpat.a(xmltok.o)
+[1136] /Apple/SDK/MacOSX26.sdk/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration.tbd
+[1137] Modules/_hacl/libHacl_Hash_MD5.a(Hacl_Hash_MD5.o)
+[1138] Modules/_hacl/libHacl_Hash_SHA1.a(Hacl_Hash_SHA1.o)
+[1139] Modules/_hacl/libHacl_Hash_SHA2.a(Hacl_Hash_SHA2.o)
+[1140] Modules/_hacl/libHacl_Hash_SHA3.a(Hacl_Hash_SHA3.o)
+[1141] Modules/_hacl/libHacl_Hash_BLAKE2.a(Hacl_Hash_Blake2s.o)
+[1142] Modules/_hacl/libHacl_Hash_BLAKE2.a(Hacl_Hash_Blake2b.o)
+[1143] Modules/_hacl/libHacl_Hash_BLAKE2.a(Lib_Memzero0.o)
+[1144] Modules/_hacl/libHacl_HMAC.a(Hacl_HMAC.o)
+[1145] Modules/_hacl/libHacl_HMAC.a(Hacl_Streaming_HMAC.o)
+[1146] /Apple/SDK/MacOSX26.sdk/usr/lib/libSystem.tbd
+[1147] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libcommonCrypto.tbd
+[1148] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libcompiler_rt.tbd
+[1149] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libcopyfile.tbd
+[1150] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libdyld.tbd
+[1151] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_c.tbd
+[1152] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_info.tbd
+[1153] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_kernel.tbd
+[1154] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_m.tbd
+[1155] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_malloc.tbd
+[1156] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_platform.tbd
+[1157] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_pthread.tbd
+[1158] /Apple/SDK/MacOSX26.sdk/usr/lib/system/libsystem_trace.tbd
+"""
+NATIVE_LINK_MAP_SDK_INTERFACES = (
+    'System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd',
+    'usr/lib/libdl.tbd',
+    'usr/lib/libffi.tbd',
+    'usr/lib/libm.tbd',
+    'System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration.tbd',
+    'usr/lib/libSystem.tbd',
+    'usr/lib/system/libcommonCrypto.tbd',
+    'usr/lib/system/libcompiler_rt.tbd',
+    'usr/lib/system/libcopyfile.tbd',
+    'usr/lib/system/libdyld.tbd',
+    'usr/lib/system/libsystem_c.tbd',
+    'usr/lib/system/libsystem_info.tbd',
+    'usr/lib/system/libsystem_kernel.tbd',
+    'usr/lib/system/libsystem_m.tbd',
+    'usr/lib/system/libsystem_malloc.tbd',
+    'usr/lib/system/libsystem_platform.tbd',
+    'usr/lib/system/libsystem_pthread.tbd',
+    'usr/lib/system/libsystem_trace.tbd',
+)
+
+
 def make_configuration(exe=".exe", multiarch="darwin", target=BUILD.ARM_TARGET):
     prefix, sdk = Path("/private/task/prefix"), Path("/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk")
     values = {
@@ -6434,6 +7623,75 @@ class MacPythonSourceBuildTests(unittest.TestCase):
         with self.assertRaises(BUILD.BuildRefused):
             BUILD.decode(b'{"files":[],"files":[]}')
 
+
+        # The complete native object table, not a projection of a few accepted rows.
+        prefix = Path("/private/test/prefix")
+        build = Path("/private/test/build/cpython")
+        sdk = Path("/Apple/SDK/MacOSX26.sdk")
+        body = (b"# Path: /private/test/build/cpython/python.exe\n# Arch: arm64\n# Object files:\n"
+                + NATIVE_LINK_MAP_OBJECTS + b"# Sections:\n# Address\tSize\tSegment\tSection\n"
+                + b"# Symbols:\n0x0\t0x2\t[1] literal string: \x80\xff\n")
+        objects, incorporated = BUILD.link_map_objects(body, prefix, build, sdk)
+        self.assertEqual(len(objects), 1159)
+        self.assertEqual(objects[0], "linker synthesized")
+        self.assertEqual(incorporated, ["cpython", "expat", "hacl", "openssl", "zlib"])
+        expected_interfaces = NATIVE_LINK_MAP_SDK_INTERFACES
+        self.assertEqual(BUILD.SDK_INTERFACE_PATHS, expected_interfaces)
+        self.assertEqual({name[len(str(sdk)) + 1:] for name in objects if name.startswith(str(sdk) + "/")},
+                         set(expected_interfaces))
+        self.assertEqual(sum(name.startswith(str(sdk) + "/") for name in objects), 18)
+        caller = BUILD.Build.__new__(BUILD.Build)
+        caller.private, caller.python_build, caller.sdk = Path("/private/test"), build, sdk
+        caller.evidence, caller.notice_evidence = {"python-link.map": body}, {}
+        BUILD.Build.notices(caller)
+        notice = BUILD.decode(caller.evidence["notices.json"])
+        self.assertIs(caller.evidence["python-link.map"], body)
+        self.assertEqual(notice["linkMapSha256"], hashlib.sha256(body).hexdigest())
+        self.assertEqual(notice["objects"], objects)
+        self.assertEqual(notice["incorporated"], incorporated)
+
+        first = NATIVE_LINK_MAP_OBJECTS.split(b"\n", 1)[0]
+        self.assertEqual(NATIVE_LINK_MAP_OBJECTS.count(b"linker synthesized"), 1)
+        malformed = (
+            body.replace(b"# Object files:\n", b"# Not object files:\n", 1),
+            body.replace(b"# Sections:\n", b"# Not sections:\n", 1),
+            b"# Object files:\n" + body,
+            body + b"# Sections:\n",
+            b"# Sections:\n# Object files:\n" + NATIVE_LINK_MAP_OBJECTS,
+            body.replace(b"linker synthesized", b"linker \xffsynthesized", 1),
+            body.replace(first + b"\n", first + b"\r\n", 1),
+            body.replace(first + b"\n", first + b"\0\n", 1),
+            body.replace(first + b"\n", b"", 1),
+            body.replace(first + b"\n", first + b"\n" + first + b"\n", 1),
+        )
+        for value in malformed:
+            with self.subTest(map_shape=hashlib.sha256(value).hexdigest()):
+                with self.assertRaises(BUILD.BuildRefused):
+                    BUILD.link_map_objects(value, prefix, build, sdk)
+
+        def small_map(names):
+            rows = ["linker synthesized", *names]
+            return (b"# Object files:\n" + "".join(f"[{i:3}] {name}\n" for i, name in enumerate(rows)).encode()
+                    + b"# Sections:\n# Symbols:\n\x80")
+
+        native_names = ["Programs/python.o", str(prefix / "lib/libssl.a(ssl.o)"),
+                        str(prefix / "lib/libz.a(adler32.o)"), "Modules/_hacl/hash.o", "Modules/expat/xmlparse.o"]
+        for interface in expected_interfaces:
+            self.assertEqual(BUILD.link_map_objects(small_map([*native_names, str(sdk / interface)]),
+                                                   prefix, build, sdk)[1], incorporated)
+        foreign = (str(sdk / "usr/lib/unknown.tbd"), str(Path("/ForeignSDK") / expected_interfaces[0]),
+                   expected_interfaces[0], str(prefix / "lib/libSystem.tbd"),
+                   str(sdk) + "/usr/lib/../lib/libSystem.tbd",
+                   str(prefix / "lib/libcompiler_rt.a(runtime.o)"))
+        for name in foreign:
+            with self.subTest(foreign_object=name):
+                with self.assertRaisesRegex(BUILD.BuildRefused, "native-unaccounted-static-object"):
+                    BUILD.link_map_objects(small_map([*native_names, name]), prefix, build, sdk)
+        with self.assertRaisesRegex(BUILD.BuildRefused, "native-incorporation-roster"):
+            BUILD.link_map_objects(small_map(native_names[:-1]), prefix, build, sdk)
+        with self.assertRaisesRegex(BUILD.BuildRefused, "native-link-map-bound"):
+            BUILD.link_map_objects(b"x" * (8 * BUILD.MIB + 1), prefix, build, sdk)
+
     def test_original_result_deadline_and_finality_are_not_success_defaults(self):
         self.assertEqual(BUILD.remaining(10.9, 5.2, 9), 5)
         for deadline, now in ((10.0, 10.0), (10.0, 9.1), (float("nan"), 1)):
@@ -6900,6 +8158,206 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 self.assertEqual(projected.stat().st_mode & 0o777, 0o444)
                 self.assertEqual(projected.stat().st_mtime_ns, 1700000000 * 1000000000)
                 self.assertEqual((projected.parent.stat().st_mode & 0o777), 0o555)
+
+
+        original_data = BUILD.DATA
+        self.assertTrue(original_data.known)
+
+        def payload_case(root):
+            work = root / "work"
+            work.mkdir(mode=0o700)
+            private = work / "private"
+            private.mkdir(mode=0o700)
+            payload = private / "supplier"
+            (payload / "python/bin").mkdir(parents=True, mode=0o700)
+            (payload / "python/lib/python3.14").mkdir(parents=True, mode=0o700)
+            BUILD.write(payload / "python/bin/python3", b"inert; never an executable probe\n", 0o555)
+            BUILD.write(payload / "python/lib/python3.14/data.py", b"public DATA\n", 0o444)
+            BUILD.seal(payload)
+            relocated_parent = private / "relocated parent with spaces"
+            relocated_parent.mkdir(mode=0o700)
+            operation = BUILD.Build.__new__(BUILD.Build)
+            operation.work, operation.private, operation.payload = work, private, payload
+            operation.work_identity = BUILD.custody(work.lstat())
+            operation.private_identity = BUILD.custody(private.lstat())
+            operation.relocation_parent_identity = BUILD.custody(relocated_parent.lstat())
+            operation.export_identity = None
+            operation.inflight = False
+            operation.deadline = time.monotonic() + 20
+            operation.guard = SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda:
+                SimpleNamespace(complete=True, fatal=False, contained=True)))
+            operation.files = list(BUILD.tree_rows(payload, maximum=BUILD.MIB, max_files=8).values())
+            operation.run = lambda *args, **kwargs: self.fail("a filesystem move must not dispatch a native command")
+            return operation
+
+        with scratch() as root:
+            operation = payload_case(root)
+            inode = (operation.payload.stat().st_dev, operation.payload.stat().st_ino)
+            data = BUILD.DataFinality()
+            moves = []
+            real_os = SimpleNamespace(**vars(os))
+
+            def darwin_ordering(source, destination, **kwargs):
+                # Inert policy double around a REAL move; not Darwin execution.
+                mode = real_os.stat(source, dir_fd=kwargs["src_dir_fd"], follow_symlinks=False).st_mode & 0o777
+                if mode != 0o755:
+                    raise PermissionError(errno.EACCES, "synthetic Darwin sealed-directory refusal")
+                self.assertEqual(data._pending, 3)
+                moves.append((source, destination))
+                return real_os.rename(source, destination, **kwargs)
+
+            proxy = SimpleNamespace(**vars(os))
+            proxy.rename = darwin_ordering
+            with patch.object(BUILD, "DATA", data), patch.object(BUILD, "os", proxy):
+                for role in ("relocation", "retention", "export"):
+                    if role == "export":
+                        export = operation.work / "export"
+                        export.mkdir(mode=0o700)
+                        operation.export_identity = BUILD.custody(export.lstat())
+                    previous = operation.payload
+                    operation._move_payload(role, deadline=operation.deadline)
+                    self.assertFalse(previous.exists())
+                    self.assertEqual((operation.payload.stat().st_dev, operation.payload.stat().st_ino), inode)
+                    self.assertEqual(operation.payload.stat().st_mode & 0o777, 0o555)
+                    self.assertEqual(list(BUILD.tree_rows(operation.payload, maximum=BUILD.MIB, max_files=8).values()),
+                                     operation.files)
+                    self.assertEqual(operation.phase, "supplier-" + role + "-payload-post")
+                    self.assertEqual(operation.payload_move_errors, [])
+                    self.assertTrue(data.known)
+                    self.assertEqual(data._pending, 0)
+            self.assertEqual(len(moves), 3)
+
+        # Each fault uses the same real small original tree and local DATA only.
+        # Scoped os proxies never replace the shared stdlib module's functions.
+        for case in ("rename", "restore", "close", "multiple-faults", "rename-result-gap", "open-result-gap",
+                     "root-replaced", "closed-root-replaced", "collision"):
+            with self.subTest(move_failure=case), scratch() as root:
+                operation = payload_case(root)
+                source = operation.payload
+                destination = operation.private / "relocated parent with spaces/release kit runtime"
+                original_inode = (source.stat().st_dev, source.stat().st_ino)
+                data = BUILD.DataFinality()
+                real_os, proxy = SimpleNamespace(**vars(os)), SimpleNamespace(**vars(os))
+                first = PermissionError(errno.EACCES, "synthetic original rename refusal")
+                restore_error = OSError(errno.EIO, "synthetic original mode-restore failure")
+                close_error = OSError(errno.EIO, "synthetic original close uncertainty")
+                parent_close_errors = {label: OSError(errno.EIO, "synthetic original parent close uncertainty")
+                                       for label in ("source-parent", "destination-parent")}
+                gap = KeyboardInterrupt("synthetic original result-publication gap")
+                held_root, close_failed, rename_entered = [None], [False], []
+                move_descriptors, close_events = {}, []
+                displaced = operation.work / "displaced-original"
+
+                def opened(path, flags, *args, **kwargs):
+                    is_root = path == source.name and "dir_fd" in kwargs
+                    if is_root and case == "root-replaced":
+                        real_os.chmod(source, 0o755)
+                        real_os.rename(source, displaced)
+                        real_os.chmod(displaced, 0o555)
+                        source.mkdir(mode=0o555)
+                        real_os.chmod(source, 0o555)
+                    fd = real_os.open(path, flags, *args, **kwargs)
+                    if is_root:
+                        if case == "open-result-gap":
+                            # The double consumes its real fd; production must not
+                            # guess that lost result or claim the constructor known.
+                            real_os.close(fd)
+                            raise gap
+                        held_root[0] = fd
+                        move_descriptors[fd] = "payload-root"
+                    elif path in {source.parent, destination.parent}:
+                        move_descriptors[fd] = "source-parent" if path == source.parent else "destination-parent"
+                    return fd
+
+                def changed_mode(fd, mode):
+                    self.assertEqual(fd, held_root[0])
+                    if case in {"restore", "multiple-faults"} and mode == 0o555:
+                        raise restore_error
+                    return real_os.fchmod(fd, mode)
+
+                def renamed(old, new, **kwargs):
+                    rename_entered.append(True)
+                    self.assertEqual(real_os.fstat(held_root[0]).st_mode & 0o777, 0o755)
+                    if case in {"rename", "restore", "multiple-faults"}:
+                        raise first
+                    result = real_os.rename(old, new, **kwargs)
+                    if case == "rename-result-gap":
+                        raise gap
+                    return result
+
+                def closed(fd):
+                    result = real_os.close(fd)
+                    label = move_descriptors.pop(fd, None)
+                    if label is not None:
+                        close_events.append(label)
+                        if case == "multiple-faults":
+                            raise close_error if label == "payload-root" else parent_close_errors[label]
+                    if fd == held_root[0] and not close_failed[0]:
+                        close_failed[0] = True
+                        if case == "close":
+                            raise close_error
+                        if case == "closed-root-replaced":
+                            real_os.chmod(destination, 0o755)
+                            real_os.rename(destination, displaced)
+                            real_os.chmod(displaced, 0o555)
+                            destination.mkdir(mode=0o555)
+                            real_os.chmod(destination, 0o555)
+                    return result
+
+                proxy.open, proxy.fchmod, proxy.rename, proxy.close = opened, changed_mode, renamed, closed
+                if case == "collision":
+                    destination.mkdir(mode=0o555)
+                    real_os.chmod(destination, 0o555)
+                with patch.object(BUILD, "DATA", data), patch.object(BUILD, "os", proxy):
+                    with self.assertRaises(BaseException) as caught:
+                        operation._move_payload("relocation", deadline=operation.deadline)
+                error = caught.exception
+                if case in {"rename", "restore", "multiple-faults"}:
+                    self.assertIs(error, first)
+                    self.assertEqual(operation.phase, "supplier-relocation-rename")
+                    self.assertEqual(source.stat().st_mode & 0o777,
+                                     0o755 if case in {"restore", "multiple-faults"} else 0o555)
+                    self.assertFalse(destination.exists())
+                elif case == "close":
+                    self.assertIs(error, close_error)
+                    self.assertEqual(operation.phase, "supplier-relocation-close-payload-root")
+                    self.assertEqual(destination.stat().st_mode & 0o777, 0o555)
+                elif case in {"rename-result-gap", "open-result-gap"}:
+                    self.assertIs(error, gap)
+                    self.assertIs(operation.payload, source)
+                    selected = destination if case == "rename-result-gap" else source
+                    self.assertEqual((selected.stat().st_dev, selected.stat().st_ino), original_inode)
+                    self.assertEqual(selected.stat().st_mode & 0o777, 0o555)
+                elif case in {"root-replaced", "closed-root-replaced"}:
+                    self.assertIs(type(error), BUILD.BuildRefused)
+                    selected = source if case == "root-replaced" else destination
+                    self.assertNotEqual((selected.stat().st_dev, selected.stat().st_ino), original_inode)
+                    self.assertEqual((displaced.stat().st_dev, displaced.stat().st_ino), original_inode)
+                    self.assertEqual(selected.stat().st_mode & 0o777, 0o555)
+                else:
+                    self.assertIs(type(error), BUILD.BuildRefused)
+                    self.assertEqual(str(error), "supplier-move-destination-collision")
+                    self.assertEqual(source.stat().st_mode & 0o777, 0o555)
+                self.assertEqual(bool(rename_entered), case not in {"open-result-gap", "root-replaced", "collision"})
+                self.assertEqual(data.known, case in {"rename", "collision"})
+                if case == "multiple-faults":
+                    events = operation.payload_move_errors
+                    self.assertEqual(len(events), 6)
+                    self.assertEqual([label for label, _ in events], ["supplier-relocation-" + suffix for suffix in
+                        ("rename", "restore-root-mode", "named-post", "close-payload-root",
+                         "close-destination-parent", "close-source-parent")])
+                    self.assertIs(events[0][1], first)
+                    self.assertIs(events[1][1], restore_error)
+                    self.assertIs(type(events[2][1]), BUILD.BuildRefused)
+                    self.assertIs(events[3][1], close_error)
+                    self.assertIs(events[4][1], parent_close_errors["destination-parent"])
+                    self.assertIs(events[5][1], parent_close_errors["source-parent"])
+                    self.assertEqual(close_events, ["payload-root", "destination-parent", "source-parent"])
+                    self.assertEqual(move_descriptors, {})
+                    self.assertEqual(data._pending, 3)
+                self.assertTrue(source.exists() or destination.exists() or displaced.exists())
+                self.assertIs(BUILD.DATA, original_data)
+                self.assertTrue(original_data.known)
 
     def test_real_small_source_projection_refuses_crc_tail_and_body_mismatch(self):
         cases = [archive_fixture(compression_trailer=gzip.compress(b"unselected")),

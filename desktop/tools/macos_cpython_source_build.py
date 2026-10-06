@@ -7,7 +7,7 @@ sign a public release, or run on a shared development machine.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import importlib.util
 import io
@@ -72,6 +72,26 @@ EVIDENCE_ROLES = ("build", "relocation", "modules", "loader", "tls", "cancellati
 TOOL_ROLES = ("sandbox", "xcrun", "shell", "make", "perl", "curl", "codesign", "ls", "orchestrator",
               "sdk-settings", "clang", "ar", "ranlib", "ld", "sysctl")
 INPUT_BOUND_FAILURES = ("ordinary-input-kind", "ordinary-input-links", "ordinary-input-size")
+SDK_INTERFACE_PATHS = (
+    'System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd',
+    'usr/lib/libdl.tbd',
+    'usr/lib/libffi.tbd',
+    'usr/lib/libm.tbd',
+    'System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration.tbd',
+    'usr/lib/libSystem.tbd',
+    'usr/lib/system/libcommonCrypto.tbd',
+    'usr/lib/system/libcompiler_rt.tbd',
+    'usr/lib/system/libcopyfile.tbd',
+    'usr/lib/system/libdyld.tbd',
+    'usr/lib/system/libsystem_c.tbd',
+    'usr/lib/system/libsystem_info.tbd',
+    'usr/lib/system/libsystem_kernel.tbd',
+    'usr/lib/system/libsystem_m.tbd',
+    'usr/lib/system/libsystem_malloc.tbd',
+    'usr/lib/system/libsystem_platform.tbd',
+    'usr/lib/system/libsystem_pthread.tbd',
+    'usr/lib/system/libsystem_trace.tbd',
+)
 
 
 class BuildRefused(ValueError):
@@ -381,6 +401,53 @@ def openssl_configuration(target=ARM_TARGET):
     return (target_profile(target)["openssl"], *OPENSSL_CONFIGURE[1:])
 
 
+def link_map_objects(body, prefix, build_root, sdk):
+    """Interpret the complete object table, not opaque symbol/literal-string bytes."""
+    need(type(body) is bytes and 0 < len(body) <= 8 * MIB, "native-link-map-bound")
+    starts = list(re.finditer(rb"(?m)^# Object files:\n", body))
+    ends = list(re.finditer(rb"(?m)^# Sections:\n", body))
+    need(len(starts) == len(ends) == 1 and starts[0].end() < ends[0].start(), "native-link-map-objects")
+    try:
+        section = body[starts[0].end():ends[0].start()].decode("utf-8", "strict")
+    except UnicodeDecodeError as error:
+        raise BuildRefused("native-link-map-object-row") from error
+    need(section.endswith("\n"), "native-link-map-object-row")
+    interfaces = {str(sdk / name) for name in SDK_INTERFACE_PATHS}
+    objects, components = [], set()
+    for line in section[:-1].split("\n"):
+        need(all(32 <= ord(character) < 127 for character in line), "native-link-map-object-row")
+        match = re.fullmatch(r"\[\s*([0-9]+)\]\s+(.+)", line)
+        need(match is not None, "native-link-map-object-row")
+        ordinal, name = int(match[1]), match[2]
+        need(ordinal == len(objects), "native-link-map-object-order")
+        objects.append(name)
+        if ordinal == 0:
+            need(name == "linker synthesized", "native-link-map-synthesized")
+            continue
+        # These exact original-SDK interfaces are not redistributed static objects.
+        # Keep them in complete object evidence; do not exempt arbitrary .tbd paths.
+        if name in interfaces:
+            continue
+        selected_prefix, build_prefix = str(prefix / "lib") + "/", str(build_root) + "/"
+        if name.startswith(build_prefix):
+            name = name[len(build_prefix):]
+        if name.startswith(selected_prefix + "libssl.a(") or name.startswith(selected_prefix + "libcrypto.a("):
+            components.add("openssl")
+        elif name.startswith(selected_prefix + "libz.a("):
+            components.add("zlib")
+        elif name.startswith("Modules/_hacl/"):
+            components.add("hacl")
+        elif name.startswith("Modules/expat/"):
+            components.add("expat")
+        elif name.startswith(("Programs/", "Modules/", "Objects/", "Parser/", "Python/", "libpython3.14.a(")):
+            components.add("cpython")
+        else:
+            # No invented compiler-runtime redistribution or static-archive allowance.
+            raise BuildRefused("native-unaccounted-static-object")
+    need({"cpython", "openssl", "zlib", "hacl", "expat"} <= components, "native-incorporation-roster")
+    return objects, sorted(components)
+
+
 def probe_result(body, role, target, probe):
     target_profile(target)
     value = decode(body)
@@ -498,6 +565,7 @@ class Build:
         self.phase, self.failure, self.cleanup_errors = "admission", None, []
         self.scratch_retired = False
         self.retained = None
+        self.relocation_parent_identity = self.export_identity = None
         self.payload, self.files, self.notice_paths, self.native = None, None, None, {}
         self.environment = {}
         self.source_rows, self.source_trees, self.toolchain = {}, {}, {}
@@ -948,6 +1016,198 @@ class Build:
                           deadline=self.deadline if deadline is None else deadline)
         need(list(actual.values()) == self.files, "supplier-complete-byte-mode-correspondence")
 
+    def _move_payload(self, role, *, deadline):
+        """Move only the same sealed task payload; Darwin requires root write permission."""
+        relocated_parent = self.private / "relocated parent with spaces"
+        routes = {
+            "relocation": (self.private / "supplier", relocated_parent / "release kit runtime",
+                           self.private_identity, self.relocation_parent_identity),
+            "retention": (relocated_parent / "release kit runtime", self.work / "retained-supplier",
+                          self.relocation_parent_identity, self.work_identity),
+            "export": (self.work / "retained-supplier", self.work / "export/supplier",
+                       self.work_identity, self.export_identity),
+        }
+        need(role in routes, "supplier-move-role")
+        source, destination, source_parent, destination_parent = routes[role]
+        phase = "supplier-" + role
+        self.phase = phase + "-admission"
+
+        def bound(value, code):
+            if not value:
+                DATA.unknown()
+                raise BuildRefused(code)
+
+        verdict = self.guard.lifetime_ledger.verdict()
+        need(DATA.known and not self.inflight and verdict.complete and not verdict.fatal and verdict.contained,
+             "supplier-move-original-finality")
+        bound(self.payload == source and custody(self.work.lstat()) == self.work_identity,
+              "supplier-move-source-route")
+        remaining(deadline, time.monotonic(), CLEANUP_SECONDS if role != "relocation" else WORK_SECONDS)
+        self.check_payload(deadline=deadline)
+        original = source.lstat()
+        need(stat.S_ISDIR(original.st_mode) and original.st_uid == os.getuid()
+             and stat.S_IMODE(original.st_mode) == 0o555, "supplier-move-sealed-root")
+        specs = ((source.parent, source_parent), (destination.parent, destination_parent))
+        before_parents = []
+        for parent, expected in specs:
+            current = parent.lstat()
+            bound(custody(current) == expected and stat.S_ISDIR(current.st_mode)
+                  and current.st_uid == os.getuid() and stat.S_IMODE(current.st_mode) == 0o700,
+                  "supplier-move-parent-original")
+            before_parents.append(current)
+
+        failure = failure_phase = None
+        # Private original exceptions only: never serialize their messages or
+        # tracebacks. The fixed one-operation/three-close path bounds this list.
+        self.payload_move_errors = []
+        parent_fds, root_fd = [], None
+        restore_required, mode_restored, move_post_known = False, False, False
+        outcome = "not-entered"
+        post_root, post_parents = None, None
+
+        def remember(error):
+            nonlocal failure, failure_phase
+            if failure is None:
+                failure, failure_phase = error, self.phase
+            self.payload_move_errors.append((self.phase, error))
+
+        def close_original(fd, label):
+            self.phase = phase + "-close-" + label
+            try:
+                os.close(fd)
+            except BaseException as error:
+                # ExitStack still closes the other original descriptors. Keep
+                # each error even if a later close changes its raised exception.
+                remember(error)
+                raise
+
+        def absent(name, fd):
+            try:
+                os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return True
+            return False
+
+        def same_root(mode):
+            current = os.fstat(root_fd)
+            bound(custody(current) == (original.st_dev, original.st_ino,
+                  stat.S_IFDIR | mode, original.st_uid, original.st_gid), "supplier-move-root-original")
+            return current
+
+        def same_parents():
+            for (parent, expected), fd in zip(specs, parent_fds):
+                held, named = os.fstat(fd), parent.lstat()
+                bound(custody(held) == expected and identity(named) == identity(held),
+                      "supplier-move-parent-post")
+
+        def closed_originals():
+            try:
+                need(identity(destination.lstat()) == post_root
+                     and all(identity(parent.lstat()) == expected
+                             for (parent, _), expected in zip(specs, post_parents)), "supplier-move-closed-post")
+            except BaseException:
+                DATA.unknown()
+                raise
+
+        try:
+            with ExitStack() as originals:
+                try:
+                    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                    for label, ((parent, _), before) in zip(
+                            ("source-parent", "destination-parent"), zip(specs, before_parents)):
+                        fd = originals.enter_context(DATA.acquiring(
+                            os.open, lambda value, label=label: close_original(value, label), parent, flags))
+                        parent_fds.append(fd)
+                        bound(identity(os.fstat(fd)) == identity(before)
+                              and identity(parent.lstat()) == identity(before), "supplier-move-parent-open")
+                    root_fd = originals.enter_context(DATA.acquiring(
+                        os.open, lambda value: close_original(value, "payload-root"),
+                        source.name, flags, dir_fd=parent_fds[0]))
+                    bound(identity(os.fstat(root_fd)) == identity(original)
+                          and identity(os.stat(source.name, dir_fd=parent_fds[0], follow_symlinks=False))
+                          == identity(original), "supplier-move-root-open")
+                    need(absent(destination.name, parent_fds[1]), "supplier-move-destination-collision")
+                    same_parents()
+                    self.phase = phase + "-enable-root-write"
+                    remaining(deadline, time.monotonic())
+                    # Arm restoration before the syscall, including a lost successful result.
+                    restore_required = True
+                    os.fchmod(root_fd, 0o755)
+                    same_root(0o755)
+                    self.phase = phase + "-rename"
+                    remaining(deadline, time.monotonic())
+                    outcome = "unknown"
+                    try:
+                        os.rename(source.name, destination.name,
+                                  src_dir_fd=parent_fds[0], dst_dir_fd=parent_fds[1])
+                    except OSError as error:
+                        remember(error)
+                        # A failed rename is known only while the same original remains
+                        # at the old name and the fixed destination is still absent.
+                        self.phase = phase + "-failed-rename-post"
+                        try:
+                            if (identity(os.stat(source.name, dir_fd=parent_fds[0], follow_symlinks=False))
+                                    == identity(same_root(0o755)) and absent(destination.name, parent_fds[1])):
+                                same_parents()
+                                outcome = "failed"
+                        except BaseException as post_error:
+                            DATA.unknown()
+                            remember(post_error)
+                        raise
+                    self.payload = destination
+                    outcome = "moved"
+                except BaseException as error:
+                    if not any(error is saved for _, saved in self.payload_move_errors):
+                        remember(error)
+                finally:
+                    if outcome == "unknown":
+                        DATA.unknown()
+                    if restore_required:
+                        self.phase = phase + "-restore-root-mode"
+                        try:
+                            os.fchmod(root_fd, 0o555)
+                            same_root(0o555)
+                            mode_restored = True
+                        except BaseException as error:
+                            DATA.unknown()
+                            remember(error)
+                    if root_fd is not None and outcome != "unknown":
+                        self.phase = phase + "-named-post"
+                        try:
+                            held = same_root(0o555)
+                            named = destination if outcome == "moved" else source
+                            named_fd = parent_fds[1] if outcome == "moved" else parent_fds[0]
+                            need(identity(os.stat(named.name, dir_fd=named_fd, follow_symlinks=False))
+                                 == identity(held), "supplier-move-named-original")
+                            if outcome == "moved":
+                                need(absent(source.name, parent_fds[0]), "supplier-move-source-still-present")
+                            same_parents()
+                            post_root = identity(held)
+                            post_parents = [identity(os.fstat(fd)) for fd in parent_fds]
+                            move_post_known = True
+                        except BaseException as error:
+                            DATA.unknown()
+                            remember(error)
+                    self.phase = phase + "-close-originals"
+        except BaseException as error:
+            if not any(error is saved for _, saved in self.payload_move_errors):
+                remember(error)
+        finally:
+            # Includes interruption of the unwind itself: an unfinished mode or
+            # membership proof must not look known merely because fd closes ran.
+            if restore_required and (not mode_restored or not move_post_known or outcome == "unknown"):
+                DATA.unknown()
+        if failure is not None:
+            self.phase = failure_phase
+            raise failure
+        self.phase = phase + "-payload-post"
+        need(DATA.known and outcome == "moved", "supplier-move-close-finality")
+        remaining(deadline, time.monotonic())
+        closed_originals()
+        self.check_payload(deadline=deadline)
+        closed_originals()
+        remaining(deadline, time.monotonic())
+
     def native_probes(self):
         probe = str(self.root / "desktop/tools/macos_cpython_source_probe.py")
         hashes = {name: row["sha256"] for name, row in self.source_binding.items()}
@@ -964,16 +1224,19 @@ class Build:
                 result = self.run(label + "-" + role, [str(self.payload / "python/bin/python3"), "-I", "-S", "-B",
                     probe, role, self.target, str(path)], env=clean, maximum=60)
                 results[role] = probe_result(result.stdout, role, self.target, self.probe)
+            self.phase = label + "-payload-post"
             self.check_payload()
             return results
 
         original = run_set("original", ("modules", "loader", "tls", "cancellation"))
         parent = self.private / "relocated parent with spaces"
+        self.phase = "supplier-relocation-parent-create"
         parent.mkdir(mode=0o700)
-        relocated = parent / "release kit runtime"
+        self.phase = "supplier-relocation-parent-post"
+        self.relocation_parent_identity = custody(parent.lstat())
         old = self.payload
-        old.rename(relocated)
-        self.payload = relocated
+        self._move_payload("relocation", deadline=self.deadline)
+        relocated = self.payload
         need(not old.exists() and not old.is_symlink(), "payload-original-not-retired")
         moved = run_set("relocated", ("modules", "loader", "tls"))
         self.native = {key: original[key] for key in ("modules", "loader", "tls", "cancellation")}
@@ -995,39 +1258,8 @@ class Build:
 
     def notices(self):
         self.phase = "incorporated-notices"
-        text = self.evidence["python-link.map"].decode("utf-8", "strict")
-        section = re.search(r"^# Object files:\n(.*?)(?=^# Sections:)", text, flags=re.M | re.S)
-        need(section is not None, "native-link-map-objects")
-        objects, components = [], set()
-        for line in section[1].splitlines():
-            match = re.fullmatch(r"\[\s*([0-9]+)\]\s+(.+)", line)
-            need(match is not None, "native-link-map-object-row")
-            ordinal, name = int(match[1]), match[2]
-            need(ordinal == len(objects), "native-link-map-object-order")
-            objects.append(name)
-            if ordinal == 0:
-                need(name == "linker synthesized", "native-link-map-synthesized")
-                continue
-            prefix = str(self.private / "prefix/lib") + "/"
-            build_prefix = str(self.python_build) + "/"
-            if name.startswith(build_prefix):
-                name = name[len(build_prefix):]
-            if name.startswith(prefix + "libssl.a(") or name.startswith(prefix + "libcrypto.a("):
-                components.add("openssl")
-            elif name.startswith(prefix + "libz.a("):
-                components.add("zlib")
-            elif name.startswith("Modules/_hacl/"):
-                components.add("hacl")
-            elif name.startswith("Modules/expat/"):
-                components.add("expat")
-            elif name.startswith(("Programs/", "Modules/", "Objects/", "Parser/", "Python/", "libpython3.14.a(")):
-                components.add("cpython")
-            else:
-                # Do not invent compiler-runtime redistribution/notices. Keep
-                # actual map evidence for a narrowly researched follow-up if the
-                # selected Apple toolchain incorporates an additional archive.
-                raise BuildRefused("native-unaccounted-static-object")
-        need({"cpython", "openssl", "zlib", "hacl", "expat"} <= components, "native-incorporation-roster")
+        objects, components = link_map_objects(
+            self.evidence["python-link.map"], self.private / "prefix", self.python_build, self.sdk)
         self.notice_evidence.update(objects=objects, incorporated=sorted(components),
                                     linkMapSha256=digest(self.evidence["python-link.map"]))
         self.evidence_json("notices.json", self.notice_evidence)
@@ -1039,11 +1271,9 @@ class Build:
         need(custody(self.work.lstat()) == self.work_identity, "original-task-root-changed")
         cleanup_deadline = min(self.deadline + CLEANUP_SECONDS, time.monotonic() + CLEANUP_SECONDS)
         if self.failure is None and self.payload is not None:
-            self.check_payload(deadline=cleanup_deadline)
             self.retained = self.work / "retained-supplier"
             need(not self.retained.exists() and not self.retained.is_symlink(), "supplier-retention-collision")
-            self.payload.rename(self.retained)
-            self.payload = self.retained
+            self._move_payload("retention", deadline=cleanup_deadline)
         if self.private_identity is not None:
             need(custody(self.private.lstat()) == self.private_identity, "original-private-root-changed")
             retire_tree(self.private, cleanup_deadline)
@@ -1108,6 +1338,7 @@ class Build:
         self.evidence_json("run-result.json", report)
         export = self.work / "export"
         export.mkdir(mode=0o700)
+        self.export_identity = custody(export.lstat())
         (export / "evidence").mkdir(mode=0o700)
         for name, body in self.evidence.items():
             self.final_check()
@@ -1118,11 +1349,8 @@ class Build:
             export.rename(self.public)
             return
         need(set(EVIDENCE_ROLES) <= {Path(name).stem for name in self.evidence}, "supplier-required-evidence")
-        self.check_payload(deadline=self.deadline + CLEANUP_SECONDS)
         supplier = export / "supplier"
-        self.payload.rename(supplier)
-        self.payload = supplier
-        self.check_payload(deadline=self.deadline + CLEANUP_SECONDS)
+        self._move_payload("export", deadline=self.deadline + CLEANUP_SECONDS)
         receipt = {"schemaVersion": 1, "kind": "mrk-macos-cpython-source-supplier-v1",
             "target": self.target, "pythonVersion": "3.14.7", "gil": True,
             "sourceLockSha256": self.source_lock["sha256"],
