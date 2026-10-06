@@ -81,12 +81,244 @@ def make_configuration(exe=".exe", multiarch="darwin", target=BUILD.ARM_TARGET):
     required = "WITH_PYMALLOC HAVE_FORK HAVE_POSIX_SPAWN HAVE_SYS_RESOURCE_H HAVE_WAITPID HAVE_POLL HAVE_SOCKETPAIR HAVE_FFI_PREP_CIF_VAR HAVE_FFI_PREP_CLOSURE_LOC HAVE_FFI_CLOSURE_ALLOC".split()
     setup = (ROOT / "desktop/tools/macos_cpython_source_setup.local").read_bytes().replace(b"@MRK_PREFIX@", str(prefix).encode())
     names = BUILD.BOOTSTRAP + BUILD.INTRINSIC + BUILD.OPTIONAL
-    files = {"Makefile": "".join(key + "=" + value + "\n" for key, value in values.items()).encode(),
+    files = {"Makefile": "".join(key + ("?=" if key == "PYTHON_FOR_REGEN" else "=") + value + "\n" for key, value in values.items()).encode(),
         "pyconfig.h": "".join("#define " + key + " 1\n" for key in required).encode(),
         "Modules/config.c": ("struct _inittab _PyImport_Inittab[] = {\n" +
             "".join('{"' + name + '", init_' + name + "},\n" for name in names) + "{0, 0}\n};\n").encode(),
         "Modules/Setup.local": setup}
     return files, prefix, sdk
+
+
+def observed_arm_configuration():
+    """Inert projection of authenticated configure DATA from Mac run37446199359.
+
+    Contains every input inspected by python_configuration, not whole generated
+    files or native evidence. Only four exact original path roles were replaced.
+    """
+    # Makefile original SHA256 69420c6d89d849fb1a9962612f3ea63aa219a0011da1a35a597e141816c073bb
+    # pyconfig.h original SHA256 9c567e7631b61240ec54ad6c4c342e59cabbf5881b8b441c13041102aaa703c3
+    # Modules/config.c original SHA256 e91b4ccd432e9be378ee78bb96c2b059e22671b5c41c568480720727426151e2
+    # Modules/Setup.local original SHA256 6df2c728221d3941337531dfe9b048eaaf269d9a1046cc799014a0a514428796
+    files = {
+        'Makefile': b"""MODBUILT_NAMES=      _bisect  _heapq  _json  _random  _struct  math  binascii  zlib  fcntl  _posixsubprocess  select  unicodedata  _ctypes  _socket  _ssl  pyexpat  resource  _scproxy  _md5  _sha1  _sha2  _sha3  _blake2  _hmac  atexit  faulthandler  posix  _signal  _tracemalloc  _suggestions  _datetime  _codecs  _collections  errno  _io  itertools  _sre  _sysconfig  _thread  time  _types  _typing  _weakref  _abc  _functools  _locale  _opcode  _operator  _stat  _symtable  pwd
+MODSHARED_NAMES=   
+MODDISABLED_NAMES=   _asyncio  _bz2  _codecs_cn  _codecs_hk  _codecs_iso2022  _codecs_jp  _codecs_kr  _codecs_tw  _csv  _ctypes_test  _curses  _curses_panel  _dbm  _decimal  _elementtree  _gdbm  _hashlib  _interpchannels  _interpqueues  _interpreters  _lsprof  _lzma  _multibytecodec  _multiprocessing  _pickle  _posixshmem  _queue  _remote_debugging  _sqlite3  _statistics  _testbuffer  _testcapi  _testclinic  _testclinic_limited  _testimportmultiple  _testinternalcapi  _testlimitedcapi  _testmultiphase  _testsinglephase  _tkinter  _uuid  _xxtestfuzz  _zoneinfo  _zstd  array  cmath  grp  mmap  readline  syslog  termios  xxlimited  xxlimited_35  xxsubtype
+VERSION=	3.14
+CC=		/Apple/clang
+ABIFLAGS=	
+CONFIGURE_CFLAGS=	-O2 -g0 -fPIC -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk -mmacosx-version-min=26.0
+CONFIGURE_CPPFLAGS=	
+CONFIGURE_LDFLAGS=	-arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk -mmacosx-version-min=26.0 -L/private/task/prefix/lib
+MACHDEP=	darwin
+MULTIARCH=	darwin
+BUILDEXE=	.exe
+MACOSX_DEPLOYMENT_TARGET=26.0
+LIBEXPAT_A= Modules/expat/libexpat.a
+MODULE__SCPROXY_LDFLAGS=-framework SystemConfiguration -framework CoreFoundation
+MODULE_PYEXPAT_CFLAGS=-I$(srcdir)/Modules/expat
+MODULE_PYEXPAT_LDFLAGS=-lm $(LIBEXPAT_A)
+MODULE__CTYPES_CFLAGS=-fno-strict-overflow -I/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk/usr/include/ffi -DUSING_APPLE_OS_LIBFFI=1 -DUSING_MALLOC_CLOSURE_DOT_C=1
+MODULE__CTYPES_LDFLAGS=-lffi -ldl
+MODULE_ZLIB_LDFLAGS=/private/task/prefix/lib/libz.a
+MODULE__SSL_CFLAGS=-I/private/task/prefix/include
+MODULE__SSL_LDFLAGS=-L/private/task/prefix/lib  -lssl -lcrypto
+PY_ENABLE_SHARED=	0
+BUILDPYTHON=	python$(BUILDEXE)
+PYTHON_FOR_REGEN?=/chosen/python3
+""",
+        'pyconfig.h': b"""#define HAVE_FFI_CLOSURE_ALLOC 1
+#define HAVE_FFI_PREP_CIF_VAR 1
+#define HAVE_FFI_PREP_CLOSURE_LOC 1
+#define HAVE_FORK 1
+#define HAVE_POLL 1
+#define HAVE_POSIX_SPAWN 1
+#define HAVE_SOCKETPAIR 1
+#define HAVE_SYS_RESOURCE_H 1
+#define HAVE_WAITPID 1
+/* #undef Py_DEBUG */
+/* #undef Py_ENABLE_SHARED */
+/* #undef Py_GIL_DISABLED */
+/* #undef Py_TRACE_REFS */
+/* #undef WITH_MIMALLOC */
+#define WITH_PYMALLOC 1
+""",
+        'Modules/config.c': b"""struct _inittab _PyImport_Inittab[] = {
+
+    {"_bisect", PyInit__bisect},
+    {"_heapq", PyInit__heapq},
+    {"_json", PyInit__json},
+    {"_random", PyInit__random},
+    {"_struct", PyInit__struct},
+    {"math", PyInit_math},
+    {"binascii", PyInit_binascii},
+    {"zlib", PyInit_zlib},
+    {"fcntl", PyInit_fcntl},
+    {"_posixsubprocess", PyInit__posixsubprocess},
+    {"select", PyInit_select},
+    {"unicodedata", PyInit_unicodedata},
+    {"_ctypes", PyInit__ctypes},
+    {"_socket", PyInit__socket},
+    {"_ssl", PyInit__ssl},
+    {"pyexpat", PyInit_pyexpat},
+    {"resource", PyInit_resource},
+    {"_scproxy", PyInit__scproxy},
+    {"_md5", PyInit__md5},
+    {"_sha1", PyInit__sha1},
+    {"_sha2", PyInit__sha2},
+    {"_sha3", PyInit__sha3},
+    {"_blake2", PyInit__blake2},
+    {"_hmac", PyInit__hmac},
+    {"atexit", PyInit_atexit},
+    {"faulthandler", PyInit_faulthandler},
+    {"posix", PyInit_posix},
+    {"_signal", PyInit__signal},
+    {"_tracemalloc", PyInit__tracemalloc},
+    {"_suggestions", PyInit__suggestions},
+    {"_datetime", PyInit__datetime},
+    {"_codecs", PyInit__codecs},
+    {"_collections", PyInit__collections},
+    {"errno", PyInit_errno},
+    {"_io", PyInit__io},
+    {"itertools", PyInit_itertools},
+    {"_sre", PyInit__sre},
+    {"_sysconfig", PyInit__sysconfig},
+    {"_thread", PyInit__thread},
+    {"time", PyInit_time},
+    {"_types", PyInit__types},
+    {"_typing", PyInit__typing},
+    {"_weakref", PyInit__weakref},
+    {"_abc", PyInit__abc},
+    {"_functools", PyInit__functools},
+    {"_locale", PyInit__locale},
+    {"_opcode", PyInit__opcode},
+    {"_operator", PyInit__operator},
+    {"_stat", PyInit__stat},
+    {"_symtable", PyInit__symtable},
+    {"pwd", PyInit_pwd},
+
+/* -- ADDMODULE MARKER 2 -- */
+
+    /* This module lives in marshal.c */
+    {"marshal", PyMarshal_Init},
+
+    /* This lives in import.c */
+    {"_imp", PyInit__imp},
+
+    /* This lives in Python/Python-ast.c */
+    {"_ast", PyInit__ast},
+
+    /* This lives in Python/Python-tokenize.c */
+    {"_tokenize", PyInit__tokenize},
+
+    /* These entries are here for sys.builtin_module_names */
+    {"builtins", NULL},
+    {"sys", NULL},
+
+    /* This lives in gcmodule.c */
+    {"gc", PyInit_gc},
+
+    /* This lives in Python/_contextvars.c */
+    {"_contextvars", PyInit__contextvars},
+
+    /* This lives in _warnings.c */
+    {"_warnings", _PyWarnings_Init},
+
+    /* This lives in Objects/unicodeobject.c */
+    {"_string", PyInit__string},
+
+    /* Sentinel */
+    {0, 0}
+};
+""",
+        'Modules/Setup.local': b"""# CPython 3.14.7 / macOS 26 ARM64 or x86_64. Not an execution grant.
+# 24 optional + 27 bootstrap + 10 intrinsic; no shared extensions.
+# /private/task/prefix is replaced only by the fixed private build prefix.
+*static*
+_bisect _bisectmodule.c
+_heapq _heapqmodule.c
+_json _json.c
+_random _randommodule.c
+_struct _struct.c
+math mathmodule.c
+binascii binascii.c $(MODULE_BINASCII_CFLAGS) /private/task/prefix/lib/libz.a
+zlib zlibmodule.c $(MODULE_ZLIB_CFLAGS) /private/task/prefix/lib/libz.a
+fcntl fcntlmodule.c
+_posixsubprocess _posixsubprocess.c
+select selectmodule.c
+unicodedata unicodedata.c
+# No explicit flags: retain Darwin's SDK ffi flags and system -lffi.
+_ctypes _ctypes/_ctypes.c _ctypes/callbacks.c _ctypes/callproc.c _ctypes/stgdict.c _ctypes/cfield.c _ctypes/malloc_closure.c
+_socket socketmodule.c
+# AX_CHECK_OPENSSL checks the static-only prefix; final operands are explicit.
+_ssl _ssl.c $(MODULE__SSL_CFLAGS) /private/task/prefix/lib/libssl.a /private/task/prefix/lib/libcrypto.a
+# Retain configured internal Expat and Darwin framework flags.
+pyexpat pyexpat.c
+resource resource.c
+_scproxy _scproxy.c
+_md5 md5module.c $(MODULE__MD5_CFLAGS) Modules/_hacl/libHacl_Hash_MD5.a
+_sha1 sha1module.c $(MODULE__SHA1_CFLAGS) Modules/_hacl/libHacl_Hash_SHA1.a
+_sha2 sha2module.c $(MODULE__SHA2_CFLAGS) Modules/_hacl/libHacl_Hash_SHA2.a
+_sha3 sha3module.c $(MODULE__SHA3_CFLAGS) Modules/_hacl/libHacl_Hash_SHA3.a
+_blake2 blake2module.c $(MODULE__BLAKE2_CFLAGS) Modules/_hacl/libHacl_Hash_BLAKE2.a
+_hmac hmacmodule.c $(MODULE__HMAC_CFLAGS) Modules/_hacl/libHacl_HMAC.a
+*disabled*
+_asyncio
+_bz2
+_codecs_cn
+_codecs_hk
+_codecs_iso2022
+_codecs_jp
+_codecs_kr
+_codecs_tw
+_csv
+_ctypes_test
+_curses
+_curses_panel
+_dbm
+_decimal
+_elementtree
+_gdbm
+_hashlib
+_interpchannels
+_interpqueues
+_interpreters
+_lsprof
+_lzma
+_multibytecodec
+_multiprocessing
+_pickle
+_posixshmem
+_queue
+_remote_debugging
+_sqlite3
+_statistics
+_testbuffer
+_testcapi
+_testclinic
+_testclinic_limited
+_testimportmultiple
+_testinternalcapi
+_testlimitedcapi
+_testmultiphase
+_testsinglephase
+_tkinter
+_uuid
+_xxtestfuzz
+_zoneinfo
+_zstd
+array
+cmath
+grp
+mmap
+readline
+syslog
+termios
+xxlimited
+xxlimited_35
+xxsubtype
+""",
+    }
+    return files, Path("/private/task/prefix"), Path("/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk")
 
 
 def mach_o(*, dylib=b"/usr/lib/libSystem.B.dylib", minimum=26 << 16, extra=b"",
@@ -165,7 +397,7 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             ("Makefile", b"MACOSX_DEPLOYMENT_TARGET=26.0", b"MACOSX_DEPLOYMENT_TARGET=15.0"),
             ("Makefile", b"-lm $(LIBEXPAT_A)", b"-lexpat"),
             ("Makefile", b"-framework SystemConfiguration", b"-framework Unselected"),
-            ("Makefile", b"PYTHON_FOR_REGEN=/chosen/python3", b"PYTHON_FOR_REGEN=python3"),
+            ("Makefile", b"PYTHON_FOR_REGEN?=/chosen/python3", b"PYTHON_FOR_REGEN?=python3"),
             ("pyconfig.h", b"#define HAVE_FFI_PREP_CIF_VAR 1", b"/* feature absent */"),
             ("Modules/Setup.local", b"/lib/libssl.a", b"/lib/libssl.dylib"),
             ("Modules/Setup.local", b"_ctypes/malloc_closure.c", b""),
@@ -175,6 +407,68 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 changed = {**files, name: files[name].replace(old, new)}
                 with self.assertRaises(BUILD.BuildRefused):
                     BUILD.python_configuration(changed, prefix, sdk, "/Apple/clang", "/chosen/python3")
+
+        # All configuration predicates are exercised on the source-derived
+        # native checkpoint, not a fixture manufactured from BUILD constants.
+        observed, prefix, sdk = observed_arm_configuration()
+        expected = BUILD.python_configuration(observed, prefix, sdk, "/Apple/clang", "/chosen/python3", BUILD.ARM_TARGET)
+        self.assertEqual(expected["executable"], "python.exe")
+        self.assertEqual(expected["generated"], ["_sysconfigdata__darwin_darwin.py",
+                                              "_sysconfig_vars__darwin_darwin.json", "build-details.json"])
+        self.assertEqual(len(expected["builtins"]), 61)
+        self.assertEqual(len(set(expected["builtins"])), 61)
+        make = observed["Makefile"]
+        self.assertEqual(make.count(b"PYTHON_FOR_REGEN?=/chosen/python3\n"), 1)
+        self.assertEqual(BUILD.make_value(make, "PYTHON_FOR_REGEN"), "/chosen/python3")
+        self.assertEqual(BUILD.make_value(make, "CC"), "/Apple/clang")
+        self.assertEqual(BUILD.make_value(make, "CONFIGURE_CPPFLAGS"), "")
+        original_regen = next(line for line in make.splitlines(keepends=True) if line.startswith(b"PYTHON_FOR_REGEN"))
+        original_cc = next(line for line in make.splitlines(keepends=True) if line.startswith(b"CC" ) and line[2:3] in (b"=", b" ", b"\t"))
+        for key, original, value, required_operator in (
+                (b"PYTHON_FOR_REGEN", original_regen, b"/chosen/python3", b"?="),
+                (b"CC", original_cc, b"/Apple/clang", b"=")):
+            for operator in (b"=", b"?=", b":=", b"::=", b":::=", b"+=", b"!=", b"??="):
+                declaration = key + operator + value + b"\n"
+                with self.subTest(key=key, duplicate_operator=operator), self.assertRaises(BUILD.BuildRefused):
+                    BUILD.python_configuration({**observed, "Makefile": make + declaration}, prefix, sdk,
+                                               "/Apple/clang", "/chosen/python3", BUILD.ARM_TARGET)
+                if operator != required_operator:
+                    with self.subTest(key=key, replacement_operator=operator), self.assertRaises(BUILD.BuildRefused):
+                        BUILD.python_configuration({**observed, "Makefile": make.replace(original, declaration)}, prefix, sdk,
+                                                   "/Apple/clang", "/chosen/python3", BUILD.ARM_TARGET)
+            for modifier in (b" ", b"\t", b"override ", b"export ", b"private ", b"override export "):
+                declaration = modifier + key + required_operator + value + b"\n"
+                for changed in (make + declaration, make.replace(original, declaration)):
+                    with self.subTest(key=key, modifier=modifier), self.assertRaises(BUILD.BuildRefused):
+                        BUILD.python_configuration({**observed, "Makefile": changed}, prefix, sdk,
+                                                   "/Apple/clang", "/chosen/python3", BUILD.ARM_TARGET)
+            for declaration in (b"define " + key + b"\n" + value + b"\nendef\n",
+                                b"override define " + key + b" :=\n" + value + b"\nendef\n"):
+                with self.subTest(key=key, definition=True), self.assertRaises(BUILD.BuildRefused):
+                    BUILD.python_configuration({**observed, "Makefile": make + declaration}, prefix, sdk,
+                                               "/Apple/clang", "/chosen/python3", BUILD.ARM_TARGET)
+            with self.subTest(key=key, missing=True), self.assertRaises(BUILD.BuildRefused):
+                BUILD.python_configuration({**observed, "Makefile": make.replace(original, b"")}, prefix, sdk,
+                                           "/Apple/clang", "/chosen/python3", BUILD.ARM_TARGET)
+        with self.assertRaises(BUILD.BuildRefused):
+            BUILD.python_configuration({**observed, "Makefile": make.replace(original_regen, b"PYTHON_FOR_REGEN?=python3\n")},
+                                       prefix, sdk, "/Apple/clang", "/chosen/python3", BUILD.ARM_TARGET)
+        with self.assertRaises(BUILD.BuildRefused):
+            BUILD.python_configuration(observed, prefix, sdk, "/Apple/clang", "/chosen/python3", BUILD.INTEL_TARGET)
+        # Conditional Make syntax is not authority to inherit a different tool.
+        source = (ROOT / "desktop/tools/macos_cpython_source_build.py").read_text()
+        prepare = source.split("    def prepare(self):", 1)[1].split("\n    def sources(", 1)[0]
+        build = source.split("    def build_python(self):", 1)[1].split("\n    def project(", 1)[0]
+        self.assertIn('CONFIG_SHELL=self.shell, PYTHON_FOR_REGEN=self.orchestrator,', prepare)
+        self.assertIn('self.environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",', prepare)
+        self.assertNotIn("os.environ", prepare)
+        for name in ("MAKEFLAGS", "MAKEFILES", "MFLAGS"):
+            self.assertNotIn(name, prepare + build)
+        self.assertIn('make_args = [self.make, "-j2", "PYTHON_FOR_REGEN=" + self.orchestrator,', build)
+        self.assertIn('"PYTHON_FOR_BUILD=./$(BUILDPYTHON) -E -B"]', build)
+        self.assertEqual(build.count('[*make_args,'), 2)
+        self.assertIn('environment = {**self.environment, **self.orchestration_config,', build)
+        self.assertNotIn('"-e"', build)
 
     def test_macho_refuses_foreign_deployment_loader_injection_and_truncation(self):
         self.assertEqual(PROBE.macho(mach_o())["architecture"], "arm64")

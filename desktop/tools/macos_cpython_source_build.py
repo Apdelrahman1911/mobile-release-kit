@@ -319,9 +319,18 @@ def inventory(body, source):
 
 
 def make_value(body, key):
-    values = re.findall(rb"^" + re.escape(key.encode("ascii")) + rb"[ \t]*=[ \t]*(.*)$", body, re.M)
-    need(len(values) == 1, "make-assignment-missing-or-repeated")
-    return values[0].decode("utf-8", "strict").strip()
+    # CPython's nominated Makefile uses a conditional default only for this
+    # regenerating interpreter. Every other admitted assignment stays plain '='.
+    operator = b"?=" if key == "PYTHON_FOR_REGEN" else b"="
+    name = re.escape(key.encode("ascii"))
+    modifiers = rb"[ \t]*(?:(?:override|export|private)[ \t]+)*"
+    values = re.findall(rb"^(" + modifiers + rb")" + name + rb"[ \t]*([:+?!]*=)[ \t]*(.*)$", body, re.M)
+    defined = re.search(rb"^" + modifiers + rb"define[ \t]+" + name + rb"(?:[ \t:+?!=]|$)", body, re.M)
+    # Count all assignment operators/modifiers before selecting the exact form;
+    # a second override must not disappear merely because its syntax differs.
+    need(defined is None and len(values) == 1 and values[0][0] == b"" and values[0][1] == operator,
+         "make-assignment-missing-or-repeated")
+    return values[0][2].decode("utf-8", "strict").strip()
 
 
 def target_profile(target):
