@@ -3,8 +3,9 @@
 
 Import is DATA-only. The native entry authenticates its original hosted source,
 loads the existing process owner, builds two separate images, and invokes one
-installed fixture. Parsed DATA never authorizes a service operation. The fixed
-fixture cannot qualify publisher identity, the desktop UI, or distribution.
+installed fixture. The explicit layout diagnostic observes two public statuses
+instead and never enters registration. Parsed DATA never authorizes a service
+operation. Neither route qualifies publisher identity, the desktop UI or distribution.
 """
 from __future__ import annotations
 
@@ -52,6 +53,24 @@ NATIVE_RUST_TESTS = (
     "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
     "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
 )
+LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
+LAYOUT_ARGUMENT = "--observe-service-layout"
+LAYOUT_CASES = ("single", "nested")
+LAYOUT_ID = IDENTIFIER + ".status-observation"
+LAYOUT_SERVICE = LAYOUT_ID + ".resident"
+LAYOUT_HOST = "service-status-layout/Nested/MRK E2 Status Host.app"
+LAYOUT_CLIENTS = ("service-status-layout/Single/MRK E2 Status Client.app",
+                  LAYOUT_HOST + "/Contents/Helpers/MRK E2 Status Client.app")
+LAYOUT_EXECUTABLE = "/Contents/MacOS/mrk-e2-status-observer"
+LAYOUT_TARGET = "/Contents/Helpers/mrk-e2-status-target"
+LAYOUT_PLIST = "/Contents/Library/LaunchDaemons/" + LAYOUT_SERVICE + ".plist"
+LAYOUT_SECONDS = 30
+LAYOUT_LOADS = frozenset((
+    b"/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+    b"/System/Library/Frameworks/ServiceManagement.framework/Versions/A/ServiceManagement",
+    b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+    b"/usr/lib/libobjc.A.dylib", b"/usr/lib/libSystem.B.dylib",
+))
 CONTEXT_CASES = ("component", "product")
 CONTEXT_IDENTIFIERS = tuple(IDENTIFIER + ".installer-context." + case + ".v1" for case in CONTEXT_CASES)
 CONTEXT_PACKAGES = ("context-direct.pkg", "context-wrapped.pkg", "context-product.pkg")
@@ -141,6 +160,117 @@ def decimal(value):
 def identity(value, size, *, empty=False):
     return type(value) is str and ((empty and value == "") or
                                    re.fullmatch("[0-9a-f]{" + str(size) + "}", value) is not None)
+
+
+def service_status_record(body, returncode, source, observer_sha, case, started, deadline):
+    """Finite observed public status; NotFound is never absence or authority."""
+    need(type(returncode) is int and returncode == 0 and type(body) is bytes
+         and body.endswith(b"\n") and body.count(b"\n") == 1, "layout-original-result")
+    value = decode(body, 2048)
+    need(type(value) is dict and set(value) == {
+        "schemaVersion", "type", "sourceCommit", "observerSourceSha256", "case", "outcome",
+        "startedNs", "finishedNs", "bundle", "executable", "identifier", "plist", "status",
+        "factoryReturned", "retainReturned", "statusReturned", "serviceReleaseReturned",
+        "poolDrainReturned", "finalityKnown", "registrationEntered",
+    }, "layout-record-shape")
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["type"] == "mrk-e2-service-status-observation-v1"
+         and identity(source, 40) and identity(observer_sha, 64)
+         and value["sourceCommit"] == source and value["observerSourceSha256"] == observer_sha
+         and type(case) is str and case in LAYOUT_CASES and value["case"] == case
+         and value["outcome"] == "observed", "layout-record-binding")
+    need(all(value[key] == "expected-client" for key in ("bundle", "executable", "identifier"))
+         and value["plist"] == "expected-daemon" and type(value["status"]) is str
+         and value["status"] in ("not-registered", "enabled", "requires-approval", "not-found")
+         and value["registrationEntered"] is False
+         and all(value[key] is True for key in ("factoryReturned", "retainReturned", "statusReturned",
+                                               "serviceReleaseReturned", "poolDrainReturned", "finalityKnown")),
+         "layout-record-finality")
+    first, last = decimal(value["startedNs"]), decimal(value["finishedNs"])
+    need(type(started) is int and type(deadline) is int
+         and 0 < started <= first <= last <= deadline <= MAX_RAW
+         and deadline - started == LAYOUT_SECONDS * 1_000_000_000
+         and last - first <= 15_000_000_000, "layout-record-deadline")
+    return value
+
+
+def service_layout_data(value, source):
+    """Validate DATA shape only; an actual bound original call remains required."""
+    need(type(value) is dict and set(value) == {
+        "schemaVersion", "type", "sourceCommit", "observerSourceSha256", "selected", "started", "completed",
+        "clock", "startedNs", "deadlineNs", "enteredCases", "cases", "pairedInstalledInputs",
+        "physicalLayoutOnly", "entryResponsibilityTested", "registrationEntered",
+        "productionIdentityQualified", "actualAppIntegrationQualified", "nativeLifecycleQualified",
+    }, "layout-public-shape")
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["type"] == "mrk-e2-service-layout-observations-v1"
+         and identity(source, 40) and value["sourceCommit"] == source
+         and value["clock"] == "CLOCK_MONOTONIC"
+         and (value["observerSourceSha256"] is None or identity(value["observerSourceSha256"], 64))
+         and all(type(value[key]) is bool for key in ("selected", "started", "completed", "pairedInstalledInputs"))
+         and value["physicalLayoutOnly"] is True
+         and all(value[key] is False for key in ("entryResponsibilityTested", "registrationEntered",
+                                                "productionIdentityQualified", "actualAppIntegrationQualified",
+                                                "nativeLifecycleQualified")), "layout-public-binding")
+    entered, cases = value["enteredCases"], value["cases"]
+    need(type(entered) is list and len(entered) <= 2 and entered == list(LAYOUT_CASES[:len(entered)])
+         and type(cases) is list and len(cases) <= len(entered), "layout-public-order")
+    started, deadline = decimal(value["startedNs"]), decimal(value["deadlineNs"])
+    if not value["selected"]:
+        need(not value["started"] and value["observerSourceSha256"] is None, "layout-public-unselected")
+    if not value["started"]:
+        need(started == deadline == 0 and not entered and not cases
+             and not value["completed"] and not value["pairedInstalledInputs"], "layout-public-unentered")
+    else:
+        need(value["selected"] and identity(value["observerSourceSha256"], 64)
+             and 0 < started < deadline <= MAX_RAW and deadline - started == LAYOUT_SECONDS * 1_000_000_000,
+             "layout-public-started")
+    previous = started
+    for index, row in enumerate(cases):
+        need(type(row) is dict and set(row) == {"case", "stdoutSha256", "record"}
+             and row["case"] == entered[index] and identity(row["stdoutSha256"], 64), "layout-public-case")
+        record = service_status_record(canonical(row["record"]), 0, source, value["observerSourceSha256"],
+                                       row["case"], started, deadline)
+        need(previous <= decimal(record["startedNs"]) and value["pairedInstalledInputs"], "layout-public-sequence")
+        previous = decimal(record["finishedNs"])
+    need(not value["completed"] or value["started"] and value["pairedInstalledInputs"]
+         and len(entered) == len(cases) == 2, "layout-public-completion")
+    return value
+
+
+def service_layout_finality(value, source):
+    try:
+        checked = service_layout_data(value, source)
+        return len(checked["enteredCases"]) == len(checked["cases"])
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def service_layout_files():
+    leaves = {LAYOUT_HOST + "/Contents/" + name
+              for name in ("MacOS/mrk-e2-status-host", "Info.plist", "_CodeSignature/CodeResources")}
+    for root in LAYOUT_CLIENTS:
+        leaves.update(root + suffix for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET, LAYOUT_PLIST,
+                                                   "/Contents/Info.plist", "/Contents/_CodeSignature/CodeResources"))
+    return leaves
+
+
+def service_layout_code():
+    return tuple((root + LAYOUT_TARGET, LAYOUT_SERVICE) for root in LAYOUT_CLIENTS) + tuple(
+        (root, LAYOUT_ID + ".client") for root in LAYOUT_CLIENTS) + ((LAYOUT_HOST, LAYOUT_ID + ".host"),)
+
+
+def service_layout_plist():
+    return plistlib.dumps({"Label": LAYOUT_SERVICE, "BundleProgram": "Contents/Helpers/mrk-e2-status-target",
+                           "MachServices": {LAYOUT_SERVICE: True}}, sort_keys=True)
+
+
+def service_layout_paired(roster):
+    # Match actual signed resources, not a promise that code-signing is deterministic.
+    for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET, LAYOUT_PLIST,
+                   "/Contents/Info.plist", "/Contents/_CodeSignature/CodeResources"):
+        need(roster[LAYOUT_CLIENTS[0] + suffix] == roster[LAYOUT_CLIENTS[1] + suffix],
+             "layout-paired-inputs")
 
 
 def tail_data(row, source, release):
@@ -413,12 +543,11 @@ def context_xar(body, *, product=False):
              "context-xar-member-id")
         seen_ids.add(file_id)
         metadata = {"name", "type", "data", "file", "mode", "uid", "gid", "user", "group",
-                    "atime", "ctime", "mtime", "inode", "deviceno"}
+                    "atime", "ctime", "mtime", "inode", "deviceno", "FinderCreateTime"}
         # Closed diagnostic vocabulary only: every extra tag still refuses.
         need(not any(child.tag == "acl" for child in element), "context-xar-member-tags-acl")
         need(not any(child.tag == "flags" for child in element), "context-xar-member-tags-flags")
         need(not any(child.tag == "ea" for child in element), "context-xar-member-tags-ea")
-        need(not any(child.tag == "FinderCreateTime" for child in element), "context-xar-member-tags-finder-create-time")
         need(not any(child.tag == "device" for child in element), "context-xar-member-tags-device")
         need(not any(child.tag == "link" for child in element), "context-xar-member-tags-link")
         need(all(child.tag in metadata for child in element), "context-xar-member-tags")
@@ -427,7 +556,25 @@ def context_xar(body, *, product=False):
         need(all(len(element.findall(tag)) <= 1 for tag in metadata - {"file"}),
              "context-xar-member-duplicate")
         for child in element:
-            if child.tag not in ("file", "data"):
+            if child.tag == "FinderCreateTime":
+                # Apple's extractor applies this as destination birth time. This
+                # passive parser validates only; it never applies or trusts it.
+                need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
+                     and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
+                     and all(not item.attrib and not list(item) and not (item.tail or "").strip()
+                             for item in child), "context-xar-member-metadata")
+                timestamp, nanoseconds = child.findtext("time"), child.findtext("nanoseconds")
+                need(type(timestamp) is str
+                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", timestamp)
+                     and type(nanoseconds) is str and re.fullmatch(r"0|[1-9][0-9]{0,8}", nanoseconds),
+                     "context-xar-member-metadata")
+                from datetime import datetime
+                try:
+                    datetime(int(timestamp[:4]), int(timestamp[5:7]), int(timestamp[8:10]),
+                             int(timestamp[11:13]), int(timestamp[14:16]), int(timestamp[17:19]))
+                except ValueError:
+                    raise Refused("context-xar-member-metadata") from None
+            elif child.tag not in ("file", "data"):
                 need(not child.attrib and not list(child), "context-xar-member-metadata")
             if child.tag in ("inode", "deviceno"):
                 # Apple xar stat.c emits both through signed PRId32/PRId64
@@ -821,6 +968,46 @@ METADATA_PATHS = (Path("/"), Path("/Library"), ROOT.parent, Path("/private"),
                   Path("/private/var/db/receipts"), ROOT)
 METADATA_FLAGS = ("localApfs", "ownershipEnforced", "noAce", "closeReturned")
 METADATA_KEYS = {"schemaVersion", "type", "sourceCommit", "outcome", "originalClosesKnown", "rows"}
+
+
+def service_observer_macho(body, stager):
+    """Diagnostic-only public framework executable; ordinary entry stays unchanged."""
+    stager.macho(body, system_only=True)
+    flags = struct.unpack_from("<I", body, 24)[0]
+    need(flags & (0x4 | 0x80 | 0x200000) == (0x4 | 0x80 | 0x200000)
+         and not flags & 0x20000, "layout-image-flags")
+    allowed = {0x19, 0x2, 0xB, 0xE, 0xC, 0x1B, 0x32, 0x2A, 0x80000028,
+               0x26, 0x29, 0x1D, 0x2E, 0x80000022, 0x80000033, 0x80000034}
+    count = struct.unpack_from("<I", body, 16)[0]
+    offset, libraries, dyld, mains = 32, [], [], 0
+    for _ in range(count):
+        command, length = struct.unpack_from("<II", body, offset)
+        row = body[offset:offset + length]
+        need(command in allowed, "layout-image-command")
+        if command in (0xC, 0xE):
+            start = 24 if command == 0xC else 12
+            need(length > start and struct.unpack_from("<I", row, 8)[0] == start,
+                 "layout-image-load-offset")
+            end = row.find(b"\0", start)
+            need(end > start and not any(row[end + 1:]), "layout-image-load-padding")
+            (libraries if command == 0xC else dyld).append(row[start:end])
+        elif command == 0x19:
+            need(length >= 72, "layout-image-segment")
+            sections = struct.unpack_from("<I", row, 64)[0]
+            need(sections <= 256 and length == 72 + sections * 80, "layout-image-sections")
+            for index in range(sections):
+                section = row[72 + index * 80:152 + index * 80]
+                need(struct.unpack_from("<I", section, 64)[0] & 0xFF not in (0x9, 0xA, 0x15)
+                     and section[:16].split(b"\0", 1)[0] not in (
+                         b"__mod_init_func", b"__mod_term_func", b"__init_offsets"),
+                     "layout-image-initializer")
+        elif command == 0x80000028:
+            need(length == 24, "layout-image-main")
+            mains += 1
+        offset += length
+    need(mains == 1 and dyld == [b"/usr/lib/dyld"]
+         and len(libraries) == len(LAYOUT_LOADS) and set(libraries) == LAYOUT_LOADS,
+         "layout-image-system-closure")
 
 
 def metadata_result(stdout, returncode, source, expected_present, originals):
@@ -1231,7 +1418,7 @@ def source_names(rows):
         "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
         "desktop/packaging/macos-android-service-signing.profile",
         "desktop/tools/macos_e2_native_fixture.py", "desktop/tools/macos_aqua_qualification.py",
-        "desktop/tools/stage_macos_installed.py", CONTEXT_SOURCE,
+        "desktop/tools/stage_macos_installed.py", CONTEXT_SOURCE, LAYOUT_SOURCE,
         *("src/mobile_release/" + name for name in (
             "__init__.py", "owned_process.py", "_command_process.py", "_native_process.py",
             "cancellation.py", "errors.py", "_lifetime_evidence.py",
@@ -1327,7 +1514,8 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) == 1 and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT])
+         and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
     source = environment.get("GITHUB_SHA")
@@ -1421,7 +1609,7 @@ def package_payload(body, expected):
     raise Refused("fixture-cpio-count")
 
 
-def fixture_package(body, expected):
+def fixture_package(body, expected, *, service_layout=False):
     """Fixed flat package, no scripts/relocation; complete payload correspondence."""
     import xml.etree.ElementTree as ET
     import zlib
@@ -1477,6 +1665,10 @@ def fixture_package(body, expected):
         need(not list(element) and not element.attrib and not (element.text or "").strip(),
              "fixture-package-relocation")
     bundle_names = {APP: IDENTIFIER, NESTED: IDENTIFIER + ".client"}
+    need(type(service_layout) is bool, "layout-package-selector")
+    if service_layout:
+        bundle_names.update({root: LAYOUT_ID + ".client" for root in LAYOUT_CLIENTS})
+        bundle_names[LAYOUT_HOST] = LAYOUT_ID + ".host"
     for element in info.findall(".//bundle"):
         path = element.get("path")
         if path is not None:
@@ -1507,7 +1699,8 @@ def bundle_info(identifier, executable):
 class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
-    def __init__(self, owner, source, stager, work, environment):
+    def __init__(self, owner, source, stager, work, environment, *, service_layout=False):
+        need(type(service_layout) is bool, "layout-operation-selector")
         self.owner, self.source, self.stager = owner, source, stager
         self.work, self.environment = work, environment
         self.scratch = work / "e2-native-fixture"
@@ -1531,6 +1724,18 @@ class Operation:
             "clock": "CLOCK_MONOTONIC", "deadlineNs": "0", "started": False, "completed": False,
             "enteredCases": [], "cases": [], "receiptsRetired": False,
             "outerPackageAuthority": False, "maintenanceQualified": False,
+        }
+        self.service_layout_originals = {}
+        self.service_layout_stage_originals = {}
+        self.service_layout = {
+            "schemaVersion": 1, "type": "mrk-e2-service-layout-observations-v1",
+            "sourceCommit": environment["GITHUB_SHA"], "observerSourceSha256": None,
+            "selected": service_layout, "started": False, "completed": False,
+            "clock": "CLOCK_MONOTONIC", "startedNs": "0", "deadlineNs": "0",
+            "enteredCases": [], "cases": [], "pairedInstalledInputs": False,
+            "physicalLayoutOnly": True, "entryResponsibilityTested": False, "registrationEntered": False,
+            "productionIdentityQualified": False, "actualAppIntegrationQualified": False,
+            "nativeLifecycleQualified": False,
         }
 
     def mkdir(self, path, mode=0o700):
@@ -2005,6 +2210,48 @@ class Operation:
             if all(call["returned"] for call in self.calls):
                 self.retire_target(target)
 
+    def compile_service_layout(self):
+        need(self.service_layout["selected"] and not self.service_layout["started"], "layout-build-route")
+        source_body = self.source.read(LAYOUT_SOURCE)
+        observer_sha = digest(source_body)
+        self.service_layout["observerSourceSha256"] = observer_sha
+        target = self.scratch / "service-layout-target"
+        entry = self.mkdir(target)
+        self.scratch_origins[target] = entry["identity"]
+        output = target / "mrk-e2-status-observer"
+        try:
+            argv = ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "-x", "objective-c", "-std=c11",
+                    "-Wall", "-Wextra", "-Werror", "-O2", "-fno-objc-arc", "-fobjc-exceptions",
+                    "-arch", "arm64", "-mmacosx-version-min=26.0", "-DMRK_E2_SERVICE_LAYOUT_DIAGNOSTIC=1",
+                    '-DMRK_IMAGE_SOURCE_COMMIT="' + self.environment["GITHUB_SHA"] + '"',
+                    '-DMRK_OBSERVER_SOURCE_SHA256="' + observer_sha + '"',
+                    str(CHECKOUT / LAYOUT_SOURCE), "-framework", "Foundation", "-framework", "ServiceManagement",
+                    "-framework", "CoreFoundation", "-lobjc", "-o", str(output)]
+            self.command("service-layout-build", argv, dict(self.native_environment(),
+                         DEVELOPER_DIR=self.environment["DEVELOPER_DIR"]), cwd=CHECKOUT, timeout=30)
+            original, body = self.outputs.file(output, 1024 * 1024, modes=(0o700, 0o755))
+            service_observer_macho(body, self.stager)
+            for root in LAYOUT_CLIENTS:
+                for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET):
+                    self.write_payload(root + suffix, body, 0o755)
+                self.write_payload(root + "/Contents/Info.plist",
+                                   plistlib.dumps(bundle_info(LAYOUT_ID + ".client", "mrk-e2-status-observer"),
+                                                  sort_keys=True), 0o444)
+                self.write_payload(root + LAYOUT_PLIST, service_layout_plist(), 0o444)
+            self.write_payload(LAYOUT_HOST + "/Contents/MacOS/mrk-e2-status-host", body, 0o755)
+            self.write_payload(LAYOUT_HOST + "/Contents/Info.plist",
+                               plistlib.dumps(bundle_info(LAYOUT_ID + ".host", "mrk-e2-status-host"),
+                                              sort_keys=True), 0o444)
+            need(self.outputs.read(original) == body and self.source.read(LAYOUT_SOURCE) == source_body,
+                 "layout-compiler-source-changed")
+            self.artifacts["service-status-observer"] = {
+                "compilerSha256": digest(body), "compilerBytes": len(body),
+                "observerSourceSha256": observer_sha, "readOnly": True,
+            }
+        finally:
+            if all(call["returned"] for call in self.calls):
+                self.retire_target(target)
+
     def sign(self):
         self.phase = "bundle-staging"
         for relative, value in ((APP + "/Contents/Info.plist", bundle_info(IDENTIFIER, "mrk-e2-native-entry")),
@@ -2016,10 +2263,15 @@ class Operation:
         code = ((IMAGES["client"], IDENTIFIER + ".client.image"),
                 (IMAGES["resident"], SERVICE + ".image"), (RESIDENT, SERVICE),
                 (NESTED, IDENTIFIER + ".client"), (APP, IDENTIFIER))
+        if self.service_layout["selected"]:
+            code += service_layout_code()
         payload = self.scratch / "payload"
         # codesign also inherits the private umask. Supply only its two exact
         # fresh signature directories ourselves instead of normalizing a tree.
-        for relative in (APP + "/Contents/_CodeSignature", CONTENTS + "_CodeSignature"):
+        signature_dirs = (APP + "/Contents/_CodeSignature", CONTENTS + "_CodeSignature")
+        if self.service_layout["selected"]:
+            signature_dirs += tuple(root + "/Contents/_CodeSignature" for root in (*LAYOUT_CLIENTS, LAYOUT_HOST))
+        for relative in signature_dirs:
             self.mkdir(payload / relative, 0o755)
         for index, (relative, identifier) in enumerate(code):
             path = payload / relative
@@ -2045,6 +2297,10 @@ class Operation:
         expected = {ENTRY, CLIENT, RESIDENT, IMAGES["client"], IMAGES["resident"], PLIST, GATE,
                     APP + "/Contents/Info.plist", CONTENTS + "Info.plist",
                     APP + "/Contents/_CodeSignature/CodeResources", CONTENTS + "_CodeSignature/CodeResources"}
+        layout_files = service_layout_files() if self.service_layout["selected"] else set()
+        layout_executables = ({root + suffix for root in LAYOUT_CLIENTS for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET)}
+                              | {LAYOUT_HOST + "/Contents/MacOS/mrk-e2-status-host"}) if layout_files else set()
+        expected.update(layout_files)
         expected_dirs = {""}
         for name in expected:
             expected_dirs.update("/".join(name.split("/")[:index]) for index in range(1, len(name.split("/"))))
@@ -2063,7 +2319,7 @@ class Operation:
             need(children == allowed, "fixture-exact-roster")
         for relative in sorted(expected):
             path = root / relative
-            executable = relative in {ENTRY, CLIENT, RESIDENT, *IMAGES.values()}
+            executable = relative in {ENTRY, CLIENT, RESIDENT, *IMAGES.values()} | layout_executables
             if seal:
                 parent = book.directory(path.parent)
                 fd = os.open(path.name, READ_FLAGS, dir_fd=parent["fd"])
@@ -2078,20 +2334,35 @@ class Operation:
                 book.check_one(entry)
                 book.close(entry)
                 need(entry["closed"], "sealing-close-unknown")
-            entry, body = book.file(path, IMAGE_LIMIT, uid=0 if installed else None,
-                                    modes=(0o555,) if executable else (0o444,))
+            layout_originals = self.service_layout_originals if installed else self.service_layout_stage_originals
+            if relative in layout_files and relative in layout_originals and not seal:
+                entry = layout_originals[relative]
+                body = book.read(entry)  # Same held original, including named/full9 POST.
+            else:
+                entry, body = book.file(path, IMAGE_LIMIT, uid=0 if installed else None,
+                                        modes=(0o555,) if executable else (0o444,))
             need(not installed or entry["identity"][4] == 0, "installed-group")
             self.stager.no_xattrs(entry["fd"])
             total += len(body)
             need(total <= 3 * IMAGE_LIMIT, "fixture-total-bytes")
             if relative in IMAGES.values():
                 fixture_image_macho(body, next(role for role, name in IMAGES.items() if name == relative))
+            elif relative in layout_executables:
+                service_observer_macho(body, self.stager)
             elif executable:
                 self.stager.entry_macho(body)
             elif relative == GATE:
                 need(body == self.stager.MAINTENANCE_GATE_BYTES, "fixture-gate-bytes")
             found[relative] = {"bytes": len(body), "sha256": digest(body),
                                "mode": "100555" if executable else "100444"}
+            if relative in layout_files:
+                if relative in (root + LAYOUT_PLIST for root in LAYOUT_CLIENTS):
+                    need(0 < len(body) <= 4096 and body == service_layout_plist(), "layout-plist-original")
+                # Reuse the finite 13 originals, both in package/signature POST
+                # and in observation PRE/POST. Do not accumulate duplicate FDs.
+                layout_originals[relative] = entry
+        if layout_files:
+            service_layout_paired(found)
         book.check()
         return found
 
@@ -2197,12 +2468,15 @@ class Operation:
         original, data = self.outputs.file(analysis, 65536, modes=(0o600, 0o644))
         components = plistlib.loads(data)
         need(type(components) is list and 0 < len(components) <= 4, "package-components")
+        bundle_names = {APP, NESTED}
+        if self.service_layout["selected"]:
+            bundle_names.update((*LAYOUT_CLIENTS, LAYOUT_HOST))
         pending, seen = [(row, 0) for row in components], set()
         while pending:
             row, depth = pending.pop()
-            need(type(row) is dict and depth <= 2 and len(seen) <= 2, "package-component-shape")
+            need(type(row) is dict and depth <= 2 and len(seen) <= len(bundle_names), "package-component-shape")
             path = row.get("RootRelativeBundlePath")
-            need(path in (APP, NESTED) and path not in seen and not any("Script" in key for key in row),
+            need(path in bundle_names and path not in seen and not any("Script" in key for key in row),
                  "package-component-path")
             seen.add(path)
             row.update(BundleIsRelocatable=False, BundleHasStrictIdentifier=True, BundleIsVersionChecked=False)
@@ -2210,6 +2484,7 @@ class Operation:
             need(type(children) is list and len(children) <= 1, "package-component-children")
             pending.extend((child, depth + 1) for child in children)
         need(APP in seen and self.outputs.read(original) == data, "package-component-root")
+        need(not self.service_layout["selected"] or seen == bundle_names, "layout-package-components")
         component_path = self.scratch / "components.plist"
         self.outputs.publish(component_path, plistlib.dumps(components, sort_keys=True))
         output = self.scratch / "MRK-E2-NativeFixture.pkg"
@@ -2218,7 +2493,7 @@ class Operation:
                      "--ownership", "recommended", "--component-plist", str(component_path),
                      "--compression", "legacy", str(output)], self.native_environment(), cwd=self.scratch, timeout=90)
         self.package_entry, body = self.outputs.file(output, 4 * IMAGE_LIMIT, modes=(0o600, 0o644))
-        self.package = fixture_package(body, self.stage_roster)
+        self.package = fixture_package(body, self.stage_roster, service_layout=self.service_layout["selected"])
         need(self.payload_roster(payload, installed=False) == self.stage_roster, "package-inputs-changed")
         self.publish("package-binding.json", canonical(self.package))
 
@@ -2252,11 +2527,68 @@ class Operation:
         need(type(receipt) is dict and receipt.get("pkgid") == PACKAGE and receipt.get("pkg-version") == "1"
              and receipt.get("volume") == "/" and receipt.get("install-location") in (str(ROOT), str(ROOT)[1:]),
              "installed-receipt-binding")
-        for index, relative in enumerate((IMAGES["client"], IMAGES["resident"], RESIDENT, NESTED, APP)):
+        code = (IMAGES["client"], IMAGES["resident"], RESIDENT, NESTED, APP)
+        if self.service_layout["selected"]:
+            code += tuple(relative for relative, _identifier in service_layout_code())
+        for index, relative in enumerate(code):
             self.command("installed-signature-" + str(index),
                          ["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "--deep", str(ROOT / relative)],
                          self.native_environment(), cwd=self.scratch, timeout=30)
         need(self.payload_roster(ROOT, installed=True) == actual, "installed-originals-changed")
+
+    def service_layout_inputs(self):
+        need(set(self.service_layout_originals) == service_layout_files(), "layout-installed-originals")
+        self.source.book.check()
+        self.outputs.check()
+        self.protected.check()
+        for relative, original in self.service_layout_originals.items():
+            body = self.protected.read(original)
+            row = self.stage_roster[relative]
+            need(len(body) == row["bytes"] and digest(body) == row["sha256"], "layout-installed-bytes")
+        service_layout_paired(self.stage_roster)
+
+    def observe_service_layout(self):
+        value = self.service_layout
+        need(value["selected"] and not value["started"] and self.installed
+             and self.package is not None and self.native is None and not self.native_entered
+             and not self.installer_context["started"]
+             and all(call["returned"] and call["returncode"] == 0 for call in self.calls),
+             "layout-admission-prerequisites")
+        self.service_layout_inputs()
+        origin = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        deadline = origin + LAYOUT_SECONDS * 1_000_000_000
+        need(0 < origin < deadline <= MAX_RAW, "layout-phase-clock")
+        value.update(started=True, startedNs=str(origin), deadlineNs=str(deadline), pairedInstalledInputs=True)
+        cwd = self.outputs.directory(self.scratch / "cwd")
+        for index, case in enumerate(LAYOUT_CASES):
+            self.service_layout_inputs()
+            need(os.listdir(cwd["fd"]) == [], "layout-empty-cwd")
+            before = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+            timeout = context_timeout(deadline, before, 15)
+            role = "service-layout-" + case
+            count = len(self.calls)
+            try:
+                result = self.call(role, [str(ROOT / (LAYOUT_CLIENTS[index] + LAYOUT_EXECUTABLE))],
+                                   self.native_environment(), cwd=self.scratch / "cwd", timeout=timeout, limit=2048)
+            finally:
+                # A planned attempt is not entry: source admission can refuse
+                # before the original call exists. Unknown actual calls stay entered.
+                if len(self.calls) > count:
+                    need(len(self.calls) == count + 1 and self.calls[count]["role"] == role
+                         and self.calls[count]["entered"] is True, "layout-original-call-entry")
+                    value["enteredCases"].append(case)
+            self.service_layout_inputs()
+            returned = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+            context_timeout(deadline, returned, 15)
+            need(not result.stderr and os.listdir(cwd["fd"]) == [], "layout-output-correspondence")
+            record = service_status_record(result.stdout, result.returncode, self.environment["GITHUB_SHA"],
+                                           value["observerSourceSha256"], case, origin, deadline)
+            need(before <= decimal(record["startedNs"]) <= decimal(record["finishedNs"]) <= returned,
+                 "layout-original-clock-correspondence")
+            value["cases"].append({"case": case, "stdoutSha256": digest(result.stdout), "record": record})
+            service_layout_data(value, self.environment["GITHUB_SHA"])
+        value["completed"] = True
+        service_layout_data(value, self.environment["GITHUB_SHA"])
 
     def run_native(self):
         need(self.installed and self.package is not None and self.stage_roster
@@ -2291,9 +2623,10 @@ class Operation:
         native_finality = (not self.native_entered or self.native_returned
                            and self.native is not None and self.native["nativeFinalityKnown"] is True)
         context_finality = not self.installer_context["started"] or self.installer_context["completed"]
+        layout_finality = service_layout_finality(self.service_layout, self.environment["GITHUB_SHA"])
         safe = (all(record["returned"] for record in self.calls) and self.sources_closed
                 and self.outputs_closed and self.protected_closed and native_finality and context_finality
-                and not self.cleanup_errors)
+                and layout_finality and not self.cleanup_errors)
         self.scratch_retired = False
         if safe:
             cleanup = Originals()
@@ -2341,6 +2674,7 @@ class Operation:
                 "receiptOriginals": getattr(self, "receipt_originals", []), "native": self.native,
                 "nativeRustTests": self.native_rust_tests,
                 "installerContext": self.installer_context,
+                "serviceLayoutObservation": self.service_layout,
                 "installerEntered": self.installer_entered, "installationReturnedSuccess": self.installed,
                 "nativeEntered": self.native_entered, "nativeOwnerReturned": self.native_returned,
                 "sourceClosesKnown": self.sources_closed, "protectedClosesKnown": self.protected_closed,
@@ -2360,15 +2694,21 @@ class Operation:
         try:
             self.begin()
             self.scratch_identity = self.outputs.directories[self.scratch]["identity"]
-            self.observe_installer_context()
+            if not self.service_layout["selected"]:
+                self.observe_installer_context()
             self.compile_metadata_observer()
             self.absence("initial")
             self.build_images()
             self.compile_facades()
+            if self.service_layout["selected"]:
+                self.compile_service_layout()
             self.sign()
             self.package_fixture()
             self.install_fixture()
-            self.run_native()
+            if self.service_layout["selected"]:
+                self.observe_service_layout()
+            else:
+                self.run_native()
         except BaseException as error:
             failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
                        and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])
@@ -2394,7 +2734,8 @@ def main():
         qualification = source.load("macos_aqua_qualification.py", "_mrk_e2_fixture_owner_loader")
         owner = qualification.load_owner(CHECKOUT)
         book.check()
-        operation = Operation(owner, source, stager, work, os.environ)
+        operation = Operation(owner, source, stager, work, os.environ,
+                              service_layout=sys.argv[1:] == [LAYOUT_ARGUMENT])
         value = operation.execute()
     except BaseException:
         book.finish()

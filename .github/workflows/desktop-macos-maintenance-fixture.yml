@@ -535,7 +535,7 @@ jobs:
           print("Locked fixture inputs prepared; source/input originals closed. No native qualification is claimed.")
           PY_PREPARE
 
-      - name: Run the one reviewed fixture owner and its three native cases
+      - name: Observe physical service layouts through the reviewed owner (no registration)
         id: native
         timeout-minutes: 55
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -545,10 +545,10 @@ jobs:
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
           # This original owner alone compiles/signs/installs/observes the fixed
-          # fixture. First, two scripts-only Installer-context observations share
-          # one120s CLOCK_MONOTONIC endpoint and never grant maintenance authority.
-          # Its 990s/993s native call covers ALL THREE cases, with one
-          # distinct aggregate 60s auxiliary ledger. Step timeout is no receipt.
+          # fixture. This diagnostic observes only public factory/status in two
+          # physical layouts, sharing one30s endpoint. Installer-context and
+          # registration/lifecycle cases remain unentered and unqualified.
+          # A completed comparison is intentionally NOT fixture acceptance.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
             GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
@@ -560,7 +560,7 @@ jobs:
             RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
             DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-service-layout
 
       - name: Publish only the closed source-bound fixture summary
         id: publication
@@ -643,6 +643,11 @@ jobs:
           if not bootstrap_ok:
               raise SystemExit("E2 summary DATA source admission refused.")
           OWNER_DIAGNOSTIC_ROLES = (
+              'service-layout-build', 'service-layout-single', 'service-layout-nested',
+              'sign-5', 'sign-6', 'sign-7', 'sign-8', 'sign-9',
+              'verify-sign-5', 'verify-sign-6', 'verify-sign-7', 'verify-sign-8', 'verify-sign-9',
+              'installed-signature-5', 'installed-signature-6', 'installed-signature-7',
+              'installed-signature-8', 'installed-signature-9',
               'context-helper-build', 'context-component-build', 'context-product-component-build',
               'context-product-build', 'context-component-empty-bom', 'context-product-empty-bom',
               'context-component-receipt-census', 'context-product-receipt-census', 'context-component-installer',
@@ -657,6 +662,11 @@ jobs:
           )
 
           OWNER_DIAGNOSTIC_PHASES = (
+              'service-layout-build', 'service-layout-single', 'service-layout-nested',
+              'sign-5', 'sign-6', 'sign-7', 'sign-8', 'sign-9',
+              'verify-sign-5', 'verify-sign-6', 'verify-sign-7', 'verify-sign-8', 'verify-sign-9',
+              'installed-signature-5', 'installed-signature-6', 'installed-signature-7',
+              'installed-signature-8', 'installed-signature-9',
               'context-lsbom-original', 'context-productbuild-original',
               'context-helper-build', 'context-component-build', 'context-product-component-build',
               'context-product-build', 'context-component-empty-bom', 'context-product-empty-bom',
@@ -675,6 +685,19 @@ jobs:
           )
 
           OWNER_DIAGNOSTIC_REFUSALS = (
+              'layout-original-result', 'layout-record-shape', 'layout-record-binding',
+              'layout-record-finality', 'layout-record-deadline', 'layout-public-shape',
+              'layout-public-binding', 'layout-public-order', 'layout-public-unselected',
+              'layout-public-unentered', 'layout-public-started', 'layout-public-case',
+              'layout-public-sequence', 'layout-public-completion', 'layout-paired-inputs',
+              'layout-image-flags', 'layout-image-command', 'layout-image-load-offset',
+              'layout-image-load-padding', 'layout-image-segment', 'layout-image-sections',
+              'layout-image-initializer', 'layout-image-main', 'layout-image-system-closure',
+              'layout-package-selector', 'layout-operation-selector', 'layout-build-route',
+              'layout-compiler-source-changed', 'layout-plist-original', 'layout-package-components',
+              'layout-installed-originals', 'layout-installed-bytes', 'layout-admission-prerequisites',
+              'layout-phase-clock', 'layout-empty-cwd', 'layout-output-correspondence',
+              'layout-original-clock-correspondence', 'layout-original-call-entry',
               'context-original-call-entry',
               'context-command-role', 'context-component-roster', 'context-compressed-bound',
               'context-deadline', 'context-distribution-changed', 'context-empty-output',
@@ -700,7 +723,6 @@ jobs:
               'context-xar-member-tags-acl',
               'context-xar-member-tags-flags',
               'context-xar-member-tags-ea',
-              'context-xar-member-tags-finder-create-time',
               'context-xar-member-tags-device',
               'context-xar-member-tags-link',
               'context-xar-range', 'context-xar-roster', 'context-xar-toc',
@@ -799,6 +821,7 @@ jobs:
               "bindingSha256": None, "sourceInventorySha256": None, "sourceReleaseId": None,
               "ownerOutcome": None, "originalCallCount": 0, "ownerFinality": None, "native": None,
               "ownerDiagnostic": None, "nativeRustTests": None, "installerContext": None,
+              "serviceLayoutObservation": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -822,7 +845,8 @@ jobs:
                            "summary-bootstrap-inventory")
               for relative in ("desktop/tools/macos_e2_native_fixture.py",
                                ".github/workflows/desktop-macos-maintenance-fixture.yml",
-                               "desktop/macos-installed-inputs/build-release.json", fixture.CONTEXT_SOURCE):
+                               "desktop/macos-installed-inputs/build-release.json", fixture.CONTEXT_SOURCE,
+                               fixture.LAYOUT_SOURCE):
                   row = rows[relative]
                   _entry, content = book.file(CHECKOUT / relative, 1048576, modes=(0o444, 0o644))
                   fixture.need(len(content) == row["size"] and fixture.digest(content) == row["sha256"]
@@ -838,7 +862,7 @@ jobs:
               expected_keys = set("""schemaVersion type source tree workflowSource workflow runId runAttempt platform toolchain
                   sourceInventorySha256 sourceOriginalHandleCount sourceOriginalHandleReserve bindingSha256 sourceReleaseId
                   outcome failure phase originalCalls workTimeoutSeconds hardTimeoutSeconds auxiliaryBudgetNanoseconds
-                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests installerContext
+                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests installerContext serviceLayoutObservation
                   installerEntered installationReturnedSuccess nativeEntered nativeOwnerReturned sourceClosesKnown
                   protectedClosesKnown outputClosesKnown cleanupErrors scratchRetired protectedRootRetired exactReceiptRetired
                   protectedRetentionRequired administrativeDomain arbitraryConcurrentPrivilegedWriterResistance flatPayloadAtomicNoReplace
@@ -902,6 +926,35 @@ jobs:
                   # A closed observation (including absent context) is not B admission.
                   # An unfinished/unknown phase can never qualify native acceptance.
                   installer_context = context_record
+              service_layout = None
+              layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
+              fixture.need(layout_record["selected"] and result["passed"] is False
+                           and result["native"] is None and not result["nativeEntered"] and not result["nativeOwnerReturned"]
+                           and not context_record["started"]
+                           and all(call["role"] != "native-run" and call["role"] not in fixture.CONTEXT_ROLES
+                                   for call in calls), "summary-layout-route")
+              if layout_record["observerSourceSha256"] is not None:
+                  fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
+                               "summary-layout-source")
+              for case in layout_record["enteredCases"]:
+                  layout_calls = [call for call in calls if call["role"] == "service-layout-" + case]
+                  fixture.need(len(layout_calls) == 1, "summary-layout-entered-call")
+              for case in layout_record["cases"]:
+                  layout_calls = [call for call in calls if call["role"] == "service-layout-" + case["case"]]
+                  fixture.need(len(layout_calls) == 1 and layout_calls[0]["returned"]
+                               and layout_calls[0]["returncode"] == 0
+                               and layout_calls[0]["stdoutSha256"] == case["stdoutSha256"]
+                               and layout_calls[0]["stderrSha256"] == fixture.digest(b"")
+                               and type(layout_calls[0].get("workTimeoutSeconds")) is int
+                               and 0 < layout_calls[0]["workTimeoutSeconds"] <= 15
+                               and layout_calls[0].get("outputLimitBytes") == 2048,
+                               "summary-layout-original-call")
+              if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                      and all(call["returned"] for call in calls) and not result["cleanupErrors"]
+                      and result["scratchRetired"] and result["installationReturnedSuccess"]):
+                  # Factory/status results are useful diagnostic evidence only.
+                  # Neither NotFound nor a complete comparison proves absence or ownership.
+                  service_layout = layout_record
               native_rust_tests = None
               if result["nativeRustTests"] is not None:
                   unit_calls = [call for call in calls if call["role"] == "native-rust-tests"]
@@ -937,6 +990,7 @@ jobs:
                   sourceReleaseId=release, ownerOutcome=result["outcome"], originalCallCount=len(calls),
                   ownerFinality={key: result[key] for key in flags}, native=native, accepted=bool(known_pass),
                   nativeRustTests=native_rust_tests, installerContext=installer_context,
+                  serviceLayoutObservation=service_layout,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
@@ -944,12 +998,14 @@ jobs:
               summary["accepted"] = False
               summary["nativeRustTests"] = None
               summary["installerContext"] = None
+              summary["serviceLayoutObservation"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
                   summary["accepted"] = False
                   summary["nativeRustTests"] = None
                   summary["installerContext"] = None
+                  summary["serviceLayoutObservation"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:

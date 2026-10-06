@@ -1144,6 +1144,278 @@ class OwnerRetirementAndModeTests(unittest.TestCase):
                 self.assertTrue(book.finish())
 
 
+class ServiceLayoutObservationTests(unittest.TestCase):
+    @staticmethod
+    def record(case="single"):
+        first = 2 if case == "single" else 5
+        return {
+            "schemaVersion": 1, "type": "mrk-e2-service-status-observation-v1",
+            "sourceCommit": SOURCE, "observerSourceSha256": "b" * 64, "case": case,
+            "outcome": "observed", "startedNs": str(first * 1_000_000_000),
+            "finishedNs": str((first + 1) * 1_000_000_000),
+            "bundle": "expected-client", "executable": "expected-client", "identifier": "expected-client",
+            "plist": "expected-daemon", "status": "not-found", "factoryReturned": True,
+            "retainReturned": True, "statusReturned": True, "serviceReleaseReturned": True,
+            "poolDrainReturned": True, "finalityKnown": True, "registrationEntered": False,
+        }
+
+    @staticmethod
+    def initial(selected=True):
+        return fixture.Operation(None, None, None, Path("/inert-layout-data"),
+                                 {"GITHUB_SHA": SOURCE}, service_layout=selected).service_layout
+
+    def test_status_binding_order_deadline_and_original_finality_never_grant_absence(self):
+        raw = self.record()
+        parse_record = lambda value, code=0: fixture.service_status_record(
+            fixture.canonical(value), code, SOURCE, "b" * 64, "single", 1_000_000_000, 31_000_000_000)
+        for status in ("not-found", "not-registered", "enabled", "requires-approval"):
+            observed = parse_record(dict(raw, status=status))
+            self.assertEqual(observed["status"], status)
+            self.assertFalse(observed["registrationEntered"])
+            self.assertNotIn("absent", observed)
+        mutations = {"schemaVersion": True, "sourceCommit": "c" * 40, "observerSourceSha256": "c" * 64,
+                     "case": "nested", "status": "absent", "bundle": "outer-host", "plist": "missing",
+                     "registrationEntered": True, "factoryReturned": False, "retainReturned": False,
+                     "statusReturned": False, "serviceReleaseReturned": False, "poolDrainReturned": False,
+                     "finalityKnown": False, "startedNs": "0", "finishedNs": "31000000001"}
+        for key, item in mutations.items():
+            with self.subTest(field=key), self.assertRaises(fixture.Refused):
+                parse_record(dict(raw, **{key: item}))
+        for code in (True, 1, 77):
+            with self.assertRaises(fixture.Refused):
+                parse_record(raw, code)
+        with self.assertRaises(fixture.Refused):
+            parse_record(dict(raw, extra="not-allowed"))
+        value = self.initial()
+        self.assertIs(fixture.service_layout_data(value, SOURCE), value)
+        self.assertTrue(fixture.service_layout_finality(value, SOURCE))
+        value.update(started=True, startedNs="1000000000", deadlineNs="31000000000",
+                     observerSourceSha256="b" * 64, pairedInstalledInputs=True)
+        value["enteredCases"].append("single")
+        self.assertFalse(fixture.service_layout_finality(value, SOURCE))
+        value["cases"].append({"case": "single", "stdoutSha256": fixture.digest(fixture.canonical(raw)), "record": raw})
+        self.assertTrue(fixture.service_layout_finality(value, SOURCE))
+        for key in ("entryResponsibilityTested", "registrationEntered", "productionIdentityQualified",
+                    "actualAppIntegrationQualified", "nativeLifecycleQualified"):
+            changed = copy.deepcopy(value)
+            changed[key] = True
+            with self.subTest(scope=key), self.assertRaises(fixture.Refused):
+                fixture.service_layout_data(changed, SOURCE)
+        changed = copy.deepcopy(value)
+        changed["completed"] = True
+        with self.assertRaises(fixture.Refused):
+            fixture.service_layout_data(changed, SOURCE)
+        nested = self.record("nested")
+        value["enteredCases"].append("nested")
+        value["cases"].append({"case": "nested", "stdoutSha256": fixture.digest(fixture.canonical(nested)), "record": nested})
+        value["completed"] = True
+        self.assertTrue(fixture.service_layout_finality(value, SOURCE))
+        for field in ("enteredCases", "cases"):
+            changed = copy.deepcopy(value)
+            changed[field].reverse()
+            with self.assertRaises(fixture.Refused):
+                fixture.service_layout_data(changed, SOURCE)
+        changed = copy.deepcopy(value)
+        changed["cases"][1]["record"]["startedNs"] = "2000000000"
+        with self.assertRaises(fixture.Refused):
+            fixture.service_layout_data(changed, SOURCE)
+
+    def test_actual_diagnostic_route_never_enters_context_or_native_and_unknown_call_retains_scratch(self):
+        # Original controller methods are real; only external work/books are
+        # inert instance fixtures. No compiler, filesystem or native API runs.
+        class UnknownOriginal(Exception):
+            dispatched, contained, cleanup_complete = True, False, False
+
+        info = SimpleNamespace(**dict(zip(
+            ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size",
+             "st_mtime_ns", "st_ctime_ns"), WORK)))
+        for mode in ("complete", "malformed-second", "unknown-second", "future-clock", "source-before-entry", "ordinary"):
+            with self.subTest(mode=mode):
+                events, calls, captures = [], [], []
+                book = lambda: SimpleNamespace(check=lambda: None, finish=lambda: True, errors=[])
+                source = SimpleNamespace(book=book(), binding={"tree": "c" * 40}, inventory_digest="d" * 64,
+                                         binding_digest="e" * 64, source_handle_count=1, source_handle_reserve=192)
+                env = {"GITHUB_SHA": SOURCE, "GITHUB_WORKFLOW_SHA": SOURCE,
+                       "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+                op = fixture.Operation(None, source, None, Path("/inert-layout-data"), env,
+                                       service_layout=mode != "ordinary")
+                op.outputs, op.protected = book(), book()
+                op.outputs.directories = {op.scratch: {"identity": WORK[:5]}}
+                op.outputs.directory = lambda _path: {"fd": 90}
+                op.publish = lambda name, body: captures.append((name, body))
+                op.begin = lambda: events.append("begin")
+                op.observe_installer_context = lambda: events.append("context")
+                op.compile_metadata_observer = lambda: events.append("metadata")
+                op.absence = lambda _role: events.append("absence")
+                op.build_images = lambda: events.append("images")
+                op.compile_facades = lambda: events.append("facades")
+                def compile_observer():
+                    events.append("observer-build")
+                    op.service_layout["observerSourceSha256"] = "b" * 64
+                op.compile_service_layout = compile_observer
+                op.sign = lambda: events.append("sign")
+                def package_fixture():
+                    events.append("package")
+                    op.package = {}
+                op.package_fixture = package_fixture
+                def install():
+                    events.append("install")
+                    op.installed = op.installer_entered = True
+                op.install_fixture = install
+                op.run_native = lambda: events.append("native")
+                op.service_layout_inputs = lambda: events.append("input-check")
+                def run_owned(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    case = "single" if len(calls) == 1 else "nested"
+                    if mode == "unknown-second" and case == "nested":
+                        raise UnknownOriginal()
+                    data = self.record(case)
+                    if mode == "future-clock":
+                        data["finishedNs"] = "9000000000"
+                    body = (b"{}\n" if mode == "malformed-second" and case == "nested"
+                            else fixture.canonical(data))
+                    return subprocess.CompletedProcess(argv, 0, body, b"")
+                op.owner = SimpleNamespace(run_owned=run_owned)
+                if mode == "source-before-entry":
+                    def refuse_source():
+                        raise fixture.Refused("original-changed")
+                    source.book.check = refuse_source
+                cleanup = SimpleNamespace(directory=lambda _path: {"fd": 93}, finish=lambda: True)
+                with patch.object(fixture.time, "clock_gettime_ns", side_effect=[
+                         1_000_000_000, 2_000_000_000, 4_000_000_000, 5_000_000_000, 7_000_000_000]), \
+                     patch.object(fixture.os, "listdir", return_value=[]), \
+                     patch.object(fixture, "Originals", return_value=cleanup) as originals, \
+                     patch.object(fixture.os, "stat", side_effect=[info, FileNotFoundError()]) as named, \
+                     patch.object(fixture.shutil, "rmtree") as retire:
+                    retire.avoids_symlink_attacks = True
+                    receipt = op.execute()
+                    if mode in ("complete", "ordinary", "source-before-entry"):
+                        retire.assert_called_once_with(op.scratch.name, dir_fd=93)
+                    else:
+                        originals.assert_not_called()
+                        named.assert_not_called()
+                        retire.assert_not_called()
+                self.assertFalse(receipt["passed"])
+                self.assertFalse(receipt["actualAppIntegrationQualified"])
+                self.assertFalse(receipt["nativeEntered"])
+                self.assertFalse(receipt["nativeOwnerReturned"])
+                self.assertIsNone(receipt["native"])
+                self.assertTrue(receipt["sourceClosesKnown"] and receipt["protectedClosesKnown"]
+                                and receipt["outputClosesKnown"])
+                self.assertEqual(receipt["scratchRetired"], mode in ("complete", "ordinary", "source-before-entry"))
+                if mode == "ordinary":
+                    self.assertIn("context", events)
+                    self.assertIn("native", events)
+                    self.assertNotIn("observer-build", events)
+                    self.assertEqual(calls, [])
+                    continue
+                if mode == "source-before-entry":
+                    self.assertEqual(calls, [])
+                    self.assertEqual(receipt["originalCalls"], [])
+                    layout = receipt["serviceLayoutObservation"]
+                    self.assertTrue(layout["started"])
+                    self.assertEqual(layout["enteredCases"], [])
+                    self.assertEqual(layout["cases"], [])
+                    self.assertTrue(fixture.service_layout_finality(layout, SOURCE))
+                    self.assertEqual(receipt["failure"], "original-changed")
+                self.assertNotIn("context", events)
+                self.assertNotIn("native", events)
+                self.assertFalse(receipt["installerContext"]["started"])
+                self.assertEqual(receipt["serviceLayoutObservation"]["completed"], mode == "complete")
+                for index, (argv, options) in enumerate(calls):
+                    self.assertEqual(argv, [str(fixture.ROOT / (fixture.LAYOUT_CLIENTS[index] + fixture.LAYOUT_EXECUTABLE))])
+                    self.assertEqual(options["output_limit"], 2048)
+                    self.assertEqual(options["timeout"], 15)
+                    self.assertEqual(set(options["environ"]), {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"})
+                if mode == "future-clock":
+                    self.assertEqual(receipt["failure"], "layout-original-clock-correspondence")
+                if mode == "unknown-second":
+                    self.assertFalse(receipt["originalCalls"][-1]["returned"])
+
+    def test_fixed_public_observer_paired_inputs_and_private_loader_layer_keep_closed_scope(self):
+        native = (PATH.parents[1] / fixture.LAYOUT_SOURCE.removeprefix("desktop/")).read_text(encoding="utf-8")
+        owner = PATH.read_text(encoding="utf-8")
+        for forbidden in ("registerAndReturnError", "unregisterAndReturnError", "openSystemSettingsLoginItems",
+                          "posix_spawn", "system(", "fork(", "NSTask", "dlopen("):
+            self.assertNotIn(forbidden, native)
+        self.assertEqual(native.count("daemonServiceWithPlistName:"), 1)
+        self.assertIn("SMAppServiceStatusNotFound: status = \"not-found\"", native)
+        self.assertLess(native.index("bundle.bundleIdentifier"), native.index("dataWithContentsOfURL:"))
+        self.assertLess(native.index("dataWithContentsOfURL:"), native.index("daemonServiceWithPlistName:"))
+        self.assertLess(native.index("[original release]"), native.index("[original drain]"))
+        self.assertLess(native.index("[original drain]"), native.index("snprintf(output"))
+        self.assertIn("Single/MRK E2 Status Client.app", native)
+        self.assertIn("Nested/MRK E2 Status Host.app/Contents/Helpers/MRK E2 Status Client.app", native)
+        self.assertIn('"-fno-objc-arc", "-fobjc-exceptions"', owner)
+        self.assertIn('"-framework", "CoreFoundation", "-lobjc"', owner)
+        self.assertIn('layout_originals[relative] = entry', owner)
+        self.assertIn('body = book.read(entry)  # Same held original', owner)
+        self.assertIn('body = self.protected.read(original)', owner)
+        self.assertIn('layout_finality and not self.cleanup_errors', owner)
+
+        leaves = fixture.service_layout_files()
+        self.assertEqual(len(leaves), 13)
+        paired = {name: {"bytes": 3, "sha256": "a" * 64, "mode": "100444"} for name in leaves}
+        fixture.service_layout_paired(paired)
+        for suffix in (fixture.LAYOUT_EXECUTABLE, fixture.LAYOUT_TARGET, fixture.LAYOUT_PLIST,
+                       "/Contents/Info.plist", "/Contents/_CodeSignature/CodeResources"):
+            changed = copy.deepcopy(paired)
+            changed[fixture.LAYOUT_CLIENTS[1] + suffix]["sha256"] = "c" * 64
+            with self.assertRaisesRegex(fixture.Refused, "^layout-paired-inputs$"):
+                fixture.service_layout_paired(changed)
+        # Existing package policy changes only by the explicit diagnostic selector.
+        payload = cpio([(".", 0o40755, b"", 0, 0, 2), ("gate", 0o100444, b"gate", 0, 0, 1)])
+        expected = {"gate": {"bytes": 4, "sha256": fixture.digest(b"gate"), "mode": "100444"}}
+        info = ('<pkg-info identifier="' + fixture.PACKAGE + '" version="1" auth="root" install-location="'
+                + str(fixture.ROOT) + '"><bundle path="' + fixture.LAYOUT_CLIENTS[0]
+                + '" id="' + fixture.LAYOUT_ID + '.client"/></pkg-info>').encode()
+        with self.assertRaisesRegex(fixture.Refused, "^fixture-package-bundle-route$"):
+            fixture.fixture_package(package(payload, info=info), expected)
+        fixture.fixture_package(package(payload, info=info), expected, service_layout=True)
+
+        # The unchanged generic Mach-O boundary is a spy, not native evidence.
+        # These cases exercise only the new, narrower public-framework layer.
+        generic_calls = []
+        stager = SimpleNamespace(macho=lambda body, *, system_only: generic_calls.append((body, system_only)))
+        libraries = (
+            b"/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+            b"/System/Library/Frameworks/ServiceManagement.framework/Versions/A/ServiceManagement",
+            b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+            b"/usr/lib/libobjc.A.dylib", b"/usr/lib/libSystem.B.dylib",
+        )
+        def load(command, name):
+            start = 12 if command == 0xE else 24
+            size = (start + len(name) + 1 + 7) & ~7
+            return struct.pack("<III", command, size, start) + b"\0" * (start - 12) + name + b"\0" * (size - start - len(name))
+        def executable(names=libraries, *, flags=0x200084, first_command=0xC, extra=b""):
+            commands = [load(first_command if i == 0 else 0xC, name) for i, name in enumerate(names)]
+            commands += [load(0xE, b"/usr/lib/dyld"), struct.pack("<6I", 0x32, 24, 1, 26 << 16, 26 << 16, 0),
+                         struct.pack("<IIQQ", 0x80000028, 24, 0, 0)]
+            if extra:
+                commands.append(extra)
+            body = b"".join(commands)
+            return struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, len(commands), len(body), flags, 0) + body
+        body = executable()
+        fixture.service_observer_macho(body, stager)
+        self.assertEqual(generic_calls, [(body, True)])
+        fixture.service_observer_macho(executable(tuple(reversed(libraries))), stager)
+        segment = bytearray(152)
+        struct.pack_into("<II", segment, 0, 0x19, 152)
+        struct.pack_into("<I", segment, 64, 1)
+        segment[72:87] = b"__mod_init_func"
+        struct.pack_into("<I", segment, 136, 0x9)
+        for bad, label in (
+            (executable(libraries + (libraries[-1],)), "layout-image-system-closure"),
+            (executable((*libraries[:-1], b"/usr/lib/libsqlite3.dylib")), "layout-image-system-closure"),
+            (executable(first_command=0x80000018), "layout-image-command"),
+            (executable(first_command=0x8000001F), "layout-image-command"),
+            (executable(flags=0x84), "layout-image-flags"),
+            (executable(extra=bytes(segment)), "layout-image-initializer"),
+        ):
+            with self.subTest(label=label), self.assertRaisesRegex(fixture.Refused, "^" + label + "$"):
+                fixture.service_observer_macho(bad, stager)
+
+
 class InstallerContextTests(unittest.TestCase):
     """Synthetic DATA + one private FS case; none is a Mac Installer receipt."""
 
@@ -1173,10 +1445,13 @@ class InstallerContextTests(unittest.TestCase):
             ET.SubElement(data, "encoding", style="application/octet-stream")
             ET.SubElement(data, "extracted-checksum", style="sha256").text = fixture.digest(content)
             heap.extend(content)
-        # Standard XAR stat metadata also appears on product directories.
+        # Standard XAR metadata also appears on product directories.
         for element in toc.iter("file"):
             ET.SubElement(element, "inode").text = "314159"
             ET.SubElement(element, "deviceno").text = "16777233"
+            created = ET.SubElement(element, "FinderCreateTime")
+            ET.SubElement(created, "time").text = "2026-10-06T03:04:05"
+            ET.SubElement(created, "nanoseconds").text = "123456789"
         if mutate is not None:
             mutate(toc)
         plain = ET.tostring(root, encoding="utf-8")
@@ -1230,6 +1505,24 @@ class InstallerContextTests(unittest.TestCase):
                 for tag in ("inode", "deviceno"):
                     element.remove(element.find(tag))
         self.assertEqual(fixture.context_xar(self.xar(members, mutate=without_stat)), members)
+        def without_created(toc):
+            for element in toc.iter("file"):
+                element.remove(element.find("FinderCreateTime"))
+        self.assertEqual(fixture.context_xar(self.xar(members, mutate=without_created)), members)
+        for timestamp, nanoseconds in (("0001-01-01T00:00:00", "0"),
+                                       ("2000-02-29T12:34:56", "123456789"),
+                                       ("9999-12-31T23:59:59", "999999999")):
+            def created_text(toc):
+                for element in toc.iter("file"):
+                    created = element.find("FinderCreateTime")
+                    created.find("time").text = timestamp
+                    created.find("nanoseconds").text = nanoseconds
+                    created[:] = list(reversed(created))
+                    created.text = created.tail = "\n"
+                    for field in created:
+                        field.tail = "\n"
+            with self.subTest(created_time=timestamp, nanoseconds=nanoseconds):
+                self.assertEqual(fixture.context_xar(self.xar(members, mutate=created_text)), members)
         fixture.context_package_info(members["PackageInfo"], fixture.CONTEXT_IDENTIFIERS[1])
         for directory in (False, True):
             product = self.xar({"Distribution": fixture.context_distribution(),
@@ -1276,11 +1569,58 @@ class InstallerContextTests(unittest.TestCase):
                 with self.subTest(stat_tag=tag, shape=shape), self.assertRaisesRegex(
                         fixture.Refused, "^context-xar-member-" + label + "$"):
                     fixture.context_xar(self.xar(members, mutate=bad_shape))
-        for tag in ("acl", "flags", "ea", "FinderCreateTime", "device", "link"):
+        bad_created_values = (
+            ("time", ("", "0000-01-01T00:00:00", "2026-02-29T12:34:56", "2026-04-31T12:34:56",
+                      "2026-13-01T12:34:56", "2026-01-01T24:00:00", "2026-01-01T12:60:00",
+                      "2026-01-01T12:34:60", "2026-01-01T12:34:56Z", "2026-01-01T12:34:56+00:00",
+                      "2026-01-01T12:34:56.0", "2026-1-01T12:34:56", "\u0662" + "026-01-01T12:34:56")),
+            ("nanoseconds", ("", "-1", "+1", "00", "01", "1000000000", "1.0", " 1", "\u0661")),
+        )
+        for tag, values in bad_created_values:
+            for value in values:
+                def bad_created_text(toc):
+                    toc.find("file/FinderCreateTime/" + tag).text = value
+                with self.subTest(created_tag=tag, value=value), self.assertRaisesRegex(
+                        fixture.Refused, "^context-xar-member-metadata$"):
+                    fixture.context_xar(self.xar(members, mutate=bad_created_text))
+        for shape in ("attribute", "text", "tail", "duplicate", "missing-time", "missing-nanoseconds",
+                      "duplicate-leaf", "extra-leaf", "leaf-attribute", "leaf-child", "leaf-tail"):
+            def bad_created_shape(toc):
+                element = toc.find("file")
+                created = element.find("FinderCreateTime")
+                field = created.find("time")
+                if shape == "attribute":
+                    created.set("unexpected", "1")
+                elif shape == "text":
+                    created.text = "unexpected"
+                elif shape == "tail":
+                    created.tail = "unexpected"
+                elif shape == "duplicate":
+                    element.append(copy.deepcopy(created))
+                elif shape == "missing-time":
+                    created.remove(field)
+                elif shape == "missing-nanoseconds":
+                    created.remove(created.find("nanoseconds"))
+                elif shape == "duplicate-leaf":
+                    created.remove(created.find("nanoseconds"))
+                    created.append(copy.deepcopy(field))
+                elif shape == "extra-leaf":
+                    ET.SubElement(created, "unexpected")
+                elif shape == "leaf-attribute":
+                    field.set("unexpected", "1")
+                elif shape == "leaf-child":
+                    ET.SubElement(field, "unexpected")
+                else:
+                    field.tail = "unexpected"
+            label = "duplicate" if shape == "duplicate" else "metadata"
+            with self.subTest(created_shape=shape), self.assertRaisesRegex(
+                    fixture.Refused, "^context-xar-member-" + label + "$"):
+                fixture.context_xar(self.xar(members, mutate=bad_created_shape))
+        for tag in ("acl", "flags", "ea", "device", "link"):
             def diagnostic_tag(toc):
                 ET.SubElement(toc.find("file"), tag)
             with self.subTest(refused_metadata=tag), self.assertRaisesRegex(
-                    fixture.Refused, "^context-xar-member-tags-" + ("finder-create-time" if tag == "FinderCreateTime" else tag) + "$"):
+                    fixture.Refused, "^context-xar-member-tags-" + tag + "$"):
                 fixture.context_xar(self.xar(members, mutate=diagnostic_tag))
         for shape, label in (("unknown", "tags"), ("missing-name", "required"), ("duplicate-name", "required")):
             def bad_member(toc):
