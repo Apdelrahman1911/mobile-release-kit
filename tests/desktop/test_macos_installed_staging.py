@@ -235,8 +235,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 if failure == "superblob":
                     bad = bytearray(body)
                     offset = struct.unpack_from("<I", bad, 40)[0]
-                    struct.pack_into(">I", bad, offset + 4, len(bad) - offset - 1)
-                    bad[-1] = 0xA5  # Inert nonzero allocation tail; not an observed native fact.
+                    struct.pack_into(">I", bad, offset, 0)  # Genuinely invalid embedded magic, not allocation padding.
                     body = bytes(bad)
                 replacement = path.with_suffix(".next")
                 replacement.write_bytes(body); replacement.chmod(0o755)
@@ -1169,9 +1168,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     diagnostic = operation.receipt["pythonSignatureDiagnostic"]
                     self.assertTrue(diagnostic["available"])
                     self.assertEqual(diagnostic["authority"], "original-byte-data-only")
-                    self.assertEqual(diagnostic["tail"]["nonzeroBytes"], 1)
-                    self.assertFalse(diagnostic["predicates"]["allocationTailZero"])
-                    self.assertFalse(diagnostic["tail"]["matchesOriginalInput"])
+                    self.assertFalse(diagnostic["predicates"]["magicKnown"])
+                    self.assertTrue(all(value is True for key, value in diagnostic["predicates"].items()
+                                        if key != "magicKnown"))
+                    self.assertEqual(diagnostic["tail"]["bytes"], 0)
+                    self.assertEqual(diagnostic["tail"]["nonzeroBytes"], 0)
+                    self.assertTrue(diagnostic["tail"]["matchesOriginalInput"])
                     self.assertLessEqual(len(TOOL.canonical(diagnostic)), 1536)
                     self.assertTrue(operation.python_mutation_pending)
                     self.assertFalse(operation.receipt["originalClosesKnown"])
@@ -1401,8 +1403,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertEqual(zero["tail"]["bytes"], 16)
             self.assertIs(zero["predicates"]["allocationTailZero"], True)
             bad = bytearray(padded); bad[-15] = 0xA5; bad[-2] = 0x5A; bad = bytes(bad)
-            with self.assertRaisesRegex(module.Refused, "^python-signature-superblob$"):
-                module.python_code_flags(bad, machine, "python-engineering", matcher)
+            # Allocation padding is not a SuperBlob component or an admission
+            # predicate. Its exact bytes remain in the original signed image.
+            self.assertEqual(module.python_code_flags(bad, machine, "python-engineering", matcher), [0x10002])
+            for word, value, reason in ((16, size, "python-signature-index"),
+                (16, size - 7, "python-signature-index"), (16, 19, "python-signature-index"),
+                (24, 45, "python-signature-components"), (24, 7, "python-signature-components")):
+                malformed = bytearray(bad); struct.pack_into(">I", malformed, offset + word, value)
+                with self.subTest(target=target, declaredWord=word, value=value):
+                    with self.assertRaisesRegex(module.Refused, "^" + reason + "$"):
+                        module.python_code_flags(bytes(malformed), machine, "python-engineering", matcher)
             for original, matches in ((bad, True), (padded, False), (body, None)):
                 row = module.python_signature_diagnostic(original, bad, machine, matcher)
                 self.assertEqual(row["input"], {"bytes": len(original), "sha256": module.digest(original)})
@@ -1431,6 +1441,37 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     module.python_signature_diagnostic(body, body, machine, matcher)
             finally:
                 self.assertEqual(module.MAX_HELPER, original_bound)
+        # Same existing filesystem fixture, with native returns still DATA
+        # doubles: a nonzero allocation tail survives verify, hash and publish.
+        original_image = self.python_image
+        tail = b"\xa5" + bytes(14) + b"\x5a"
+        def image_with_allocation_tail(target, flags=0x2):
+            image = bytearray(original_image(target, flags) + tail)
+            allocated = struct.unpack_from("<I", image, 44)[0]
+            struct.pack_into("<I", image, 44, allocated + len(tail))
+            return bytes(image)
+        for target in (module.ARM_TARGET, module.INTEL_TARGET):
+            for phase in module.PYTHON_PHASES:
+                with self.subTest(allocationTarget=target, purpose=phase), tempfile.TemporaryDirectory() as directory:
+                    with mock.patch.object(self, "python_image", side_effect=image_with_allocation_tail):
+                        fixture = self.python_fixture(Path(directory), target=target, phase=phase)
+                    with self.python_fixture_call(fixture) as operation:
+                        self.assertEqual(operation.execute(), module.digest(fixture.signed))
+                    self.assertEqual(operation.python_signed, fixture.signed)
+                    self.assertEqual(operation.sha256, module.digest(fixture.signed))
+                    self.assertEqual(fixture.signed[-len(tail):], tail)
+                    self.assertEqual([row[0] for row in fixture.observations], list(module.PYTHON_ROLES))
+                    verify = fixture.observations[1][1]
+                    self.assertEqual(verify[:4], ("/usr/bin/codesign", "--verify", "--strict", "--all-architectures"))
+                    self.assertTrue(operation.receipt["passed"] and operation.receipt["originalClosesKnown"]
+                                    and operation.receipt["targetRetired"] and all(row["closed"] for row in operation.entries))
+                    self.assertNotIn("pythonSignatureDiagnostic", operation.receipt)
+                    self.assertFalse(operation.receipt["productReady"] or operation.receipt["developerIdOrNotarizationQualified"])
+                    self.assertEqual((fixture.work / "python-supplier-transport/supplier.tar").read_bytes(), fixture.archive)
+                    if phase == "python-shipping":
+                        self.assertEqual((fixture.work / "python3").read_bytes(), fixture.signed)
+                    else:
+                        self.assertFalse((fixture.work / "python3").exists())
         with tempfile.TemporaryDirectory() as directory:
             fixture = self.python_fixture(Path(directory), phase="python-shipping", failure="unconfigured")
             with self.python_fixture_call(fixture), self.assertRaises((module.Refused, TOOL.Refused)):

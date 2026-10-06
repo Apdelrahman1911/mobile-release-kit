@@ -88,8 +88,11 @@ def python_code_flags(body, machine, phase, matcher):
          and offset + size == len(body), "python-signature-range")
     blob = body[offset:]
     magic, length, count = struct.unpack_from(">III", blob)
-    need(magic == 0xFADE0CC0 and 1 <= count <= 32 and 12 + count * 8 <= length <= size
-         and not any(blob[length:]), "python-signature-superblob")
+    need(magic == 0xFADE0CC0 and 1 <= count <= 32 and 12 + count * 8 <= length <= size,
+         "python-signature-superblob")
+    # LC_CODE_SIGNATURE allocation may exceed the declared SuperBlob. Parse
+    # only that extent; preserve the complete signed body for native verification.
+    blob = blob[:length]
     intervals, slots, flags = [], set(), {}
     for index in range(count):
         slot, start = struct.unpack_from(">II", blob, 12 + index * 8)
