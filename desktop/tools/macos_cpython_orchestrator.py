@@ -283,15 +283,21 @@ def framework_component(body):
     return True
 
 
-def native_slice(body, machine):
-    """Extract one exact native 64-bit slice; no code is run or invented."""
-    need(type(body) is bytes and 32 <= len(body) <= FILE_LIMIT and machine in CPUS, "macho-input")
+def native_slice(body, machine, *, archive_data=False):
+    """Extract a native image, or classify explicitly requested static DATA.
+
+    Apple's universal format also wraps ar archives. Only the inventory caller
+    may classify those as nonimages; strict loader callers keep the default.
+    No archive member is parsed, executed, linked, or granted image authority.
+    """
+    need(type(body) is bytes and 32 <= len(body) <= FILE_LIMIT and machine in CPUS
+         and type(archive_data) is bool, "macho-input")
     magic = struct.unpack_from(">I", body)[0]
     if magic in {0xCAFEBABE, 0xCAFEBABF}:
         count = struct.unpack_from(">I", body, 4)[0]
         width = 32 if magic == 0xCAFEBABF else 20
         need(1 <= count <= 8 and 8 + count * width <= len(body), "fat-count")
-        ranges, cpus, selected = [], set(), None
+        ranges, cpus, selected, kinds = [], set(), None, set()
         for number in range(count):
             start = 8 + number * width
             if width == 20:
@@ -306,19 +312,25 @@ def native_slice(body, machine):
             cpus.add(cpu)
             ranges.append((offset, offset + size))
             thin = body[offset:offset + size]
-            try:
-                need(thin[:4] == b"\xcf\xfa\xed\xfe"
-                     and struct.unpack_from("<II", thin, 4) == (cpu, subtype), "fat-slice-header")
-            except PreparationRefused as error:
+            archive = archive_data and thin.startswith(b"!<arch>\n")
+            if not archive:
                 try:
-                    error._fat_slice_header = (magic, count, number, cpu, subtype, offset, size, alignment,
-                                               *struct.unpack_from("<III", thin))
-                except BaseException:
-                    pass  # Optional public-input observation cannot replace the original refusal.
-                raise
+                    need(thin[:4] == b"\xcf\xfa\xed\xfe"
+                         and struct.unpack_from("<II", thin, 4) == (cpu, subtype), "fat-slice-header")
+                except PreparationRefused as error:
+                    try:
+                        error._fat_slice_header = (magic, count, number, cpu, subtype, offset, size, alignment,
+                                                   *struct.unpack_from("<III", thin))
+                    except BaseException:
+                        pass  # Optional public-input observation cannot replace the original refusal.
+                    raise
+            kinds.add(archive)
+            need(len(kinds) == 1, "fat-slice-kind")
             if cpu == CPUS[machine]:
                 selected = thin
         need(selected is not None, "fat-native-missing")
+        if True in kinds:
+            return None  # Preserve the complete authenticated nonimage unchanged.
         body = selected
     need(body[:4] == b"\xcf\xfa\xed\xfe" and struct.unpack_from("<I", body, 4)[0] == CPUS[machine],
          "macho-native-header")
@@ -1067,7 +1079,7 @@ def native_image_bytes(path, machine):
     data = b.read(path, FILE_LIMIT)
     if data[:4] not in {b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"}:
         return None
-    return native_slice(data, machine)
+    return native_slice(data, machine, archive_data=path.suffix == ".a")
 
 
 def replace_owned_file(path, body):

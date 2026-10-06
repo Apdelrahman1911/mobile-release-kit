@@ -567,6 +567,65 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             self.assertIs(caught.exception, original_error)
         finally:
             PREP.need = original_need
+        # FAT32/FAT64 are wrappers, not proof of executable Mach-O content.
+        # Real ar-shaped DATA remains byte-identical and never reaches a loader.
+        ar_header = b"member.o/       " + b"0           " + b"0     " + b"0     " + b"100644  " + b"4         " + b"`\n"
+        self.assertEqual(len(ar_header), 60)
+        archive = b"!<arch>\n" + ar_header + b"DATA"
+        archives = fat_fixture(archive, archive)
+        wide_archives_header = (struct.pack(">2I", 0xCAFEBABF, 2)
+                                + struct.pack(">IIQQII", ARM, 0, 128, len(archive), 6, 0)
+                                + struct.pack(">IIQQII", INTEL, 3, 256, len(archive), 6, 0))
+        wide_archives = (wide_archives_header + bytes(128 - len(wide_archives_header)) + archive
+                         + bytes(128 - len(archive)) + archive)
+        for universal in (archives, wide_archives):
+            before = PREP.hashlib.sha256(universal).digest()
+            for machine in ("arm64", "x86_64"):
+                self.assertIsNone(PREP.native_slice(universal, machine, archive_data=True))
+                with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-header$"):
+                    PREP.native_slice(universal, machine)
+                with self.assertRaises(PREP.PreparationRefused):
+                    PREP.macho_records(universal, machine)
+            self.assertEqual(PREP.hashlib.sha256(universal).digest(), before)
+        for mixed in (fat_fixture(archive, intel), fat_fixture(arm, archive)):
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-kind$"):
+                PREP.native_slice(mixed, "arm64", archive_data=True)
+        damaged_archives = []
+        for offset, value in ((4, 0), (4, 9), (28, ARM), (36, 64),
+                              (20, len(archives) + 1), (16, 65), (8, 7)):
+            data = bytearray(archives); struct.pack_into(">I", data, offset, value)
+            damaged_archives.append(bytes(data))
+        reserved_archive = bytearray(wide_archives); struct.pack_into(">I", reserved_archive, 36, 1)
+        damaged_archives.append(bytes(reserved_archive))
+        incomplete_magic = bytearray(archives); incomplete_magic[71] = ord("X")
+        damaged_archives.append(bytes(incomplete_magic))
+        for number, data in enumerate(damaged_archives):
+            with self.subTest(archive_boundary=number), self.assertRaises(PREP.PreparationRefused):
+                PREP.native_slice(data, "arm64", archive_data=True)
+        single_header = struct.pack(">2I", 0xCAFEBABF, 1) + struct.pack(">IIQQII", ARM, 0, 64, len(archive), 6, 0)
+        single_archive = single_header + bytes(64 - len(single_header)) + archive
+        with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-native-missing$"):
+            PREP.native_slice(single_archive, "x86_64", archive_data=True)
+        with self.assertRaises(PREP.PreparationRefused):
+            PREP.native_slice(archives, "arm64", archive_data="yes")
+
+        # Suffix only enables classification; it never excludes an actual image.
+        # The existing inventory hashes/nonimage POST preserve the whole archive.
+        original_read = BUILD.read
+        for data, filename, expected in ((archives, "libtclstub.a", None),
+                                          (wide_archives, "libtkstub.a", None),
+                                          (fat, "still-an-image.a", arm),
+                                          (arm, "thin-image.a", arm)):
+            path = Path(filename)
+            with mock.patch.object(BUILD, "read", return_value=data) as read:
+                self.assertEqual(PREP.native_image_bytes(path, "arm64"), expected)
+                read.assert_called_once_with(path, PREP.FILE_LIMIT)
+            self.assertIs(BUILD.read, original_read)
+        with mock.patch.object(BUILD, "read", return_value=archives):
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-header$"):
+                PREP.native_image_bytes(Path("not-an-archive.dylib"), "arm64")
+        self.assertIs(BUILD.read, original_read)
+
         with self.assertRaises(PREP.PreparationRefused):
             PREP.macho_records(fat, "arm64")
         records = PREP.macho_records(arm, "arm64")
