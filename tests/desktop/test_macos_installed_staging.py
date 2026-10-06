@@ -5886,6 +5886,35 @@ class MacNormalPreviewData(unittest.TestCase):
         native = (root / "desktop/native/macos-installed-native/build.rs").read_text()
         self.assertIn("release: 1.98.1", native)
         self.assertIn("commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985", native)
+        # SOURCE table DATA only: the actual Rust guard is still exercised by
+        # native compilation, never executed or translated by this Python test.
+        table_start = 'const CLOCK_TOOLCHAINS: [(&str, &str, &str); 3] = [\n'
+        self.assertEqual(native.count(table_start), 1)
+        table_body = native.split(table_start, 1)[1].split('\n];', 1)[0]
+        clock_rows = ast.literal_eval('[' + table_body + ']')
+        self.assertEqual(clock_rows, [
+            ("aarch64-apple-darwin", "release: 1.98.1", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985"),
+            ("x86_64-apple-darwin", "release: 1.98.1", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985"),
+            ("x86_64-apple-darwin", "release: 1.98.0", "commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+        ])
+        for rejected in (
+            ("aarch64-apple-darwin", "release: 1.98.0", "commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+            ("x86_64-apple-darwin", "release: 1.98.0", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985"),
+            ("x86_64-apple-darwin", "release: 1.98.1", "commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+            ("x86_64-apple-darwin", "release: 1.98.2", "commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+            ("x86_64-unknown-linux-gnu", "release: 1.98.0", "commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+        ):
+            self.assertNotIn(rejected, clock_rows)
+        self.assertIn('let target = std::env::var("TARGET").expect("Cargo native target binding required");', native)
+        self.assertIn('assert!(matches!(target.as_str(), "aarch64-apple-darwin" | "x86_64-apple-darwin"),', native)
+        for key, expected in (("CARGO_CFG_TARGET_OS", "macos"), ("CARGO_CFG_TARGET_POINTER_WIDTH", "64"),
+                              ("CARGO_CFG_TARGET_VENDOR", "apple"), ("CARGO_CFG_TARGET_FAMILY", "unix")):
+            self.assertIn('assert_eq!(std::env::var("' + key + '").as_deref(), Ok("' + expected + '")', native)
+        self.assertEqual(native.count('std::env::var("TARGET")'), 1)
+        query_start = '    let rustc = std::env::var_os("RUSTC").expect("Cargo compiler binding required");\n'
+        self.assertEqual(native.count(query_start), 1)
+        guard = query_start + native.split(query_start, 1)[1].split('    if qualification {', 1)[0]
+        self.assertEqual(guard, '    let rustc = std::env::var_os("RUSTC").expect("Cargo compiler binding required");\n    let version = std::process::Command::new(rustc).args(["--version", "--verbose"])\n        .output().expect("query actual Mac compiler");\n    let version_text = std::str::from_utf8(&version.stdout).expect("compiler version is UTF-8");\n    assert!(version.status.success() && version.stdout.len() <= 4096\n        && CLOCK_TOOLCHAINS.iter().any(|(clock_target, release, commit)| {\n            target.as_str() == *clock_target\n                && version_text.lines().filter(|line| line.starts_with("release:"))\n                    .eq(std::iter::once(*release))\n                && version_text.lines().filter(|line| line.starts_with("commit-hash:"))\n                    .eq(std::iter::once(*commit))\n        }), "Mac app/helper CLOCK_UPTIME_RAW proof requires an exact reviewed target/compiler tuple");\n')
         library = (root / "desktop/src-tauri/src/lib.rs").read_text()
         self.assertIn("!mrk_macos_installed_native::VAULT_HELPER_BUILD", library)
         package_source = (root / "desktop/tools/macos_android_helper_package.py").read_text()

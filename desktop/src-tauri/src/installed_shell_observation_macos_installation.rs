@@ -148,7 +148,8 @@ impl FixtureData {
         fixture.root.is_absolute() && fixture.root.to_str().is_some_and(|s| s.len() <= 1024)
             && fixture.app_identity.is_some() && fixture.untouched.as_ref().is_some_and(|rows| rows.iter().all(fact))
             && fact(&fixture.ignore) && fixture.config.is_none() && fixture.release.is_none()
-            && fixture.ios.is_none() && fixture.project_fields.is_none() && fixture.recovery.is_none() && !fixture.written && !fixture.mutated
+            && fixture.ios.is_none() && fixture.project_fields.is_none() && fixture.recovery.is_none()
+            && fixture.local_edits.is_none() && fixture.checks.is_none() && !fixture.written && !fixture.mutated
     }
     fn capture(fixture: &super::Fixture) -> Option<Self> {
         if !Self::shape(fixture) { return None; }
@@ -165,7 +166,7 @@ impl FixtureData {
         // and consuming FD closes), but with only this bounded copied DATA.
         let expected = super::Fixture { root: self.root.clone(), uid: self.uid, root_identity: self.root_identity,
             app_identity: Some(self.app_identity), untouched: Some(self.untouched.clone()), ignore: self.ignore.clone(),
-            config: None, release: None, ios: None, project_fields: None, recovery: None, written: false, mutated: false };
+            config: None, release: None, ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, written: false, mutated: false };
         expected.verify(false)
     }
 }
@@ -431,7 +432,7 @@ pub(super) fn data_checks() -> bool {
         super::Fixture { root: "/private/tmp/inert-installation-fixture".into(), uid: 501,
             root_identity: [8; 6], app_identity: Some([9; 6]),
             untouched: Some([fact.clone(), fact.clone(), fact.clone()]), ignore: fact,
-            config: None, release: None, ios: None, project_fields: None, recovery: None, written: false, mutated: false }
+            config: None, release: None, ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, written: false, mutated: false }
     };
     let original = fixture();
     let Some(frozen) = FixtureData::capture(&original) else { return false; };

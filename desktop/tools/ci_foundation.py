@@ -718,8 +718,12 @@ GTK_COMPILE_CHECKS = {
 MAC_COMPILE_SCOPE = "macos-normal-compile-v1"
 MAC_COMPILE_WORKFLOW = ".github/workflows/desktop-macos-normal-compile.yml"
 MAC_COMPILE_REF = "refs/heads/verify/desktop-macos-normal-compile"
-MAC_COMPILE_RUST = "1.98.1"
-MAC_COMPILE_RUST_COMMIT = "48a229ceaefd4985c50990b14116b6d856af0985"
+# Each fixed hosted target selects ONE exact compiler tuple; no cross-target
+# fallback. The Intel image publishes Rust1.98.0, independently of ARM1.98.1.
+MAC_COMPILE_RUST = {
+    "aarch64-apple-darwin": ("1.98.1", "48a229ceaefd4985c50990b14116b6d856af0985"),
+    "x86_64-apple-darwin": ("1.98.0", "88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+}
 MAC_COMPILE_HOSTS = {
     "aarch64-apple-darwin": ("ARM64", "arm64", ("macos26", "macos26-arm64"), "build-release.json", "macos26-arm64-"),
     "x86_64-apple-darwin": ("X64", "x86_64", ("macos26",), "build-release-intel.json", "macos26-x86_64-"),
@@ -2752,7 +2756,8 @@ def compiler_binding(context: dict) -> dict:
         target = context.get("macCompile", {}).get("target")
         require(context.get("platform") == "macos" and target in MAC_COMPILE_HOSTS,
                 "Normal Mac compiler context differs")
-        return {"release": MAC_COMPILE_RUST, "commitHash": MAC_COMPILE_RUST_COMMIT, "target": target}
+        release, commit = MAC_COMPILE_RUST[target]
+        return {"release": release, "commitHash": commit, "target": target}
     return {"release": RUST, "target": TARGETS[context["platform"]]}
 
 
@@ -7278,7 +7283,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         public.update(binding)
         public["notQualified"].append("test-execution")
     if scope == MAC_COMPILE_SCOPE:
-        public.update(expectedRust=MAC_COMPILE_RUST, compiler=compiler_binding(context), macCompile=context["macCompile"])
+        compiler = compiler_binding(context)
+        public.update(expectedRust=compiler["release"], compiler=compiler, macCompile=context["macCompile"])
         public["notQualified"].extend(("signed-runtime", "Developer-ID-identity", "service-registration", "ordinary-UI"))
     if scope == GTK_COMPILE_SCOPE:
         public["sg1"] = context["sg1"]
@@ -7440,8 +7446,8 @@ def tools(context: dict, environment: dict[str, str], *, timeout_for=None) -> tu
         ordinary(Path(rustc))
         version = run([rustc, "-vV"], check="rust-version-target", cwd=root, env=environment,
                       timeout=15 if timeout_for is None else timeout_for(15), capture=True)
-        require(len(version.encode()) <= 4096 and "release: " + MAC_COMPILE_RUST in version.splitlines()
-                and "commit-hash: " + MAC_COMPILE_RUST_COMMIT in version.splitlines()
+        require(len(version.encode()) <= 4096 and "release: " + selected["release"] in version.splitlines()
+                and "commit-hash: " + selected["commitHash"] in version.splitlines()
                 and "host: " + selected["target"] in version.splitlines(), "Direct Mac compiler version/commit/host differs")
         cargo_version = run([cargo, "--version"], check="mac-cargo-version", cwd=root, env=environment,
                             timeout=15 if timeout_for is None else timeout_for(15), capture=True)

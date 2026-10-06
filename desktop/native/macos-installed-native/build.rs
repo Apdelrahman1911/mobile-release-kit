@@ -3,6 +3,15 @@ mod installed_paths;
 #[path = "build_support/producer_selection.rs"]
 mod producer_selection;
 
+// Full SOURCE proof: both pinned releases use the identical Apple
+// Instant -> CLOCK_UPTIME_RAW -> clock_gettime implementation. Keep the
+// original 1.98.1 route on BOTH supported targets; add 1.98.0 only for Intel.
+const CLOCK_TOOLCHAINS: [(&str, &str, &str); 3] = [
+    ("aarch64-apple-darwin", "release: 1.98.1", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985"),
+    ("x86_64-apple-darwin", "release: 1.98.1", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985"),
+    ("x86_64-apple-darwin", "release: 1.98.0", "commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+];
+
 // Only reviewed source inputs can select the shipping identity. This is not a
 // renderer/environment requirement string, same-team wildcard or ad-hoc path.
 // The deliberately unconfigured profile builds an unavailable engineering app.
@@ -58,10 +67,13 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");
     println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification_native)");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_MRK_WRAPPING_KEYCHAIN_QUALIFICATION");
-    assert!(matches!(std::env::var("TARGET").as_deref(),
-        Ok("aarch64-apple-darwin" | "x86_64-apple-darwin")), "fixed supported macOS native target required");
+    let target = std::env::var("TARGET").expect("Cargo native target binding required");
+    assert!(matches!(target.as_str(), "aarch64-apple-darwin" | "x86_64-apple-darwin"),
+        "fixed supported macOS native target required");
     assert_eq!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos"), "native target must be macOS");
     assert_eq!(std::env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref(), Ok("64"), "native target must be LP64");
+    assert_eq!(std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref(), Ok("apple"), "native clock requires Apple target vendor");
+    assert_eq!(std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref(), Ok("unix"), "native clock requires Unix target family");
     // Only a flag cfg supplied to this owned Cargo build enables the source
     // seam. Neither an environment fixture path nor a runtime switch exists.
     let qualification = match std::env::var_os("CARGO_CFG_MRK_WRAPPING_KEYCHAIN_QUALIFICATION") {
@@ -120,9 +132,13 @@ fn main() {
         .output().expect("query actual Mac compiler");
     let version_text = std::str::from_utf8(&version.stdout).expect("compiler version is UTF-8");
     assert!(version.status.success() && version.stdout.len() <= 4096
-        && version_text.lines().any(|l| l == "release: 1.98.1")
-        && version_text.lines().any(|l| l == "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985"),
-        "Mac app/helper CLOCK_UPTIME_RAW proof requires the pinned Rust1.98.1 compiler");
+        && CLOCK_TOOLCHAINS.iter().any(|(clock_target, release, commit)| {
+            target.as_str() == *clock_target
+                && version_text.lines().filter(|line| line.starts_with("release:"))
+                    .eq(std::iter::once(*release))
+                && version_text.lines().filter(|line| line.starts_with("commit-hash:"))
+                    .eq(std::iter::once(*commit))
+        }), "Mac app/helper CLOCK_UPTIME_RAW proof requires an exact reviewed target/compiler tuple");
     if qualification {
         assert!(observation, "wrapping qualification requires installed-observation");
         assert_eq!(std::env::var("PROFILE").as_deref(), Ok("debug"), "wrapping qualification is debug-profile only");

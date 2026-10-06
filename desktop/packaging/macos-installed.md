@@ -49,10 +49,36 @@ feature unification. The existing OriginalWork coordinator registers the one
 blocking child before native admission; it owns launch, request GO, three pipes,
 absolute work/cleanup limits, the real child wait, and the actual worker join.
 
-Both reviewed Mac workflow jobs select Rust **1.98.1**, commit
-48a229ceaefd4985c50990b14116b6d856af0985; the native build script checks the
-actual selected compiler. The Apple Instant/CLOCK_UPTIME_RAW source binding
-is specific to that toolchain, not a promise about arbitrary future compilers.
+The ordinary installed/Aqua workflow tool selections remain separate from the
+native clock guard. That guard preserves Rust **1.98.1**, commit
+`48a229ceaefd4985c50990b14116b6d856af0985`, for both `aarch64-apple-darwin` and
+`x86_64-apple-darwin`; it additionally admits Rust **1.98.0**, commit
+`88d9e12ae178fab0fb5cc050a94da85685d449ea`, **only** for `x86_64-apple-darwin`.
+The three complete target/release/commit rows are closed SOURCE inputs, not an
+arbitrary compiler-version range or fallback. The original selected compiler
+query must succeed with bounded UTF-8 output and exactly one matching full
+release and commit-hash field. Cargo target cfg must be macOS/LP64/Apple/Unix.
+Existing supported cross-target builds are not replaced by a new host policy;
+the compiler-only CI caller independently checks its actual compiler host.
+
+The official Rust sources below are byte-identical at those two exact commits.
+Prefix each relative path with either pinned source root:
+- `https://raw.githubusercontent.com/rust-lang/rust/48a229ceaefd4985c50990b14116b6d856af0985/`
+- `https://raw.githubusercontent.com/rust-lang/rust/88d9e12ae178fab0fb5cc050a94da85685d449ea/`
+
+| Relative Rust SOURCE path | Bytes | SHA-256 at both commits |
+| --- | ---: | --- |
+| `library/std/src/sys/time/mod.rs` | 1125 | `449afdd86955252a302d889032a6cb2cbb04dd786f8cb81d9a9059ad933e7e4c` |
+| `library/std/src/sys/time/unix.rs` | 4999 | `2250ca181d117737d32734c50156a7a9e74852251a17bf70b2a002b8d6fbac43` |
+| `library/std/src/sys/pal/unix/time.rs` | 8303 | `963774dbbabd67a0a8264d7f1edf0faca0bbc4e064af6c2459371481a5888307` |
+
+Unix selection plus the Apple cfg chooses `CLOCK_UPTIME_RAW`; `Instant::now`
+passes that clock to `Timespec::now`, whose macOS path calls
+`libc::clock_gettime(clock, ...)`. The existing native helper uses the same
+clock; its original bracket, conversion, regression checks and deadlines are
+unchanged. This is specific standard-library SOURCE correspondence, not a
+promise about future compilers, a runtime timing measurement, or qualification
+of installation, signatures, service registration, process finality or UI.
 No shared global Rust toolchain or Windows/Linux profile is changed.
 
 Packaging order is helper build → hardened/empty-entitlements signature →
