@@ -12,15 +12,15 @@ STEP_NAMES = (
     "Admit only this fixed fresh hosted route",
     "Check out the exact reviewed source without retained credentials",
     "Select fixed isolated preparation Python",
-    "Prepare only Context source and existing tool-version bindings",
-    "Observe scripts-only Context receipt facts without native qualification",
+    "Prepare only the locked fixture graphs through the original command owner",
+    "Verify installer worker DATA, context and normal native fixture",
     "Publish only the closed source-bound fixture summary",
     "Preserve only the bounded reviewed summary",
-    "Require completed diagnostics without native acceptance",
+    "Require actual complete acceptance",
 )
 # Frozen active source, not values derived from the subject during a test.
 EXPECTED_HEADER = "name: Desktop macOS fixed maintenance fixture\n\non:\n  push:\n    branches:\n      - verify/desktop-macos-maintenance-fixture\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: desktop-macos-maintenance-fixture-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  e2_fixture:\n    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'\n    runs-on: macos-26\n    timeout-minutes: 100\n    env:\n      # No shell startup file, inherited compiler switch or credential reaches\n      # a preparation/native child. Child environments below are reconstructed.\n      BASH_ENV: ''\n      ENV: ''\n"
-EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # The same owner observes only Context under its unchanged 120s endpoint.\n          # No Rust build/test, image, signing or service/native lifecycle route.\n          # Zero here means safely captured diagnostics, not native acceptance.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-context-receipts\n\n"
+EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # This original owner alone compiles/signs/installs/observes the fixed\n          # fixture. Its 990s/993s native call covers ALL THREE cases, with one\n          # distinct aggregate 60s auxiliary ledger. Step timeout is no receipt.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py\n\n"
 EXPECTED_IF_LINES = (
     "    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'",
     "        if: always() && !cancelled() && steps.prepare.outcome == 'success'",
@@ -162,7 +162,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(active(native), active(EXPECTED_NATIVE))
         self.assertEqual(active(native).count("exec /usr/bin/env -i"), 1)
         self.assertEqual(active(native).count(" --observe-service-layout"), 0)
-        self.assertEqual(active(native).count(" --observe-context-receipts"), 1)
+        self.assertEqual(active(native).count(" --observe-context-receipts"), 0)
         self.assertIn("owner = qualification.load_owner(CHECKOUT)", active(prepare))
         self.assertEqual(active(prepare).count("owner.run_owned("), 1)
         for required in (
@@ -279,7 +279,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                          'context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)'):
             self.assertIn(required, receipts)
             self.assertLess(complete.index(required), complete.index('self.installer_context["completed"] = True'))
-        self.assertNotIn('call("fetch-"', prepare)
+        self.assertIn('call("fetch-"', prepare)
         sources = section(self.owner, "def source_names(rows):", "\nclass SourceInputs:")
         for required in ('"desktop/src-tauri/"', '"desktop/macos-installed-inputs/"',
                          '"desktop/tools/macos_android_sdk_metadata.py"',
@@ -453,12 +453,11 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn(flat('need("release: 1.98.1" in text.splitlines() and '
                            '"commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985" in text.splitlines(), '
                            '"effective-rust-clock-binding")'), flat(prepare))
-        # This explicit diagnostic route keeps only actual version bindings;
-        # the retained normal compiler method still requires locked offline work.
-        self.assertNotIn('CARGO_NET_OFFLINE="false"', prepare)
-        self.assertNotIn('for index, directory in enumerate(manifests):', prepare)
-        self.assertNotIn('call("fetch-"', prepare)
-        self.assertNotIn('fetch_environment', prepare)
+        self.assertIn('CARGO_NET_OFFLINE="false"', prepare)
+        self.assertIn('for index, directory in enumerate(manifests):', prepare)
+        self.assertIn(flat('call("fetch-" + str(index), [str(bin_directory / "cargo"), "fetch", "--manifest-path", '
+                           'str(CHECKOUT / directory / "Cargo.toml"), "--locked", "--target", TARGET], '
+                           'fetch_environment, 240, 262144)'), flat(prepare))
         self.assertIn('CARGO_NET_OFFLINE="true"', compiler)
         self.assertEqual(active(self.steps[STEP_NAMES[4]]), active(EXPECTED_NATIVE))
 
@@ -511,20 +510,24 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired",
             "protectedRetentionRequired")"""))
         self.assertIn('accepted=bool(known_pass)', active(publish))
-        diagnostic = section(publish, '              # This committed workflow selects only the receipt diagnostic route.',
-                             '              known_pass = (')
-        self.assertIn('fixture.need(result["passed"] is False', diagnostic)
-        self.assertIn('result["installerEntered"] is result["nativeEntered"] is False', diagnostic)
-        self.assertIn('context_receipt_diagnostic = fixture.context_receipt_diagnostic_result(result, source)', diagnostic)
-        self.assertIn('diagnostic_captured = outcome == "success" and context_receipt_diagnostic is not None', diagnostic)
+        route = section(publish, '              # This committed workflow selects the ordinary native fixture route.',
+                        '              known_pass = (')
+        self.assertIn('fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")', route)
+        self.assertIn('context_receipt_diagnostic = None', route)
+        self.assertIn('diagnostic_captured = False', route)
+        self.assertNotIn('context_receipt_diagnostic_result(', route)
+        self.assertNotIn('context_observation_result(', route)
         self.assertIn('contextReceiptDiagnostic=context_receipt_diagnostic, diagnosticCaptured=bool(diagnostic_captured)', publish)
         self.assertEqual([line.strip() for line in active(publish).splitlines() if 'summary["diagnosticCaptured"] =' in line],
                          ['summary["diagnosticCaptured"] = False'] * 2)
         self.assertEqual([line.strip() for line in active(publish).splitlines() if 'summary["contextReceiptDiagnostic"] =' in line],
                          ['summary["contextReceiptDiagnostic"] = None'] * 2)
         self.assertIn('b"diagnostic_captured=true\\n" if summary["diagnosticCaptured"] else b"diagnostic_captured=false\\n"', publish)
-        self.assertIn('context_observation = fixture.context_observation_result(result, source)', diagnostic)
-        self.assertIn('context_completed = outcome == "success" and context_observation is not None', diagnostic)
+        self.assertIn('context_completed = installer_context is not None and installer_context["completed"]', route)
+        self.assertGreater(publish.index(route), publish.index('fixture.installer_context_calls(context_record, source, calls)'))
+        self.assertIn('and native_rust_tests is not None and installer_worker_rust_tests is not None', gates)
+        self.assertIn('and installed_reader_rust_tests is not None and producer_signing_rust_tests is not None', gates)
+        self.assertIn('and package_producer_rust_tests is not None', gates)
         self.assertIn('"contextObservationCompleted": False,', publish)
         self.assertIn('contextObservationCompleted=bool(context_completed),', publish)
         self.assertEqual([line.strip() for line in active(publish).splitlines() if 'summary["contextObservationCompleted"] =' in line],
@@ -706,7 +709,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                       'and self.outputs_closed and self.protected_closed and native_finality and context_finality',
                       'and layout_finality and not self.cleanup_errors'):
             self.assertIn(token, finish)
-        btm = section(publish, "              btm_log = None", "              # This committed workflow selects only the receipt diagnostic route.")
+        btm = section(publish, "              btm_log = None", "              # This committed workflow selects the ordinary native fixture route.")
         self.assertEqual(flat(active(btm)), flat("""btm_log = None
             btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
             if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
@@ -881,9 +884,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "NATIVE_OUTCOME: ${{ steps.native.outcome }}",
             "PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}",
             'set -euo pipefail',
-            "DIAGNOSTIC_CAPTURED: ${{ steps.publication.outputs.diagnostic_captured }}",
-            "CONTEXT_OBSERVATION_COMPLETED: ${{ steps.publication.outputs.context_observation_completed }}",
-            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == false && "$DIAGNOSTIC_CAPTURED" == false && "$CONTEXT_OBSERVATION_COMPLETED" == true ]]',
+            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == true ]]',
         ):
             with self.subTest(finality=required):
                 self.assertIn(required, active(final))

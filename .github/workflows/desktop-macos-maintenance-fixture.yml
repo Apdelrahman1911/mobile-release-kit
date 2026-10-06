@@ -54,7 +54,7 @@ jobs:
         with:
           python-version: '3.14.7'
 
-      - name: Prepare only Context source and existing tool-version bindings
+      - name: Prepare only the locked fixture graphs through the original command owner
         id: prepare
         timeout-minutes: 18
         shell: bash
@@ -452,8 +452,18 @@ jobs:
                   else:
                       need("release: 1.98.1" in text.splitlines(), "effective-cargo-clock-binding")
                   tools[tool] = {"command": [tool, "--version", "--verbose"], "output": text}
-              # Diagnostic-only: retain actual version bindings, but do not fetch
-              # or compile any Cargo graph. No synthetic effective-Rust receipt.
+              # Acquisition only: no build scripts, credential helpers, alternate
+              # registries, token/proxy/SSL overrides or inherited Cargo settings.
+              fetch_environment = dict(tool_environment, CARGO_NET_OFFLINE="false",
+                                       CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse", CARGO_NET_RETRY="1",
+                                       CARGO_HTTP_TIMEOUT="30", CARGO_HTTP_SSL_VERIFY="true",
+                                       CARGO_NET_GIT_FETCH_WITH_CLI="false")
+              for index, directory in enumerate(manifests):
+                  phase = "cargo-configuration"
+                  no_configuration()
+                  call("fetch-" + str(index), [str(bin_directory / "cargo"), "fetch", "--manifest-path",
+                                             str(CHECKOUT / directory / "Cargo.toml"), "--locked", "--target", TARGET],
+                       fetch_environment, 240, 262144)
               phase = "cargo-configuration"
               no_configuration()
               phase = "source-recheck"
@@ -525,7 +535,7 @@ jobs:
           print("Locked fixture inputs prepared; source/input originals closed. No native qualification is claimed.")
           PY_PREPARE
 
-      - name: Observe scripts-only Context receipt facts without native qualification
+      - name: Verify installer worker DATA, context and normal native fixture
         id: native
         timeout-minutes: 70
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -534,9 +544,10 @@ jobs:
           umask 077
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
-          # The same owner observes only Context under its unchanged 120s endpoint.
-          # No Rust build/test, image, signing or service/native lifecycle route.
-          # Zero here means both closed Context observations, not native acceptance.
+          # The same original owner runs the four fixed Mac8 DATA graphs,
+          # independent Native6/client compilation, then normal Context and
+          # the fixture. A DATA/compile pass alone never grants installation,
+          # signing, service, ordinary-entry or distribution qualification.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
             GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
@@ -548,7 +559,7 @@ jobs:
             RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
             DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-context-receipts
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py
 
       - name: Publish only the closed source-bound fixture summary
         id: publication
@@ -1098,16 +1109,13 @@ jobs:
                       and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
                   # Filtered mentions are not causal findings, native finality or service authority.
                   btm_log = btm_record
-              # This committed workflow selects only the receipt diagnostic route.
-              fixture.need(result["passed"] is False
-                           and all(result[key] is None for key in ("native", "nativeRustTests", "installerWorkerRustTests",
-                               "installedReaderRustTests", "producerSigningRustTests", "packageProducerRustTests", "package"))
-                           and result["installerEntered"] is result["nativeEntered"] is False,
-                           "summary-context-receipt-route")
-              context_receipt_diagnostic = fixture.context_receipt_diagnostic_result(result, source)
-              diagnostic_captured = outcome == "success" and context_receipt_diagnostic is not None
-              context_observation = fixture.context_observation_result(result, source)
-              context_completed = outcome == "success" and context_observation is not None
+              # This committed workflow selects the ordinary native fixture route.
+              # The separate Context-only CLI remains explicit opt-in, not an
+              # alternative success condition for this workflow or native gate.
+              fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")
+              context_receipt_diagnostic = None
+              diagnostic_captured = False
+              context_completed = installer_context is not None and installer_context["completed"]
               known_pass = (
                   outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
                   and result["failure"] is None and all(result[key] for key in flags)
@@ -1204,8 +1212,8 @@ jobs:
           except BaseException:
               publisher.finish()
               raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
-          print("Both Context receipt observations completed; native fixture remains NOT accepted." if summary["contextObservationCompleted"] else
-                "Context receipt observations incomplete; native fixture remains NOT accepted.")
+          print("E2 native fixture accepted." if summary["accepted"] else
+                "E2 native fixture is not accepted; retained summary is failure evidence only.")
           PY_PUBLISH
 
       - name: Preserve only the bounded reviewed summary
@@ -1218,19 +1226,17 @@ jobs:
           retention-days: 14
           compression-level: 1
 
-      - name: Require completed diagnostics without native acceptance
+      - name: Require actual complete acceptance
         if: always() && !cancelled()
         shell: bash
         env:
           ACCEPTED: ${{ steps.publication.outputs.accepted }}
-          DIAGNOSTIC_CAPTURED: ${{ steps.publication.outputs.diagnostic_captured }}
-          CONTEXT_OBSERVATION_COMPLETED: ${{ steps.publication.outputs.context_observation_completed }}
           PREPARATION_OUTCOME: ${{ steps.prepare.outcome }}
           NATIVE_OUTCOME: ${{ steps.native.outcome }}
           PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
         run: |
           set -euo pipefail
-          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == false && "$DIAGNOSTIC_CAPTURED" == false && "$CONTEXT_OBSERVATION_COMPLETED" == true ]]
+          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == true ]]
           # No protected-root/receipt removal, adoption or process scan here.
           # Owner retirement is immediate and original-finality-gated. Shared
           # Cargo/Rust/Python homes and required evidence remain untouched.
