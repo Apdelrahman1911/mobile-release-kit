@@ -82,6 +82,20 @@ def relative_name(name):
     return name
 
 
+def expanded_name(name):
+    """Native filename DATA in the disposable public package, not a load path."""
+    need(type(name) is str and 0 < len(name) <= 4096 and not name.startswith("/")
+         and "\\" not in name and "\0" not in name
+         and all(part not in {"", ".", ".."} for part in name.split("/")),
+         "expanded-relative-name")
+    try:
+        encoded = name.encode("utf-8", "strict")
+    except UnicodeError:
+        raise PreparationRefused("expanded-relative-name-utf8") from None
+    need(len(encoded) <= 4096, "expanded-relative-name-bytes")
+    return name  # Preserve control characters/Unicode exactly; never normalize.
+
+
 def public_member_failure(error, phase):
     """Describe only the original rejected authenticated-package-derived input.
 
@@ -443,8 +457,10 @@ def runtime_facts_valid(facts, root, machine):
     return True
 
 
-def scan_tree(root, *, readonly=False, closure=False, deadline=None):
+def scan_tree(root, *, readonly=False, closure=False, expanded=False, deadline=None):
     """Observe a finite owned tree without traversing any directory alias."""
+    need(type(expanded) is bool and not (expanded and (readonly or closure)), "inventory-role")
+    name_check = expanded_name if expanded else relative_name
     b = build_data()
     root = Path(root)
     rows, aliases, total, directories, links = {}, set(), 0, 0, 0
@@ -461,14 +477,14 @@ def scan_tree(root, *, readonly=False, closure=False, deadline=None):
         directories += 1
         need(directories <= 4096 if closure else directories <= 32768, "inventory-directory-limit")
         for child in names + files:
-            relative = relative_name((directory / child).relative_to(root).as_posix())
+            relative = name_check((directory / child).relative_to(root).as_posix())
             need(relative.casefold() not in aliases, "inventory-case-alias")
             aliases.add(relative.casefold())
         for child in files:
             if deadline is not None:
                 b.remaining(deadline, time.monotonic(), PREP_SECONDS)
             path = directory / child
-            name = relative_name(path.relative_to(root).as_posix())
+            name = name_check(path.relative_to(root).as_posix())
             info = path.lstat()
             need(info.st_uid == os.getuid(), "inventory-file-owner")
             if stat.S_ISLNK(info.st_mode):
@@ -532,11 +548,12 @@ def copy_framework(source, destination, expected, *, deadline):
     return copied
 
 
-def retire_tree(root, expected, *, known, deadline):
+def retire_tree(root, expected, *, known, deadline, expanded=False):
     """Remove only pre-observed task originals, never an alias's target."""
     b = build_data()
     root = Path(root)
-    need(known is True and b.DATA.known and scan_tree(root, deadline=deadline) == expected,
+    need(known is True and b.DATA.known
+         and scan_tree(root, expanded=expanded, deadline=deadline) == expected,
          "retirement-finality-or-correspondence")
     need(expected.get(".", {}).get("kind") == "directory", "retirement-root")
     children = {}
@@ -1014,7 +1031,8 @@ def capture_cleanup(ctx, *, deadline):
         path = root / item.name
         info = path.lstat()
         if stat.S_ISDIR(info.st_mode):
-            entries[item.name] = {"kind": "directory", "inventory": scan_tree(path, deadline=deadline)}
+            entries[item.name] = {"kind": "directory", "inventory": scan_tree(
+                path, expanded=item.name == "expanded", deadline=deadline)}
         else:
             need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid(),
                  "cleanup-entry-kind")
@@ -1083,7 +1101,8 @@ def retire(ctx, preparation_outcome, build_outcome):
     for name, row in entries.items():
         path = root / name
         if row.get("kind") == "directory":
-            need(scan_tree(path, deadline=deadline) == row.get("inventory"), "retirement-tree-originals")
+            need(scan_tree(path, expanded=name == "expanded", deadline=deadline) == row.get("inventory"),
+                 "retirement-tree-originals")
         else:
             need(row.get("kind") == "file" and list(identity(path.lstat())) == row.get("identity"),
                  "retirement-file-original")
@@ -1092,7 +1111,7 @@ def retire(ctx, preparation_outcome, build_outcome):
     for name, row in entries.items():
         path = root / name
         if row["kind"] == "directory":
-            retire_tree(path, row["inventory"], known=True, deadline=deadline)
+            retire_tree(path, row["inventory"], known=True, deadline=deadline, expanded=name == "expanded")
         else:
             need(list(identity(path.lstat())) == row["identity"], "retirement-file-post")
             path.unlink()
@@ -1169,7 +1188,7 @@ def prepare(ctx):
             expanded = root / "expanded"
             engine.run("package", ["--expand-full", str(package), str(expanded)], environment=env)
             member_phase = "expanded-inventory"
-            inventory = scan_tree(expanded, deadline=engine.deadline - SETTLE_SECONDS)
+            inventory = scan_tree(expanded, expanded=True, deadline=engine.deadline - SETTLE_SECONDS)
             member_phase = "framework-selection"
             selected = select_framework(expanded, inventory)
             member_phase = "framework-inventory"
@@ -1250,7 +1269,7 @@ def prepare(ctx):
             need(not cancellation["cancelled"] and engine.known and b.DATA.known and engine.active is None,
                  "preparation-original-finality")
             member_phase = "expanded-retirement"
-            retire_tree(expanded, inventory, known=True, deadline=engine.deadline)
+            retire_tree(expanded, inventory, known=True, deadline=engine.deadline, expanded=True)
             member_phase = None
             expected_package = b.read(package, PACKAGE_LIMIT)
             package_binding(len(expected_package), hashlib.sha256(expected_package).hexdigest())

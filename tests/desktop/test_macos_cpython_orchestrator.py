@@ -862,6 +862,8 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                 (collision / "MODULE.py").write_bytes(b"b")
                 with self.assertRaises(PREP.PreparationRefused):
                     PREP.scan_tree(collision, closure=True, deadline=deadline)
+                with self.assertRaises(PREP.PreparationRefused):
+                    PREP.scan_tree(collision, expanded=True, deadline=deadline)
             hardlink = root / "hardlink"; hardlink.mkdir()
             (hardlink / "original").write_bytes(b"shared DATA inode")
             os.link(hardlink / "original", hardlink / "second")
@@ -871,6 +873,80 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             (writable / "data.py").write_bytes(b"writable closure DATA")
             with self.assertRaises(PREP.PreparationRefused):
                 PREP.scan_tree(writable, readonly=True, closure=True, deadline=deadline)
+            # Authentic public packages contain native metadata names such as
+            # Finder's terminal-CR Icon file. They are inert disposable DATA,
+            # never an admitted framework name or a command/loader argument.
+            icon_name = "Python_Applications.pkg/Payload/Python 3.14/Icon\r"
+            for name in (icon_name, "package/metadata-é.txt"):
+                self.assertIs(PREP.expanded_name(name), name)
+                with self.assertRaisesRegex(PREP.PreparationRefused, "^relative-name$"):
+                    PREP.relative_name(name)
+            for name in (None, 1, "", "/outside", "a/../outside", "a/./file", "a//file", "a/",
+                         "a\\file", "a/\0file", "a/\ud800", "a" * 4097, "é" * 2049):
+                with self.subTest(expanded_name=name), self.assertRaises(PREP.PreparationRefused):
+                    PREP.expanded_name(name)
+            # This context/record is a tiny explicit DATA fixture. No real Mac,
+            # pkgutil command, process completion or supplier is being claimed.
+            preparation_root = root / "preparation-data"
+            expanded = preparation_root / "expanded"
+            icon = expanded / icon_name
+            icon.parent.mkdir(parents=True, mode=0o700)
+            icon.write_bytes(b"inert Finder icon metadata")
+            unicode_name = "Python_Applications.pkg/Payload/Python 3.14/metadata-é.txt"
+            (expanded / unicode_name).write_bytes(b"inert UTF-8 filename DATA")
+            os.symlink(str(outside), expanded / "outside-alias")
+            for flags in ({}, {"closure": True}, {"readonly": True}):
+                with self.subTest(strict_role=flags), self.assertRaises(PREP.PreparationRefused):
+                    PREP.scan_tree(expanded, deadline=deadline, **flags)
+            for flags in ({"closure": True}, {"readonly": True}):
+                with self.subTest(mixed_role=flags), self.assertRaisesRegex(
+                        PREP.PreparationRefused, "^inventory-role$"):
+                    PREP.scan_tree(expanded, expanded=True, deadline=deadline, **flags)
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^inventory-role$"):
+                PREP.scan_tree(expanded, expanded=1, deadline=deadline)
+            public_rows = PREP.scan_tree(expanded, expanded=True, deadline=deadline)
+            self.assertEqual(public_rows[icon_name]["kind"], "file")
+            self.assertEqual((public_rows[icon_name]["size"], public_rows[icon_name]["sha256"]),
+                             (26, PREP.hashlib.sha256(b"inert Finder icon metadata").hexdigest()))
+            self.assertEqual(public_rows[unicode_name]["kind"], "file")
+            self.assertEqual(public_rows["outside-alias"]["target"], str(outside))
+            self.assertEqual(BUILD.decode(BUILD.canonical(public_rows)), public_rows)
+            self.assertIn(b'Icon\\r', BUILD.canonical(public_rows))
+            unknown_public = root / "unknown-public"
+            unknown_public.mkdir(mode=0o700)
+            (unknown_public / "Icon\r").write_bytes(b"inert unknown-finality metadata")
+            unknown_rows = PREP.scan_tree(unknown_public, expanded=True, deadline=deadline)
+            with self.assertRaises(PREP.PreparationRefused):
+                PREP.retire_tree(unknown_public, unknown_rows, expanded=True, known=False, deadline=deadline)
+            self.assertEqual(PREP.scan_tree(unknown_public, expanded=True, deadline=deadline), unknown_rows)
+            # No unknown original is re-admitted as known: the real cleanup
+            # route below uses the separate preparation_root fixture.
+            ctx = {"root": preparation_root, "sourceCommit": "a" * 40, "run": "1", "attempt": "1",
+                   "target": "aarch64-apple-darwin", "machine": "arm64"}
+            PREP.capture_cleanup(ctx, deadline=deadline)
+            cleanup = PREP.read_record(preparation_root / "cleanup.json")
+            self.assertEqual(cleanup["entries"]["expanded"]["inventory"], public_rows)
+            public = preparation_root / "public/evidence"
+            public.mkdir(parents=True, mode=0o700)
+            PREP.atomic_record(public / "prepare-result.json", {
+                "identity": PREP.identity_fields(ctx), "originalsKnown": True,
+                "handlersRestored": True, "cleanupRecorded": True, "prepared": False})
+            PREP.retire(ctx, "failure", "skipped")
+            self.assertFalse(expanded.exists() or expanded.is_symlink())
+            self.assertEqual({entry.name for entry in preparation_root.iterdir()}, {"public"})
+            retirement = PREP.read_record(public / "retirement-result.json")
+            self.assertTrue(retirement["orchestratorRetired"])
+            self.assertEqual(retirement["retiredEntries"], 1)
+            self.assertEqual((outside / "keep").read_bytes(), b"outside the selected tree")
+            changed_public = root / "changed-public"
+            (changed_public / "metadata").mkdir(parents=True, mode=0o700)
+            changed_icon = changed_public / "metadata/Icon\r"
+            changed_icon.write_bytes(b"original metadata")
+            changed_rows = PREP.scan_tree(changed_public, expanded=True, deadline=deadline)
+            changed_icon.write_bytes(b"changed metadata")
+            with self.assertRaises(PREP.PreparationRefused):
+                PREP.retire_tree(changed_public, changed_rows, expanded=True, known=True, deadline=deadline)
+            self.assertEqual(changed_icon.read_bytes(), b"changed metadata")
             self.assertEqual(PREP.scan_tree(source, closure=True, deadline=deadline), expected)
         self.assertIs(BUILD.DATA, actual_data)
         self.assertTrue(actual_data.known)
