@@ -783,14 +783,15 @@ def retire_tree(root, expected, *, known, deadline, expanded=False):
     need(b.DATA.known and not root.exists() and not root.is_symlink(), "retirement-post")
 
 
-def sign_failure_observation(stderr):
+def sign_failure_observation(stderr, *, arguments=None, root=None, signing_context=None):
     """Finite error-text observations only; never admission or a causal verdict."""
     if type(stderr) not in (bytes, bytearray) or len(stderr) > 16384:
         return None
     try:
-        text = stderr.decode("utf-8", errors="strict").lower()
+        original_text = stderr.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return None
+    text = original_text.lower()
     phrases = {
         "helperUnavailable": ("codesign_allocate helper tool cannot be found or used",),
         "permissionDenied": ("operation not permitted", "permission denied"),
@@ -799,12 +800,139 @@ def sign_failure_observation(stderr):
         "notMachO": ("not a mach-o file", "file format unrecognized, invalid, or unsuitable"),
         "internalError": ("internal error in code signing subsystem", "errsecinternalcomponent"),
         "unsealedContents": ("unsealed contents present", "a sealed resource is missing or invalid"),
-        "signatureInvalid": ("invalid signature", "code object is not signed at all"),
+        "signatureInvalid": ("invalid signature",),
+        "unsigned": ("code object is not signed at all",),
         "resourceMismatch": ("code has no resources but signature indicates they must be present",),
     }
     matches = {key: any(value in text for value in values) for key, values in phrases.items()}
-    return {"kind": "closed-codesign-error-observation-v1", "observationOnly": True,
-            "matches": matches, "matchedCategories": sum(matches.values())}
+    result = {"kind": "closed-codesign-error-observation-v2", "observationOnly": True,
+              "matches": matches, "matchedCategories": sum(matches.values()), "signingContext": None}
+    # A malformed diagnostic context never changes the already-failed call.
+    # Only these two private callsites can supply the copied public inventory.
+    try:
+        if (type(signing_context) is not tuple or len(signing_context) != 4
+                or type(arguments) is not list or any(type(v) is not str for v in arguments)
+                or type(root) is not str or not root.startswith("/") or len(root) > 4096
+                or any(not 32 <= ord(c) < 127 for c in root)):
+            return result
+        member, rows, ordinal, image_count = signing_context
+        if (type(rows) is not dict or len(rows) > 32768 + 4096 + 1024
+                or type(ordinal) is not int or type(image_count) is not int
+                or not 0 <= ordinal < image_count <= 1024 or relative_name(member) != member):
+            return result
+        row = rows.get(member)
+        if (type(row) is not dict or row.get("kind") != "file" or type(row.get("size")) is not int
+                or not 0 <= row["size"] <= FILE_LIMIT or type(row.get("sha256")) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None):
+            return result
+        framework = root + "/Python.framework"
+        target = framework + "/" + member
+        if arguments == ["--force", "--sign", "-", "--timestamp=none", target]:
+            action = "sign"
+        elif arguments == ["--verify", "--strict", target]:
+            action = "verify"
+        else:
+            return result
+
+        def kind(name):
+            value = rows.get(name)
+            return value.get("kind") if type(value) is dict else None
+
+        parts = member.split("/")
+        layout = "other-image-path"
+        if (len(parts) >= 4 and parts[-4].endswith(".app") and parts[-3:-1] == ["Contents", "MacOS"]
+                and parts[-1] == parts[-4][:-4]
+                and kind("/".join(parts[:-3])) == "directory"
+                and kind("/".join(parts[:-2]) + "/Info.plist") in {"file", "link"}):
+            layout = "application-main-path"
+        elif (len(parts) >= 4 and parts[-4].endswith(".framework") and parts[-3] == "Versions"
+                and parts[-1] == parts[-4][:-len(".framework")]
+                and kind("/".join(parts[:-3])) == "directory"
+                and kind("/".join(parts[:-1]) + "/Resources/Info.plist") in {"file", "link"}):
+            layout = "framework-main-path"
+        context = {"phase": "image-signing", "action": action, "ordinal": ordinal, "imageCount": image_count,
+                   "target": {"relativeMember": member, "kind": "file", "packageMemberBytes": row["size"],
+                              "packageMemberSha256": row["sha256"], "lexicalLayoutCandidate": layout},
+                   "reportedObjects": None}
+        result["signingContext"] = context
+
+        def public_operand(value):
+            # Compare the exact private prefix, but publish only inventory keys.
+            # Strict alias resolution is DATA only and creates no loader grant.
+            if value == framework:
+                relative = "."
+            elif value.startswith(framework + "/"):
+                relative = value[len(framework) + 1:]
+            else:
+                return None, "unmatched"
+            try:
+                if relative != ".":
+                    relative_name(relative)
+                resolved = relative if relative in rows else resolve_member(relative, rows)
+                if resolved != ".":
+                    relative_name(resolved)
+                if kind(resolved) not in {"file", "directory", "link"}:
+                    return None, "unmatched"
+                return (resolved, kind(resolved), resolved != relative), None
+            except PreparationRefused as error:
+                return None, "malformed" if error.args == ("relative-name",) else "unmatched"
+
+        observed = {"primaryFields": 0, "subcomponentFields": 0, "matchedFields": 0,
+                    "unmatchedFields": 0, "malformedFields": 0, "ambiguousFields": 0,
+                    "otherNonemptyLines": 0, "multipleSubcomponents": False, "overflow": False, "matches": []}
+        seen = set()
+        for line in original_text.split("\n"):
+            line = line.lstrip(" \t")
+            if line.startswith("In subcomponent:"):
+                source = "subcomponent"
+                observed["subcomponentFields"] += 1  # Count before publishability filtering.
+                operands = [line[len("In subcomponent:"):].lstrip(" \t")]
+            elif line == framework or line.startswith(framework + "/") or line.startswith(framework + ": "):
+                source = "primary"
+                observed["primaryFields"] += 1
+                # A colon can also occur in a legitimate public name. Admit a
+                # unique complete inventory match, never a guessed truncation.
+                operands = [line]
+                for boundary in re.finditer(": ", line):
+                    if len(operands) >= 16:
+                        observed["ambiguousFields"] += 1
+                        observed["overflow"] = True
+                        break
+                    operands.append(line[:boundary.start()])
+                else:
+                    boundary = None
+                if boundary is not None:
+                    continue
+            else:
+                observed["otherNonemptyLines"] += bool(line)
+                continue
+            candidates, reasons = set(), set()
+            for operand in operands:
+                candidate, reason = public_operand(operand)
+                if candidate is not None:
+                    candidates.add(candidate)
+                elif reason is not None:
+                    reasons.add(reason)
+            if len(candidates) > 1:
+                observed["ambiguousFields"] += 1
+            elif not candidates:
+                observed["malformedFields" if "malformed" in reasons else "unmatchedFields"] += 1
+            else:
+                observed["matchedFields"] += 1
+                relative, row_kind, alias = next(iter(candidates))
+                key = (source, relative, row_kind, alias)
+                if key not in seen:
+                    if len(seen) < 8:
+                        seen.add(key)
+                        observed["matches"].append({"source": source, "relativeMember": relative,
+                                                    "kind": row_kind, "viaAlias": alias})
+                    else:
+                        observed["overflow"] = True
+        observed["multipleSubcomponents"] = observed["subcomponentFields"] > 1
+        context["reportedObjects"] = observed
+    except BaseException:
+        pass  # Best effort only, with no new call, timing or cleanup authority.
+    return result
 
 
 class FixedCalls:
@@ -823,7 +951,7 @@ class FixedCalls:
                 '(allow file-write* (subpath "' + root + '") (literal "/dev/null"))'
                 + ('' if online else '(deny network*)'))
 
-    def run(self, role, arguments, *, environment, maximum=120, online=False):
+    def run(self, role, arguments, *, environment, maximum=120, online=False, signing_context=None):
         need(self.known and self.data.known and self.active is None and len(self.records) < 2048,
              "fixed-call-finality")
         need(role in {"download", "package", "relocate", "sign", "probe", "runtime"} and role in self.tools
@@ -920,7 +1048,8 @@ class FixedCalls:
             if role == "sign" and row.get("returned") is True and row.get("settled") is True \
                     and row.get("returncode") != 0 and self.known and self.data.known:
                 try:
-                    row["signDiagnostic"] = sign_failure_observation(outputs["stderr"])
+                    row["signDiagnostic"] = sign_failure_observation(
+                        outputs["stderr"], arguments=arguments, root=str(self.root), signing_context=signing_context)
                 except BaseException:
                     pass
             raise failure
@@ -1474,19 +1603,22 @@ def prepare(ctx):
                 transformations.append({"path": name, "sliceSha256": hashlib.sha256(body).hexdigest(),
                                         "relocatedSha256": hashlib.sha256(changed).hexdigest(), **plan})
             member_phase = "image-signing"
-            for name in sorted(images, key=lambda value: (-value.count("/"), value)):
+            for ordinal, name in enumerate(sorted(images, key=lambda value: (-value.count("/"), value))):
                 path = framework / name
                 old = b.read(path, FILE_LIMIT)
-                engine.run("sign", ["--force", "--sign", "-", "--timestamp=none", str(path)], environment=env)
-                engine.run("sign", ["--verify", "--strict", str(path)], environment=env)
+                signing_context = (name, copied, ordinal, len(images))
+                engine.run("sign", ["--force", "--sign", "-", "--timestamp=none", str(path)],
+                           environment=env, signing_context=signing_context)
+                engine.run("sign", ["--verify", "--strict", str(path)],
+                           environment=env, signing_context=signing_context)
                 macho_content_valid(old, b.read(path, FILE_LIMIT), ctx["machine"], signing=True)
             member_phase = "signed-inventory"
             signed_rows = scan_tree(framework, closure=True, deadline=engine.deadline - SETTLE_SECONDS)
             member_phase = None
-            # Signing each Mach-O path is not bundle signing. It may update
-            # that image's signature blob but cannot add unrelated resources,
-            # replace aliases, or change any authenticated nontransformed file
-            # (including the explicit Intel-only auxiliary retained on ARM).
+            # File arguments may be recognized as bundle main executables by
+            # Security. These guards still refuse added resources, changed
+            # aliases or authenticated nontransformed files (including the
+            # explicit Intel-only auxiliary retained on ARM).
             need(set(signed_rows) == set(copied), "signing-inventory-changed")
             for name, row in copied.items():
                 current = signed_rows[name]

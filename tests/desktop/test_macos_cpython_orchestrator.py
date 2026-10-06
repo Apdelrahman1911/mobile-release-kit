@@ -1088,7 +1088,7 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                     self.assertEqual(factory.call_count, 1)
                     self.assertEqual(calls.deadline, PREP.PREP_SECONDS)
 
-        # Observe only closed failure categories, never tool output/path text.
+        # Observe closed categories, never private or unlisted output/path text.
         canary = b"/private/MRK-DIAGNOSTIC-CANARY: "
         for body, count in ((canary + b"Operation not permitted", 1),
                             (canary + b"unrecognized diagnostic", 0),
@@ -1109,6 +1109,120 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
         self.assertIsNone(PREP.sign_failure_observation(b"x" * 16385))
         self.assertIsNone(PREP.sign_failure_observation(b"\xff"))
         self.assertIsNone(PREP.sign_failure_observation("not bytes"))
+
+        # Small synthetic public inventory DATA, not package/native authority.
+        member = PREP.ENTRY_RELATIVE
+        nested = PREP.VERSION_RELATIVE + "/Frameworks/Tcl.framework"
+        rows = {".": {"kind": "directory"}}
+        for name in (member, nested + "/Versions/9.0/Tcl",
+                     nested + "/Versions/9.0/Resources/Info.plist",
+                     str(PurePosixPath(member).parent.parent / "Info.plist")):
+            parts = name.split("/")
+            for index in range(1, len(parts)):
+                rows["/".join(parts[:index])] = {"kind": "directory"}
+            rows[name] = {"kind": "file", "size": 7, "sha256": "a" * 64}
+        rows["Versions/Current"] = {"kind": "link", "target": "3.14"}
+        framework = str(root) + "/Python.framework"
+        target = framework + "/" + member
+        sign_args = ["--force", "--sign", "-", "--timestamp=none", target]
+        verify_args = ["--verify", "--strict", target]
+        signing_context = (member, rows, 0, 2)
+
+        def observe(body, *, arguments=sign_args, context=signing_context):
+            return PREP.sign_failure_observation(body, arguments=arguments, root=str(root), signing_context=context)
+
+        for action, arguments, phrase in (("sign", sign_args, "code object is not signed at all"),
+                                          ("verify", verify_args, "invalid signature")):
+            body = (target + ": " + phrase + "\nIn subcomponent: " + framework + "/" + nested + "\n").encode()
+            with self.subTest(sign_action=action), PipeOriginal(returncode=1, stderr=body) as original:
+                factory = mock.Mock(return_value=original)
+                calls = PREP.FixedCalls(root, tools, data=BUILD.DataFinality(), clock=lambda: 0.0, popen=factory)
+                with self.assertRaisesRegex(PREP.PreparationRefused, "^fixed-sign-exit-1$"):
+                    calls.run("sign", arguments, environment={}, signing_context=signing_context)
+                row = calls.records[0]
+                diagnostic = row["signDiagnostic"]
+                self.assertEqual(diagnostic["kind"], "closed-codesign-error-observation-v2")
+                self.assertEqual(diagnostic["matches"]["unsigned"], action == "sign")
+                self.assertEqual(diagnostic["matches"]["signatureInvalid"], action == "verify")
+                self.assertEqual(diagnostic["matchedCategories"], 1)
+                context = diagnostic["signingContext"]
+                self.assertEqual((context["phase"], context["action"], context["ordinal"], context["imageCount"]),
+                                 ("image-signing", action, 0, 2))
+                self.assertEqual(context["target"], {"relativeMember": member, "kind": "file",
+                    "packageMemberBytes": 7, "packageMemberSha256": "a" * 64,
+                    "lexicalLayoutCandidate": "application-main-path"})
+                objects = context["reportedObjects"]
+                self.assertEqual((objects["primaryFields"], objects["subcomponentFields"], objects["matchedFields"]), (1, 1, 2))
+                self.assertEqual(objects["matches"], [
+                    {"source": "primary", "relativeMember": member, "kind": "file", "viaAlias": False},
+                    {"source": "subcomponent", "relativeMember": nested, "kind": "directory", "viaAlias": False}])
+                self.assertFalse(objects["multipleSubcomponents"] or objects["overflow"])
+                self.assertNotIn(str(root), PREP.json.dumps(row))
+                self.assertEqual(factory.call_args.args[0][3:], [tools["sign"], *arguments])
+                self.assertTrue(row["settled"] and row["returned"] and calls.known and calls.data.known)
+                self.assertTrue(all(stream.closed for stream in original.streams))
+
+        # An untrusted or unavailable context cannot stop the original call or
+        # turn its actual nonzero exit into success, and cannot leak its text.
+        with PipeOriginal(returncode=1, stderr=b"invalid signature") as original:
+            factory = mock.Mock(return_value=original)
+            calls = PREP.FixedCalls(root, tools, data=BUILD.DataFinality(), clock=lambda: 0.0, popen=factory)
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^fixed-sign-exit-1$"):
+                calls.run("sign", sign_args, environment={}, signing_context=("PRIVATE-CANARY", {}, 0, 1))
+            factory.assert_called_once()
+            self.assertIsNone(calls.records[0]["signDiagnostic"]["signingContext"])
+            self.assertNotIn("PRIVATE-CANARY", PREP.json.dumps(calls.records[0]))
+
+        alias = framework + "/Versions/Current/Resources/Python.app/Contents/MacOS/Python"
+        objects = observe(("In subcomponent: " + alias).encode())["signingContext"]["reportedObjects"]
+        self.assertEqual(objects["matches"], [{"source": "subcomponent", "relativeMember": member,
+                                              "kind": "file", "viaAlias": True}])
+        frame_member = nested + "/Versions/9.0/Tcl"
+        frame_args = ["--force", "--sign", "-", "--timestamp=none", framework + "/" + frame_member]
+        self.assertEqual(observe(b"invalid signature", arguments=frame_args,
+            context=(frame_member, rows, 1, 2))["signingContext"]["target"]["lexicalLayoutCandidate"], "framework-main-path")
+        mixed = observe(b"invalid signature; code object is not signed at all")
+        self.assertTrue(mixed["matches"]["unsigned"] and mixed["matches"]["signatureInvalid"])
+        self.assertEqual(mixed["matchedCategories"], 2)
+
+        bad_values = [("/private/PRIVATE-CANARY", "unmatchedFields"),
+                      (framework + "-foreign/PRIVATE-CANARY", "unmatchedFields"),
+                      (framework + "/absent", "unmatchedFields"),
+                      (framework + "/../PRIVATE-CANARY", "malformedFields"),
+                      (framework + "/" + member + "\r", "malformedFields"),
+                      (framework + "/x\\y", "malformedFields"),
+                      (framework + "/" + "x" * 4097, "malformedFields")]
+        for value, field in bad_values:
+            with self.subTest(sign_object_refusal=field, value_bytes=len(value)):
+                objects = observe(("In subcomponent: " + value).encode())["signingContext"]["reportedObjects"]
+                self.assertEqual(objects["subcomponentFields"], 1)
+                self.assertEqual(objects[field], 1)
+                self.assertEqual(objects["matches"], [])
+                self.assertNotIn("PRIVATE-CANARY", PREP.json.dumps(objects))
+        duplicated = observe(("In subcomponent: " + framework + "/" + nested
+            + "\nIn subcomponent: /private/PRIVATE-CANARY").encode())["signingContext"]["reportedObjects"]
+        self.assertEqual((duplicated["subcomponentFields"], duplicated["matchedFields"], duplicated["unmatchedFields"]), (2, 1, 1))
+        self.assertTrue(duplicated["multipleSubcomponents"])
+        ambiguous_rows = {**rows, member + ": extra": {"kind": "file", "size": 9, "sha256": "b" * 64}}
+        ambiguous = observe((target + ": extra: invalid signature").encode(),
+            context=(member, ambiguous_rows, 0, 2))["signingContext"]["reportedObjects"]
+        self.assertEqual(ambiguous["ambiguousFields"], 1)
+        self.assertEqual(ambiguous["matches"], [])
+        long_line = observe((framework + "/" + "x: " * 20 + "invalid signature").encode())["signingContext"]["reportedObjects"]
+        self.assertTrue(long_line["overflow"])
+        self.assertEqual((long_line["ambiguousFields"], long_line["matches"]), (1, []))
+        many_rows = {**rows, "public": {"kind": "directory"}}
+        many_rows.update({"public/file" + str(i): {"kind": "file", "size": 1, "sha256": "c" * 64} for i in range(9)})
+        many = observe("\n".join("In subcomponent: " + framework + "/public/file" + str(i) for i in range(9)).encode(),
+            context=(member, many_rows, 0, 2))["signingContext"]["reportedObjects"]
+        self.assertEqual((many["subcomponentFields"], many["matchedFields"], len(many["matches"])), (9, 9, 8))
+        self.assertTrue(many["overflow"] and many["multipleSubcomponents"])
+        for bad_context in (None, [member, rows, 0, 2], (member, rows, True, 2), (member, rows, 0, 1025),
+                            (member, rows, 2, 2), ("../private", rows, 0, 2), (member, {}, 0, 2)):
+            self.assertIsNone(observe(b"invalid signature", context=bad_context)["signingContext"])
+        for bad_args in ([], ["--sign", "-", target], ["--verify", "--strict", target + "-foreign"]):
+            self.assertIsNone(observe(b"invalid signature", arguments=bad_args)["signingContext"])
+
         for mode in ("wait-unknown", "close-unknown", "observer-error", "success", "other-role"):
             with self.subTest(sign_diagnostic_boundary=mode), PipeOriginal(
                     returncode=0 if mode=="success" else 1, stderr=b"Permission denied",
@@ -1117,13 +1231,22 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                                         clock=lambda: 0.0, popen=mock.Mock(return_value=original))
                 guard = mock.patch.object(PREP, "sign_failure_observation", side_effect=MemoryError(
                     "inert diagnostic allocation failure")) if mode=="observer-error" else nullcontext()
-                with guard:
+                original_failure = PREP.PreparationRefused("fixed-sign-exit-1")
+                original_need = PREP.need
+                def fail_original(condition, code):
+                    if not condition and code == "fixed-sign-exit-1":
+                        raise original_failure
+                    return original_need(condition, code)
+                failure_guard = mock.patch.object(PREP, "need", side_effect=fail_original) if mode=="observer-error" else nullcontext()
+                with guard, failure_guard:
                     if mode=="success":
                         calls.run("sign", [], environment={})
                     else:
                         expected = OSError if mode=="wait-unknown" else PREP.PreparationRefused
-                        with self.assertRaises(expected):
+                        with self.assertRaises(expected) as caught:
                             calls.run("package" if mode=="other-role" else "sign", [], environment={})
+                        if mode == "observer-error":
+                            self.assertIs(caught.exception, original_failure)
                 self.assertNotIn("signDiagnostic", calls.records[0])
                 self.assertTrue(all(stream.closed for stream in original.streams))
 
