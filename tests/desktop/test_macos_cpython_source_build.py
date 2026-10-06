@@ -7789,7 +7789,8 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 return False
 
         def boundary_case(raised, *, kind="cancellation", cancelled=True,
-                          begin_error=None, ledger=None, sent=None, errors=None, **scope_options):
+                          begin_error=None, ledger=None, sent=None, errors=None,
+                          invoke_fixed=None, **scope_options):
             verdict = SimpleNamespace(complete=True, fatal=False, contained=True,
                                       cleanup_complete=True, commands=1, command_dispatched=True)
             verdict.__dict__.update(ledger or {})
@@ -7805,6 +7806,8 @@ class MacPythonSourceBuildTests(unittest.TestCase):
 
             def invoke():
                 events.append("invoke")
+                if invoke_fixed is not None:
+                    return invoke_fixed(guard)
                 if raised is not None:
                     raise raised
 
@@ -7830,6 +7833,56 @@ class MacPythonSourceBuildTests(unittest.TestCase):
         self.assertEqual(observe(), ("typed-timeout", verdict))
         self.assertEqual(scope.exits, [None, None])
         self.assertEqual(events, ["enter", "begin", "invoke", "cleanup", "restore"])
+
+        # The actual fixed invocation gives the existing native owner its full
+        # 12s startup+target allowance. This is not a new endpoint at readiness,
+        # a retry, or permission to pass the observed Intel pre-dispatch timeout.
+        calls = []
+        executable = "/inert payload/python/bin/python3"
+        scratch = Path("/inert scratch")
+        ready = scratch / "timeout.ready"
+        environment = {"PATH": "/usr/bin:/bin", "HOME": str(scratch), "LANG": "C"}
+
+        def record_original(argv, **options):
+            calls.append((argv, options))
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+        original_owner = SimpleNamespace(run_owned=record_original)
+
+        def invoke_fixed(guard):
+            return PROBE._invoke_lifecycle_original(original_owner, executable, ready,
+                                                    environment, scratch, guard)
+
+        for response, refusal in (
+                (ProcessError(dispatched=False), "native-timeout-lifetime"),
+                (ProcessError(), None),
+                (object(), "native-lifecycle-negative-returned")):
+            calls.clear()
+            observe, scope, verdict, events = boundary_case(
+                None, kind="timeout", cancelled=False, sent=[], invoke_fixed=invoke_fixed)
+            if refusal is None:
+                self.assertEqual(observe(), ("typed-timeout", verdict))
+            else:
+                with self.assertRaisesRegex(PROBE.ProbeRefused, "^" + refusal + "$"):
+                    observe()
+            self.assertEqual(len(calls), 1)
+            argv, options = calls[0]
+            self.assertEqual(argv, [executable, "-I", "-S", "-B", "-c", PROBE.CHILD, str(ready)])
+            self.assertEqual(set(options), {"environ", "cwd", "timeout", "capture", "text",
+                                            "output_limit", "cancellation"})
+            self.assertIs(options["environ"], environment)
+            self.assertIs(options["cwd"], scratch)
+            self.assertIs(options["cancellation"], scope.guard)
+            self.assertIs(type(options["timeout"]), int)
+            self.assertEqual(options["timeout"], 12)
+            self.assertIs(options["capture"], True)
+            self.assertIs(options["text"], False)
+            self.assertEqual(options["output_limit"], 4096)
+            self.assertEqual(events, ["enter", "begin", "invoke", "cleanup", "restore"])
+            self.assertEqual(scope.guard.handler_state, "RESTORED")
+        self.assertIn("time.sleep(30)", PROBE.CHILD)  # Not a normal-return probe.
 
         # An interruption outside the actual run is never adopted as its result.
         for where in ("begin_error", "exit_error"):
