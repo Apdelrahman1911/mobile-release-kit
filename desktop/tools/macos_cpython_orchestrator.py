@@ -783,6 +783,30 @@ def retire_tree(root, expected, *, known, deadline, expanded=False):
     need(b.DATA.known and not root.exists() and not root.is_symlink(), "retirement-post")
 
 
+def sign_failure_observation(stderr):
+    """Finite error-text observations only; never admission or a causal verdict."""
+    if type(stderr) not in (bytes, bytearray) or len(stderr) > 16384:
+        return None
+    try:
+        text = stderr.decode("utf-8", errors="strict").lower()
+    except UnicodeDecodeError:
+        return None
+    phrases = {
+        "helperUnavailable": ("codesign_allocate helper tool cannot be found or used",),
+        "permissionDenied": ("operation not permitted", "permission denied"),
+        "resourceFork": ("resource fork, finder information, or similar detritus not allowed",),
+        "bundleFormat": ("bundle format unrecognized, invalid, or unsuitable",),
+        "notMachO": ("not a mach-o file", "file format unrecognized, invalid, or unsuitable"),
+        "internalError": ("internal error in code signing subsystem", "errsecinternalcomponent"),
+        "unsealedContents": ("unsealed contents present", "a sealed resource is missing or invalid"),
+        "signatureInvalid": ("invalid signature", "code object is not signed at all"),
+        "resourceMismatch": ("code has no resources but signature indicates they must be present",),
+    }
+    matches = {key: any(value in text for value in values) for key, values in phrases.items()}
+    return {"kind": "closed-codesign-error-observation-v1", "observationOnly": True,
+            "matches": matches, "matchedCategories": sum(matches.values())}
+
+
 class FixedCalls:
     """Bounded original calls for these Apple tools only; not a project runner."""
     def __init__(self, root, tools, *, data=None, clock=time.monotonic, popen=subprocess.Popen):
@@ -891,6 +915,14 @@ class FixedCalls:
                        stdoutSha256=hashlib.sha256(outputs["stdout"]).hexdigest(),
                        stderrSha256=hashlib.sha256(outputs["stderr"]).hexdigest())
         if failure is not None:
+            # Only a failed, fully captured and settled original can report
+            # these closed observations. Diagnostic errors never replace it.
+            if role == "sign" and row.get("returned") is True and row.get("settled") is True \
+                    and row.get("returncode") != 0 and self.known and self.data.known:
+                try:
+                    row["signDiagnostic"] = sign_failure_observation(outputs["stderr"])
+                except BaseException:
+                    pass
             raise failure
         result = {name: bytes(body) for name, body in outputs.items()}
         # Known original settlement is not permission to accept late success.

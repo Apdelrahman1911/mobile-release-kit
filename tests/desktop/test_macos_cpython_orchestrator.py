@@ -78,11 +78,11 @@ class PipeOriginal:
     No child exists. kill/wait/poll below only record actions on this object.
     The real streams exercise the existing selector/drain/close implementation.
     """
-    def __init__(self, *, returncode=0, interrupt=False, wait_error=False, close_error=False):
+    def __init__(self, *, returncode=0, interrupt=False, wait_error=False, close_error=False, stderr=b""):
         self.returncode, self.interrupt, self.wait_error = returncode, interrupt, wait_error
         self.events, self.streams = [], []
         try:
-            for body in (b"ordinary-output\n", b""):
+            for body in (b"ordinary-output\n", stderr):
                 reader, writer = os.pipe()
                 try:
                     if body:
@@ -1087,6 +1087,45 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                         calls.run("package", [], environment={})
                     self.assertEqual(factory.call_count, 1)
                     self.assertEqual(calls.deadline, PREP.PREP_SECONDS)
+
+        # Observe only closed failure categories, never tool output/path text.
+        canary = b"/private/MRK-DIAGNOSTIC-CANARY: "
+        for body, count in ((canary + b"Operation not permitted", 1),
+                            (canary + b"unrecognized diagnostic", 0),
+                            (canary + b"Permission denied; codesign_allocate helper tool cannot be found or used", 2)):
+            with self.subTest(sign_categories=count), PipeOriginal(returncode=1, stderr=body) as original:
+                calls = PREP.FixedCalls(root, tools, data=BUILD.DataFinality(),
+                                        clock=lambda: 0.0, popen=mock.Mock(return_value=original))
+                with self.assertRaisesRegex(PREP.PreparationRefused, "^fixed-sign-exit-1$"):
+                    calls.run("sign", ["--sign", "-", "input"], environment={})
+                row = calls.records[0]
+                self.assertTrue(row["settled"] and row["returned"] and calls.known)
+                self.assertEqual(row["stderrSize"], len(body))
+                self.assertEqual(row["stderrSha256"], PREP.hashlib.sha256(body).hexdigest())
+                self.assertEqual(row["signDiagnostic"]["matchedCategories"], count)
+                self.assertTrue(row["signDiagnostic"]["observationOnly"])
+                self.assertNotIn("CANARY", PREP.json.dumps(row))
+                self.assertTrue(all(stream.closed for stream in original.streams))
+        self.assertIsNone(PREP.sign_failure_observation(b"x" * 16385))
+        self.assertIsNone(PREP.sign_failure_observation(b"\xff"))
+        self.assertIsNone(PREP.sign_failure_observation("not bytes"))
+        for mode in ("wait-unknown", "close-unknown", "observer-error", "success", "other-role"):
+            with self.subTest(sign_diagnostic_boundary=mode), PipeOriginal(
+                    returncode=0 if mode=="success" else 1, stderr=b"Permission denied",
+                    wait_error=mode=="wait-unknown", close_error=mode=="close-unknown") as original:
+                calls = PREP.FixedCalls(root, tools, data=BUILD.DataFinality(),
+                                        clock=lambda: 0.0, popen=mock.Mock(return_value=original))
+                guard = mock.patch.object(PREP, "sign_failure_observation", side_effect=MemoryError(
+                    "inert diagnostic allocation failure")) if mode=="observer-error" else nullcontext()
+                with guard:
+                    if mode=="success":
+                        calls.run("sign", [], environment={})
+                    else:
+                        expected = OSError if mode=="wait-unknown" else PREP.PreparationRefused
+                        with self.assertRaises(expected):
+                            calls.run("package" if mode=="other-role" else "sign", [], environment={})
+                self.assertNotIn("signDiagnostic", calls.records[0])
+                self.assertTrue(all(stream.closed for stream in original.streams))
 
         # A successful original wait or close can itself cross the immutable
         # endpoint or observe cancellation. That remains a known, settled
