@@ -69,10 +69,59 @@ def identity(value):
 
 
 def relative_name(name):
-    need(type(name) is str and 0 < len(name) <= 4096 and not name.startswith("/")
-         and "\\" not in name and all(32 <= ord(c) < 127 for c in name)
-         and all(part not in {"", ".", ".."} for part in name.split("/")), "relative-name")
+    try:
+        need(type(name) is str and 0 < len(name) <= 4096 and not name.startswith("/")
+             and "\\" not in name and all(32 <= ord(c) < 127 for c in name)
+             and all(part not in {"", ".", ".."} for part in name.split("/")), "relative-name")
+    except PreparationRefused as error:
+        try:
+            error._relative_name_input = name
+        except BaseException:
+            pass  # Optional observation cannot replace this original refusal.
+        raise
     return name
+
+
+def public_member_failure(error, phase):
+    """Describe only the original rejected authenticated-package-derived input.
+
+    UTF8-surrogatepass below represents the Python input, not filesystem bytes.
+    This observation cannot authorize a path, preparation, or cleanup.
+    """
+    phases = ("expanded-inventory", "framework-selection", "framework-inventory",
+              "framework-copy", "image-slicing", "image-relocation", "image-signing",
+              "signed-inventory", "sealed-inventory", "runtime-inventory", "expanded-retirement")
+    if (type(phase) is not str or phase not in phases or type(error) is not PreparationRefused
+            or error.args != ("relative-name",) or "_relative_name_input" not in error.__dict__):
+        return None
+    value = error.__dict__["_relative_name_input"]
+    is_string = type(value) is str
+    length = len(value) if is_string else None
+    reasons = {"notString": not is_string, "length": is_string and not 0 < length <= 4096,
+               "absolute": False, "backslash": False, "nonPrintableASCII": False,
+               "components": False}
+    result = {"phase": phase, "representation": "utf8-surrogatepass-input-not-filesystem-bytes",
+              "characterCount": length, "utf8Size": None, "sha256": None,
+              "detailsInspected": False, "reasons": reasons, "jsonSpelling": None,
+              "spellingState": "non-string" if not is_string else "input-bound"}
+    if not is_string or length > 65536:
+        return result
+    reasons.update(absolute=value.startswith("/"), backslash="\\" in value,
+                   nonPrintableASCII=any(not 32 <= ord(character) < 127 for character in value),
+                   components=any(part in {"", ".", ".."} for part in value.split("/")))
+    body = value.encode("utf-8", "surrogatepass")
+    result.update(detailsInspected=True, utf8Size=len(body), sha256=hashlib.sha256(body).hexdigest())
+    if reasons["absolute"] or reasons["components"]:
+        result["spellingState"] = "unsafe-structure"
+    elif len(body) > 16384:
+        result["spellingState"] = "utf8-bound"
+    else:
+        spelling = json.dumps(value, ensure_ascii=True)
+        if len(spelling) > 4096:
+            result["spellingState"] = "escaped-bound"
+        else:
+            result.update(jsonSpelling=spelling, spellingState="captured")
+    return result
 
 
 def package_binding(size, sha256):
@@ -1087,6 +1136,8 @@ def prepare(ctx):
     script = str(b.CHECKOUT / "desktop/tools/macos_cpython_orchestrator.py")
     policy_known, ready, failure, cancellation = False, None, None, None
     package_signature = None
+    member_phase = None
+    public_member = None
     try:
         with cancellation_state() as cancellation:
             engine.cancellation = cancellation
@@ -1117,13 +1168,19 @@ def prepare(ctx):
             package_signature_valid(signature["stdout"])
             expanded = root / "expanded"
             engine.run("package", ["--expand-full", str(package), str(expanded)], environment=env)
+            member_phase = "expanded-inventory"
             inventory = scan_tree(expanded, deadline=engine.deadline - SETTLE_SECONDS)
+            member_phase = "framework-selection"
             selected = select_framework(expanded, inventory)
+            member_phase = "framework-inventory"
             original_rows = scan_tree(selected, closure=True, deadline=engine.deadline - SETTLE_SECONDS)
+            member_phase = None
             capacity = os.statvfs(root)
             need(capacity.f_bavail * capacity.f_frsize >= SELECTED_LIMIT + 1024 * MIB, "preparation-copy-reserve")
             framework = root / "Python.framework"
+            member_phase = "framework-copy"
             copied = copy_framework(selected, framework, original_rows, deadline=engine.deadline - SETTLE_SECONDS)
+            member_phase = "image-slicing"
             images, transformations = set(), []
             for name, row in copied.items():
                 if row["kind"] != "file":
@@ -1135,6 +1192,7 @@ def prepare(ctx):
                     replace_owned_file(path, body)
             need(ENTRY_RELATIVE in images and VERSION_RELATIVE + "/Python" in images and len(images) <= 1024,
                  "framework-image-roster")
+            member_phase = "image-relocation"
             for name in sorted(images):
                 path = framework / name
                 body = b.read(path, FILE_LIMIT)
@@ -1148,13 +1206,16 @@ def prepare(ctx):
                 macho_content_valid(body, changed, ctx["machine"])
                 transformations.append({"path": name, "sliceSha256": hashlib.sha256(body).hexdigest(),
                                         "relocatedSha256": hashlib.sha256(changed).hexdigest(), **plan})
+            member_phase = "image-signing"
             for name in sorted(images, key=lambda value: (-value.count("/"), value)):
                 path = framework / name
                 old = b.read(path, FILE_LIMIT)
                 engine.run("sign", ["--force", "--sign", "-", "--timestamp=none", str(path)], environment=env)
                 engine.run("sign", ["--verify", "--strict", str(path)], environment=env)
                 macho_content_valid(old, b.read(path, FILE_LIMIT), ctx["machine"], signing=True)
+            member_phase = "signed-inventory"
             signed_rows = scan_tree(framework, closure=True, deadline=engine.deadline - SETTLE_SECONDS)
+            member_phase = None
             # Signing each Mach-O path is not bundle signing. It may update
             # that image's signature blob but cannot add unrelated resources,
             # replace aliases, or change any authenticated non-image file.
@@ -1167,7 +1228,9 @@ def prepare(ctx):
                 elif row["kind"] == "file" and name not in images:
                     need(current == row, "signing-nonimage-changed")
             seal_framework(framework, signed_rows)
+            member_phase = "sealed-inventory"
             final_rows = scan_tree(framework, readonly=True, closure=True, deadline=engine.deadline - SETTLE_SECONDS)
+            member_phase = None
             preparing = {"schemaVersion": 1, "state": "PREPARED-NOT-READY", "identity": identity_fields(ctx),
                          "packageSha256": PACKAGE_SHA256, "rootCustody": original_root,
                          "framework": final_rows, "providerIdentity": list(identity(provider.lstat()))}
@@ -1177,14 +1240,18 @@ def prepare(ctx):
                                       environment=orchestration_environment(scoped_env, root), maximum=30)
             facts = b.decode(facts_result["stdout"])
             runtime_facts_valid(facts, root, ctx["machine"])
+            member_phase = "runtime-inventory"
             need(scan_tree(framework, readonly=True, closure=True,
                            deadline=engine.deadline - SETTLE_SECONDS) == final_rows, "runtime-check-original-post")
+            member_phase = None
             recheck_apple(originals)
             source_post(before, ctx)
             need(engine.clock() < engine.deadline - SETTLE_SECONDS, "preparation-deadline")
             need(not cancellation["cancelled"] and engine.known and b.DATA.known and engine.active is None,
                  "preparation-original-finality")
+            member_phase = "expanded-retirement"
             retire_tree(expanded, inventory, known=True, deadline=engine.deadline)
+            member_phase = None
             expected_package = b.read(package, PACKAGE_LIMIT)
             package_binding(len(expected_package), hashlib.sha256(expected_package).hexdigest())
             package.unlink()
@@ -1194,6 +1261,10 @@ def prepare(ctx):
         need(not cancellation["cancelled"], "preparation-cancelled")
     except BaseException as error:
         failure = error
+        try:
+            public_member = public_member_failure(error, member_phase)
+        except BaseException:
+            pass  # Diagnostic failure never replaces the original failure.
     known = (policy_known or not engine.records) and engine.known and b.DATA.known and engine.active is None
     known = known and cancellation is not None and cancellation["restored"]
     cleanup_recorded = False
@@ -1232,7 +1303,7 @@ def prepare(ctx):
             "schemaVersion": 1, "identity": identity_fields(ctx), "packageSha256": PACKAGE_SHA256,
             "prepared": failure is None, "originalsKnown": known, "handlersRestored": True,
             "cleanupRecorded": cleanup_recorded, "commands": engine.records,
-            "packageSignature": package_signature,
+            "packageSignature": package_signature, "publicMemberFailure": public_member,
             "failure": None if failure is None else {"code": code, "type": type(failure).__name__}})
     if failure is not None:
         raise failure

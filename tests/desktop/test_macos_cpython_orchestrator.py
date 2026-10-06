@@ -271,6 +271,88 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             with self.assertRaises(PREP.PreparationRefused):
                 PREP.package_signature_valid(value)
 
+        # These are rejected Python path INPUTS, never native/package evidence.
+        # Public-only origin is supplied by the real prepare callsite below.
+        phase = "expanded-inventory"
+        cases = [
+            ("pkg/Payload/caf\u00e9.py", "nonPrintableASCII", "captured"),
+            ("pkg/Payload/a\\b", "backslash", "captured"),
+            ("pkg/Payload/\udcff.py", "nonPrintableASCII", "captured"),
+            ("pkg/Payload/line\nname", "nonPrintableASCII", "captured"),
+            ("/private/MRK-PATH-CANARY/file", "absolute", "unsafe-structure"),
+            ("pkg/../MRK-PATH-CANARY", "components", "unsafe-structure"),
+            ("pkg//MRK-PATH-CANARY", "components", "unsafe-structure"),
+            ("pkg/./MRK-PATH-CANARY", "components", "unsafe-structure"),
+            ("", "length", "unsafe-structure"),
+            ("x" * 4097, "length", "escaped-bound"),
+            ("\u00e9" * 8193, "length", "utf8-bound"),
+            ("x" * 65537, "length", "input-bound"),
+            (b"MRK-PATH-CANARY", "notString", "non-string"),
+        ]
+        class NoStringification:
+            def __str__(self):
+                raise AssertionError("diagnostic must not stringify arbitrary inputs")
+            def __repr__(self):
+                raise AssertionError("diagnostic must not repr arbitrary inputs")
+        cases.append((NoStringification(), "notString", "non-string"))
+        for number, (name, reason, capture) in enumerate(cases):
+            with self.subTest(rejected_public_input=number):
+                try:
+                    PREP.relative_name(name)
+                except PREP.PreparationRefused as original:
+                    self.assertEqual(original.args, ("relative-name",))
+                    self.assertIs(original.__dict__["_relative_name_input"], name)
+                    facts = PREP.public_member_failure(original, phase)
+                    self.assertIs(original.__dict__["_relative_name_input"], name)
+                    self.assertEqual(original.args, ("relative-name",))
+                    self.assertEqual((facts["phase"], facts["spellingState"]), (phase, capture))
+                    self.assertIs(facts["reasons"][reason], True)
+                    self.assertTrue(all(type(flag) is bool for flag in facts["reasons"].values()))
+                    detailed = type(name) is str and len(name) <= 65536
+                    self.assertIs(facts["detailsInspected"], detailed)
+                    self.assertEqual(facts["characterCount"], len(name) if type(name) is str else None)
+                    if detailed:
+                        raw = name.encode("utf-8", "surrogatepass")
+                        self.assertEqual((facts["utf8Size"], facts["sha256"]),
+                                         (len(raw), PREP.hashlib.sha256(raw).hexdigest()))
+                    else:
+                        self.assertIsNone(facts["utf8Size"])
+                        self.assertIsNone(facts["sha256"])
+                    if capture == "captured":
+                        self.assertEqual(PREP.json.loads(facts["jsonSpelling"]), name)
+                        self.assertLessEqual(len(facts["jsonSpelling"].encode("ascii")), 4096)
+                        self.assertLessEqual(facts["utf8Size"], 16384)
+                    else:
+                        self.assertIsNone(facts["jsonSpelling"])
+                    self.assertNotIn("MRK-PATH-CANARY", PREP.json.dumps(facts))
+                    for unavailable in (None, "unrelated-task", 1):
+                        self.assertIsNone(PREP.public_member_failure(original, unavailable))
+                else:
+                    self.fail("unchanged relative-name policy unexpectedly admitted invalid input")
+        for accepted in ("pkg/Public Space/module.py", "a" * 4096):
+            self.assertIs(PREP.relative_name(accepted), accepted)
+        self.assertIsNone(PREP.public_member_failure(PREP.PreparationRefused("relative-name"), phase))
+        self.assertIsNone(PREP.public_member_failure(ValueError("relative-name"), phase))
+
+        # An unavailable diagnostic attribute must not replace the original.
+        class AttributeUnavailable(PREP.PreparationRefused):
+            def __setattr__(self, name, value):
+                if name == "_relative_name_input":
+                    raise MemoryError("inert diagnostic allocation failure")
+                return super().__setattr__(name, value)
+        original = AttributeUnavailable("relative-name")
+        original_need = PREP.need
+        with mock.patch.object(PREP, "need", side_effect=original):
+            try:
+                PREP.relative_name("pkg/../rejected")
+            except PREP.PreparationRefused as returned:
+                self.assertIs(returned, original)
+                self.assertEqual(returned.args, ("relative-name",))
+                self.assertNotIn("_relative_name_input", returned.__dict__)
+            else:
+                self.fail("original path refusal was lost")
+        self.assertIs(PREP.need, original_need)
+
         # The same successful original result feeds diagnostic observation and
         # the raw validator. Only original-known publication can export it.
         source = Path(PREP.__file__).read_text()
@@ -291,6 +373,50 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
         loads = [node for node in ast.walk(preparation_ast)
                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == "package_signature"]
         self.assertEqual(len(loads), 1)  # report only, never a permission/READY predicate
+        # The same predicate and same exception are retained. No scanner,
+        # permission, original-finality or cleanup decision consumes this DATA.
+        relative = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "relative_name")
+        expected_predicate = ast.parse(
+            'need(type(name) is str and 0 < len(name) <= 4096 and not name.startswith("/")\n'
+            '     and "\\\\" not in name and all(32 <= ord(c) < 127 for c in name)\n'
+            '     and all(part not in {"", ".", ".."} for part in name.split("/")), "relative-name")'
+        ).body[0]
+        self.assertEqual(ast.dump(relative.body[0].body[0]), ast.dump(expected_predicate))
+        self.assertIsInstance(relative.body[0].handlers[0].body[-1], ast.Raise)
+        self.assertIsNone(relative.body[0].handlers[0].body[-1].exc)
+        prepared = preparation_ast.body[0]
+        primary = next(node for node in prepared.body if isinstance(node, ast.Try))
+        handler = primary.handlers[0]
+        self.assertEqual(ast.dump(handler.body[0]), ast.dump(ast.parse("failure = error").body[0]))
+        diagnostic_try = handler.body[1]
+        self.assertIsInstance(diagnostic_try, ast.Try)
+        self.assertIsInstance(diagnostic_try.handlers[0].body[0], ast.Pass)
+        captures = [node for node in ast.walk(prepared) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "public_member_failure"]
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(ast.dump(captures[0]), ast.dump(ast.parse(
+            "public_member_failure(error, member_phase)").body[0].value))
+        phases = [node for node in ast.walk(prepared) if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "member_phase" for target in node.targets)]
+        armed = [node for node in phases if isinstance(node.value, ast.Constant) and node.value.value is not None]
+        expected_phases = {"expanded-inventory", "framework-selection", "framework-inventory", "framework-copy",
+                           "image-slicing", "image-relocation", "image-signing", "signed-inventory",
+                           "sealed-inventory", "runtime-inventory", "expanded-retirement"}
+        self.assertEqual({node.value.value for node in armed}, expected_phases)
+        expand = next(node for node in ast.walk(prepared) if isinstance(node, ast.Call)
+                      and any(isinstance(value, ast.Constant) and value.value == "--expand-full"
+                              for value in ast.walk(node)))
+        # Choose the actual engine.run call, not any future enclosing call.
+        self.assertIsInstance(expand.func, ast.Attribute)
+        self.assertEqual(expand.func.attr, "run")
+        self.assertTrue(all(node.lineno > expand.end_lineno for node in armed))
+        self.assertIn('member_phase = None\n            recheck_apple(originals)', preparation)
+        self.assertIn('"publicMemberFailure": public_member', known_publication)
+        loads = [node for node in ast.walk(preparation_ast) if isinstance(node, ast.Name)
+                 and isinstance(node.ctx, ast.Load) and node.id == "public_member"]
+        self.assertEqual(len(loads), 1)  # report only; never path/READY/cleanup authority
+
 
     def test_native_slices_and_load_command_bounds_refuse_ambiguous_data(self):
         load = cstring_command(0xC, "/usr/lib/libSystem.B.dylib")
