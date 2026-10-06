@@ -2182,6 +2182,58 @@ class InstallerContextTests(unittest.TestCase):
         completed = fixture.context_distribution().replace(b'version="1">', b'version="1" installKBytes="0" onConclusion="None">')
         completed = completed.replace(b'>context-wrapped.pkg<', b'>#context-wrapped.pkg<')
         fixture.context_product(self.xar({"Distribution": completed, fixture.CONTEXT_PACKAGES[1]: component}), component, members)
+        # Complete actual macos-26 output, run37456903652/attempt1/source87ae3872.
+        # Its SHA is identical to the original Native17 refused Distribution.
+        generated = b'<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n<installer-gui-script minSpecVersion="1">\n    <title>MRK Installer Context Observation</title>\n    <options customize="never" require-scripts="false" allow-external-scripts="false"/>\n    <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>\n    <choices-outline>\n        <line choice="context"/>\n    </choices-outline>\n    <choice id="context" visible="false">\n        <pkg-ref id="dev.mobile-release-kit.fixture.e2.installer-context.product.v1"/>\n    </choice>\n    <pkg-ref id="dev.mobile-release-kit.fixture.e2.installer-context.product.v1" version="1" installKBytes="0" updateKBytes="0">#context-wrapped.pkg</pkg-ref>\n    <pkg-ref id="dev.mobile-release-kit.fixture.e2.installer-context.product.v1">\n        <bundle-version/>\n    </pkg-ref>\n</installer-gui-script>'
+        self.assertEqual(len(generated), 861)
+        self.assertEqual(fixture.digest(generated), "0220cf73f09b719009f57ab49635ad13c6f5f94f5fa14b59cf36880ecb411647")
+        for directory in (False, True):
+            body = self.xar({"Distribution": generated,
+                             **(members if directory else {fixture.CONTEXT_PACKAGES[1]: component})}, directory=directory)
+            fixture.context_product(body, component, members)
+        import xml.etree.ElementTree as ET
+        # Do not turn productbuild's inert completion into arbitrary merging,
+        # alternate destinations, actionable bundle metadata or ignored tails.
+        mutations = [
+            lambda root: root.findall("pkg-ref")[1].set("id", "different.package"),
+            lambda root: root.findall("pkg-ref")[1].attrib.clear(),
+            lambda root: root.findall("pkg-ref")[1].set("version", "1"),
+            lambda root: root.findall("pkg-ref")[1].set("updateKBytes", "0"),
+            lambda root: root.findall("pkg-ref")[1].set("onConclusion", "RequireRestart"),
+            lambda root: setattr(root.findall("pkg-ref")[1], "text", "#other.pkg"),
+            lambda root: setattr(root.findall("pkg-ref")[1], "tail", "unexpected"),
+            lambda root: root.findall("pkg-ref")[1].remove(root.findall("pkg-ref")[1][0]),
+            lambda root: root.findall("pkg-ref")[1].append(ET.Element("bundle-version")),
+            lambda root: setattr(root.findall("pkg-ref")[1][0], "tag", "must-close"),
+            lambda root: root.findall("pkg-ref")[1][0].set("id", "unexpected"),
+            lambda root: root.findall("pkg-ref")[1][0].append(ET.Element("bundle")),
+            lambda root: setattr(root.findall("pkg-ref")[1][0], "text", "unexpected"),
+            lambda root: setattr(root.findall("pkg-ref")[1][0], "tail", "unexpected"),
+            lambda root: root.append(copy.deepcopy(root.findall("pkg-ref")[1])),
+            lambda root: root.__setitem__(slice(-2, None), list(reversed(list(root)[-2:]))),
+            lambda root: setattr(root.findall("pkg-ref")[0], "text", "https://outside.invalid/pkg"),
+            lambda root: root.findall("pkg-ref")[0].set("onConclusion", "RequireRestart"),
+        ]
+        for size in ("1", "00", "-1", "invalid"):
+            mutations.append(lambda root, size=size: root.findall("pkg-ref")[0].set("updateKBytes", size))
+        for index, mutation in enumerate(mutations):
+            altered = ET.fromstring(generated)
+            mutation(altered)
+            body = self.xar({"Distribution": ET.tostring(altered, encoding="utf-8"),
+                             fixture.CONTEXT_PACKAGES[1]: component})
+            with self.subTest(generated_distribution_mutation=index), self.assertRaisesRegex(
+                    fixture.Refused, "^context-product-distribution$") as caught:
+                fixture.context_product(body, component, members)
+            observation = caught.exception._context_distribution
+            info = observation["distribution"]
+            expected_site = "on-conclusion" if index == 17 else "tree"
+            self.assertEqual((info["failureSite"], info["referenceIndex"]),
+                             (expected_site, 0 if expected_site == "on-conclusion" else None))
+            diagnostic = {"schemaVersion": 1, "type": "mrk-context-product-distribution-diagnostic-v1", "diagnosticOnly": True,
+                          "phase": "context-product-audit", "package": "outer-product", "buildCallIndex": 0, **observation}
+            calls = [{"role": "context-product-build", "entered": True, "returned": True, "returncode": 0}]
+            self.assertIs(fixture.context_distribution_diagnostic_data(diagnostic, diagnostic["phase"],
+                          "context-product-distribution", calls), diagnostic)
 
     def test_archive_alias_payload_overlap_tail_checksum_hooks_and_product_change_are_refused(self):
         members = {"PackageInfo": self.package_info(), "Scripts": b"inert"}

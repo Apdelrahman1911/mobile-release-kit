@@ -1532,10 +1532,29 @@ def context_product(body, component, component_members):
         # Apple documents productbuild's local URL and install-size completion.
         # These closed non-action forms are equivalent; no arbitrary URL, script,
         # alternate conclusion, package, destination or attribute is accepted.
+        # macOS 26 productbuild also appends one same-ID metadata reference.
+        # Its empty bundle-version describes this no-payload component. Accept
+        # only the observed inert row, never a general duplicate-reference merge.
+        references = distribution.findall("pkg-ref")
+        if len(references) == 2:
+            metadata = references[1]
+            reference_index = 1
+            need(list(distribution)[-1] is metadata
+                 and metadata.attrib == {"id": CONTEXT_IDENTIFIERS[1]}
+                 and not (metadata.text or "").strip() and not (metadata.tail or "").strip()
+                 and len(metadata) == 1, "context-product-distribution")
+            bundle = metadata[0]
+            need(bundle.tag == "bundle-version" and not bundle.attrib and not list(bundle)
+                 and not (bundle.text or "").strip() and not (bundle.tail or "").strip(),
+                 "context-product-distribution")
+            distribution.remove(metadata)
         for reference_index, reference in enumerate(distribution.findall("pkg-ref")):
             if "installKBytes" in reference.attrib:
                 site = "install-kbytes"
                 need(reference.attrib.pop("installKBytes") == "0", "context-product-distribution")
+            if "updateKBytes" in reference.attrib:
+                site = "tree"
+                need(reference.attrib.pop("updateKBytes") == "0", "context-product-distribution")
             if "onConclusion" in reference.attrib:
                 site = "on-conclusion"
                 need(reference.attrib.pop("onConclusion") == "None", "context-product-distribution")
@@ -1550,7 +1569,8 @@ def context_product(body, component, component_members):
                 error._context_distribution = {
                     "packageSha256": digest(body), "packageBytes": len(body),
                     "distributionSha256": digest(members["Distribution"]), "distributionBytes": len(members["Distribution"]),
-                    "distribution": _context_distribution_observation(members["Distribution"], site, reference_index),
+                    "distribution": _context_distribution_observation(
+                        members["Distribution"], site, None if site == "tree" else reference_index),
                 }
             except BaseException:
                 # No observation is preferable to invented facts or cleanup proof.
