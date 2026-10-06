@@ -6,7 +6,7 @@ shipping supplier, and a ready record does not qualify an application release.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import importlib.util
 import json
@@ -827,9 +827,11 @@ def sign_failure_observation(stderr, *, arguments=None, root=None, signing_conte
             return result
         framework = root + "/Python.framework"
         target = framework + "/" + member
-        if arguments == ["--force", "--sign", "-", "--timestamp=none", target]:
+        slot_target = root + "/tmp/macho-sign-%04d/" % ordinal + posixpath.basename(member)
+        if arguments in (["--force", "--sign", "-", "--timestamp=none", target],
+                         ["--force", "--sign", "-", "--timestamp=none", slot_target]):
             action = "sign"
-        elif arguments == ["--verify", "--strict", target]:
+        elif arguments in (["--verify", "--strict", target], ["--verify", "--strict", slot_target]):
             action = "verify"
         else:
             return result
@@ -851,6 +853,7 @@ def sign_failure_observation(stderr, *, arguments=None, root=None, signing_conte
                 and kind("/".join(parts[:-1]) + "/Resources/Info.plist") in {"file", "link"}):
             layout = "framework-main-path"
         context = {"phase": "image-signing", "action": action, "ordinal": ordinal, "imageCount": image_count,
+                   "operandRole": "standalone-macho" if arguments[-1] == slot_target else "framework-path",
                    "target": {"relativeMember": member, "kind": "file", "packageMemberBytes": row["size"],
                               "packageMemberSha256": row["sha256"], "lexicalLayoutCandidate": layout},
                    "reportedObjects": None}
@@ -859,6 +862,8 @@ def sign_failure_observation(stderr, *, arguments=None, root=None, signing_conte
         def public_operand(value):
             # Compare the exact private prefix, but publish only inventory keys.
             # Strict alias resolution is DATA only and creates no loader grant.
+            if value == slot_target:
+                return (member, "file", False), None
             if value == framework:
                 relative = "."
             elif value.startswith(framework + "/"):
@@ -887,7 +892,8 @@ def sign_failure_observation(stderr, *, arguments=None, root=None, signing_conte
                 source = "subcomponent"
                 observed["subcomponentFields"] += 1  # Count before publishability filtering.
                 operands = [line[len("In subcomponent:"):].lstrip(" \t")]
-            elif line == framework or line.startswith(framework + "/") or line.startswith(framework + ": "):
+            elif (line == framework or line.startswith(framework + "/") or line.startswith(framework + ": ")
+                  or line == slot_target or line.startswith(slot_target + ": ")):
                 source = "primary"
                 observed["primaryFields"] += 1
                 # A colon can also occur in a legitimate public name. Admit a
@@ -1356,6 +1362,207 @@ def replace_owned_file(path, body):
     need(b.read(path, FILE_LIMIT) == body, "private-image-readback")
 
 
+def sign_owned_image(engine, name, rows, ordinal, image_count, machine, *, environment, root_custody):
+    """Sign a disposable tool image, never its vendor resource envelope.
+
+    Security can promote a main file to a bundle and require signatures on
+    configuration DATA. This isolated slot has no bundle layout. Its signed
+    output is an expected new original (codesign renames .cstemp), while the
+    framework destination remains the SAME held original inode.
+    """
+    b = build_data()
+    relative_name(name)
+    need(type(ordinal) is int and type(image_count) is int
+         and 0 <= ordinal < image_count <= 1024 and rows.get(name, {}).get("kind") == "file",
+         "signing-image-selection")
+    root = engine.root
+    slot_name = "macho-sign-%04d" % ordinal
+    slot_root = root / "tmp" / slot_name
+    basename = posixpath.basename(name)
+    slot = slot_root / basename
+    finish = engine.deadline - SETTLE_SECONDS
+    # Intentionally held filesystem originals are not yet CLOSED. Use the same
+    # DataFinality implementation locally, not a false settled FixedCalls state.
+    held, stack = b.DataFinality(), ExitStack()
+    directories, close_failure = [], [None]
+    failure, slot_rows = None, None
+
+    def guard():
+        need(engine.known and engine.data.known and b.DATA.known and engine.active is None,
+             "signing-original-finality")
+        need(engine.clock() < finish, "preparation-deadline")
+        need(engine.cancellation is None or not engine.cancellation["cancelled"], "preparation-cancelled")
+
+    def close_original(fd):
+        try:
+            os.close(fd)
+        except BaseException as error:
+            if close_failure[0] is None:
+                close_failure[0] = error
+            raise
+
+    def open_original(parent, leaf, flags):
+        before = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        need((stat.S_ISDIR(before.st_mode) if flags & os.O_DIRECTORY else stat.S_ISREG(before.st_mode))
+             and before.st_uid == os.getuid(), "signing-original-kind")
+        fd = stack.enter_context(held.acquiring(os.open, close_original, leaf,
+            flags | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent))
+        need(identity(os.fstat(fd)) == identity(before), "signing-open-original")
+        return fd, before
+
+    def directory(parent, leaf, expected=None):
+        fd, before = open_original(parent, leaf, os.O_RDONLY | os.O_DIRECTORY)
+        need(stat.S_IMODE(before.st_mode) == 0o700, "signing-private-directory")
+        original = identity(before)[:5]
+        need(expected is None or original == tuple(expected), "signing-directory-source")
+        directories.append((parent, leaf, fd, original))
+        return fd
+
+    def bound_directories():
+        for parent, leaf, fd, original in directories:
+            now = os.fstat(fd)
+            need(identity(now) == identity(os.stat(leaf, dir_fd=parent, follow_symlinks=False))
+                 and identity(now)[:5] == original, "signing-directory-rebound")
+
+    def file_original(parent, leaf, writable=False):
+        fd, before = open_original(parent, leaf, os.O_RDWR if writable else os.O_RDONLY)
+        need(before.st_nlink == 1 and 32 <= before.st_size <= FILE_LIMIT
+             and not before.st_mode & 0o077, "signing-private-file")
+        return fd, before
+
+    def read_original(fd, parent, leaf, before):
+        need(identity(os.fstat(fd)) == identity(before)
+             == identity(os.stat(leaf, dir_fd=parent, follow_symlinks=False)), "signing-file-rebound")
+        os.lseek(fd, 0, os.SEEK_SET)
+        blocks, count = [], 0
+        while count < before.st_size:
+            guard()
+            block = os.read(fd, min(65536, before.st_size - count))
+            need(block, "signing-original-short-read")
+            blocks.append(block)
+            count += len(block)
+        need(not os.read(fd, 1) and identity(os.fstat(fd)) == identity(before)
+             == identity(os.stat(leaf, dir_fd=parent, follow_symlinks=False)), "signing-file-post")
+        body = b"".join(blocks)
+        guard()
+        return body
+
+    def only_slot_file():
+        bound_directories()
+        # Enumerate the captured directory, not an absolute path that could
+        # select a replacement parent. A second entry already proves refusal.
+        with b.DATA.acquiring(os.scandir, lambda value: value.close(), slot_fd) as entries:
+            first = next(entries, None)
+            need(first is not None and first.name == basename and next(entries, None) is None,
+                 "signing-slot-outputs")
+        bound_directories()
+
+    try:
+        try:
+            guard()
+            root_fd = directory(None, root, root_custody)
+            tmp_fd = directory(root_fd, "tmp")
+            parent = directory(root_fd, "Python.framework", rows["."]["identity"][:5])
+            parts = name.split("/")
+            for index, part in enumerate(parts[:-1], 1):
+                row = rows.get("/".join(parts[:index]), {})
+                need(row.get("kind") == "directory", "signing-source-parent")
+                parent = directory(parent, part, row["identity"][:5])
+            destination, before = file_original(parent, basename, writable=True)
+            old = read_original(destination, parent, basename, before)
+            macho_records(old, machine)
+            guard()
+            capacity = os.fstatvfs(root_fd)
+            need(capacity.f_bavail * capacity.f_frsize >= 2 * FILE_LIMIT, "signing-slot-disk-reserve")
+            guard()
+            bound_directories()
+            os.mkdir(slot_name, 0o700, dir_fd=tmp_fd)  # Exclusive, never reuse a failed slot.
+            slot_fd = directory(tmp_fd, slot_name)
+            guard()
+            source = stack.enter_context(held.acquiring(os.open, close_original, basename,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o700, dir_fd=slot_fd))
+            source_before = os.fstat(source)
+            need(stat.S_ISREG(source_before.st_mode) and source_before.st_uid == os.getuid()
+                 and source_before.st_nlink == 1 and source_before.st_size == 0, "signing-slot-created-file")
+            guard()
+            os.fchmod(source, 0o700)
+            cursor = 0
+            while cursor < len(old):
+                guard()
+                count = os.write(source, old[cursor:cursor + 65536])
+                need(count > 0, "signing-slot-write")
+                cursor += count
+            source_before = os.fstat(source)
+            need(read_original(source, slot_fd, basename, source_before) == old, "signing-slot-input-readback")
+            # codesign may replace this slot inode. Keep the input FD only for
+            # its own close, never treat it as the newly signed output original.
+            only_slot_file()
+            guard()
+            context = (name, rows, ordinal, image_count)
+            engine.run("sign", ["--force", "--sign", "-", "--timestamp=none", str(slot)],
+                       environment=environment, signing_context=context)
+            guard()
+            only_slot_file()
+            output, output_before = file_original(slot_fd, basename)
+            signed = read_original(output, slot_fd, basename, output_before)
+            need(read_original(destination, parent, basename, before) == old, "signing-destination-changed")
+            guard()
+            engine.run("sign", ["--verify", "--strict", str(slot)],
+                       environment=environment, signing_context=context)
+            guard()
+            only_slot_file()
+            need(read_original(output, slot_fd, basename, output_before) == signed,
+                 "signing-verified-output-changed")
+            macho_content_valid(old, signed, machine, signing=True)
+            need(read_original(destination, parent, basename, before) == old, "signing-destination-changed")
+            bound_directories()
+            guard()
+            # Commit only to the captured destination, never a returned path.
+            os.ftruncate(destination, 0)
+            os.lseek(destination, 0, os.SEEK_SET)
+            cursor = 0
+            while cursor < len(signed):
+                guard()
+                count = os.write(destination, signed[cursor:cursor + 65536])
+                need(count > 0, "signing-destination-write")
+                cursor += count
+            after = os.fstat(destination)
+            need(identity(after)[:6] == identity(before)[:6], "signing-destination-original")
+            need(read_original(destination, parent, basename, after) == signed, "signing-destination-readback")
+            bound_directories()
+            guard()
+            slot_rows = scan_tree(slot_root, deadline=finish)
+            need(set(slot_rows) == {".", basename}, "signing-slot-complete-roster")
+            bound_directories()
+            need(slot_rows["."] == {"kind": "directory", "identity": list(identity(os.fstat(slot_fd)))}
+                 and slot_rows[basename] == {"kind": "file", "identity": list(identity(output_before)),
+                     "size": len(signed), "sha256": hashlib.sha256(signed).hexdigest()},
+                 "signing-slot-retirement-originals")
+            need(read_original(output, slot_fd, basename, output_before) == signed,
+                 "signing-slot-terminal-output")
+            bound_directories()
+        except BaseException as error:
+            failure = error
+        finally:
+            try:
+                stack.close()  # Close captured originals even after process UNKNOWN.
+            except BaseException as error:
+                if failure is None:
+                    failure = close_failure[0] if close_failure[0] is not None else error
+    finally:
+        # Every constructor/result gap or ambiguous close poisons BOTH shared
+        # gates. No later command, commit, filesystem removal or readiness.
+        if not held.known:
+            b.DATA.unknown()
+            engine.known = False
+    if failure is not None:
+        raise failure
+    guard()
+    retire_tree(slot_root, slot_rows, known=engine.known, deadline=finish)
+    guard()
+
+
 def seal_framework(root, rows):
     for name, row in rows.items():
         if row["kind"] == "file":
@@ -1604,21 +1811,15 @@ def prepare(ctx):
                                         "relocatedSha256": hashlib.sha256(changed).hexdigest(), **plan})
             member_phase = "image-signing"
             for ordinal, name in enumerate(sorted(images, key=lambda value: (-value.count("/"), value))):
-                path = framework / name
-                old = b.read(path, FILE_LIMIT)
-                signing_context = (name, copied, ordinal, len(images))
-                engine.run("sign", ["--force", "--sign", "-", "--timestamp=none", str(path)],
-                           environment=env, signing_context=signing_context)
-                engine.run("sign", ["--verify", "--strict", str(path)],
-                           environment=env, signing_context=signing_context)
-                macho_content_valid(old, b.read(path, FILE_LIMIT), ctx["machine"], signing=True)
+                sign_owned_image(engine, name, copied, ordinal, len(images), ctx["machine"],
+                                 environment=env, root_custody=original_root)
             member_phase = "signed-inventory"
             signed_rows = scan_tree(framework, closure=True, deadline=engine.deadline - SETTLE_SECONDS)
             member_phase = None
-            # File arguments may be recognized as bundle main executables by
-            # Security. These guards still refuse added resources, changed
-            # aliases or authenticated nontransformed files (including the
-            # explicit Intel-only auxiliary retained on ARM).
+            # Standalone signatures qualify only these disposable tool images,
+            # not vendor bundle resource envelopes. The framework is not shipped.
+            # Retain every unsigned configuration/resource byte and alias, plus
+            # the explicit Intel-only auxiliary on ARM, without new seal files.
             need(set(signed_rows) == set(copied), "signing-inventory-changed")
             for name, row in copied.items():
                 current = signed_rows[name]

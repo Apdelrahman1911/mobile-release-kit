@@ -1162,6 +1162,32 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                 self.assertTrue(row["settled"] and row["returned"] and calls.known and calls.data.known)
                 self.assertTrue(all(stream.closed for stream in original.streams))
 
+        # The real standalone route keeps both original commands/flags, but
+        # neither the native operand nor its observation selects a framework.
+        slot = str(root / "tmp/macho-sign-0000" / PurePosixPath(member).name)
+        for action, arguments in (("sign", ["--force", "--sign", "-", "--timestamp=none", slot]),
+                                  ("verify", ["--verify", "--strict", slot])):
+            with self.subTest(standalone_action=action), PipeOriginal(
+                    returncode=1, stderr=(slot + ": code object is not signed at all").encode()) as original:
+                factory = mock.Mock(return_value=original)
+                calls = PREP.FixedCalls(root, tools, data=BUILD.DataFinality(), clock=lambda: 0.0, popen=factory)
+                with self.assertRaisesRegex(PREP.PreparationRefused, "^fixed-sign-exit-1$"):
+                    calls.run("sign", arguments, environment={}, signing_context=signing_context)
+                row = calls.records[0]
+                context = row["signDiagnostic"]["signingContext"]
+                self.assertEqual((context["action"], context["operandRole"]), (action, "standalone-macho"))
+                self.assertEqual(context["target"]["relativeMember"], member)
+                self.assertEqual(context["reportedObjects"]["matches"], [
+                    {"source": "primary", "relativeMember": member, "kind": "file", "viaAlias": False}])
+                self.assertNotIn(str(root), PREP.json.dumps(row))
+                self.assertNotIn("macho-sign-", PREP.json.dumps(row))
+                self.assertEqual(factory.call_args.args[0][3:], [tools["sign"], *arguments])
+                self.assertTrue(row["returned"] and row["settled"] and calls.known and calls.data.known)
+                self.assertTrue(all(stream.closed for stream in original.streams))
+        for wrong in (slot.replace("0000", "0001"), slot + "-foreign", slot + "/../Python"):
+            self.assertIsNone(observe(b"invalid signature",
+                arguments=["--verify", "--strict", wrong])["signingContext"])
+
         # An untrusted or unavailable context cannot stop the original call or
         # turn its actual nonzero exit into success, and cannot leak its text.
         with PipeOriginal(returncode=1, stderr=b"invalid signature") as original:
@@ -1569,5 +1595,274 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                 PREP.retire_tree(changed_public, changed_rows, expanded=True, known=True, deadline=deadline)
             self.assertEqual(changed_icon.read_bytes(), b"changed metadata")
             self.assertEqual(PREP.scan_tree(source, closure=True, deadline=deadline), expected)
+
+            # Standalone signing uses real, tiny nonroot filesystem originals,
+            # but ONLY an inert engine below: no codesign/process is executed.
+            # This fixture deliberately retains unsigned bundle-side DATA.
+            signing_source = root / "signing-source"
+            member = PREP.VERSION_RELATIVE + "/Frameworks/Tcl.framework/Versions/9.0/Tcl"
+            original_path = signing_source / member
+            original_path.parent.mkdir(parents=True, mode=0o700)
+            load = cstring_command(PREP.LC_ID_DYLIB, "@loader_path/Tcl")
+            payload = b"MRK-PASSIVE-UNCHANGED-CODE-DATA"
+            signature_offset = 32 + len(load) + 16 + len(payload)
+            original_image = thin_fixture(commands=(load, struct.pack("<4I", 0x1D, 16, signature_offset, 4)),
+                                          payload=payload + b"OLD!")
+            signed_image = original_image[:-4] + b"NEW!"
+            original_path.write_bytes(original_image); original_path.chmod(0o700)
+            script_name = str(PurePosixPath(member).parent / "tclConfig.sh")
+            (signing_source / script_name).write_bytes(b"# unsigned configuration DATA, not code\n")
+            resources = original_path.parent / "Resources"; resources.mkdir(mode=0o700)
+            (resources / "Info.plist").write_bytes(b"passive vendor bundle metadata")
+            seal = original_path.parent / "_CodeSignature"; seal.mkdir(mode=0o700)
+            (seal / "CodeResources").write_bytes(b"passive unchanged vendor resource seal")
+            os.symlink("9.0", original_path.parent.parent / "Current")
+            os.symlink("Versions/Current/Tcl", original_path.parent.parent.parent / "Tcl")
+            signing_rows = PREP.scan_tree(signing_source, closure=True, deadline=deadline)
+            finality_class = BUILD.DataFinality
+
+            cases = ("success", "sign-failure", "verify-failure", "unknown-sign", "late-verify", "cancel-verify",
+                     "payload-tamper", "loader-tamper", "extra-output", "output-symlink", "output-hardlink",
+                     "verify-replacement", "destination-rebound", "destination-parent-rebound", "slot-parent-rebound",
+                     "occupied-slot", "slot-symlink", "output-constructor", "constructor-interrupt",
+                     "first-error-close", "close-only", "late-close", "retirement-scan-rebound")
+            for scenario in cases:
+                with self.subTest(standalone_filesystem=scenario):
+                    preparation = root / ("signing-" + scenario); preparation.mkdir(mode=0o700)
+                    (preparation / "tmp").mkdir(mode=0o700)
+                    framework = preparation / "Python.framework"
+                    copied = PREP.copy_framework(signing_source, framework, signing_rows, deadline=deadline)
+                    destination = framework / member
+                    destination_before = PREP.identity(destination.lstat())
+                    nonimages = {name: row for name, row in copied.items() if name != member and row["kind"] != "directory"}
+                    slot_root = preparation / "tmp/macho-sign-0000"
+                    slot = slot_root / "Tcl"
+                    untouched = preparation / "outside"; untouched.mkdir(mode=0o700)
+                    (untouched / "keep").write_bytes(b"never select an outside original")
+                    if scenario == "occupied-slot":
+                        slot_root.mkdir(mode=0o700)
+                        (slot_root / "keep").write_bytes(b"never reuse an occupied signing slot")
+                    elif scenario == "slot-symlink":
+                        os.symlink(untouched, slot_root)
+
+                    fixture_data, books = finality_class(), []
+                    operation_error = PREP.PreparationRefused("inert-original-signing-failure")
+                    close_error = OSError("inert local original close uncertainty")
+                    constructor_error = (KeyboardInterrupt("inert local constructor interruption")
+                                         if scenario == "constructor-interrupt" else
+                                         OSError("inert output constructor result unavailable"))
+                    owner = self
+
+                    class HeldOriginals(finality_class):
+                        def __init__(self):
+                            super().__init__()
+                            self.opened, self.closed, self.dispatches = [], [], 0
+                            self.close_fault = False
+                            books.append(self)
+
+                        def acquiring(self, constructor, closer, *args, **kwargs):
+                            def acquire():
+                                self.dispatches += 1
+                                if scenario == "constructor-interrupt" and self.dispatches == 3:
+                                    raise constructor_error
+                                if (scenario == "output-constructor" and args[0] == "Tcl"
+                                        and args[1] & os.O_ACCMODE == os.O_RDONLY
+                                        and not args[1] & os.O_DIRECTORY):
+                                    raise constructor_error
+                                value = constructor(*args, **kwargs)
+                                self.opened.append(value)
+                                return value
+                            return super().acquiring(acquire, closer)
+
+                        def close(self, closer, fd):
+                            super().close(closer, fd)
+                            self.closed.append(fd)
+                            if not self.close_fault and scenario in ("first-error-close", "close-only", "late-close"):
+                                self.close_fault = True
+                                if scenario == "late-close":
+                                    engine.now = engine.deadline - PREP.SETTLE_SECONDS
+                                else:
+                                    self.unknown()
+                                    raise close_error
+
+                    class InertSigner:
+                        def __init__(self):
+                            self.root, self.data = preparation, fixture_data
+                            self.now, self.deadline = time.monotonic(), deadline + PREP.SETTLE_SECONDS
+                            self.known, self.active, self.calls = True, None, []
+                            self.cancellation = {"cancelled": False}
+                            self.displaced, self.slot_displaced = None, None
+                            self.slot_input_identity, self.signed_identity = None, None
+                            self.expected_output = None
+
+                        def clock(self):
+                            return self.now
+
+                        def run(self, role, arguments, *, environment, signing_context):
+                            number = len(self.calls)
+                            owner.assertLess(number, 2)
+                            expected_arguments = (["--force", "--sign", "-", "--timestamp=none", str(slot)]
+                                                  if number == 0 else ["--verify", "--strict", str(slot)])
+                            owner.assertEqual((role, arguments, environment), ("sign", expected_arguments, {}))
+                            owner.assertEqual(signing_context, (member, copied, 0, 1))
+                            owner.assertIs(BUILD.DATA, fixture_data)
+                            owner.assertTrue(BUILD.DATA.known and self.known)
+                            owner.assertEqual(len(books), 1)
+                            owner.assertGreater(books[0]._pending, 0)
+                            owner.assertFalse(books[0].known)  # Intentionally held, NOT global closed-state.
+                            owner.assertEqual(PREP.identity(destination.lstat()), destination_before)
+                            owner.assertEqual(destination.read_bytes(), original_image)
+                            self.calls.append(arguments)
+                            if number == 0:
+                                self.slot_input_identity = PREP.identity(slot.lstat())
+                                owner.assertEqual(slot.read_bytes(), original_image)
+                                if scenario in ("sign-failure", "first-error-close", "unknown-sign"):
+                                    if scenario == "unknown-sign":
+                                        self.known = False
+                                        self.data.unknown()
+                                    raise operation_error
+                                # Apple's real implementation can replace the
+                                # slot inode via .cstemp. This simulates ONLY
+                                # that filesystem transformation, not a signature.
+                                output = signed_image
+                                if scenario == "payload-tamper":
+                                    output = output.replace(payload, b"BAD" + payload[3:])
+                                elif scenario == "loader-tamper":
+                                    output = output.replace(b"@loader_path/Tcl", b"@loader_path/Bad")
+                                self.expected_output = output
+                                pending = slot.with_name(slot.name + ".cstemp")
+                                pending.write_bytes(output); pending.chmod(0o700)
+                                os.replace(pending, slot)
+                                self.signed_identity = PREP.identity(slot.lstat())
+                                owner.assertNotEqual(self.signed_identity[:2], self.slot_input_identity[:2])
+                                if scenario == "extra-output":
+                                    pending.write_bytes(b"unexpected output stays unadmitted")
+                                elif scenario == "output-symlink":
+                                    slot.unlink(); os.symlink(untouched / "keep", slot)
+                                elif scenario == "output-hardlink":
+                                    os.link(slot, untouched / "extra-hardlink")
+                                elif scenario == "destination-rebound":
+                                    self.displaced = destination.with_name("held-destination")
+                                    destination.rename(self.displaced)
+                                    destination.write_bytes(b"do not mutate this replacement")
+                                elif scenario == "destination-parent-rebound":
+                                    old_parent = destination.parent
+                                    self.displaced = old_parent.with_name("held-parent") / destination.name
+                                    old_parent.rename(self.displaced.parent)
+                                    old_parent.mkdir(mode=0o700)
+                                    destination.write_bytes(b"do not mutate this replacement")
+                                elif scenario == "slot-parent-rebound":
+                                    self.slot_displaced = slot_root.with_name("held-slot")
+                                    slot_root.rename(self.slot_displaced)
+                                    slot_root.mkdir(mode=0o700)
+                                    slot.write_bytes(b"do not adopt this replacement")
+                            else:
+                                owner.assertEqual(slot.read_bytes(), self.expected_output)
+                                if scenario == "verify-failure":
+                                    raise operation_error
+                                if scenario == "verify-replacement":
+                                    pending = slot.with_name(slot.name + ".cstemp")
+                                    pending.write_bytes(signed_image); pending.chmod(0o700)
+                                    os.replace(pending, slot)
+                                elif scenario == "late-verify":
+                                    self.now = self.deadline - PREP.SETTLE_SECONDS
+                                elif scenario == "cancel-verify":
+                                    self.cancellation["cancelled"] = True
+                            return {"stdout": b"", "stderr": b""}
+
+                    engine = InertSigner()
+                    original_scan = PREP.scan_tree
+                    def scan_rebound(path, **kwargs):
+                        # Replace only between the preceding held check and the
+                        # terminal inventory. A fresh matching scan cannot adopt
+                        # this new inode as the originally verified output.
+                        self.assertEqual(Path(path), slot_root)
+                        replacement = slot.with_name(slot.name + ".cstemp")
+                        replacement.write_bytes(signed_image); replacement.chmod(0o700)
+                        os.replace(replacement, slot)
+                        return original_scan(path, **kwargs)
+                    scan_guard = (mock.patch.object(PREP, "scan_tree", side_effect=scan_rebound)
+                                  if scenario == "retirement-scan-rebound" else nullcontext())
+                    # These are fixture-local finality books. Neither process
+                    # uncertainty nor an injected close poisons the real module
+                    # DATA original; every binding is restored by the same with.
+                    # Tighten the byte bound for tiny DATA under the original
+                    # 32MiB scratch. Capacity/FD/rename checks stay real; native
+                    # preparation still uses its unchanged 256MiB FILE_LIMIT.
+                    self.assertEqual(PREP.FILE_LIMIT, 256 * PREP.MIB)
+                    with mock.patch.object(BUILD, "DATA", fixture_data), mock.patch.object(BUILD, "DataFinality", HeldOriginals), \
+                            mock.patch.object(PREP, "FILE_LIMIT", 64 * 1024), scan_guard:
+                        if scenario == "success":
+                            PREP.sign_owned_image(engine, member, copied, 0, 1, "arm64", environment={},
+                                                  root_custody=PREP.identity(preparation.lstat())[:5])
+                        else:
+                            with self.assertRaises(BaseException) as caught:
+                                PREP.sign_owned_image(engine, member, copied, 0, 1, "arm64", environment={},
+                                                      root_custody=PREP.identity(preparation.lstat())[:5])
+                            if scenario in ("sign-failure", "verify-failure", "unknown-sign", "first-error-close"):
+                                self.assertIs(caught.exception, operation_error)
+                            elif scenario in ("output-constructor", "constructor-interrupt"):
+                                self.assertIs(caught.exception, constructor_error)
+                            elif scenario == "close-only":
+                                self.assertIs(caught.exception, close_error)
+                            else:
+                                self.assertIsInstance(caught.exception, (PREP.PreparationRefused, FileExistsError))
+                        self.assertEqual(len(books), 1)
+                        self.assertCountEqual(books[0].closed, books[0].opened)
+                        for fd in books[0].opened:
+                            with self.assertRaises(OSError):
+                                os.fstat(fd)
+                        uncertain = scenario in ("unknown-sign", "output-constructor", "constructor-interrupt",
+                                                  "first-error-close", "close-only")
+                        self.assertEqual(fixture_data.known, not uncertain)
+                        self.assertEqual(engine.known, not uncertain)
+                        self.assertEqual(books[0].known, scenario not in
+                                         ("output-constructor", "constructor-interrupt", "first-error-close", "close-only"))
+                    self.assertIs(BUILD.DATA, actual_data)
+                    self.assertIs(BUILD.DataFinality, finality_class)
+                    self.assertEqual(PREP.FILE_LIMIT, 256 * PREP.MIB)
+                    self.assertTrue(actual_data.known)
+                    expected_calls = (0 if scenario in ("occupied-slot", "slot-symlink", "constructor-interrupt")
+                                      else 1 if scenario in ("sign-failure", "unknown-sign", "first-error-close",
+                                          "extra-output", "output-symlink", "output-hardlink", "output-constructor",
+                                          "destination-rebound", "destination-parent-rebound", "slot-parent-rebound") else 2)
+                    self.assertEqual(len(engine.calls), expected_calls)
+                    committed = scenario in ("success", "close-only", "late-close", "retirement-scan-rebound")
+                    held_destination = engine.displaced if engine.displaced is not None else destination
+                    self.assertEqual(held_destination.read_bytes(), signed_image if committed else original_image)
+                    self.assertEqual(PREP.identity(held_destination.lstat())[:6], destination_before[:6])
+                    if engine.displaced is not None:
+                        self.assertEqual(destination.read_bytes(), b"do not mutate this replacement")
+                    else:
+                        for name, before_row in nonimages.items():
+                            path = framework / name
+                            self.assertEqual(list(PREP.identity(path.lstat())), before_row["identity"])
+                            if before_row["kind"] == "link":
+                                self.assertEqual(os.readlink(path), before_row["target"])
+                            else:
+                                self.assertEqual(PREP.hashlib.sha256(path.read_bytes()).hexdigest(), before_row["sha256"])
+                    if scenario == "success":
+                        self.assertEqual(len(engine.calls), 2)
+                        self.assertFalse(slot_root.exists() or slot_root.is_symlink())
+                        self.assertEqual(list((preparation / "tmp").iterdir()), [])
+                    elif scenario == "constructor-interrupt":
+                        self.assertEqual(engine.calls, [])
+                        self.assertFalse(slot_root.exists())
+                    else:
+                        self.assertTrue(slot_root.exists() or slot_root.is_symlink())
+                    if scenario == "occupied-slot":
+                        self.assertEqual(engine.calls, [])
+                        self.assertEqual((slot_root / "keep").read_bytes(), b"never reuse an occupied signing slot")
+                    if scenario == "slot-symlink":
+                        self.assertEqual(engine.calls, [])
+                        self.assertTrue(slot_root.is_symlink())
+                    if engine.slot_displaced is not None:
+                        self.assertEqual((engine.slot_displaced / "Tcl").read_bytes(), signed_image)
+                        self.assertEqual(slot.read_bytes(), b"do not adopt this replacement")
+                    self.assertEqual((untouched / "keep").read_bytes(), b"never select an outside original")
+                    # The test TemporaryDirectory, not production retirement,
+                    # owns disposal of these deliberately failed/unknown DATA
+                    # fixtures. No uncertain case is ever re-admitted as known.
+            self.assertEqual(PREP.scan_tree(signing_source, closure=True, deadline=deadline), signing_rows)
         self.assertIs(BUILD.DATA, actual_data)
         self.assertTrue(actual_data.known)
