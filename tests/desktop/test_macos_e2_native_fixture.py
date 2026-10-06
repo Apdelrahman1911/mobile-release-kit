@@ -1991,9 +1991,20 @@ class InstallerContextTests(unittest.TestCase):
             for element in toc.iter("file"):
                 element.remove(element.find("FinderCreateTime"))
         self.assertEqual(fixture.context_xar(self.xar(members, mutate=without_created)), members)
+        # These annotations are not returned as dates or used as authority.
+        # Include the real pkgbuild day00 and retain the old calendar-only
+        # cases as positive opaque DATA rather than normalizing them.
         for timestamp, nanoseconds in (("0001-01-01T00:00:00", "0"),
                                        ("2000-02-29T12:34:56", "123456789"),
-                                       ("9999-12-31T23:59:59", "999999999")):
+                                       ("9999-12-31T23:59:59", "999999999"),
+                                       ("1900-01-00T22:06:56", "0"),
+                                       ("0000-01-01T00:00:00", "0"),
+                                       ("2026-02-29T12:34:56", "0"),
+                                       ("2026-04-31T12:34:56", "0"),
+                                       ("2026-13-01T12:34:56", "0"),
+                                       ("2026-01-01T24:00:00", "0"),
+                                       ("2026-01-01T12:60:00", "0"),
+                                       ("2026-01-01T12:34:60", "0")):
             def created_text(toc):
                 for element in toc.iter("file"):
                     created = element.find("FinderCreateTime")
@@ -2004,7 +2015,14 @@ class InstallerContextTests(unittest.TestCase):
                     for field in created:
                         field.tail = "\n"
             with self.subTest(created_time=timestamp, nanoseconds=nanoseconds):
-                self.assertEqual(fixture.context_xar(self.xar(members, mutate=created_text)), members)
+                annotated = self.xar(members, mutate=created_text)
+                self.assertEqual(fixture.context_xar(annotated), members)
+                if timestamp == "1900-01-00T22:06:56":
+                    for directory in (False, True):
+                        product = self.xar({"Distribution": fixture.context_distribution(),
+                                            **(members if directory else {fixture.CONTEXT_PACKAGES[1]: annotated})},
+                                           directory=directory, mutate=created_text)
+                        fixture.context_product(product, annotated, members)
         fixture.context_package_info(members["PackageInfo"], fixture.CONTEXT_IDENTIFIERS[1])
         for directory in (False, True):
             product = self.xar({"Distribution": fixture.context_distribution(),
@@ -2052,10 +2070,9 @@ class InstallerContextTests(unittest.TestCase):
                         fixture.Refused, "^context-xar-member-" + label + "$"):
                     fixture.context_xar(self.xar(members, mutate=bad_shape))
         bad_created_values = (
-            ("time", ("", "0000-01-01T00:00:00", "2026-02-29T12:34:56", "2026-04-31T12:34:56",
-                      "2026-13-01T12:34:56", "2026-01-01T24:00:00", "2026-01-01T12:60:00",
-                      "2026-01-01T12:34:60", "2026-01-01T12:34:56Z", "2026-01-01T12:34:56+00:00",
-                      "2026-01-01T12:34:56.0", "2026-1-01T12:34:56", "\u0662" + "026-01-01T12:34:56")),
+            ("time", ("", "2026-01-01T12:34:56Z", "2026-01-01T12:34:56+00:00",
+                      "2026-01-01T12:34:56.0", "2026-1-01T12:34:56", "\u0662" + "026-01-01T12:34:56",
+                      "1900-01-00T22:06:56\n", "1900-01-00T22:06:5\t", "1900-01-00T22:06:56extra", "1" * 65)),
             ("nanoseconds", ("", "-1", "+1", "00", "01", "1000000000", "1.0", " 1", "\u0661")),
         )
         for tag, values in bad_created_values:
@@ -2116,12 +2133,13 @@ class InstallerContextTests(unittest.TestCase):
             with self.subTest(member_shape=shape), self.assertRaisesRegex(
                     fixture.Refused, "^context-xar-member-" + label + "$"):
                 fixture.context_xar(self.xar(members, mutate=bad_member))
-        # Six exact existing guards, not a guessed acceptance format. Preserve
-        # each original Refused; only safe date/number spellings may be shown.
+        # Remaining live guards, not a guessed acceptance format. Preserve
+        # each original Refused; only bounded annotation/number spellings show.
+        # finder-calendar stays in the closed vocabulary for old diagnostics,
+        # but the parser no longer treats optional annotation text as a date.
         diagnostic_samples = (
             ("finder-shape", "FinderCreateTime", lambda toc: toc.find("file/FinderCreateTime").set("private-name", "private-value")),
             ("finder-values", "FinderCreateTime", lambda toc: setattr(toc.find("file/FinderCreateTime/time"), "text", "2026-01-01T12:34:56Z")),
-            ("finder-calendar", "FinderCreateTime", lambda toc: setattr(toc.find("file/FinderCreateTime/time"), "text", "2026-02-29T12:34:56")),
             ("scalar-shape", "inode", lambda toc: ET.SubElement(toc.find("file/inode"), "private-name")),
             ("inode-value", "inode", lambda toc: setattr(toc.find("file/inode"), "text", "+1")),
             ("deviceno-value", "deviceno", lambda toc: setattr(toc.find("file/deviceno"), "text", "01")),

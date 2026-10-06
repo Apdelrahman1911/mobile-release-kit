@@ -993,7 +993,7 @@ def context_xar(body, *, product=False):
             try:
                 if child.tag == "FinderCreateTime":
                     # Apple's extractor applies this as destination birth time. This
-                    # passive parser validates only; it never applies or trusts it.
+                    # passive audit bounds annotation shape, not calendar validity.
                     metadata_check = "finder-shape"
                     need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
                          and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
@@ -1005,13 +1005,10 @@ def context_xar(body, *, product=False):
                          and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", timestamp)
                          and type(nanoseconds) is str and re.fullmatch(r"0|[1-9][0-9]{0,8}", nanoseconds),
                          "context-xar-member-metadata")
-                    from datetime import datetime
-                    metadata_check = "finder-calendar"
-                    try:
-                        datetime(int(timestamp[:4]), int(timestamp[5:7]), int(timestamp[8:10]),
-                                 int(timestamp[11:13]), int(timestamp[14:16]), int(timestamp[17:19]))
-                    except ValueError:
-                        raise Refused("context-xar-member-metadata") from None
+                    # The observed Apple tool emitted 1900-01-00T22:06:56. Public
+                    # xar source ignores failed gmtime_r output; this optional
+                    # annotation is never converted, normalized, applied or used
+                    # as authority. Keep only the closed spelling/bounds above.
                 elif child.tag not in ("file", "data"):
                     metadata_check = "scalar-shape"
                     need(not child.attrib and not list(child), "context-xar-member-metadata")
