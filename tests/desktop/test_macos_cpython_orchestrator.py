@@ -361,10 +361,44 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
         self.assertIsNone(PREP.public_member_failure(PREP.PreparationRefused("relative-name"), phase))
         self.assertIsNone(PREP.public_member_failure(ValueError("relative-name"), phase))
 
+        # Missing aliases retain the original refusal and inert logical context.
+        rows = {"a": {"kind": "link", "target": "dir/link"},
+                "dir": {"kind": "directory"},
+                "dir/link": {"kind": "link", "target": "../absent"}}
+        for requested, inventory, alias, current, missing in (
+                ("a/module.py", rows, ("dir/link", "../absent"), "absent/module.py", "absent"),
+                ("missing.py", {}, None, "missing.py", "missing.py")):
+            with self.assertRaises(PREP.PreparationRefused) as caught:
+                PREP.resolve_member(requested, inventory)
+            original = caught.exception
+            self.assertEqual(original.args, ("member-missing",))
+            context = (requested, current, missing, alias)
+            self.assertEqual(original._missing_member_context, context)
+            facts = PREP.public_member_failure(original, "framework-inventory")
+            self.assertEqual((facts["phase"], facts["code"]),
+                             ("framework-inventory", "member-missing"))
+            self.assertEqual([PREP.json.loads(facts[key]) for key in
+                              ("requested", "current", "missingPrefix")], list(context[:3]))
+            self.assertEqual(facts["lastAlias"], None if alias is None else
+                             {"name": PREP.json.dumps(alias[0]), "target": PREP.json.dumps(alias[1])})
+            self.assertEqual(original._missing_member_context, context)
+            self.assertIsNone(PREP.public_member_failure(original, "unrelated-task"))
+        self.assertIsNone(PREP.public_member_failure(PREP.PreparationRefused("member-missing"), phase))
+        self.assertIsNone(PREP.public_member_failure(ValueError("member-missing"), phase))
+        for malformed in (None, [], ("a", "b", "c"), ("a", "b", "c", []),
+                          ("a", "b", "c", ("alias",)), (NoStringification(), "b", "c", None),
+                          ("/private/MRK-PATH-CANARY", "b", "c", None),
+                          ("a", "b", "c", ("alias", "a\\b")),
+                          ("a" * 4097, "b", "c", None),
+                          ("\u00e9" * 1024, "b", "c", None)):
+            invalid = PREP.PreparationRefused("member-missing")
+            invalid._missing_member_context = malformed
+            self.assertIsNone(PREP.public_member_failure(invalid, phase))
+
         # An unavailable diagnostic attribute must not replace the original.
         class AttributeUnavailable(PREP.PreparationRefused):
             def __setattr__(self, name, value):
-                if name == "_relative_name_input":
+                if name in {"_relative_name_input", "_missing_member_context"}:
                     raise MemoryError("inert diagnostic allocation failure")
                 return super().__setattr__(name, value)
         original = AttributeUnavailable("relative-name")
@@ -378,6 +412,18 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                 self.assertNotIn("_relative_name_input", returned.__dict__)
             else:
                 self.fail("original path refusal was lost")
+        self.assertIs(PREP.need, original_need)
+        missing_original = AttributeUnavailable("member-missing")
+        def missing_need(condition, code):
+            if not condition and code == "member-missing":
+                raise missing_original
+            return original_need(condition, code)
+        with mock.patch.object(PREP, "need", side_effect=missing_need):
+            with self.assertRaises(PREP.PreparationRefused) as caught:
+                PREP.resolve_member("a/module.py", rows)
+            self.assertIs(caught.exception, missing_original)
+            self.assertEqual(caught.exception.args, ("member-missing",))
+            self.assertNotIn("_missing_member_context", caught.exception.__dict__)
         self.assertIs(PREP.need, original_need)
 
         # The same successful original result feeds diagnostic observation and

@@ -105,8 +105,31 @@ def public_member_failure(error, phase):
     phases = ("expanded-inventory", "framework-selection", "framework-inventory",
               "framework-copy", "image-slicing", "image-relocation", "image-signing",
               "signed-inventory", "sealed-inventory", "runtime-inventory", "expanded-retirement")
-    if (type(phase) is not str or phase not in phases or type(error) is not PreparationRefused
-            or error.args != ("relative-name",) or "_relative_name_input" not in error.__dict__):
+    if type(phase) is not str or phase not in phases or type(error) is not PreparationRefused:
+        return None
+    if error.args == ("member-missing",):
+        context = error.__dict__.get("_missing_member_context")
+        if type(context) is not tuple or len(context) != 4:
+            return None
+        requested, current, missing, alias = context
+        if alias is not None and (type(alias) is not tuple or len(alias) != 2):
+            return None
+        values = (requested, current, missing) + (() if alias is None else alias)
+        spellings = []
+        for value in values:
+            if (type(value) is not str or not 0 < len(value) <= 4096
+                    or value.startswith("/") or "\\" in value):
+                return None
+            spelling = json.dumps(value, ensure_ascii=True)
+            if len(spelling) > 4096:
+                return None
+            spellings.append(spelling)
+        return {"phase": phase, "code": "member-missing",
+                "representation": "json-spelled-public-relative-input-not-filesystem-path",
+                "requested": spellings[0], "current": spellings[1], "missingPrefix": spellings[2],
+                "lastAlias": None if alias is None else
+                    {"name": spellings[3], "target": spellings[4]}}
+    if error.args != ("relative-name",) or "_relative_name_input" not in error.__dict__:
         return None
     value = error.__dict__["_relative_name_input"]
     is_string = type(value) is str
@@ -299,6 +322,7 @@ def resolve_member(name, rows):
     """Resolve only inventory-owned aliases, with no real filesystem traversal."""
     need(type(name) is str and not name.startswith("/"), "member-relative")
     value = posixpath.normpath(name)
+    last_alias = None
     for _ in range(65):
         if value == ".":
             need(rows.get(".", {}).get("kind") == "directory", "member-root")
@@ -308,11 +332,19 @@ def resolve_member(name, rows):
         for index in range(1, len(parts) + 1):
             prefix = "/".join(parts[:index])
             row = rows.get(prefix)
-            need(row is not None, "member-missing")
+            try:
+                need(row is not None, "member-missing")
+            except PreparationRefused as error:
+                try:
+                    error._missing_member_context = (name, value, prefix, last_alias)
+                except BaseException:
+                    pass  # Observation must not replace the original refusal.
+                raise
             if row["kind"] == "link":
                 target = row["target"]
                 need(type(target) is str and target and not target.startswith("/") and "\\" not in target,
                      "member-link-escape")
+                last_alias = (prefix, target)
                 value = posixpath.normpath(posixpath.join(posixpath.dirname(prefix), target, *parts[index:]))
                 changed = True
                 break
