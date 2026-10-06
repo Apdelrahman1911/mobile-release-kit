@@ -19,7 +19,7 @@ jobs:
   producer:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-cpython-source-build-intel' && github.sha == github.workflow_sha
     runs-on: macos-26-intel
-    timeout-minutes: 55
+    timeout-minutes: 65
     steps:
       - id: admission
         name: Admit only the fixed disposable hosted Intel source-build route
@@ -52,19 +52,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - id: python
-        name: Select the isolated orchestration interpreter, not the supplier
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14.7'
-          architecture: x64
-
-      - id: build
-        name: Build and qualify once through the original command owner
+      - id: prepare
+        name: Prepare an authenticated private orchestration Python without global installation
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
           umask 077
@@ -72,14 +64,13 @@ jobs:
           observed_head="$("${git_env[@]}" rev-parse --verify HEAD)"
           observed_status="$("${git_env[@]}" status --porcelain=v1 --untracked-files=all --ignored)"
           [[ "$observed_head" == "$GITHUB_SHA" && -z "$observed_status" ]] || exit 1
-          [[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
-          root="$RUNNER_TEMP/mrk-macos-cpython-intel-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          root="$RUNNER_TEMP/mrk-macos-cpython-intel-orchestrator-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           [[ ! -e "$root" && ! -L "$root" ]] || exit 1
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-          # The owner alone creates its root, accounts for all children and
-          # retires its scratch. No shell retry, cleanup or status replacement.
+          # Apple Python prepares package DATA only; it never runs the MRK owner.
           exec /usr/bin/env -i \
             PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
+            DEVELOPER_DIR=/Library/Developer/CommandLineTools \
             GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
             GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
@@ -87,7 +78,62 @@ jobs:
             GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
             GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" \
             GITHUB_JOB="$GITHUB_JOB" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
-            "$MRK_PYTHON" -I -S -B desktop/tools/macos_cpython_source_build.py
+            /usr/bin/python3 -I -S -B desktop/tools/macos_cpython_orchestrator.py prepare
+
+      - id: build
+        name: Build and qualify once through the original command owner
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          git_env=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-optional-locks -c core.fsmonitor=false -C "$GITHUB_WORKSPACE")
+          observed_head="$("${git_env[@]}" rev-parse --verify HEAD)"
+          observed_status="$("${git_env[@]}" status --porcelain=v1 --untracked-files=all --ignored)"
+          [[ "$observed_head" == "$GITHUB_SHA" && -z "$observed_status" ]] || exit 1
+          root="$RUNNER_TEMP/mrk-macos-cpython-intel-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          [[ ! -e "$root" && ! -L "$root" ]] || exit 1
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          # Apple performs the ready-file PRE, then execve replaces that same
+          # process with the private embedded Python and the existing builder.
+          # No shell retry, child wrapper or later command replaces its status.
+          exec /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
+            DEVELOPER_DIR=/Library/Developer/CommandLineTools \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_REF="$GITHUB_REF" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" \
+            GITHUB_JOB="$GITHUB_JOB" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/python3 -I -S -B desktop/tools/macos_cpython_orchestrator.py build
+
+      - id: retire
+        name: Retire only settled task-owned orchestration inputs after actual producer completion
+        if: always() && steps.prepare.outputs.root != ''
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          PREPARATION_OUTCOME: ${{ steps.prepare.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # Missing, cancelled or unknown completion preserves needed inputs.
+          # No shell rm/chmod, global cache cleanup or invented success receipt.
+          exec /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
+            DEVELOPER_DIR=/Library/Developer/CommandLineTools \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_REF="$GITHUB_REF" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" \
+            GITHUB_JOB="$GITHUB_JOB" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/python3 -I -S -B desktop/tools/macos_cpython_orchestrator.py retire "$PREPARATION_OUTCOME" "$BUILD_OUTCOME"
 
       - id: source_post
         name: Check exact unchanged source even after a failed build
@@ -99,6 +145,20 @@ jobs:
           observed_head="$("${git_env[@]}" rev-parse --verify HEAD)"
           observed_status="$("${git_env[@]}" status --porcelain=v1 --untracked-files=all --ignored)"
           [[ "$observed_head" == "$GITHUB_SHA" && -z "$observed_status" ]] || exit 1
+
+      - id: preparation_evidence
+        name: Retain only closed preparation and retirement facts
+        if: always() && steps.prepare.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-cpython-intel-preparation-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Never upload the package, framework, raw captures or private census.
+          path: ${{ steps.prepare.outputs.root }}/public/evidence/
+          if-no-files-found: ${{ steps.prepare.outcome == 'success' && 'error' || 'warn' }}
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 14
 
       - id: evidence
         name: Retain only bounded closed public evidence when exported
@@ -117,7 +177,7 @@ jobs:
 
       - id: supplier
         name: Retain a successful source supplier without activating any consumer
-        if: success() && steps.build.outcome == 'success' && steps.source_post.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: success() && steps.prepare.outcome == 'success' && steps.build.outcome == 'success' && steps.retire.outcome == 'success' && steps.source_post.outcome == 'success' && steps.preparation_evidence.outcome == 'success' && steps.evidence.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-cpython-intel-supplier-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

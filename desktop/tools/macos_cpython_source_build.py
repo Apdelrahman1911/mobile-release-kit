@@ -583,7 +583,8 @@ class Build:
             CFLAGS=compiler_flags(self.sdk, self.target), CPPFLAGS="", LDFLAGS=linker_flags(self.sdk, self.target))
         probe_path = self.root / "desktop/tools/macos_cpython_source_probe.py"
         network_result = self.run("network-denial", [self.orchestrator, "-I", "-S", "-B", str(probe_path),
-                                  "network", self.target], maximum=15)
+                                  "network", self.target], maximum=15,
+                                  env={**self.environment, **self.orchestration_config})
         network = probe_result(network_result.stdout, "network", self.target, self.probe)
         need(type(network.get("errno")) is int and network["errno"] in {1, 13}, "network-denial-result")
         self.toolchain["nativeHost"] = network["nativeHost"]
@@ -755,7 +756,8 @@ class Build:
         setup = setup.replace(b"@MRK_PREFIX@", str(prefix).encode("ascii"))
         need(b"@MRK_" not in setup, "python-template-token")
         write(directory / "Modules/Setup.local", setup, 0o444)
-        environment = {**self.environment, "MODULE_BUILDTYPE": "static", "ZLIB_CFLAGS": "-I" + str(prefix / "include"),
+        environment = {**self.environment, **self.orchestration_config,
+            "MODULE_BUILDTYPE": "static", "ZLIB_CFLAGS": "-I" + str(prefix / "include"),
             "ZLIB_LIBS": str(prefix / "lib/libz.a"),
             "LDFLAGS": self.environment["LDFLAGS"] + " -L" + str(prefix / "lib")}
         self.run("python-configure", [self.shell, str(source / "configure"), *PYTHON_CONFIGURE,
@@ -1193,6 +1195,7 @@ def supplier_tar(root, output, files, *, deadline):
 def source_snapshot(root, target=ARM_TARGET):
     profile = target_profile(target)
     fixed = {profile["workflow"], "desktop/tools/macos_cpython_source_build.py", "desktop/tools/macos_cpython_source_probe.py",
+             "desktop/tools/macos_cpython_orchestrator.py",
              "desktop/tools/macos_cpython_source_setup.local", "desktop/tools/macos_cpython_source_recipe.py",
              "desktop/tools/macos_aqua_qualification.py", profile["lock"],
              PROVENANCE[0]}
@@ -1238,6 +1241,12 @@ def main():
     os.umask(0o077)
     before = source_snapshot(CHECKOUT, target)
     tools = CHECKOUT / "desktop/tools"
+    orchestration = load_module("_mrk_macos_orchestration", tools / "macos_cpython_orchestrator.py")
+    need(orchestration._BUILD is None, "orchestration-facade-already-bound")
+    # Share this original DATA ledger; do not hide preparation-file FD finality
+    # in a second imported copy of the builder before entering its native owner.
+    orchestration._BUILD = sys.modules[__name__]
+    orchestration_config = orchestration.build_entry_configuration()
     recipe = load_module("_mrk_macos_source_data", tools / "macos_cpython_source_recipe.py")
     probe = load_module("_mrk_macos_source_probe", tools / "macos_cpython_source_probe.py")
     qualification = load_module("_mrk_macos_source_qualification", tools / "macos_aqua_qualification.py")
@@ -1246,6 +1255,7 @@ def main():
     work = WORK_PARENT / f"{profile['workPrefix']}-{source}-{run}-{attempt}"
     work.mkdir(mode=0o700)  # No adoption, reset, overwrite or retry of an existing task.
     build = Build(CHECKOUT, work, source, owner, cancellation, recipe, probe, target)
+    build.orchestration_config = orchestration_config
     build.descriptor_limits = {"original": original_limits, "selected": selected_limits}
     build.source_binding = before
     try:
