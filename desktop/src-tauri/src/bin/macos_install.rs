@@ -1671,7 +1671,7 @@ mod installer {
         fn dispatch_private(args: &[String]) -> i32 {
             // Intentionally not called by the current ordinary or fixture run.
             // The deadline is decoded BEFORE the first potentially blocking read.
-            let admitted = (|| {
+            let admitted: Result<(Deadline, u64)> = (|| {
                 check(args.len() == 4 && args[1] == ROLE && invocation_valid(&args[3]), "worker-role")?;
                 let end = args[2].parse::<u64>().map_err(|_| "worker-clock-value")?;
                 check(args[2] == end.to_string(), "worker-clock-value")?;

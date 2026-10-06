@@ -441,7 +441,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                 if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                         and all(call["returned"] for call in calls)):
                     native_rust_tests = unit_record"""))
-        worker_units = section(publish, "              installer_worker_rust_tests = None", "              native = None")
+        worker_units = section(publish, "              installer_worker_rust_tests = None", "              installer_worker_diagnostic = None")
         self.assertEqual(flat(worker_units), flat("""installer_worker_rust_tests = None
             if result["installerWorkerRustTests"] is not None:
                 worker_calls = [call for call in calls if call["role"] == "installer-worker-rust-tests"]
@@ -512,6 +512,27 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn("installerContext serviceLayoutObservation btmLogObservation", publish)
         self.assertIn('"btmLogObservation": None,', publish)
         self.assertIn('btmLogObservation=btm_log,', publish)
+
+        diagnostic = section(publish, "              installer_worker_diagnostic = None", "              native = None")
+        for required in (
+            'diagnostic_calls = [call for call in calls if "installerWorkerDiagnostic" in call]',
+            'len(diagnostic_calls) == 1 and len([call for call in calls if call["role"] == "installer-worker-rust-tests"]) == 1',
+            'fixture.installer_worker_diagnostic_data( diagnostic_calls[0]["installerWorkerDiagnostic"], diagnostic_calls[0], rows)',
+            'candidate_diagnostic is not None',
+            'all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))',
+            'all(call["returned"] for call in calls) and not result["cleanupErrors"]',
+            'installer_worker_diagnostic = candidate_diagnostic',
+        ):
+            self.assertIn(flat(required), flat(diagnostic))
+        self.assertLess(publish.index('"summary-returned-call"'), publish.index(diagnostic))
+        self.assertLess(publish.index(diagnostic), publish.index('              known_pass = ('))
+        self.assertIn('"installerWorkerDiagnostic": None,', publish)
+        self.assertIn('installerWorkerDiagnostic=installer_worker_diagnostic,', publish)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["installerWorkerDiagnostic"] =' in line],
+                         ['summary["installerWorkerDiagnostic"] = None'] * 2)
+        known_pass = section(publish, "              known_pass = (", "              summary.update(")
+        self.assertNotIn("installer_worker_diagnostic", known_pass)
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["btmLogObservation"] =' in line],
                          ['summary["btmLogObservation"] = None'] * 2)

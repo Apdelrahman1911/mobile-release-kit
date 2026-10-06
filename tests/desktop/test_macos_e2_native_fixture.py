@@ -663,7 +663,8 @@ class CargoTests(unittest.TestCase):
                         raise fixture.Refused("original-changed")
                 source = SimpleNamespace(book=SimpleNamespace(check=source_check),
                                          binding={"tree": "b" * 40}, inventory_digest="c" * 64,
-                                         source_handle_count=1, source_handle_reserve=192, binding_digest="d" * 64)
+                                         source_handle_count=1, source_handle_reserve=192, binding_digest="d" * 64,
+                                         rows={"desktop/src-tauri/src/bin/macos_install.rs": {}})
                 environment = {"GITHUB_SHA": SOURCE, "GITHUB_WORKFLOW_SHA": SOURCE,
                                "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
                 value = fixture.Operation(None, source, None, Path("/synthetic/installer-bin"), environment)
@@ -713,6 +714,11 @@ class CargoTests(unittest.TestCase):
                 self.assertEqual([row["role"] for row in receipt["originalCalls"]], ["installer-worker-rust-tests"])
                 self.assertEqual(receipt["originalCalls"][0]["returned"], mode != "unknown")
                 self.assertEqual(len(published), 0 if mode == "unknown" else 2)
+                diagnostic = receipt["originalCalls"][0].get("installerWorkerDiagnostic")
+                self.assertEqual(diagnostic is not None, mode == "nonzero")
+                if diagnostic is not None:
+                    self.assertEqual(diagnostic["classification"], "unrecognized")
+                    self.assertIsNotNone(fixture.installer_worker_diagnostic_data(diagnostic, receipt["originalCalls"][0], source.rows))
                 self.assertEqual(invocations, [([
                     "/synthetic/cargo", "test", "--manifest-path", str(fixture.CHECKOUT / "desktop/src-tauri/Cargo.toml"),
                     "--locked", "--offline", "--jobs", "1", "--target", "aarch64-apple-darwin",
@@ -725,6 +731,113 @@ class CargoTests(unittest.TestCase):
                 if mode == "unknown":
                     self.assertEqual(receipt["originalCalls"][0]["errorType"], "ProcessOutcomeUnknown")
                     self.assertFalse(receipt["originalCalls"][0]["cleanup_complete"])
+
+
+        # A bounded diagnostic explains only already-returned failure; no raw
+        # compiler message, foreign filename or test assertion value escapes.
+        path = "desktop/src-tauri/src/bin/macos_install.rs"
+        source_rows = {path: {}, "desktop/src-tauri/src/lib.rs": {},
+                       "desktop/native/macos-installed-native/src/lib.rs": {}}
+        selected = INSTALLER_WORKER_TEST_NAMES[0]
+        private = "PRIVATE-DIAGNOSTIC-TEXT"
+        stderr = ("src/bin/macos_install.rs:1674:9: error[E0282]: " + private + "\n"
+                  + str(fixture.CHECKOUT / path) + ":1684:4: error: " + private + "\n"
+                  + "src/lib.rs:2:3: error[E0308]: " + private + "\n"
+                  + "/private/unrelated.rs:4:5: error[E0412]: " + private + "\n"
+                  + "./desktop/src-tauri/src/bin/macos_install.rs:6:7: error[E0283]: " + private + "\n"
+                  + "error[E0599]: " + private + "\n").encode()
+        stdout = ("test " + selected + " ... FAILED\n"
+                  + "thread '" + selected + "' (42) panicked at src/bin/macos_install.rs:7:8:\n"
+                  + private + "\n").encode()
+        diagnostic = fixture.installer_worker_diagnostic_result(stdout, stderr, source_rows)
+        self.assertEqual(diagnostic["classification"], "mixed")
+        self.assertEqual(diagnostic["errorCodes"], ["E0282", "E0308", "E0412", "E0283", "E0599"])
+        self.assertEqual([row["path"] for row in diagnostic["errorLocations"]], [path, path, None, None, path])
+        self.assertTrue(diagnostic["unresolvedLocations"])
+        self.assertEqual(diagnostic["failedTests"], [selected])
+        self.assertEqual(diagnostic["panicLocations"], [{"test": selected, "path": path, "line": 7, "column": 8}])
+        self.assertNotIn(private.encode(), fixture.canonical(diagnostic))
+        self.assertNotIn(b"/private/", fixture.canonical(diagnostic))
+        self.assertNotIn(str(fixture.CHECKOUT).encode(), fixture.canonical(diagnostic))
+        embedded = b"src/bin/macos_install.rs:9:10: error[E0282]: arbitrary:11:12: error[E9999]: private\n"
+        prefix_only = fixture.installer_worker_diagnostic_result(b"", embedded, source_rows)
+        self.assertEqual(prefix_only["errorCodes"], ["E0282"])
+        self.assertEqual(prefix_only["errorLocations"], [{"code": "E0282", "path": path, "line": 9, "column": 10}])
+        original_call = {"role": "installer-worker-rust-tests", "entered": True, "returned": True, "returncode": 101,
+                         "workTimeoutSeconds": 480, "outputLimitBytes": 4 * 1024 * 1024,
+                         "stdoutSha256": fixture.digest(stdout), "stderrSha256": fixture.digest(stderr)}
+        validated = fixture.installer_worker_diagnostic_data(diagnostic, original_call, source_rows)
+        self.assertEqual(validated, diagnostic)
+        self.assertIsNot(validated, diagnostic)
+        self.assertIsNot(validated["errorLocations"][0], diagnostic["errorLocations"][0])
+        for change in ({"returned": False}, {"returncode": 0}, {"returncode": True}, {"role": "client-build"},
+                       {"workTimeoutSeconds": 481}, {"outputLimitBytes": True}, {"stdoutSha256": "f" * 64}):
+            with self.subTest(call=change):
+                self.assertIsNone(fixture.installer_worker_diagnostic_data(diagnostic, dict(original_call, **change), source_rows))
+        for change in ({"schemaVersion": True}, {"diagnosticOnly": False}, {"rawOutput": private}, {"truncated": 1},
+                       {"classification": "passed"}, {"unresolvedLocations": False}, {"stdoutBytes": True},
+                       {"stdoutBytes": 4 * 1024 * 1024}, {"failedTests": ["foreign::test"]},
+                       {"errorCodes": ["E0282", "E0282"]}, {"errorCodes": ["E0282\nsecret"]}):
+            with self.subTest(diagnostic=change):
+                self.assertIsNone(fixture.installer_worker_diagnostic_data(dict(diagnostic, **change), original_call, source_rows))
+        for change in ({"path": "/private/unrelated.rs"}, {"line": True}, {"column": 0}, {"code": "E9999"}):
+            copy_value = copy.deepcopy(diagnostic)
+            copy_value["errorLocations"][0].update(change)
+            self.assertIsNone(fixture.installer_worker_diagnostic_data(copy_value, original_call, source_rows))
+        hostile = (b"\x1b[31msrc/bin/macos_install.rs:1:1: error[E0001]: secret\n"
+                   b"src/bin/\xff.rs:1:1: error[E0002]: secret\n"
+                   b"src/bin/macos_install.rs:0:1: error[E0003]: secret\n"
+                   b"src/bin/macos_install.rs:10000000:1: error[E0004]: secret\n"
+                   b"test foreign::test ... FAILED\nthread 'foreign::test' panicked at src/bin/macos_install.rs:1:1:\n")
+        self.assertEqual(fixture.installer_worker_diagnostic_result(hostile, b"", source_rows)["classification"], "unrecognized")
+        many = b"\n".join(("src/bin/macos_install.rs:1:1: error[E%04d]: private" % number).encode() for number in range(40))
+        bounded = fixture.installer_worker_diagnostic_result(b"x" * 8193 + b"\n", many, source_rows)
+        self.assertTrue(bounded["truncated"])
+        self.assertEqual(len(bounded["errorCodes"]), 32)
+        self.assertEqual(len(bounded["errorLocations"]), 12)
+        self.assertLessEqual(len(fixture.canonical(bounded)), 12 * 1024)
+        saturated = b"\n".join(("error[E%04d]: private" % number).encode() for number in range(32))
+        saturated += b"\nsrc/bin/macos_install.rs:1:1: error[E0032]: private\n"
+        capped = fixture.installer_worker_diagnostic_result(b"", saturated, source_rows)
+        self.assertTrue(capped["truncated"])
+        self.assertEqual(capped["errorLocations"], [])
+        self.assertIsNotNone(fixture.installer_worker_diagnostic_data(capped, dict(original_call,
+                            stdoutSha256=fixture.digest(b""), stderrSha256=fixture.digest(saturated)), source_rows))
+        self.assertEqual(fixture.installer_worker_diagnostic_result(stdout, b"", source_rows)["classification"], "selected-test-failures")
+        self.assertEqual(fixture.installer_worker_diagnostic_result(b"", stderr, source_rows)["classification"], "rust-errors")
+        for output, other, supplied in ((None, b"", source_rows), (b"", "text", source_rows),
+                                         (b"x" * (4 * 1024 * 1024 + 1), b"", source_rows), (b"", b"", None)):
+            self.assertIsNone(fixture.installer_worker_diagnostic_result(output, other, supplied))
+
+        # Diagnostic exception/capture failure cannot replace the actual refusal.
+        # Everything below uses the same call/command plus inert per-instance originals.
+        for mode in ("known", "diagnostic-refused", "capture-refused", "post-refused"):
+            events, checks = [], []
+            def source_check():
+                checks.append(True)
+                if mode == "post-refused" and len(checks) == 2:
+                    raise fixture.Refused("original-changed")
+            source = SimpleNamespace(book=SimpleNamespace(check=source_check), rows=source_rows)
+            value = fixture.Operation(None, source, None, Path("/synthetic/failure-diagnostic"), {"GITHUB_SHA": SOURCE})
+            def publish(name, body):
+                events.append(name)
+                if mode == "capture-refused":
+                    raise fixture.Refused("output-close-unknown")
+            value.publish = publish
+            value.owner = SimpleNamespace(run_owned=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 101, stdout, stderr))
+            original_parser = fixture.installer_worker_diagnostic_result
+            def observe_parser(*args):
+                self.assertEqual(events, ["installer-worker-rust-tests.stdout", "installer-worker-rust-tests.stderr"])
+                if mode == "diagnostic-refused":
+                    raise fixture.Refused("inert-diagnostic-refused")
+                return original_parser(*args)
+            with patch.object(fixture, "installer_worker_diagnostic_result", side_effect=observe_parser):
+                expected_failure = {"capture-refused": "output-close-unknown", "post-refused": "original-changed"}.get(mode, "original-command-failed")
+                with self.assertRaisesRegex(fixture.Refused, "^" + expected_failure + "$"):
+                    value.command("installer-worker-rust-tests", ["/synthetic/cargo"], {}, cwd=Path("/synthetic"), timeout=480, limit=4 * 1024 * 1024)
+            self.assertTrue(value.calls[0]["returned"])
+            self.assertEqual(value.calls[0]["returncode"], 101)
+            self.assertEqual("installerWorkerDiagnostic" in value.calls[0], mode == "known")
 
     def test_native_rust_results_require_three_actual_successes_and_exact_closed_record(self):
         expected = {"schemaVersion": 1, "type": "mrk-macos-native-rust-tests-v1", "target": "aarch64-apple-darwin",

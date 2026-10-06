@@ -829,7 +829,7 @@ jobs:
               "ownerDiagnostic": None, "nativeRustTests": None, "installerWorkerRustTests": None,
               "installerContext": None,
               "serviceLayoutObservation": None,
-              "btmLogObservation": None,
+              "btmLogObservation": None, "installerWorkerDiagnostic": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -968,6 +968,17 @@ jobs:
                           and all(call["returned"] for call in calls)):
                       # Actual Mac test-profile compilation, not a shipping-release build.
                       installer_worker_rust_tests = worker_record
+              installer_worker_diagnostic = None
+              diagnostic_calls = [call for call in calls if "installerWorkerDiagnostic" in call]
+              if (len(diagnostic_calls) == 1 and len([call for call in calls
+                      if call["role"] == "installer-worker-rust-tests"]) == 1):
+                  candidate_diagnostic = fixture.installer_worker_diagnostic_data(
+                      diagnostic_calls[0]["installerWorkerDiagnostic"], diagnostic_calls[0], rows)
+                  if (candidate_diagnostic is not None
+                          and all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                          and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
+                      # Nonzero original only: this projection cannot establish any pass.
+                      installer_worker_diagnostic = candidate_diagnostic
               native = None
               if result["native"] is not None:
                   native_calls = [call for call in calls if call["role"] == "native-run"]
@@ -1001,7 +1012,7 @@ jobs:
                   nativeRustTests=native_rust_tests, installerWorkerRustTests=installer_worker_rust_tests,
                   installerContext=installer_context,
                   serviceLayoutObservation=service_layout,
-                  btmLogObservation=btm_log,
+                  btmLogObservation=btm_log, installerWorkerDiagnostic=installer_worker_diagnostic,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
@@ -1012,6 +1023,7 @@ jobs:
               summary["installerContext"] = None
               summary["serviceLayoutObservation"] = None
               summary["btmLogObservation"] = None
+              summary["installerWorkerDiagnostic"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
@@ -1021,6 +1033,7 @@ jobs:
                   summary["installerContext"] = None
                   summary["serviceLayoutObservation"] = None
                   summary["btmLogObservation"] = None
+                  summary["installerWorkerDiagnostic"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:

@@ -333,6 +333,158 @@ def btm_log_data(value, source, calls):
     return value
 
 
+def installer_worker_diagnostic_sources(rows):
+    """Only already-bound SOURCE names; aliases do not read or resolve a path."""
+    if type(rows) is not dict or len(rows) > 4096:
+        return None
+    prefixes = (INSTALLER + "/", NATIVE + "/", HELPER + "/")
+    canonical_names, aliases = set(), {}
+    for name in rows:
+        if (type(name) is not str or not name.isascii() or not 1 <= len(name) <= 384
+                or not name.endswith(".rs") or not name.startswith(prefixes)
+                or "\\" in name or any(ord(char) < 32 or ord(char) == 127 for char in name)
+                or any(piece in ("", ".", "..") for piece in name.split("/"))):
+            continue
+        canonical_names.add(name)
+        prefix = next(item for item in prefixes if name.startswith(item))
+        package_name = name[len(prefix):]
+        spellings = {name, str(CHECKOUT) + "/" + name, package_name}
+        if prefix == NATIVE + "/":
+            spellings.add("../native/macos-installed-native/" + package_name)
+        elif prefix == HELPER + "/":
+            spellings.add("../helpers/macos-android-register/" + package_name)
+        spellings |= {"./" + spelling for spelling in tuple(spellings) if not spelling.startswith("/")}
+        for spelling in spellings:
+            # src/lib.rs can name several crates. Do not guess which compiler
+            # emitted it; even two independently real names remain ambiguous.
+            if spelling in aliases and aliases[spelling] != name:
+                aliases[spelling] = None
+            else:
+                aliases[spelling] = name
+    return canonical_names, aliases
+
+
+def installer_worker_diagnostic_result(stdout, stderr, rows):
+    """Small diagnostic projection, not a compiler result or native authority."""
+    source = installer_worker_diagnostic_sources(rows)
+    if (source is None or type(stdout) is not bytes or type(stderr) is not bytes
+            or len(stdout) + len(stderr) > 4 * 1024 * 1024):
+        return None
+    _names, aliases = source
+    result = {
+        "schemaVersion": 1, "type": "mrk-macos-installer-worker-diagnostic-v1", "diagnosticOnly": True,
+        "classification": "unrecognized", "stdoutSha256": digest(stdout), "stderrSha256": digest(stderr),
+        "stdoutBytes": len(stdout), "stderrBytes": len(stderr), "errorCodes": [], "errorLocations": [],
+        "failedTests": [], "panicLocations": [], "truncated": False, "unresolvedLocations": False,
+    }
+    def add(key, value, limit):
+        if value not in result[key]:
+            if len(result[key]) == limit:
+                result["truncated"] = True
+            else:
+                result[key].append(value)
+    for body in (stdout, stderr):
+        start = 0
+        while start < len(body):
+            end = body.find(b"\n", start)
+            if end < 0:
+                end = len(body)
+            if end - start > 8192:
+                result["truncated"] = True
+                start = end + 1
+                continue
+            line = body[start:end]
+            start = end + 1
+            # Inspect the finite prefix only. Arbitrary trailing compiler text,
+            # assertion values, messages and non-ASCII payloads are not decoded.
+            match = re.match(rb"([^:\r\n]{1,768}):([1-9][0-9]{0,6}):([1-9][0-9]{0,5}): error(?:\[(E[0-9]{4})\])?:", line)
+            if match is not None and all(32 <= byte <= 126 for byte in match.group(0)):
+                code = match[4].decode("ascii") if match[4] is not None else None
+                if code is not None:
+                    add("errorCodes", code, 32)
+                    if code not in result["errorCodes"]:
+                        # A capped code cannot appear only in a location row.
+                        continue
+                add("errorLocations", {"code": code, "path": aliases.get(match[1].decode("ascii")),
+                                       "line": int(match[2]), "column": int(match[3])}, 12)
+                continue
+            match = re.match(rb"error\[(E[0-9]{4})\]:", line)
+            if match is not None:
+                add("errorCodes", match[1].decode("ascii"), 32)
+                continue
+            failed = next((name for name in INSTALLER_WORKER_RUST_TESTS
+                           if line == ("test " + name + " ... FAILED").encode("ascii")), None)
+            if failed is not None:
+                add("failedTests", failed, 3)
+                continue
+            match = re.fullmatch(rb"thread '([^'\r\n]{1,256})'(?: \([1-9][0-9]{0,19}\))? panicked at ([^:\r\n]{1,768}):([1-9][0-9]{0,6}):([1-9][0-9]{0,5}):", line)
+            if match is not None and all(32 <= byte <= 126 for byte in line):
+                name = match[1].decode("ascii")
+                if name in INSTALLER_WORKER_RUST_TESTS:
+                    add("panicLocations", {"test": name, "path": aliases.get(match[2].decode("ascii")),
+                                           "line": int(match[3]), "column": int(match[4])}, 3)
+    rust = bool(result["errorCodes"] or result["errorLocations"])
+    tests = bool(result["failedTests"] or result["panicLocations"])
+    result["classification"] = "mixed" if rust and tests else "rust-errors" if rust else "selected-test-failures" if tests else "unrecognized"
+    result["unresolvedLocations"] = any(row["path"] is None for row in result["errorLocations"] + result["panicLocations"])
+    return result if len(canonical(result)) <= 12 * 1024 else None
+
+
+def installer_worker_diagnostic_data(value, call, rows):
+    """Closed DATA bound to one actual failed original; no permission or pass."""
+    keys = {"schemaVersion", "type", "diagnosticOnly", "classification", "stdoutSha256", "stderrSha256",
+            "stdoutBytes", "stderrBytes", "errorCodes", "errorLocations", "failedTests", "panicLocations",
+            "truncated", "unresolvedLocations"}
+    source = installer_worker_diagnostic_sources(rows)
+    if (source is None or type(value) is not dict or set(value) != keys or type(call) is not dict
+            or call.get("role") != "installer-worker-rust-tests" or call.get("entered") is not True
+            or call.get("returned") is not True or type(call.get("returncode")) is not int
+            or not 1 <= call["returncode"] <= 255 or type(call.get("workTimeoutSeconds")) is not int
+            or call["workTimeoutSeconds"] != 480 or type(call.get("outputLimitBytes")) is not int
+            or call["outputLimitBytes"] != 4 * 1024 * 1024
+            or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+            or value["type"] != "mrk-macos-installer-worker-diagnostic-v1" or value["diagnosticOnly"] is not True
+            or type(value["truncated"]) is not bool or type(value["unresolvedLocations"]) is not bool):
+        return None
+    for stream in ("stdout", "stderr"):
+        if (not identity(value[stream + "Sha256"], 64) or value[stream + "Sha256"] != call.get(stream + "Sha256")
+                or type(value[stream + "Bytes"]) is not int or not 0 <= value[stream + "Bytes"] <= 4 * 1024 * 1024):
+            return None
+    if value["stdoutBytes"] + value["stderrBytes"] > 4 * 1024 * 1024:
+        return None
+    names, _aliases = source
+    code = lambda item: type(item) is str and re.fullmatch(r"E[0-9]{4}", item) is not None
+    for key, maximum in (("errorCodes", 32), ("errorLocations", 12), ("failedTests", 3), ("panicLocations", 3)):
+        items = value[key]
+        if type(items) is not list or len(items) > maximum or any(item in items[:index] for index, item in enumerate(items)):
+            return None
+    if (not all(code(item) for item in value["errorCodes"])
+            or not all(type(item) is str and item in INSTALLER_WORKER_RUST_TESTS for item in value["failedTests"])):
+        return None
+    for key, tag in (("errorLocations", "code"), ("panicLocations", "test")):
+        for row in value[key]:
+            if (type(row) is not dict or set(row) != {tag, "path", "line", "column"}
+                    or not (row["path"] is None or type(row["path"]) is str and row["path"] in names)
+                    or type(row["line"]) is not int or not 1 <= row["line"] <= 9999999
+                    or type(row["column"]) is not int or not 1 <= row["column"] <= 999999):
+                return None
+            if key == "errorLocations":
+                if row[tag] is not None and (not code(row[tag]) or row[tag] not in value["errorCodes"]):
+                    return None
+            elif type(row[tag]) is not str or row[tag] not in INSTALLER_WORKER_RUST_TESTS:
+                return None
+    rust = bool(value["errorCodes"] or value["errorLocations"])
+    tests = bool(value["failedTests"] or value["panicLocations"])
+    classification = "mixed" if rust and tests else "rust-errors" if rust else "selected-test-failures" if tests else "unrecognized"
+    unresolved = any(row["path"] is None for row in value["errorLocations"] + value["panicLocations"])
+    if value["classification"] != classification or value["unresolvedLocations"] != unresolved or len(canonical(value)) > 12 * 1024:
+        return None
+    # Return fresh plain DATA; a later caller cannot mutate the admitted record.
+    return {**value, "errorCodes": list(value["errorCodes"]), "failedTests": list(value["failedTests"]),
+            "errorLocations": [dict(row) for row in value["errorLocations"]],
+            "panicLocations": [dict(row) for row in value["panicLocations"]]}
+
+
 def service_status_record(body, returncode, source, observer_sha, case, started, deadline):
     """Finite observed public status; NotFound is never absence or authority."""
     need(type(returncode) is int and returncode == 0 and type(body) is bytes
@@ -1991,6 +2143,15 @@ class Operation:
         # this driver and never uploaded as an automatic public report.
         self.publish(role + ".stdout", result.stdout)
         self.publish(role + ".stderr", result.stderr)
+        if role == "installer-worker-rust-tests" and result.returncode != 0:
+            # Only the same completed original after source POST and private
+            # capture closes. Diagnostic failure must not replace its refusal.
+            try:
+                diagnostic = installer_worker_diagnostic_result(result.stdout, result.stderr, self.source.rows)
+                if diagnostic is not None:
+                    record["installerWorkerDiagnostic"] = diagnostic
+            except BaseException:
+                pass
         return result
 
     def command(self, role, argv, environment, *, cwd, timeout, limit=65536):
