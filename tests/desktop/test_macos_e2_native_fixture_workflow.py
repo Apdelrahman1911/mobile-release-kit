@@ -483,6 +483,14 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     and isinstance(node.args[-1], ast.Constant) and type(node.args[-1].value) is str):
                 labels.add(node.args[-1].value)
         self.assertEqual(labels, set(tables["OWNER_DIAGNOSTIC_REFUSALS"]))
+        # Owner output is sanitized before this workflow sees it. A listed
+        # label must survive that exact grammar, not silently become generic.
+        owner_grammar = r"[a-z][a-z0-9-]{0,95}"
+        self.assertIn('re.fullmatch(r"' + owner_grammar + '", error.args[0])', self.owner)
+        for label in labels:
+            with self.subTest(owner_refusal=label):
+                self.assertIsNotNone(re.fullmatch(owner_grammar, label))
+                self.assertEqual(report("context-component-audit", label, [successful])["failure"], label)
         self.assertTrue(set(tables["OWNER_DIAGNOSTIC_ROLES"]) <= set(tables["OWNER_DIAGNOSTIC_PHASES"]))
         self.assertIn('"ownerDiagnostic": None,', publish)
         self.assertIn('ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),', publish)

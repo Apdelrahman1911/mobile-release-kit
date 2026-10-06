@@ -418,7 +418,7 @@ def context_xar(body, *, product=False):
         need(not any(child.tag == "acl" for child in element), "context-xar-member-tags-acl")
         need(not any(child.tag == "flags" for child in element), "context-xar-member-tags-flags")
         need(not any(child.tag == "ea" for child in element), "context-xar-member-tags-ea")
-        need(not any(child.tag == "FinderCreateTime" for child in element), "context-xar-member-tags-FinderCreateTime")
+        need(not any(child.tag == "FinderCreateTime" for child in element), "context-xar-member-tags-finder-create-time")
         need(not any(child.tag == "device" for child in element), "context-xar-member-tags-device")
         need(not any(child.tag == "link" for child in element), "context-xar-member-tags-link")
         need(all(child.tag in metadata for child in element), "context-xar-member-tags")

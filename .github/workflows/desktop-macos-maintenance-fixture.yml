@@ -700,7 +700,7 @@ jobs:
               'context-xar-member-tags-acl',
               'context-xar-member-tags-flags',
               'context-xar-member-tags-ea',
-              'context-xar-member-tags-FinderCreateTime',
+              'context-xar-member-tags-finder-create-time',
               'context-xar-member-tags-device',
               'context-xar-member-tags-link',
               'context-xar-range', 'context-xar-roster', 'context-xar-toc',
