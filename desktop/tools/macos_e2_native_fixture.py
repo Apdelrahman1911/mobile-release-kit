@@ -413,14 +413,21 @@ def context_xar(body, *, product=False):
              "context-xar-member-id")
         seen_ids.add(file_id)
         metadata = {"name", "type", "data", "file", "mode", "uid", "gid", "user", "group",
-                    "atime", "ctime", "mtime"}
-        need(all(child.tag in metadata for child in element)
-             and all(len(element.findall(tag)) == 1 for tag in ("name", "type"))
-             and all(len(element.findall(tag)) <= 1 for tag in metadata - {"file"}),
-             "context-xar-member-shape")
+                    "atime", "ctime", "mtime", "inode", "deviceno"}
+        need(all(child.tag in metadata for child in element), "context-xar-member-tags")
+        need(all(len(element.findall(tag)) == 1 for tag in ("name", "type")),
+             "context-xar-member-required")
+        need(all(len(element.findall(tag)) <= 1 for tag in metadata - {"file"}),
+             "context-xar-member-duplicate")
         for child in element:
             if child.tag not in ("file", "data"):
                 need(not child.attrib and not list(child), "context-xar-member-metadata")
+            if child.tag in ("inode", "deviceno"):
+                # Apple xar stat.c emits both through signed PRId32/PRId64
+                # formats (configure.ac). These bounded strings are inert
+                # archive metadata, never filesystem identity or size authority.
+                need(type(child.text) is str and re.fullmatch(r"0|-?[1-9][0-9]{0,19}", child.text),
+                     "context-xar-member-metadata")
         name, kind = element.findtext("name"), element.findtext("type")
         need(type(name) is str and name and "/" not in name and "\\" not in name
              and name not in (".", ".."), "context-xar-member-name")

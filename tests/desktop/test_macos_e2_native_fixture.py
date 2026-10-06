@@ -1173,6 +1173,10 @@ class InstallerContextTests(unittest.TestCase):
             ET.SubElement(data, "encoding", style="application/octet-stream")
             ET.SubElement(data, "extracted-checksum", style="sha256").text = fixture.digest(content)
             heap.extend(content)
+        # Standard XAR stat metadata also appears on product directories.
+        for element in toc.iter("file"):
+            ET.SubElement(element, "inode").text = "314159"
+            ET.SubElement(element, "deviceno").text = "16777233"
         if mutate is not None:
             mutate(toc)
         plain = ET.tostring(root, encoding="utf-8")
@@ -1214,6 +1218,18 @@ class InstallerContextTests(unittest.TestCase):
         members = {"PackageInfo": self.package_info(), "Scripts": b"synthetic archive DATA, not executed"}
         component = self.xar(members)
         self.assertEqual(fixture.context_xar(component), members)
+        for value in ("0", "-9223372036854775808", "18446744073709551615"):
+            def stat_text(toc):
+                for element in toc.iter("file"):
+                    for tag in ("inode", "deviceno"):
+                        element.find(tag).text = value
+            with self.subTest(stat_text=value):
+                self.assertEqual(fixture.context_xar(self.xar(members, mutate=stat_text)), members)
+        def without_stat(toc):
+            for element in toc.iter("file"):
+                for tag in ("inode", "deviceno"):
+                    element.remove(element.find(tag))
+        self.assertEqual(fixture.context_xar(self.xar(members, mutate=without_stat)), members)
         fixture.context_package_info(members["PackageInfo"], fixture.CONTEXT_IDENTIFIERS[1])
         for directory in (False, True):
             product = self.xar({"Distribution": fixture.context_distribution(),
@@ -1238,6 +1254,40 @@ class InstallerContextTests(unittest.TestCase):
         for index, body in enumerate(bad):
             with self.subTest(archive=index), self.assertRaises(fixture.Refused):
                 fixture.context_xar(body)
+        import xml.etree.ElementTree as ET
+        for tag in ("inode", "deviceno"):
+            for value in ("", "+1", "-0", "01", " 1", "1" * 21, "not-a-number"):
+                def bad_stat(toc):
+                    toc.find("file/" + tag).text = value
+                with self.subTest(stat_tag=tag, value=value), self.assertRaisesRegex(
+                        fixture.Refused, "^context-xar-member-metadata$"):
+                    fixture.context_xar(self.xar(members, mutate=bad_stat))
+            for shape in ("attribute", "child", "duplicate"):
+                def bad_shape(toc):
+                    element = toc.find("file")
+                    leaf = element.find(tag)
+                    if shape == "attribute":
+                        leaf.set("unexpected", "1")
+                    elif shape == "child":
+                        ET.SubElement(leaf, "unexpected")
+                    else:
+                        element.append(copy.deepcopy(leaf))
+                label = "duplicate" if shape == "duplicate" else "metadata"
+                with self.subTest(stat_tag=tag, shape=shape), self.assertRaisesRegex(
+                        fixture.Refused, "^context-xar-member-" + label + "$"):
+                    fixture.context_xar(self.xar(members, mutate=bad_shape))
+        for shape, label in (("unknown", "tags"), ("missing-name", "required"), ("duplicate-name", "required")):
+            def bad_member(toc):
+                element = toc.find("file")
+                if shape == "unknown":
+                    ET.SubElement(element, "unrecognized")
+                elif shape == "missing-name":
+                    element.remove(element.find("name"))
+                else:
+                    element.append(copy.deepcopy(element.find("name")))
+            with self.subTest(member_shape=shape), self.assertRaisesRegex(
+                    fixture.Refused, "^context-xar-member-" + label + "$"):
+                fixture.context_xar(self.xar(members, mutate=bad_member))
         entity = '<!DOCTYPE pkg-info [<!ENTITY hidden "expanded">]><pkg-info>&hidden;</pkg-info>'
         for encoding in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
             with self.subTest(xml_encoding=encoding), self.assertRaises(fixture.Refused):
