@@ -662,7 +662,7 @@ def scan_tree(root, *, readonly=False, closure=False, expanded=False, deadline=N
         name = directory.relative_to(root).as_posix()
         need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(), "inventory-directory")
         need(not readonly or stat.S_IMODE(info.st_mode) == 0o555, "inventory-directory-mode")
-        need(not readonly or not os.listxattr(directory, follow_symlinks=False), "inventory-directory-xattr")
+        need(not readonly or b.xattrs_absent(directory, info), "inventory-directory-xattr")
         need(name not in rows, "inventory-directory-duplicate")
         rows[name] = {"kind": "directory", "identity": list(identity(info))}
         directories += 1
@@ -690,7 +690,7 @@ def scan_tree(root, *, readonly=False, closure=False, expanded=False, deadline=N
                 need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
                      and 0 <= info.st_size <= FILE_LIMIT, "inventory-file-kind-or-size")
                 need(not readonly or stat.S_IMODE(info.st_mode) in {0o444, 0o555}, "inventory-file-mode")
-                need(not readonly or not os.listxattr(path, follow_symlinks=False), "inventory-file-xattr")
+                need(not readonly or b.xattrs_absent(path, info), "inventory-file-xattr")
                 body = b.read(path, FILE_LIMIT)
                 need(identity(path.lstat()) == identity(info), "inventory-file-post")
                 rows[name] = {"kind": "file", "identity": list(identity(info)),
@@ -1733,6 +1733,7 @@ def prepare(ctx):
     try:
         with cancellation_state() as cancellation:
             engine.cancellation = cancellation
+            need(b.xattrs_absent(root, root.lstat()), "preparation-root-xattr")
             originals = [protected_apple(path) for path in role_paths.values()]
             originals.append(protected_apple(sys.executable))
             engine.original_tools = originals

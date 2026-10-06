@@ -1408,11 +1408,196 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
                      "requires the reviewed nonroot POSIX DATA owner")
     def test_complete_copy_and_retirement_preserve_original_alias_custody(self):
+        # The shared facade must use the fixed Darwin fd ABI, not the
+        # GNU/Linux-only path API. Source inspection does not execute ctypes.
+        builder_source = Path(BUILD.__file__).read_text(encoding="utf-8")
+        helper_source = Path(PREP.__file__).read_text(encoding="utf-8")
+        builder_ast, helper_ast = ast.parse(builder_source), ast.parse(helper_source)
+        adapter_source = ast.get_source_segment(builder_source, next(
+            node for node in builder_ast.body if isinstance(node, ast.FunctionDef) and node.name == "xattrs_absent"))
+        prepare_source = ast.get_source_segment(helper_source, next(
+            node for node in helper_ast.body if isinstance(node, ast.FunctionDef) and node.name == "prepare"))
+        for required in ('ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)',
+                         'call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]',
+                         'call.restype = ctypes.c_ssize_t', '_DARWIN_XATTRS(fd, None, 0, 0)',
+                         'type(count) is int and count == 0', 'DATA.acquiring(os.open, os.close, path, flags)'):
+            self.assertIn(required, adapter_source)
+        early_check = 'need(b.xattrs_absent(root, root.lstat()), "preparation-root-xattr")'
+        self.assertGreater(prepare_source.index(early_check), prepare_source.index('with cancellation_state()'))
+        self.assertLess(prepare_source.index(early_check), prepare_source.index('originals = [protected_apple('))
+        self.assertLess(prepare_source.index(early_check), prepare_source.index('engine.run('))
+        self.assertIn('b.xattrs_absent(directory, info)', helper_source)
+        self.assertIn('b.xattrs_absent(path, info)', helper_source)
+        self.assertIn('xattrs_absent(directory, info)', builder_source)
+        self.assertIn('xattrs_absent(Path(entry.path), info)', builder_source)
+        self.assertNotIn('os.listxattr(directory, follow_symlinks=False)', helper_source + builder_source)
+        self.assertNotIn('os.listxattr(path, follow_symlinks=False)', helper_source + builder_source)
+        self.assertNotIn('os.listxattr(entry.path, follow_symlinks=False)', builder_source)
+        actual_cache, actual_sys, actual_os = BUILD._DARWIN_XATTRS, BUILD.sys, BUILD.os
         actual_data = BUILD.DATA
         self.assertTrue(actual_data.known)
-        with tempfile.TemporaryDirectory(prefix="mrk-orchestration-data-") as temporary:
+        with mock.patch.object(BUILD, "_DARWIN_XATTRS", actual_cache), \
+                tempfile.TemporaryDirectory(prefix="mrk-orchestration-data-") as temporary:
             root = Path(temporary)
             deadline = time.monotonic() + 30
+            # Real small originals exercise both production callers on this
+            # host, including the Linux fd API used by the nonroot DATA gate.
+            xattr_tree = root / "xattr-readonly"
+            xattr_tree.mkdir(mode=0o700)
+            xattr_file = xattr_tree / "data.py"
+            xattr_body = b"# passive zero-xattr DATA\n"
+            xattr_file.write_bytes(xattr_body)
+            self.assertIs(BUILD.xattrs_absent(xattr_tree, xattr_tree.lstat()), True)
+            self.assertIs(BUILD.xattrs_absent(xattr_file, xattr_file.lstat()), True)
+            xattr_file.chmod(0o444); xattr_tree.chmod(0o555)
+            xattr_rows = PREP.scan_tree(xattr_tree, readonly=True, closure=True, deadline=deadline)
+            payload_rows = BUILD.tree_rows(xattr_tree, maximum=1024, max_files=2, deadline=deadline)
+            self.assertEqual(set(payload_rows), {"data.py"})
+            self.assertEqual((payload_rows["data.py"]["size"], payload_rows["data.py"]["sha256"]),
+                             (len(xattr_body), BUILD.digest(xattr_body)))
+            PREP.retire_tree(xattr_tree, xattr_rows, known=True, deadline=deadline)
+            self.assertFalse(xattr_tree.exists())
+
+            query_path = root / "xattr-query"
+            query_path.write_bytes(b"original xattr query DATA")
+            query_original = query_path.lstat()
+            darwin = type("InertDarwinHost", (), {"platform": "darwin"})()
+            answer, query_fault, queried, query_expected = [0], [None], [], [query_original]
+
+            def query(fd, buffer, size, options):
+                self.assertEqual((buffer, size, options), (None, 0, 0))
+                self.assertEqual(BUILD.identity(os.fstat(fd)), BUILD.identity(query_expected[0]))
+                queried.append(fd)
+                if query_fault[0] is not None:
+                    raise query_fault[0]
+                return answer[0]
+
+            class XattrData(BUILD.DataFinality):
+                def __init__(self, *, close_fault=None, after_close=None):
+                    super().__init__()
+                    self.closed, self.close_fault, self.after_close = [], close_fault, after_close
+
+                def close(self, closer, *args):
+                    self.closed.append(args[0])
+
+                    def consume(*original_args):
+                        closer(*original_args)
+                        if self.after_close is not None:
+                            self.after_close()
+                        if self.close_fault is not None:
+                            raise self.close_fault
+                    return super().close(consume, *args)
+
+            # A private fake ctypes import exercises the actual fixed-library
+            # lookup/ABI binding. It never loads a Darwin library on Linux.
+            query_cache = BUILD._DARWIN_XATTRS
+            fake_ctypes = type(sys)("ctypes")
+            fake_ctypes.c_int, fake_ctypes.c_void_p = object(), object()
+            fake_ctypes.c_size_t, fake_ctypes.c_ssize_t = object(), object()
+            fake_ctypes.CDLL = mock.Mock()
+            fake_ctypes.CDLL.return_value.flistxattr = query
+            ctypes_present, ctypes_original = "ctypes" in sys.modules, sys.modules.get("ctypes")
+            data = XattrData()
+            with mock.patch.dict(sys.modules, {"ctypes": fake_ctypes}), \
+                    mock.patch.object(BUILD, "sys", darwin), mock.patch.object(BUILD, "_DARWIN_XATTRS", None), \
+                    mock.patch.object(BUILD, "DATA", data):
+                for value in (0, 7, -1, False, True, None, 0.0):
+                    answer[0] = value
+                    self.assertIs(BUILD.xattrs_absent(query_path, query_original), type(value) is int and value == 0)
+                    self.assertTrue(data.known)
+                    with self.assertRaises(OSError):
+                        os.fstat(queried[-1])
+                fake_ctypes.CDLL.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
+                self.assertEqual(query.argtypes, [fake_ctypes.c_int, fake_ctypes.c_void_p,
+                                                 fake_ctypes.c_size_t, fake_ctypes.c_int])
+                self.assertIs(query.restype, fake_ctypes.c_ssize_t)
+                answer[0] = 0
+                query_expected[0] = root.lstat()
+                self.assertIs(BUILD.xattrs_absent(root, query_expected[0]), True)
+                query_expected[0] = query_original
+                query_fault[0] = KeyboardInterrupt("inert xattr query cancellation")
+                with self.assertRaises(KeyboardInterrupt) as failed:
+                    BUILD.xattrs_absent(query_path, query_original)
+                self.assertIs(failed.exception, query_fault[0])
+                self.assertTrue(data.known)
+                self.assertEqual(data.closed, queried)
+            self.assertEqual("ctypes" in sys.modules, ctypes_present)
+            self.assertIs(sys.modules.get("ctypes"), ctypes_original)
+            query_fault[0] = None
+
+            for missing in ("library", "symbol"):
+                unavailable = type(sys)("ctypes")
+                unavailable.CDLL = mock.Mock()
+                if missing == "library":
+                    unavailable.CDLL.side_effect = OSError("inert unavailable fixed library")
+                else:
+                    unavailable.CDLL.return_value = object()
+                data = XattrData()
+                with self.subTest(missing_api=missing), mock.patch.dict(sys.modules, {"ctypes": unavailable}), \
+                        mock.patch.object(BUILD, "sys", darwin), mock.patch.object(BUILD, "_DARWIN_XATTRS", None), \
+                        mock.patch.object(BUILD, "DATA", data):
+                    with self.assertRaisesRegex(BUILD.BuildRefused, "^xattr-api-unavailable$"):
+                        BUILD.xattrs_absent(query_path, query_original)
+                    self.assertIsNone(BUILD._DARWIN_XATTRS)
+                self.assertTrue(data.known)
+                self.assertEqual(len(data.closed), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(data.closed[0])
+
+            for first_error in (None, KeyboardInterrupt("inert first xattr failure")):
+                close_error = OSError("inert reported xattr original-close failure")
+                data = XattrData(close_fault=close_error)
+                query_fault[0] = first_error
+                with mock.patch.object(BUILD, "sys", darwin), mock.patch.object(BUILD, "_DARWIN_XATTRS", query), \
+                        mock.patch.object(BUILD, "DATA", data):
+                    with self.assertRaises(BaseException) as failed:
+                        BUILD.xattrs_absent(query_path, query_original)
+                    self.assertIs(failed.exception, first_error if first_error is not None else close_error)
+                    self.assertFalse(data.known)
+                    with self.assertRaises(PREP.PreparationRefused):
+                        PREP.retire_tree(root, {}, known=data.known, deadline=deadline)
+                self.assertEqual(len(data.closed), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(data.closed[0])
+                self.assertEqual(query_path.read_bytes(), b"original xattr query DATA")
+            query_fault[0] = None
+
+            for at_close in (False, True):
+                rebound = root / ("xattr-rebound-close" if at_close else "xattr-rebound-query")
+                displaced = root / (rebound.name + "-original")
+                rebound.write_bytes(b"held xattr original")
+                before_rebind = rebound.lstat()
+
+                def rebind():
+                    rebound.rename(displaced)
+                    rebound.write_bytes(b"different named occupant")
+
+                def changing_query(fd, buffer, size, options):
+                    self.assertEqual((buffer, size, options), (None, 0, 0))
+                    self.assertEqual(BUILD.identity(os.fstat(fd)), BUILD.identity(before_rebind))
+                    if not at_close:
+                        rebind()
+                    return 0
+
+                data = XattrData(after_close=rebind if at_close else None)
+                with mock.patch.object(BUILD, "sys", darwin), \
+                        mock.patch.object(BUILD, "_DARWIN_XATTRS", changing_query), mock.patch.object(BUILD, "DATA", data):
+                    with self.assertRaisesRegex(BUILD.BuildRefused, "^xattr-(?:post|close)-correspondence$"):
+                        BUILD.xattrs_absent(rebound, before_rebind)
+                self.assertTrue(data.known)
+                self.assertEqual(len(data.closed), 1)
+                self.assertEqual(displaced.read_bytes(), b"held xattr original")
+                self.assertEqual(rebound.read_bytes(), b"different named occupant")
+            # No failed original is re-admitted or repaired. Only this test's
+            # temporary root owns the eventual disposal of those inert fixtures.
+            self.assertIs(BUILD.DATA, actual_data)
+            self.assertIs(BUILD.sys, actual_sys)
+            self.assertIs(BUILD.os, actual_os)
+            self.assertIs(BUILD._DARWIN_XATTRS, query_cache)
+            self.assertEqual("ctypes" in sys.modules, ctypes_present)
+            self.assertIs(sys.modules.get("ctypes"), ctypes_original)
+            self.assertTrue(actual_data.known)
+
             source = root / "source"
             library = source / "Versions/3.14/lib/python3.14"
             library.mkdir(parents=True, mode=0o700)
@@ -1866,3 +2051,4 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             self.assertEqual(PREP.scan_tree(signing_source, closure=True, deadline=deadline), signing_rows)
         self.assertIs(BUILD.DATA, actual_data)
         self.assertTrue(actual_data.known)
+        self.assertIs(BUILD._DARWIN_XATTRS, actual_cache)

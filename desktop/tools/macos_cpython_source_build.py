@@ -124,6 +124,7 @@ class DataFinality:
 
 
 DATA = DataFinality()
+_DARWIN_XATTRS = None
 
 
 def need(value, code):
@@ -168,6 +169,61 @@ def remaining(deadline, now, maximum=WORK_SECONDS):
     seconds = math.floor(deadline - now)
     need(seconds >= 1 and type(maximum) is int and maximum >= 1, "common-deadline-exhausted")
     return min(seconds, maximum)
+
+
+def xattrs_absent(path, original_stat):
+    """Query the same ordinary original; errors are never an empty-xattr result."""
+    global _DARWIN_XATTRS
+    path = Path(path)
+    before = identity(original_stat)
+    directory = stat.S_ISDIR(original_stat.st_mode)
+    need(original_stat.st_uid == os.getuid() and (directory or (
+         stat.S_ISREG(original_stat.st_mode) and original_stat.st_nlink == 1)), "xattr-original-kind")
+    need(identity(path.lstat()) == before, "xattr-named-original")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    if directory:
+        flags |= os.O_DIRECTORY
+    failure, absent = None, False
+    try:
+        with DATA.acquiring(os.open, os.close, path, flags) as fd:
+            try:
+                need(identity(os.fstat(fd)) == before and identity(path.lstat()) == before,
+                     "xattr-open-correspondence")
+                if sys.platform == "darwin":
+                    if _DARWIN_XATTRS is None:
+                        try:
+                            import ctypes
+                            library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+                            call = library.flistxattr
+                            call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+                            call.restype = ctypes.c_ssize_t
+                        except (ImportError, AttributeError, OSError) as error:
+                            raise BuildRefused("xattr-api-unavailable") from error
+                        _DARWIN_XATTRS = call
+                    count = _DARWIN_XATTRS(fd, None, 0, 0)
+                    absent = type(count) is int and count == 0
+                elif sys.platform == "linux":
+                    try:
+                        call = os.listxattr
+                    except AttributeError as error:
+                        raise BuildRefused("xattr-api-unavailable") from error
+                    attributes = call(fd)
+                    absent = type(attributes) is list and not attributes
+                else:
+                    raise BuildRefused("xattr-host-unavailable")
+                need(identity(os.fstat(fd)) == before and identity(path.lstat()) == before,
+                     "xattr-post-correspondence")
+            except BaseException as error:
+                # Collect the operation error before consuming the original fd;
+                # a close fault must poison DATA without replacing that error.
+                failure = error
+    except BaseException as error:
+        if failure is None:
+            failure = error
+    if failure is not None:
+        raise failure
+    need(identity(path.lstat()) == before, "xattr-close-correspondence")
+    return absent
 
 
 def read(path, limit, *, expected=None, expected_links=1):
@@ -1073,7 +1129,7 @@ def tree_rows(root, *, maximum, max_files, source=False, deadline=None):
         info = directory.lstat()
         need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
              and stat.S_IMODE(info.st_mode) == 0o555, "readonly-directory")
-        need(not os.listxattr(directory, follow_symlinks=False), "directory-extended-attributes")
+        need(xattrs_absent(directory, info), "directory-extended-attributes")
         seen_directories.add(directory.relative_to(root).as_posix())
         with DATA.acquiring(os.scandir, lambda stream: stream.close(), directory) as entries:
             for entry in entries:
@@ -1087,7 +1143,7 @@ def tree_rows(root, *, maximum, max_files, source=False, deadline=None):
                     pending.append(Path(entry.path))
                 else:
                     need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
-                         and not os.listxattr(entry.path, follow_symlinks=False), "tree-ordinary-file")
+                         and xattrs_absent(Path(entry.path), info), "tree-ordinary-file")
                     mode = stat.S_IMODE(info.st_mode)
                     need(mode in {0o444, 0o555} if source else mode == (0o555 if name == "python/bin/python3" else 0o444),
                          "tree-file-mode")
