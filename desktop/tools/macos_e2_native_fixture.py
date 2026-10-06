@@ -864,6 +864,22 @@ def context_audit_call_data(package, phase, index, calls):
             and sum(type(row) is dict and row.get("role") == role for row in calls) == 1)
 
 
+# Exact harmless defaults emitted by the original script-only pkgbuild route.
+# No payload is admitted below; relocation/restart alternatives remain forbidden.
+CONTEXT_PACKAGE_BASE_ATTRIBUTES = frozenset({
+    "format-version", "identifier", "version", "install-location", "auth", "generator-version",
+})
+CONTEXT_PACKAGE_FIXED_DEFAULTS = {
+    "overwrite-permissions": "true", "relocatable": "false", "postinstall-action": "none",
+}
+
+
+def _context_package_attributes_allowed(attributes):
+    return (set(attributes) <= CONTEXT_PACKAGE_BASE_ATTRIBUTES | CONTEXT_PACKAGE_FIXED_DEFAULTS.keys()
+            and all(attributes.get(name) in (None, value)
+                    for name, value in CONTEXT_PACKAGE_FIXED_DEFAULTS.items()))
+
+
 def _context_package_info_observation(body, identifier):
     """Inspect the SAME bounded bytes after refusal; never alter acceptance."""
     root = context_xml(body, 65536)
@@ -892,10 +908,9 @@ def _context_package_info_observation(body, identifier):
                        children=len(node), textPresent=bool((node.text or "").strip()),
                        tailPresent=bool((node.tail or "").strip()))
         rows[role] = row
-    allowed = {"format-version", "identifier", "version", "install-location", "auth", "generator-version"}
     return {"checks": {"rootTagMatches": root.tag == "pkg-info", "identifierMatches": root.get("identifier") == identifier,
                        "versionMatches": root.get("version") == "1", "installLocationMatches": root.get("install-location") == "/",
-                       "authMatches": root.get("auth") == "root", "onlyExpectedAttributes": set(root.attrib) <= allowed},
+                       "authMatches": root.get("auth") == "root", "onlyExpectedAttributes": _context_package_attributes_allowed(root.attrib)},
             "elements": rows, "childCounts": {name: sum(node.tag == name for node in children) for name in CONTEXT_PACKAGE_INFO_CHILDREN},
             "otherChildren": sum(node.tag not in CONTEXT_PACKAGE_INFO_CHILDREN for node in children)}
 
@@ -947,10 +962,10 @@ def context_package_info_diagnostic_data(value, phase, failure, calls):
     if rows["root"]["count"] != 1:
         return None
     attributes = rows["root"]["attributes"]
-    allowed = {"format-version", "identifier", "version", "install-location", "auth", "generator-version"}
     expected = {"identifierMatches": attributes["identifier"] == "expected", "versionMatches": attributes["version"] == "1",
                 "installLocationMatches": attributes["install-location"] == "/", "authMatches": attributes["auth"] == "root",
-                "onlyExpectedAttributes": rows["root"]["otherAttributes"] == 0 and all(value is None for name, value in attributes.items() if name not in allowed)}
+                "onlyExpectedAttributes": rows["root"]["otherAttributes"] == 0
+                    and _context_package_attributes_allowed({name: value for name, value in attributes.items() if value is not None})}
     if (any(checks[key] != item for key, item in expected.items())
             or (failure == "context-package-identity") == all(checks.values())
             or sum(info["childCounts"].values()) + info["otherChildren"] != rows["root"]["children"]
@@ -1233,7 +1248,7 @@ def context_package_info(body, identifier):
     need(info.tag == "pkg-info" and info.get("identifier") == identifier
          and info.get("version") == "1" and info.get("install-location") == "/"
          and info.get("auth") == "root"
-         and set(info.attrib) <= {"format-version", "identifier", "version", "install-location", "auth", "generator-version"},
+         and _context_package_attributes_allowed(info.attrib),
          "context-package-identity")
     empty = {"bundle-version", "upgrade-bundle", "update-bundle", "atomic-update-bundle",
              "strict-identifier", "relocate"}
@@ -1250,7 +1265,9 @@ def context_package_info(body, identifier):
                  and set(child.attrib) <= {"numberOfFiles", "installKBytes"}, "context-package-no-payload")
         else:
             need(not child.attrib and len(child) == 1 and child[0].tag == "postinstall"
-                 and child[0].attrib in ({"file": "postinstall"}, {"file": "./postinstall"})
+                 and child[0].get("file") in ("postinstall", "./postinstall")
+                 and child[0].get("timeout") in (None, "600")
+                 and set(child[0].attrib) <= {"file", "timeout"}
                  and not list(child[0]) and not (child[0].text or "").strip(), "context-package-hook")
 
 

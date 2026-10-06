@@ -2226,6 +2226,30 @@ class InstallerContextTests(unittest.TestCase):
                      members["PackageInfo"].replace(b"<relocate/>", b'<relocate><bundle path="/unrelated"/></relocate>')):
             with self.assertRaises(fixture.Refused):
                 fixture.context_package_info(body, fixture.CONTEXT_IDENTIFIERS[1])
+        # Actual macOS pkgbuild defaults on the authenticated script-only
+        # component (run37432722121), not a payload or timeout-policy exception.
+        native = ET.fromstring(self.package_info())
+        native.remove(native.find("payload"))
+        native.set("overwrite-permissions", "true")
+        native.set("relocatable", "false")
+        native.set("postinstall-action", "none")
+        native.find("scripts/postinstall").set("timeout", "600")
+        for tag in ("bundle-version", "upgrade-bundle", "update-bundle", "atomic-update-bundle", "strict-identifier"):
+            ET.SubElement(native, tag)
+        native_body = ET.tostring(native, encoding="utf-8")
+        fixture.context_package_info(native_body, fixture.CONTEXT_IDENTIFIERS[1])
+        self.assertTrue(all(fixture._context_package_info_observation(native_body, fixture.CONTEXT_IDENTIFIERS[1])["checks"].values()))
+        for timeout in ("0", "60", "601", "0600", "600 ", "9999"):
+            mutated = ET.fromstring(native_body)
+            mutated.find("scripts/postinstall").set("timeout", timeout)
+            with self.subTest(hook_timeout=timeout), self.assertRaisesRegex(fixture.Refused, "^context-package-hook$"):
+                fixture.context_package_info(ET.tostring(mutated, encoding="utf-8"), fixture.CONTEXT_IDENTIFIERS[1])
+        for attributes in ({"file": "/postinstall", "timeout": "600"},
+                           {"file": "./postinstall", "timeout": "600", "extra": "true"}):
+            mutated = ET.fromstring(native_body)
+            mutated.find("scripts/postinstall").attrib = attributes
+            with self.subTest(hook_attributes=attributes), self.assertRaisesRegex(fixture.Refused, "^context-package-hook$"):
+                fixture.context_package_info(ET.tostring(mutated, encoding="utf-8"), fixture.CONTEXT_IDENTIFIERS[1])
         # Observations distinguish each original identity conjunct without
         # changing what is accepted or publishing arbitrary XML names/values.
         identity_changes = (
@@ -2236,7 +2260,9 @@ class InstallerContextTests(unittest.TestCase):
             ("installLocationMatches", lambda root: root.set("install-location", "/private-path")),
             ("authMatches", lambda root: root.attrib.pop("auth")),
             ("authMatches", lambda root: root.set("auth", "private-auth")),
-            ("onlyExpectedAttributes", lambda root: root.set("overwrite-permissions", "true")),
+            ("onlyExpectedAttributes", lambda root: root.set("overwrite-permissions", "false")),
+            ("onlyExpectedAttributes", lambda root: root.set("relocatable", "true")),
+            ("onlyExpectedAttributes", lambda root: root.set("postinstall-action", "restart")),
             ("onlyExpectedAttributes", lambda root: root.set("private-attribute", "private-value")),
         )
         package_calls = [{"role": "context-product-component-build", "entered": True, "returned": True, "returncode": 0}]
