@@ -327,21 +327,43 @@ def framework_component(body):
     return True
 
 
-def native_slice(body, machine, *, archive_data=False):
+def _bitcode_wrapper_data(body, cpu):
+    """Bound the Darwin LLVM link wrapper, never decode or admit executable IR.
+
+    LLVM's Darwin writer emits this20-byte header and zero padding to16 bytes.
+    ARM64 may carry its documented unspecified CPU sentinel: enclosing FAT
+    metadata is still checked, but neither header establishes IR architecture.
+    Whole authenticated package/inventory bytes remain unchanged and authoritative.
+    """
+    need(type(body) is bytes and 32 <= len(body) <= FILE_LIMIT
+         and type(cpu) is int and cpu in CPUS.values(), "bitcode-wrapper-input")
+    magic, version, offset, size, wrapped_cpu = struct.unpack_from("<5I", body)
+    need((magic, version, offset) == (0x0B17C0DE, 0, 20), "bitcode-wrapper-header")
+    end = offset + size
+    need(size >= 4 and size % 4 == 0 and end <= len(body)
+         and len(body) == (end + 15) // 16 * 16, "bitcode-wrapper-range")
+    need(body[offset:offset + 4] == b"BC\xc0\xde", "bitcode-wrapper-magic")
+    need(wrapped_cpu == cpu or cpu == CPUS["arm64"] and wrapped_cpu == 0xFFFFFFFF,
+         "bitcode-wrapper-cpu")
+    need(not any(body[end:]), "bitcode-wrapper-padding")
+
+
+def native_slice(body, machine, *, archive_data=False, bitcode_data=False):
     """Extract a native image, or classify explicitly requested static DATA.
 
-    Apple's universal format also wraps ar archives. Only the inventory caller
-    may classify those as nonimages; strict loader callers keep the default.
-    No archive member is parsed, executed, linked, or granted image authority.
+    Apple's universal format also wraps ar archives and LLVM link inputs.
+    Only the inventory caller may classify those as nonimages; strict loader
+    callers keep both defaults. No member/IR is executed or granted authority.
     """
     need(type(body) is bytes and 32 <= len(body) <= FILE_LIMIT and machine in CPUS
-         and type(archive_data) is bool, "macho-input")
+         and type(archive_data) is bool and type(bitcode_data) is bool
+         and not (archive_data and bitcode_data), "macho-input")
     magic = struct.unpack_from(">I", body)[0]
     if magic in {0xCAFEBABE, 0xCAFEBABF}:
         count = struct.unpack_from(">I", body, 4)[0]
         width = 32 if magic == 0xCAFEBABF else 20
         need(1 <= count <= 8 and 8 + count * width <= len(body), "fat-count")
-        ranges, cpus, selected, kinds = [], set(), None, set()
+        ranges, cpus, selected, kinds, bitcode_kinds = [], set(), None, set(), set()
         for number in range(count):
             start = 8 + number * width
             if width == 20:
@@ -357,7 +379,10 @@ def native_slice(body, machine, *, archive_data=False):
             ranges.append((offset, offset + size))
             thin = body[offset:offset + size]
             archive = archive_data and thin.startswith(b"!<arch>\n")
-            if not archive:
+            bitcode = bitcode_data and thin.startswith(b"\xde\xc0\x17\x0b")
+            if bitcode:
+                _bitcode_wrapper_data(thin, cpu)
+            elif not archive:
                 try:
                     need(thin[:4] == b"\xcf\xfa\xed\xfe"
                          and struct.unpack_from("<II", thin, 4) == (cpu, subtype), "fat-slice-header")
@@ -369,7 +394,8 @@ def native_slice(body, machine, *, archive_data=False):
                         pass  # Optional public-input observation cannot replace the original refusal.
                     raise
             kinds.add(archive)
-            need(len(kinds) == 1, "fat-slice-kind")
+            bitcode_kinds.add(bitcode)
+            need(len(kinds) == 1 and len(bitcode_kinds) == 1, "fat-slice-kind")
             if cpu == CPUS[machine]:
                 selected = thin
         try:
@@ -381,9 +407,12 @@ def native_slice(body, machine, *, archive_data=False):
             except BaseException:
                 pass  # Optional facts cannot replace the original missing-target refusal.
             raise
-        if True in kinds:
+        if True in kinds or True in bitcode_kinds:
             return None  # Preserve the complete authenticated nonimage unchanged.
         body = selected
+    if bitcode_data and body.startswith(b"\xde\xc0\x17\x0b"):
+        _bitcode_wrapper_data(body, CPUS[machine])
+        return None
     need(body[:4] == b"\xcf\xfa\xed\xfe" and struct.unpack_from("<I", body, 4)[0] == CPUS[machine],
          "macho-native-header")
     return body
@@ -1140,9 +1169,12 @@ def native_image_bytes(path, machine, *, relative=None):
         need(struct.unpack_from("<I", thin, 12)[0] == 2, "intel-auxiliary-executable")
         macho_records(thin, "x86_64")
         return None  # Retained unchanged, not an admitted ARM native image.
+    bitcode_data = path.suffix == ".o"
+    if bitcode_data and data.startswith(b"\xde\xc0\x17\x0b"):
+        return native_slice(data, machine, bitcode_data=True)
     if data[:4] not in {b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"}:
         return None
-    return native_slice(data, machine, archive_data=path.suffix == ".a")
+    return native_slice(data, machine, archive_data=path.suffix == ".a", bitcode_data=bitcode_data)
 
 
 def replace_owned_file(path, body):

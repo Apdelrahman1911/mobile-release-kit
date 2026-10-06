@@ -694,6 +694,92 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                 PREP.native_image_bytes(Path("not-an-archive.dylib"), "arm64")
         self.assertIs(BUILD.read, original_read)
 
+        # The observed public python.o is LLVM link DATA, not a runtime image.
+        # These fixtures validate only its wrapper envelope, not executable IR.
+        def bitcode_fixture(cpu):
+            payload = b"BC\xc0\xdeDATA"
+            wrapped = struct.pack("<5I", 0x0B17C0DE, 0, 20, len(payload), cpu) + payload
+            return wrapped + bytes((-len(wrapped)) % 16)
+
+        wrapped_arm, wrapped_intel = bitcode_fixture(ARM), bitcode_fixture(INTEL)
+        wrapped_unspecified = bitcode_fixture(0xFFFFFFFF)
+        bitcodes = fat_fixture(wrapped_arm, wrapped_intel)
+        wide_bitcode_header = (struct.pack(">2I", 0xCAFEBABF, 2)
+                               + struct.pack(">IIQQII", ARM, 0, 128, len(wrapped_arm), 6, 0)
+                               + struct.pack(">IIQQII", INTEL, 3, 256, len(wrapped_intel), 6, 0))
+        wide_bitcodes = (wide_bitcode_header + bytes(128 - len(wide_bitcode_header)) + wrapped_arm
+                        + bytes(128 - len(wrapped_arm)) + wrapped_intel)
+        for universal in (bitcodes, wide_bitcodes, fat_fixture(wrapped_unspecified, wrapped_intel)):
+            original_hash = PREP.hashlib.sha256(universal).digest()
+            for machine in ("arm64", "x86_64"):
+                self.assertIsNone(PREP.native_slice(universal, machine, bitcode_data=True))
+                with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-header$"):
+                    PREP.native_slice(universal, machine)
+                with self.assertRaises(PREP.PreparationRefused):
+                    PREP.macho_records(universal, machine)
+            self.assertEqual(PREP.hashlib.sha256(universal).digest(), original_hash)
+        for wrapped, machine in ((wrapped_arm, "arm64"), (wrapped_intel, "x86_64"),
+                                  (wrapped_unspecified, "arm64")):
+            self.assertIsNone(PREP.native_slice(wrapped, machine, bitcode_data=True))
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^macho-native-header$"):
+                PREP.native_slice(wrapped, machine)
+            with self.assertRaises(PREP.PreparationRefused):
+                PREP.macho_records(wrapped, machine)
+        for machine, wrapped in (("x86_64", wrapped_unspecified), ("x86_64", wrapped_arm),
+                                  ("arm64", wrapped_intel)):
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^bitcode-wrapper-cpu$"):
+                PREP.native_slice(wrapped, machine, bitcode_data=True)
+        for option in (None, 1, "true", []):
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^macho-input$"):
+                PREP.native_slice(bitcodes, "arm64", bitcode_data=option)
+        with self.assertRaisesRegex(PREP.PreparationRefused, "^macho-input$"):
+            PREP.native_slice(bitcodes, "arm64", bitcode_data=True, archive_data=True)
+        malformed_wrappers = []
+        for offset, value, code in ((0, 0, "header"), (4, 1, "header"), (8, 16, "header"),
+                                    (12, 0, "range"), (12, 7, "range"), (12, 16, "range"),
+                                    (16, 0, "cpu")):
+            changed = bytearray(wrapped_arm)
+            struct.pack_into("<I", changed, offset, value)
+            malformed_wrappers.append((bytes(changed), code))
+        changed = bytearray(wrapped_arm); changed[20] = ord("X")
+        malformed_wrappers.append((bytes(changed), "magic"))
+        changed = bytearray(wrapped_arm); changed[-1] = 1
+        malformed_wrappers.extend(((bytes(changed), "padding"), (wrapped_arm + bytes(16), "range")))
+        for number, (body, code) in enumerate(malformed_wrappers):
+            with self.subTest(bitcode_wrapper_boundary=number), \
+                 self.assertRaisesRegex(PREP.PreparationRefused, "^bitcode-wrapper-" + code + "$"):
+                PREP._bitcode_wrapper_data(body, ARM)
+        for body, cpu in ((wrapped_arm[:19], ARM), (bytearray(wrapped_arm), ARM),
+                          (wrapped_arm, True), (wrapped_arm, 7)):
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^bitcode-wrapper-input$"):
+                PREP._bitcode_wrapper_data(body, cpu)
+        # Even a valid selected slice cannot hide another malformed slice.
+        wrong_other = bytearray(wrapped_intel); struct.pack_into("<I", wrong_other, 4, 1)
+        with self.assertRaisesRegex(PREP.PreparationRefused, "^bitcode-wrapper-header$"):
+            PREP.native_slice(fat_fixture(wrapped_arm, bytes(wrong_other)), "arm64", bitcode_data=True)
+        for mixed in (fat_fixture(wrapped_arm, intel), fat_fixture(arm, wrapped_intel)):
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-kind$"):
+                PREP.native_slice(mixed, "arm64", bitcode_data=True)
+        single_bc_header = (struct.pack(">2I", 0xCAFEBABF, 1)
+                            + struct.pack(">IIQQII", ARM, 0, 64, len(wrapped_arm), 6, 0))
+        single_bitcode = single_bc_header + bytes(64 - len(single_bc_header)) + wrapped_arm
+        with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-native-missing$") as absent:
+            PREP.native_slice(single_bitcode, "x86_64", bitcode_data=True)
+        self.assertEqual(absent.exception._fat_native_missing,
+                         (0xCAFEBABF, 1, (ARM,), "x86_64", False, (False,)))
+        for data, filename, expected in ((bitcodes, "python.o", None), (wide_bitcodes, "python.o", None),
+                                          (wrapped_arm, "python.o", None), (fat, "still-an-image.o", arm),
+                                          (arm, "thin-image.o", arm)):
+            with mock.patch.object(BUILD, "read", return_value=data) as read:
+                self.assertEqual(PREP.native_image_bytes(Path(filename), "arm64"), expected)
+                read.assert_called_once_with(Path(filename), PREP.FILE_LIMIT)
+            self.assertIs(BUILD.read, original_read)
+        for filename in ("python.dylib", "python.a"):
+            with mock.patch.object(BUILD, "read", return_value=bitcodes), \
+                 self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-header$"):
+                PREP.native_image_bytes(Path(filename), "arm64")
+        self.assertIs(BUILD.read, original_read)
+
         # One documented Intel-only launcher is retained on ARM, never granted
         # loader/execution authority. Synthetic pin substitutions are local to
         # these parser tests; actual public-package correspondence needs Mac CI.
