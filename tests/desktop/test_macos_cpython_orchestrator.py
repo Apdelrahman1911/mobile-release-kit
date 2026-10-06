@@ -151,14 +151,41 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             with self.subTest(size=size, valid_digest=value == digest), self.assertRaises(PREP.PreparationRefused):
                 PREP.package_binding(size, value)
 
-        xml = ('<pkg-info identifier="org.python.Python.PythonFramework-3.14" '
-               'version="3.14.7" install-location="/Library/Frameworks/Python.framework"/>')
+        # Exact observed PackageInfo from the SHA-bound public package,
+        # Python_Framework.pkg/PackageInfo (945 bytes, SHA256
+        # 1b054010e6fb0733ee35a87acab94c1dc9b619178c3f17da6201515cd327737b).
+        # Component version 0 is not runtime-version authority.
+        xml = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<pkg-info overwrite-permissions="true" relocatable="false" identifier="org.python.Python.PythonFramework-3.14" postinstall-action="none" version="0" format-version="2" generator-version="InstallCmds-864.12 (25G72)" install-location="/Library/Frameworks/Python.framework" auth="root">\n'
+            '    <payload numberOfFiles="4201" installKBytes="123109"/>\n'
+            '    <bundle path="./Versions/3.14/Resources/Python.app" id="org.python.python" CFBundleShortVersionString="3.14.7" CFBundleVersion="3.14.7"/>\n'
+            '    <bundle-version>\n'
+            '        <bundle id="org.python.python"/>\n'
+            '    </bundle-version>\n'
+            '    <upgrade-bundle>\n'
+            '        <bundle id="org.python.python"/>\n'
+            '    </upgrade-bundle>\n'
+            '    <update-bundle/>\n'
+            '    <atomic-update-bundle/>\n'
+            '    <strict-identifier>\n'
+            '        <bundle id="org.python.python"/>\n'
+            '    </strict-identifier>\n'
+            '    <relocate/>\n'
+            '    <scripts>\n'
+            '        <postinstall file="./postinstall" timeout="600"/>\n'
+            '    </scripts>\n'
+            '</pkg-info>'
+        )
         self.assertTrue(PREP.framework_component(xml.encode()))
-        self.assertTrue(PREP.framework_component(xml.replace('version="3.14.7"', 'version="3.14.7.0"').encode()))
+        for version in ("1", "3.14.7", "3.14.7.0", "3.14.6", "00", "0.0", ""):
+            with self.subTest(component_version=version), self.assertRaises(PREP.PreparationRefused):
+                PREP.framework_component(xml.replace('version="0"', f'version="{version}"').encode())
+        with self.assertRaises(PREP.PreparationRefused):
+            PREP.framework_component(xml.replace(' version="0"', "").encode())
         for foreign in ("PythonFramework-3.14t", "PythonApplications-3.14"):
             self.assertFalse(PREP.framework_component(xml.replace("PythonFramework-3.14", foreign).encode()))
-        bad = [xml.replace('version="3.14.7"', 'version="3.14.6"').encode(),
-               xml.replace("/Library/Frameworks/Python.framework", "/Library/Frameworks/PythonT.framework").encode(),
+        bad = [xml.replace("/Library/Frameworks/Python.framework", "/Library/Frameworks/PythonT.framework").encode(),
                b"<!DOCTYPE pkg-info [<!ENTITY x 'bad'>]>" + xml.encode(),
                xml.encode("utf-16-le"), xml.encode("utf-16-be"),
                xml.encode("utf-32-le"), xml.encode("utf-32-be"),

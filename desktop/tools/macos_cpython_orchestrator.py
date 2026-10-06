@@ -225,7 +225,9 @@ def framework_component(body):
     name, version, location = (root.get(key, "") for key in ("identifier", "version", "install-location"))
     if not re.fullmatch(r"org\.python\.Python\.PythonFramework-3\.14", name):
         return False
-    need(version in {"3.14.7", "3.14.7.0"} and location == FRAMEWORK_ORIGINAL,
+    # This fixed PSF package records component version 0, not the runtime
+    # version. runtime_facts_valid separately requires actual Python 3.14.7.
+    need(version == "0" and location == FRAMEWORK_ORIGINAL,
          "package-framework-identity")
     return True
 
