@@ -817,6 +817,116 @@ def context_inflate(body, limit):
     return result
 
 
+CONTEXT_METADATA_TAGS = ("name", "type", "mode", "uid", "gid", "user", "group",
+                         "atime", "ctime", "mtime", "inode", "deviceno", "FinderCreateTime")
+CONTEXT_METADATA_CHECKS = ("finder-shape", "finder-values", "finder-calendar", "scalar-shape",
+                           "inode-value", "deviceno-value")
+CONTEXT_METADATA_ARTIFACT = "installer-context-metadata-refusal"
+
+
+def _context_metadata_scalar(value, *, timestamp=False):
+    """Observed spelling only, never a timestamp/inode or normalization."""
+    if value is None:
+        return {"characters": None, "text": None}
+    pattern = r"[0-9TZ:+.\-]{1,64}" if timestamp else r"[0-9+\-]{1,24}"
+    return {"characters": len(value), "text": value if re.fullmatch(pattern, value) else None}
+
+
+def _context_metadata_observation(element, child, check, parent):
+    # context_xml already bounded the complete tree to256 nodes/16 attributes.
+    # Unknown names/attributes and user/group contents are NEVER copied out.
+    name = element.findtext("name")
+    name = parent + name if type(name) is str else None
+    members = {"PackageInfo", "Scripts", "Bom", "Distribution", CONTEXT_PACKAGES[1],
+               *(CONTEXT_PACKAGES[1] + "/" + item for item in ("PackageInfo", "Scripts", "Bom"))}
+    leaves = list(child)
+    finder = child.tag == "FinderCreateTime"
+    return {
+        "member": name if name in members else "unknown", "tag": child.tag, "check": check,
+        "attributes": len(child.attrib), "children": len(leaves),
+        "textPresent": bool((child.text or "").strip()), "tailPresent": bool((child.tail or "").strip()),
+        "timeChildren": sum(item.tag == "time" for item in leaves),
+        "nanosecondChildren": sum(item.tag == "nanoseconds" for item in leaves),
+        "otherChildren": sum(item.tag not in ("time", "nanoseconds") for item in leaves),
+        "leafAttributes": any(item.attrib for item in leaves),
+        "leafChildren": any(len(item) for item in leaves),
+        "leafTailText": any((item.tail or "").strip() for item in leaves),
+        "timestamp": _context_metadata_scalar(child.findtext("time") if finder else None, timestamp=True),
+        "nanoseconds": _context_metadata_scalar(child.findtext("nanoseconds") if finder else None),
+        "number": _context_metadata_scalar(child.text if child.tag in ("inode", "deviceno") else None),
+    }
+
+
+def context_metadata_diagnostic_data(value, phase, failure, calls):
+    """Closed, failure-only observations; malformed DATA has no publication."""
+    keys = {"schemaVersion", "type", "diagnosticOnly", "phase", "package", "packageSha256", "packageBytes",
+            "parsedArchiveSha256", "parsedArchiveBytes", "buildCallIndex", "metadata"}
+    if (type(value) is not dict or set(value) != keys or type(value["schemaVersion"]) is not int
+            or value["schemaVersion"] != 1 or value["type"] != "mrk-context-xar-metadata-diagnostic-v1"
+            or value["diagnosticOnly"] is not True or failure != "context-xar-member-metadata"
+            or phase not in ("context-component-audit", "context-product-audit") or value["phase"] != phase
+            or type(value["package"]) is not str or value["package"] not in CONTEXT_PACKAGE_LABELS
+            or type(calls) is not list or not 1 <= len(calls) <= 64):
+        return None
+    index = value["buildCallIndex"]
+    position = CONTEXT_PACKAGE_LABELS.index(value["package"])
+    role = ("context-component-build", "context-product-component-build", "context-product-build")[position]
+    expected_phase = "context-component-audit" if position == 0 else "context-product-audit"
+    if (phase != expected_phase or type(index) is not int or not 0 <= index < len(calls)
+            or type(calls[index]) is not dict or calls[index].get("role") != role
+            or calls[index].get("entered") is not True or calls[index].get("returned") is not True
+            or type(calls[index].get("returncode")) is not int or calls[index]["returncode"] != 0
+            or sum(type(call) is dict and call.get("role") == role for call in calls) != 1):
+        return None
+    for prefix in ("package", "parsedArchive"):
+        size, sha = value[prefix + "Bytes"], value[prefix + "Sha256"]
+        if type(size) is not int or not 28 <= size <= CONTEXT_PACKAGE_LIMIT or not identity(sha, 64):
+            return None
+    metadata = value["metadata"]
+    metadata_keys = {"member", "tag", "check", "attributes", "children", "textPresent", "tailPresent",
+                     "timeChildren", "nanosecondChildren", "otherChildren", "leafAttributes", "leafChildren",
+                     "leafTailText", "timestamp", "nanoseconds", "number"}
+    members = {"PackageInfo", "Scripts", "Bom", "Distribution", CONTEXT_PACKAGES[1], "unknown",
+               *(CONTEXT_PACKAGES[1] + "/" + item for item in ("PackageInfo", "Scripts", "Bom"))}
+    if (type(metadata) is not dict or set(metadata) != metadata_keys
+            or type(metadata["member"]) is not str or metadata["member"] not in members
+            or type(metadata["tag"]) is not str or metadata["tag"] not in CONTEXT_METADATA_TAGS
+            or type(metadata["check"]) is not str or metadata["check"] not in CONTEXT_METADATA_CHECKS):
+        return None
+    tag, check = metadata["tag"], metadata["check"]
+    if ((check.startswith("finder-") and tag != "FinderCreateTime")
+            or (check == "scalar-shape" and tag == "FinderCreateTime")
+            or (check in ("inode-value", "deviceno-value") and tag != check[:-6])):
+        return None
+    for name in ("attributes", "children", "timeChildren", "nanosecondChildren", "otherChildren"):
+        if type(metadata[name]) is not int or not 0 <= metadata[name] <= (16 if name == "attributes" else 256):
+            return None
+    if metadata["timeChildren"] + metadata["nanosecondChildren"] + metadata["otherChildren"] != metadata["children"]:
+        return None
+    if any(type(metadata[name]) is not bool for name in
+           ("textPresent", "tailPresent", "leafAttributes", "leafChildren", "leafTailText")):
+        return None
+    for name in ("timestamp", "nanoseconds", "number"):
+        scalar = metadata[name]
+        if type(scalar) is not dict or set(scalar) != {"characters", "text"}:
+            return None
+        count, text = scalar["characters"], scalar["text"]
+        if count is None:
+            if text is not None:
+                return None
+        elif type(count) is not int or not 0 <= count <= 2 * 1024 * 1024:
+            return None
+        if text is not None:
+            pattern = r"[0-9TZ:+.\-]{1,64}" if name == "timestamp" else r"[0-9+\-]{1,24}"
+            if type(text) is not str or len(text) != count or not re.fullmatch(pattern, text):
+                return None
+        if ((name in ("timestamp", "nanoseconds") and tag != "FinderCreateTime")
+                or (name == "number" and tag not in ("inode", "deviceno"))):
+            if scalar != {"characters": None, "text": None}:
+                return None
+    return value if len(canonical(value)) <= 2048 else None
+
+
 def context_xar(body, *, product=False):
     """Two closed scripts-only envelopes, never an extractor or production parser.
 
@@ -879,32 +989,49 @@ def context_xar(body, *, product=False):
         need(all(len(element.findall(tag)) <= 1 for tag in metadata - {"file"}),
              "context-xar-member-duplicate")
         for child in element:
-            if child.tag == "FinderCreateTime":
-                # Apple's extractor applies this as destination birth time. This
-                # passive parser validates only; it never applies or trusts it.
-                need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
-                     and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
-                     and all(not item.attrib and not list(item) and not (item.tail or "").strip()
-                             for item in child), "context-xar-member-metadata")
-                timestamp, nanoseconds = child.findtext("time"), child.findtext("nanoseconds")
-                need(type(timestamp) is str
-                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", timestamp)
-                     and type(nanoseconds) is str and re.fullmatch(r"0|[1-9][0-9]{0,8}", nanoseconds),
-                     "context-xar-member-metadata")
-                from datetime import datetime
-                try:
-                    datetime(int(timestamp[:4]), int(timestamp[5:7]), int(timestamp[8:10]),
-                             int(timestamp[11:13]), int(timestamp[14:16]), int(timestamp[17:19]))
-                except ValueError:
-                    raise Refused("context-xar-member-metadata") from None
-            elif child.tag not in ("file", "data"):
-                need(not child.attrib and not list(child), "context-xar-member-metadata")
-            if child.tag in ("inode", "deviceno"):
-                # Apple xar stat.c emits both through signed PRId32/PRId64
-                # formats (configure.ac). These bounded strings are inert
-                # archive metadata, never filesystem identity or size authority.
-                need(type(child.text) is str and re.fullmatch(r"0|-?[1-9][0-9]{0,19}", child.text),
-                     "context-xar-member-metadata")
+            metadata_check = None
+            try:
+                if child.tag == "FinderCreateTime":
+                    # Apple's extractor applies this as destination birth time. This
+                    # passive parser validates only; it never applies or trusts it.
+                    metadata_check = "finder-shape"
+                    need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
+                         and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
+                         and all(not item.attrib and not list(item) and not (item.tail or "").strip()
+                                 for item in child), "context-xar-member-metadata")
+                    timestamp, nanoseconds = child.findtext("time"), child.findtext("nanoseconds")
+                    metadata_check = "finder-values"
+                    need(type(timestamp) is str
+                         and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", timestamp)
+                         and type(nanoseconds) is str and re.fullmatch(r"0|[1-9][0-9]{0,8}", nanoseconds),
+                         "context-xar-member-metadata")
+                    from datetime import datetime
+                    metadata_check = "finder-calendar"
+                    try:
+                        datetime(int(timestamp[:4]), int(timestamp[5:7]), int(timestamp[8:10]),
+                                 int(timestamp[11:13]), int(timestamp[14:16]), int(timestamp[17:19]))
+                    except ValueError:
+                        raise Refused("context-xar-member-metadata") from None
+                elif child.tag not in ("file", "data"):
+                    metadata_check = "scalar-shape"
+                    need(not child.attrib and not list(child), "context-xar-member-metadata")
+                if child.tag in ("inode", "deviceno"):
+                    # Apple xar stat.c emits both through signed PRId32/PRId64
+                    # formats (configure.ac). These bounded strings are inert
+                    # archive metadata, never filesystem identity or size authority.
+                    metadata_check = "inode-value" if child.tag == "inode" else "deviceno-value"
+                    need(type(child.text) is str and re.fullmatch(r"0|-?[1-9][0-9]{0,19}", child.text),
+                         "context-xar-member-metadata")
+            except Refused as error:
+                if type(error) is Refused and error.args == ("context-xar-member-metadata",):
+                    try:
+                        error._context_metadata = {
+                            "metadata": _context_metadata_observation(element, child, metadata_check, parent),
+                            "parsedArchiveSha256": digest(body), "parsedArchiveBytes": len(body),
+                        }
+                    except BaseException:
+                        pass  # Unqualified diagnostic; rethrow the SAME refusal.
+                raise
         name, kind = element.findtext("name"), element.findtext("type")
         need(type(name) is str and name and "/" not in name and "\\" not in name
              and name not in (".", ".."), "context-xar-member-name")
@@ -2069,6 +2196,8 @@ class Operation:
         self.btm_started, self.btm_finished = None, None
         self.btm_log = btm_record(environment["GITHUB_SHA"])
         self.artifacts = {}
+        self._context_metadata_refusal = None
+        self.context_pure_metadata_refused = False
         self.observer_entry, self.observer_digest, self.metadata = None, None, []
         self.release = None
         self.sources_closed = self.outputs_closed = self.protected_closed = False
@@ -2268,6 +2397,42 @@ class Operation:
         self.protected.check()
         return rows  # Actual root-owned receipt originals remain held until finish().
 
+    def context_audit(self, entry, body, *, component=None):
+        """Only the existing pure parser, after its caller's bound body read."""
+        try:
+            if component is None:
+                return context_xar(body)
+            return context_product(body, *component)
+        except Refused as error:
+            if type(error) is Refused and error.args == ("context-xar-member-metadata",):
+                try:
+                    observed = getattr(error, "_context_metadata", None)
+                    paths = [self.scratch / "installer-context" / name for name in CONTEXT_PACKAGES]
+                    if (type(observed) is dict and set(observed) == {"metadata", "parsedArchiveSha256", "parsedArchiveBytes"}
+                            and type(body) is bytes and type(entry) is dict
+                            and entry.get("path") in paths and entry.get("kind") == "file"
+                            and type(entry.get("fd")) is int and entry["fd"] >= 0 and entry.get("closed") is False
+                            and type(entry.get("identity")) is tuple and len(entry["identity"]) == 9
+                            and entry["identity"][6] == len(body)
+                            and any(entry is original for original in self.outputs.entries)):
+                        position = paths.index(entry["path"])
+                        value = {"schemaVersion": 1, "type": "mrk-context-xar-metadata-diagnostic-v1",
+                                 "diagnosticOnly": True, "phase": self.phase,
+                                 "package": CONTEXT_PACKAGE_LABELS[position], "packageSha256": digest(body),
+                                 "packageBytes": len(body), "buildCallIndex": len(self.calls) - 1, **observed}
+                        if context_metadata_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None:
+                            self.artifacts[CONTEXT_METADATA_ARTIFACT] = value
+                            # Not a receipt/input flag. execute must catch THIS
+                            # exact Refused before it may permit retirement.
+                            self._context_metadata_refusal = error
+                except BaseException:
+                    # A diagnostic/cancellation error is never cleanup proof
+                    # and never replaces the original parser refusal.
+                    self._context_metadata_refusal = None
+                    self.artifacts.pop(CONTEXT_METADATA_ARTIFACT, None)
+            raise
+
+
     def observe_installer_context(self):
         self.phase = "context-prepare"
         need(not self.installer_context["started"], "context-single-entry")
@@ -2336,7 +2501,7 @@ class Operation:
                                   "--ownership", "recommended", "--compression", "legacy", str(package_paths[index])], 30)
             self.phase = "context-" + case + "-audit"
             entry, body = self.outputs.file(package_paths[index], CONTEXT_PACKAGE_LIMIT, modes=(0o600, 0o644))
-            members = context_xar(body)
+            members = self.context_audit(entry, body)
             context_package_info(members["PackageInfo"], CONTEXT_IDENTIFIERS[index])
             archive = members["Scripts"]
             if archive[:2] == b"\x1f\x8b":
@@ -2370,7 +2535,7 @@ class Operation:
                              "--package-path", str(context_root), str(package_paths[2])], 30)
         self.phase = "context-product-audit"
         entry, body = self.outputs.file(package_paths[2], CONTEXT_PACKAGE_LIMIT, modes=(0o600, 0o644))
-        context_product(body, *components[1])
+        self.context_audit(entry, body, component=components[1])
         package_entries.append(entry)
         need(self.outputs.read(distribution_entry) == distribution_body == context_distribution()
              and self.outputs.read(product_tool) == product_tool_body,
@@ -3070,7 +3235,14 @@ class Operation:
         # can supply that fact; malformed/unknown reports retain this scratch.
         native_finality = (not self.native_entered or self.native_returned
                            and self.native is not None and self.native["nativeFinalityKnown"] is True)
-        context_finality = not self.installer_context["started"] or self.installer_context["completed"]
+        context_finality = (not self.installer_context["started"] or self.installer_context["completed"]
+                            or self.context_pure_metadata_refused is True
+                            and self.installer_context["started"] is True
+                            and self.installer_context["completed"] is False
+                            and self.installer_context["enteredCases"] == [] and self.installer_context["cases"] == []
+                            and not self.installer_entered and not self.native_entered
+                            and not any(call["role"] in ("context-component-installer", "context-product-installer")
+                                        for call in self.calls))
         layout_finality = service_layout_finality(self.service_layout, self.environment["GITHUB_SHA"])
         safe = (all(record["returned"] for record in self.calls) and self.sources_closed
                 and self.outputs_closed and self.protected_closed and native_finality and context_finality
@@ -3163,6 +3335,7 @@ class Operation:
             else:
                 self.run_native()
         except BaseException as error:
+            self.context_pure_metadata_refused = (type(error) is Refused and error is self._context_metadata_refusal)
             failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
                        and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])
                        else "original-operation-refused-or-unknown")
@@ -3171,6 +3344,7 @@ class Operation:
             try:
                 self.observe_btm_logs()
             except BaseException as error:
+                self.context_pure_metadata_refused = False
                 if failure is None:
                     failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
                                and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])

@@ -500,6 +500,40 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["serviceLayoutObservation"] =' in line],
                          ['summary["serviceLayoutObservation"] = None'] * 2)
+        metadata_diagnostic = section(publish, "              context_metadata_diagnostic = None", "              btm_log = None")
+        self.assertEqual(flat(active(metadata_diagnostic)), flat("""context_metadata_diagnostic = None
+            metadata_candidate = fixture.context_metadata_diagnostic_data(
+                result["artifacts"].get(fixture.CONTEXT_METADATA_ARTIFACT) if type(result["artifacts"]) is dict else None,
+                result["phase"], result["failure"], calls)
+            if (metadata_candidate is not None
+                    and all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                    and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
+                context_metadata_diagnostic = metadata_candidate"""))
+        self.assertLess(publish.index('"summary-returned-call"'), publish.index(metadata_diagnostic))
+        self.assertLess(publish.index(metadata_diagnostic), publish.index('              known_pass = ('))
+        self.assertIn('"contextMetadataDiagnostic": None,', publish)
+        self.assertIn('contextMetadataDiagnostic=context_metadata_diagnostic,', publish)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["contextMetadataDiagnostic"] =' in line],
+                         ['summary["contextMetadataDiagnostic"] = None'] * 2)
+        audit = section(self.owner, "    def context_audit(", "    def observe_installer_context(")
+        self.assertIn('return context_xar(body)', audit)
+        self.assertIn('return context_product(body, *component)', audit)
+        self.assertIn('self._context_metadata_refusal = error', audit)
+        self.assertIn('any(entry is original for original in self.outputs.entries)', audit)
+        self.assertNotIn('self.context_pure_metadata_refused = True', audit)
+        execute = section(self.owner, "    def execute(self):", "\ndef canonical(")
+        self.assertIn('type(error) is Refused and error is self._context_metadata_refusal', execute)
+        self.assertIn('except BaseException as error: self.context_pure_metadata_refused = False', flat(execute))
+        operation = section(self.owner, "class Operation:", "\ndef canonical(")
+        finish = section(operation, "    def finish(self):", "    def receipt(self, failure):")
+        for token in ('self.context_pure_metadata_refused is True', 'self.installer_context["enteredCases"] == []',
+                      'self.installer_context["cases"] == []', 'not self.installer_entered and not self.native_entered',
+                      '"context-component-installer", "context-product-installer"',
+                      'all(record["returned"] for record in self.calls)',
+                      'and self.outputs_closed and self.protected_closed and native_finality and context_finality',
+                      'and layout_finality and not self.cleanup_errors'):
+            self.assertIn(token, finish)
         btm = section(publish, "              btm_log = None", "              known_pass = (")
         self.assertEqual(flat(active(btm)), flat("""btm_log = None
             btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
@@ -533,6 +567,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                          ['summary["installerWorkerDiagnostic"] = None'] * 2)
         known_pass = section(publish, "              known_pass = (", "              summary.update(")
         self.assertNotIn("installer_worker_diagnostic", known_pass)
+        self.assertNotIn("context_metadata_diagnostic", known_pass)
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["btmLogObservation"] =' in line],
                          ['summary["btmLogObservation"] = None'] * 2)

@@ -830,6 +830,7 @@ jobs:
               "installerContext": None,
               "serviceLayoutObservation": None,
               "btmLogObservation": None, "installerWorkerDiagnostic": None,
+              "contextMetadataDiagnostic": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -987,6 +988,15 @@ jobs:
                                and result["sourceReleaseId"] == release, "summary-native-call")
                   native = fixture.native_result(fixture.canonical(result["native"]),
                                                   native_calls[0]["returncode"], source, release)
+              context_metadata_diagnostic = None
+              metadata_candidate = fixture.context_metadata_diagnostic_data(
+                  result["artifacts"].get(fixture.CONTEXT_METADATA_ARTIFACT) if type(result["artifacts"]) is dict else None,
+                  result["phase"], result["failure"], calls)
+              if (metadata_candidate is not None
+                      and all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                      and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
+                  # Pure failure observations, never metadata acceptance or Context completion.
+                  context_metadata_diagnostic = metadata_candidate
               btm_log = None
               btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
               if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
@@ -1013,6 +1023,7 @@ jobs:
                   installerContext=installer_context,
                   serviceLayoutObservation=service_layout,
                   btmLogObservation=btm_log, installerWorkerDiagnostic=installer_worker_diagnostic,
+                  contextMetadataDiagnostic=context_metadata_diagnostic,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
@@ -1024,6 +1035,7 @@ jobs:
               summary["serviceLayoutObservation"] = None
               summary["btmLogObservation"] = None
               summary["installerWorkerDiagnostic"] = None
+              summary["contextMetadataDiagnostic"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
@@ -1034,6 +1046,7 @@ jobs:
                   summary["serviceLayoutObservation"] = None
                   summary["btmLogObservation"] = None
                   summary["installerWorkerDiagnostic"] = None
+                  summary["contextMetadataDiagnostic"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:

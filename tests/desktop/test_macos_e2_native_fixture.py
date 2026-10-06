@@ -2116,6 +2116,58 @@ class InstallerContextTests(unittest.TestCase):
             with self.subTest(member_shape=shape), self.assertRaisesRegex(
                     fixture.Refused, "^context-xar-member-" + label + "$"):
                 fixture.context_xar(self.xar(members, mutate=bad_member))
+        # Six exact existing guards, not a guessed acceptance format. Preserve
+        # each original Refused; only safe date/number spellings may be shown.
+        diagnostic_samples = (
+            ("finder-shape", "FinderCreateTime", lambda toc: toc.find("file/FinderCreateTime").set("private-name", "private-value")),
+            ("finder-values", "FinderCreateTime", lambda toc: setattr(toc.find("file/FinderCreateTime/time"), "text", "2026-01-01T12:34:56Z")),
+            ("finder-calendar", "FinderCreateTime", lambda toc: setattr(toc.find("file/FinderCreateTime/time"), "text", "2026-02-29T12:34:56")),
+            ("scalar-shape", "inode", lambda toc: ET.SubElement(toc.find("file/inode"), "private-name")),
+            ("inode-value", "inode", lambda toc: setattr(toc.find("file/inode"), "text", "+1")),
+            ("deviceno-value", "deviceno", lambda toc: setattr(toc.find("file/deviceno"), "text", "01")),
+        )
+        calls = [{"role": "context-component-build", "entered": True, "returned": True, "returncode": 0}]
+        for check, tag, mutate in diagnostic_samples:
+            body = self.xar(members, mutate=mutate)
+            with self.subTest(diagnostic_check=check), self.assertRaises(fixture.Refused) as caught:
+                fixture.context_xar(body)
+            self.assertEqual(caught.exception.args, ("context-xar-member-metadata",))
+            self.assertIs(type(caught.exception), fixture.Refused)
+            observed = caught.exception._context_metadata
+            self.assertEqual(observed["metadata"]["check"], check)
+            self.assertEqual(observed["metadata"]["tag"], tag)
+            self.assertNotIn("private-", fixture.canonical(observed).decode("ascii"))
+            self.assertEqual(observed["parsedArchiveSha256"], fixture.digest(body))
+            diagnostic = {"schemaVersion": 1, "type": "mrk-context-xar-metadata-diagnostic-v1", "diagnosticOnly": True,
+                          "phase": "context-component-audit", "package": "direct-component",
+                          "packageSha256": fixture.digest(body), "packageBytes": len(body), "buildCallIndex": 0, **observed}
+            self.assertIs(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"], caught.exception.args[0], calls), diagnostic)
+            self.assertLessEqual(len(fixture.canonical(diagnostic)), 2048)
+            for field, value in (("buildCallIndex", True), ("package", "outside"), ("packageBytes", 0),
+                                 ("packageSha256", "path-or-other-text"), ("diagnosticOnly", 1)):
+                bad_diagnostic = dict(diagnostic, **{field: value})
+                self.assertIsNone(fixture.context_metadata_diagnostic_data(bad_diagnostic, diagnostic["phase"], caught.exception.args[0], calls))
+            for key, value in (("check", "guessed"), ("tag", "host-path"), ("member", "/unrelated"),
+                               ("attributes", 17), ("children", True), ("leafAttributes", 1)):
+                bad_diagnostic = copy.deepcopy(diagnostic)
+                bad_diagnostic["metadata"][key] = value
+                self.assertIsNone(fixture.context_metadata_diagnostic_data(bad_diagnostic, diagnostic["phase"], caught.exception.args[0], calls))
+            for bad_calls in ([], calls * 2, [dict(calls[0], returned=False)], [dict(calls[0], returncode=1)],
+                              [dict(calls[0], returncode=False)], [dict(calls[0], role="context-product-build")]):
+                self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"], caught.exception.args[0], bad_calls))
+            self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, "context-product-audit", caught.exception.args[0], calls))
+            self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"], None, calls))
+        for tag, value in (("time", "2026-01-01T12:34:56+00:00"), ("nanoseconds", "1000000000"),
+                           ("time", "/Users/private/path"), ("time", "\u0662" + "026-01-01T12:34:56"),
+                           ("time", "1" * 65), ("nanoseconds", " 1"), ("nanoseconds", "1" * 25)):
+            body = self.xar(members, mutate=lambda toc: setattr(toc.find("file/FinderCreateTime/" + tag), "text", value))
+            with self.subTest(scalar_tag=tag, value=value), self.assertRaises(fixture.Refused) as caught:
+                fixture.context_xar(body)
+            scalar = caught.exception._context_metadata["metadata"]["timestamp" if tag == "time" else "nanoseconds"]
+            self.assertEqual(scalar["characters"], len(value))
+            self.assertEqual(scalar["text"], value if value in ("2026-01-01T12:34:56+00:00", "1000000000") else None)
+        self.assertEqual(fixture.context_xar(component), members)  # Same accepted parse.
+
         entity = '<!DOCTYPE pkg-info [<!ENTITY hidden "expanded">]><pkg-info>&hidden;</pkg-info>'
         for encoding in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
             with self.subTest(xml_encoding=encoding), self.assertRaises(fixture.Refused):
@@ -2276,6 +2328,104 @@ class InstallerContextTests(unittest.TestCase):
             retire.assert_not_called()
         self.assertFalse(op.scratch_retired or op.installer_context["completed"])
         self.assertTrue(op.sources_closed and op.outputs_closed and op.protected_closed)
+
+        # These are inert original-read/process/book DATA. The actual pure
+        # parser and execute/finish run; no native process or deletion occurs.
+        def invalid_finder(toc):
+            toc.find("file/FinderCreateTime/time").text = "2026-01-01T12:34:56Z"
+        body = self.xar({"PackageInfo": self.package_info(), "Scripts": b"inert"}, mutate=invalid_finder)
+        scenarios = ("known-pure", "read-refused", "read-unknown", "parser-unexpected", "parser-unmarked",
+                     "diagnostic-unknown", "foreign-original", "context-entered", "installer-entered",
+                     "call-unknown", "source-close-unknown", "output-close-unknown", "protected-close-unknown",
+                     "secondary-unknown")
+        stat_info = SimpleNamespace(**dict(zip(
+            ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), WORK)))
+        for scenario in scenarios:
+            with self.subTest(retirement=scenario):
+                op = OwnerRetirementAndModeTests.operation(b"", 0)
+                op.installed = False
+                op.installer_context.update(started=True, deadlineNs="100000000000")
+                op.phase = "context-component-audit"
+                op.calls = [{"role": "context-component-build", "entered": True, "returned": True, "returncode": 0}]
+                entry = {"fd": 92, "path": op.scratch / "installer-context" / fixture.CONTEXT_PACKAGES[0],
+                         "kind": "file", "closed": False, "identity": (*WORK[:6], len(body), *WORK[7:])}
+                op.outputs.entries = [] if scenario == "foreign-original" else [entry]
+                op.outputs.directories = {op.scratch: {"identity": WORK[:5]}}
+                events = []
+                def original_read(*_args, **_kwargs):
+                    if scenario == "read-refused":
+                        raise fixture.Refused("context-xar-member-metadata")
+                    if scenario == "read-unknown":
+                        raise KeyboardInterrupt()
+                    events.append("original-body-read-eof-post-returned")
+                    return entry, body
+                op.outputs.file = original_read
+                def audit():
+                    bound, original_body = op.outputs.file(entry["path"], fixture.CONTEXT_PACKAGE_LIMIT)
+                    try:
+                        op.context_audit(bound, original_body)
+                    except fixture.Refused as error:
+                        events.append(error)
+                        raise
+                op.begin = op.build_installer_worker_tests = lambda: None
+                op.observe_installer_context = audit
+                op.observe_btm_logs = lambda: None
+                op.receipt = lambda failure: failure  # No synthetic receipt/pass.
+                if scenario == "context-entered":
+                    op.installer_context["enteredCases"] = ["component"]
+                elif scenario == "installer-entered":
+                    op.installer_entered = True
+                elif scenario == "call-unknown":
+                    op.calls[0]["returned"] = False
+                elif scenario.endswith("close-unknown"):
+                    book = {"source-close-unknown": op.source.book, "output-close-unknown": op.outputs,
+                            "protected-close-unknown": op.protected}[scenario]
+                    book.finish = lambda: False
+                elif scenario == "secondary-unknown":
+                    def unknown_log():
+                        raise KeyboardInterrupt()
+                    op.observe_btm_logs = unknown_log
+                parse = fixture.context_xar
+                observation = fixture._context_metadata_observation
+                unmarked = fixture.Refused("context-xar-member-metadata")
+                def selected_parse(data, **kwargs):
+                    if scenario == "parser-unexpected":
+                        raise RuntimeError("inert")
+                    if scenario == "parser-unmarked":
+                        raise unmarked
+                    return parse(data, **kwargs)
+                def selected_observation(*args):
+                    if scenario == "diagnostic-unknown":
+                        raise KeyboardInterrupt()
+                    return observation(*args)
+                cleanup = SimpleNamespace(directory=lambda _path: {"fd": 93}, finish=lambda: True)
+                with patch.object(fixture, "context_xar", selected_parse), \
+                     patch.object(fixture, "_context_metadata_observation", selected_observation), \
+                     patch.object(fixture, "Originals", return_value=cleanup) as originals, \
+                     patch.object(fixture.os, "stat", side_effect=[stat_info, FileNotFoundError()]) as named, \
+                     patch.object(fixture.shutil, "rmtree") as retire:
+                    retire.avoids_symlink_attacks = True
+                    failure = op.execute()
+                    if scenario == "known-pure":
+                        self.assertEqual(events[0], "original-body-read-eof-post-returned")
+                        self.assertIs(events[1], op._context_metadata_refusal)
+                        self.assertTrue(op.context_pure_metadata_refused)
+                        self.assertEqual(failure, "context-xar-member-metadata")
+                        self.assertIn(fixture.CONTEXT_METADATA_ARTIFACT, op.artifacts)
+                        originals.assert_called_once_with()
+                        retire.assert_called_once_with(op.scratch.name, dir_fd=93)
+                        self.assertEqual(named.call_count, 2)
+                    else:
+                        originals.assert_not_called()
+                        retire.assert_not_called()
+                        named.assert_not_called()
+                self.assertEqual(op.scratch_retired, scenario == "known-pure")
+                self.assertFalse(op.installer_context["completed"])
+                if scenario in ("read-refused", "read-unknown", "parser-unexpected", "parser-unmarked",
+                                "diagnostic-unknown", "foreign-original", "call-unknown", "secondary-unknown"):
+                    self.assertFalse(op.context_pure_metadata_refused)
+                if scenario == "parser-unmarked":
+                    self.assertIs(events[-1], unmarked)
 
     def test_fixed_context_source_uses_only_existing_owner_and_private_original_output_channel(self):
         source = PATH.read_text(encoding="utf-8")
