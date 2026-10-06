@@ -1276,6 +1276,12 @@ class InstallerContextTests(unittest.TestCase):
                 with self.subTest(stat_tag=tag, shape=shape), self.assertRaisesRegex(
                         fixture.Refused, "^context-xar-member-" + label + "$"):
                     fixture.context_xar(self.xar(members, mutate=bad_shape))
+        for tag in ("acl", "flags", "ea", "FinderCreateTime", "device", "link"):
+            def diagnostic_tag(toc):
+                ET.SubElement(toc.find("file"), tag)
+            with self.subTest(refused_metadata=tag), self.assertRaisesRegex(
+                    fixture.Refused, "^context-xar-member-tags-" + tag + "$"):
+                fixture.context_xar(self.xar(members, mutate=diagnostic_tag))
         for shape, label in (("unknown", "tags"), ("missing-name", "required"), ("duplicate-name", "required")):
             def bad_member(toc):
                 element = toc.find("file")
