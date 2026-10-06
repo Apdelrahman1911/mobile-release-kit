@@ -1176,8 +1176,20 @@ def context_xar(body, *, product=False):
         need(not any(child.tag == "device" for child in element), "context-xar-member-tags-device")
         need(not any(child.tag == "link" for child in element), "context-xar-member-tags-link")
         need(all(child.tag in metadata for child in element), "context-xar-member-tags")
+        names, types = element.findall("name"), element.findall("type")
+        # Apple's xar_file_replicate constructs a named node, then copies its
+        # name property too. Readers can select the last XML name rather than
+        # ElementTree's first: only identical bare names have one meaning.
+        # This is a fixed product FILE envelope, never a generic alias rule.
+        repeated_name = (product and len(names) == 2 and len(types) == 1
+                         and types[0].text == "file" and len(element.findall("data")) == 1
+                         and not element.findall("file")
+                         and all(not node.attrib and not list(node) and not (node.tail or "").strip()
+                                 for node in names)
+                         and type(names[0].text) is str and names[0].text == names[1].text
+                         and parent + names[0].text in allowed)
         try:
-            need(all(len(element.findall(tag)) == 1 for tag in ("name", "type")),
+            need(len(types) == 1 and (len(names) == 1 or repeated_name),
                  "context-xar-member-required")
         except Refused as error:
             try:
@@ -1186,7 +1198,8 @@ def context_xar(body, *, product=False):
             except BaseException:
                 pass  # Diagnostic failure never replaces this original refusal.
             raise
-        need(all(len(element.findall(tag)) <= 1 for tag in metadata - {"file"}),
+        unique_metadata = metadata - ({"file", "name"} if repeated_name else {"file"})
+        need(all(len(element.findall(tag)) <= 1 for tag in unique_metadata),
              "context-xar-member-duplicate")
         for child in element:
             metadata_check = None

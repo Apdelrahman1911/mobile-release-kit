@@ -2077,6 +2077,54 @@ class InstallerContextTests(unittest.TestCase):
             with self.subTest(archive=index), self.assertRaises(fixture.Refused):
                 fixture.context_xar(body)
         import xml.etree.ElementTree as ET
+        # Real Apple replication can emit the same name twice. Require one
+        # interpretation without changing the original archive or contents.
+        def repeat_file_names(toc):
+            for element in toc.iter("file"):
+                if element.findtext("type") == "file":
+                    element.append(copy.deepcopy(element.find("name")))
+        for expanded in (False, True):
+            product_members = {"Distribution": fixture.context_distribution(),
+                               **(members if expanded else {fixture.CONTEXT_PACKAGES[1]: component})}
+            canonical_product = self.xar(product_members, directory=expanded)
+            repeated_product = self.xar(product_members, directory=expanded, mutate=repeat_file_names)
+            self.assertEqual(fixture.context_xar(repeated_product, product=True),
+                             fixture.context_xar(canonical_product, product=True))
+            fixture.context_product(repeated_product, component, members)
+            for shape in ("conflict-first", "conflict-last", "third", "attribute", "child", "tail", "foreign"):
+                def malformed_repeat(toc):
+                    repeat_file_names(toc)
+                    element = next(node for node in toc.iter("file") if node.findtext("type") == "file")
+                    names = element.findall("name")
+                    if shape.startswith("conflict-"):
+                        # Both names are separately permitted; disagreement is
+                        # still ambiguous regardless of first/last precedence.
+                        alternative = fixture.CONTEXT_PACKAGES[1] if names[0].text == "Distribution" else "Scripts"
+                        names[0 if shape == "conflict-first" else 1].text = alternative
+                    elif shape == "third":
+                        element.append(copy.deepcopy(names[0]))
+                    elif shape == "attribute":
+                        names[1].set("enctype", "base64")
+                    elif shape == "child":
+                        ET.SubElement(names[1], "name")
+                    elif shape == "tail":
+                        names[1].tail = "not-metadata"
+                    else:
+                        names[0].text = names[1].text = "foreign"
+                with self.subTest(repeated_name_shape=shape, expanded=expanded), self.assertRaises(fixture.Refused):
+                    fixture.context_xar(self.xar(product_members, directory=expanded, mutate=malformed_repeat), product=True)
+        def repeated_directory(toc):
+            element = next(node for node in toc.iter("file") if node.findtext("type") == "directory")
+            element.append(copy.deepcopy(element.find("name")))
+        with self.assertRaises(fixture.Refused):
+            fixture.context_xar(self.xar({"Distribution": fixture.context_distribution(), **members},
+                                         directory=True, mutate=repeated_directory), product=True)
+        with self.assertRaises(fixture.Refused):
+            fixture.context_xar(self.xar(members, mutate=repeat_file_names))
+        changed_product = self.xar({"Distribution": fixture.context_distribution(),
+                                    **dict(members, Scripts=b"different")}, directory=True, mutate=repeat_file_names)
+        with self.assertRaisesRegex(fixture.Refused, "context-product-component"):
+            fixture.context_product(changed_product, component, members)
         for tag in ("inode", "deviceno"):
             for value in ("", "+1", "-0", "01", " 1", "1" * 21, "not-a-number"):
                 def bad_stat(toc):
@@ -2162,8 +2210,8 @@ class InstallerContextTests(unittest.TestCase):
             with self.subTest(member_shape=shape), self.assertRaisesRegex(
                     fixture.Refused, "^context-xar-member-" + label + "$"):
                 fixture.context_xar(self.xar(members, mutate=bad_member))
-        # Productbuild's required-field refusal needs shape, not guessed defaults.
-        # All fixtures below STILL refuse; only closed diagnostics are observed.
+        # Missing/contradictory names and duplicate types still refuse; the
+        # existing closed required-field diagnostic remains unchanged.
         calls = [{"role": "context-product-build", "entered": True, "returned": True, "returncode": 0}]
         for tag in ("name", "type"):
             for duplicate in (False, True):
@@ -2171,7 +2219,10 @@ class InstallerContextTests(unittest.TestCase):
                     element = toc.find("file")
                     node = element.find(tag)
                     if duplicate:
-                        element.append(copy.deepcopy(node))
+                        repeated = copy.deepcopy(node)
+                        if tag == "name":
+                            repeated.text = fixture.CONTEXT_PACKAGES[1]
+                        element.append(repeated)
                     else:
                         element.remove(node)
                 body = self.xar({"Distribution": fixture.context_distribution(),
