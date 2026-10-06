@@ -1626,13 +1626,30 @@ def digest(body):
     return hashlib.sha256(body).hexdigest()
 
 
+ARM_TARGET = "aarch64-apple-darwin"
+INTEL_TARGET = "x86_64-apple-darwin"
+
+
+def target_data(target):
+    need(type(target) is str and target in (ARM_TARGET, INTEL_TARGET), "native-target")
+    intel = target == INTEL_TARGET
+    return {"machine": "x86_64" if intel else "arm64", "runner": "X64" if intel else "ARM64",
+            "releaseInput": "build-release-intel.json" if intel else "build-release.json",
+            "sourceLock": "source-lock-intel.json" if intel else "source-lock.json",
+            "releasePrefix": "macos26-x86_64-" if intel else "macos26-arm64-",
+            "platform": "macOS26-x86_64" if intel else "macOS26-arm64",
+            "cargo": "/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo"}
+
+
 @dataclass(frozen=True)
 class Binding:
     source: str
     run: str
     attempt: str
+    target: str = ARM_TARGET
 
     def checked(self):
+        target_data(self.target)
         need(type(self.source) is str and re.fullmatch(r"[0-9a-f]{40}", self.source), "source-binding")
         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
         return self
@@ -1700,6 +1717,17 @@ def argument_scope(argv):
                                or argv == ["--scope", LOCAL_EDITS_SCOPE]
                                or argv == ["--scope", LOCAL_CHECK_SCOPE]), "arguments-not-supported")
     return argv[1] if argv else None
+
+
+def entry_arguments(argv):
+    # The fixed host target follows, never precedes/interleaves, the old scope.
+    need(type(argv) is list and all(type(value) is str for value in argv), "arguments-not-supported")
+    target = ARM_TARGET
+    if len(argv) >= 2 and argv[-2] == "--target":
+        target = argv[-1]
+        target_data(target)
+        argv = argv[:-2]
+    return argument_scope(argv), target
 
 
 def case_timeout(case):
@@ -4898,16 +4926,18 @@ class Fixtures:
 
     def admit_recovery_runtime(self, source, work, *, supplier_origin="historical", supplier_receipt_sha256=None):
         recovery_supplier_route(supplier_origin, supplier_receipt_sha256)
+        target = target_data(self.binding.target)
+        need(self.binding.target == ARM_TARGET or supplier_origin == "fresh-public-source", "recovery-intel-fresh-supplier")
         need(self.cases in ((RECOVERY_CASE,), (IOS_ACCOUNT_CASE,)) and not self.inflight and self.recovery_runtime is None, "recovery-runtime-reused")
         need(type(work) is Path or isinstance(work, Path), "recovery-runtime-work")
         need(work.parent == Path("/Users/runner/work/_temp") and re.fullmatch(r"mrk-macos-aqua\.[A-Za-z0-9]{8}", work.name), "recovery-runtime-work-route")
         def private_json(path, limit):
             info, _, body = self._recovery_read(None, str(path), self.uid, limit)
             return json.loads(body, object_pairs_hook=_pairs)
-        release = private_json(source / "desktop/macos-installed-inputs/build-release.json", 4096)
+        release = private_json(source / "desktop/macos-installed-inputs" / target["releaseInput"], 4096)
         need(type(release) is dict and set(release) == {"schemaVersion", "packageVersion", "release"}
              and type(release["schemaVersion"]) is int and release["schemaVersion"] == 1
-             and type(release["release"]) is str and re.fullmatch(r"macos26-arm64-[a-z0-9_.-]*[a-z0-9]", release["release"])
+             and type(release["release"]) is str and re.fullmatch(re.escape(target["releasePrefix"]) + r"[a-z0-9_.-]*[a-z0-9]", release["release"])
              and len(release["release"]) <= 128, "recovery-runtime-release")
         # Current stager output, NOT the historical supplier digest. The same
         # actual reviewed workflow builds and installs these exact bytes first.
@@ -4915,18 +4945,18 @@ class Fixtures:
         recovery_supplier_matches(result, supplier_origin, supplier_receipt_sha256)
         if supplier_origin == "fresh-public-source":
             _, source_lock_sha, _ = self._recovery_read(None,
-                str(source / "desktop/macos-cpython-source-inputs/source-lock.json"), self.uid, 16*1024)
+                str(source / "desktop/macos-cpython-source-inputs" / target["sourceLock"]), self.uid, 16*1024)
             need(result["supplierSourceLockSha256"] == source_lock_sha, "recovery-fresh-source-lock")
         _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid, 1024*1024)
         need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
-             and result.get("release") == release["release"] and result.get("target") == "aarch64-apple-darwin"
+             and result.get("release") == release["release"] and result.get("target") == self.binding.target
              and result.get("qualification") == "current-source-staged-no-native-execution"
              and type(result.get("sourceInputsSha256")) is str and re.fullmatch(r"[0-9a-f]{64}", result["sourceInputsSha256"])
              and result.get("successorManifestSha256") == manifest_sha, "recovery-current-runtime-binding")
         manifest = json.loads(manifest_body, object_pairs_hook=_pairs)
         need(type(manifest) is dict and set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
              and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
-             and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == "aarch64-apple-darwin"
+             and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == self.binding.target
              and manifest["protocolSha256"] == result.get("protocolSha256") and manifest["coreSha256"] == result.get("coreSha256")
              and type(manifest["files"]) is list and 1 <= len(manifest["files"]) <= 2048
              and manifest["inventorySha256"] == result.get("inventorySha256")
@@ -5514,17 +5544,19 @@ def recovery_supplier_matches(result, origin, expected):
              and re.fullmatch(r"[0-9a-f]{64}", result["supplierSourceLockSha256"]), "recovery-fresh-supplier")
 
 
-def admit(environment, root):
+def admit(environment, root, *, target=ARM_TARGET):
     # Platform/user APIs are evaluated only in the actual native entry.
     import platform
     import pwd
     import threading
-    need(sys.platform == "darwin" and platform.machine() == "arm64" and platform.mac_ver()[0].split(".")[0] == "26", "native-platform")
+    selected = target_data(target)
+    need(sys.platform == "darwin" and sys.maxsize == 2 ** 63 - 1
+         and platform.machine() == selected["machine"] and platform.mac_ver()[0].split(".")[0] == "26", "native-platform")
     uid, gid = os.getuid(), os.getgid()
     need(uid == os.geteuid() and uid > 0 and gid == os.getegid()
          and threading.current_thread() is threading.main_thread(), "native-main-user")
-    binding = Binding(environment.get("GITHUB_SHA"), environment.get("GITHUB_RUN_ID"), environment.get("GITHUB_RUN_ATTEMPT")).checked()
-    required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64",
+    binding = Binding(environment.get("GITHUB_SHA"), environment.get("GITHUB_RUN_ID"), environment.get("GITHUB_RUN_ATTEMPT"), target).checked()
+    required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": selected["runner"],
                 "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_REF": REF,
                 "GITHUB_WORKFLOW_REF": WORKFLOW, "GITHUB_WORKFLOW_SHA": binding.source, "GITHUB_WORKSPACE": str(root)}
     need(all(environment.get(key) == value for key, value in required.items()), "hosted-source-route")
@@ -5579,9 +5611,17 @@ SHIPPING_GATE_COMPILER_ARGV = ["/Users/runner/.rustup/toolchains/stable-aarch64-
     "--target", "aarch64-apple-darwin", "--package", "mobile-release-kit-desktop",
     "--package", "mrk-macos-installed-native", "--lib", "--no-run", "--message-format=json",
     "--features", "mrk-macos-installed-native/installed-observation"]
+
+def shipping_gate_compiler_argv(target=ARM_TARGET):
+    argv = list(SHIPPING_GATE_COMPILER_ARGV)
+    argv[0], argv[7] = target_data(target)["cargo"], target
+    return argv
+
+
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": "e86e6fdb1bcff47351be8408c0b12b65c5625d77528909f3eafe56867233ec11",
+    "desktop/tools/stage_macos_installed.py": "01b1f213d930c987b2a1e9fc0ee87d875b65bd2dcb4f88c331fb51f543e95ea7",
     "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
+    "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }
 SHIPPING_GATE_REPORT = "shipping-gate-control.receipt.json"
 SHIPPING_GATE_STATUS = "shipping-gate-control.status"
@@ -5621,11 +5661,12 @@ def _gate_libtest(stdout, stderr, returncode, names):
     return int(summary[1])
 
 
-def _gate_artifact(value, work, library):
+def _gate_artifact(value, work, library, *, target=ARM_TARGET):
+    target_data(target)
     need(type(value) is dict and set(value) == {"path", "sha256", "identity", "full9"}
          and type(value["path"]) is str and len(value["path"]) <= 4096 and _gate_sha(value["sha256"]), "gate-artifact-shape")
     path = Path(value["path"])
-    need(path.parent == work / "cargo-target/aarch64-apple-darwin/debug/deps"
+    need(path.parent == work / "cargo-target" / target / "debug/deps"
          and re.fullmatch(re.escape(library) + r"-[0-9a-f]{1,64}", path.name), "gate-artifact-route")
     full = _gate_integers(value["full9"], 9)
     need(full[0] >= 0 and full[1] > 0 and stat.S_ISREG(full[2]) and full[2] & 0o111
@@ -5645,7 +5686,7 @@ def _gate_headless(bodies, binding, checkout, work):
         "passed": True, "shippingBinaryQualified": False, "distributionQualified": False,
         "compilerOriginalReturned": True, "cargoTargetRetired": False, "cargoTargetOriginalClosed": True,
         "workOriginalClosed": True, "genuineServiceQualified": False, "protectedCopyQualified": False,
-        "compilerArgv": SHIPPING_GATE_COMPILER_ARGV, "ownerCallsEntered": 3, "ownerCallsReturned": 3,
+        "compilerArgv": shipping_gate_compiler_argv(binding.target), "ownerCallsEntered": 3, "ownerCallsReturned": 3,
         "headlessCustodyRetained": False, "cargoTargetRetentionReason": "required-follow-on-build-and-gate-control",
         "tests": 13, "failed": 0, "ignored": 0, "measured": 0}
     need(set(value) == set(fixed) | {"targets", "cargoTargetOriginal", "workOriginal", "compilerJsonSha256"}, "gate-headless-keys")
@@ -5683,7 +5724,7 @@ def _gate_headless(bodies, binding, checkout, work):
         need(bodies[prefix + "-tests.status"] == b"0\n" and record["stdoutSha256"] == digest(stdout)
              and record["stderrSha256"] == digest(stderr), "gate-data-output-binding")
         _exact(record["filtered"], _gate_libtest(stdout, stderr, 0, names))
-        artifact = _gate_artifact(record["artifact"], work, library)
+        artifact = _gate_artifact(record["artifact"], work, library, target=binding.target)
         matching = [row for row in targets if type(row.get("target")) is dict and row["target"].get("name") == library]
         need(len(matching) == 1, "gate-one-library")
         target = matching[0]
@@ -5699,32 +5740,150 @@ def _gate_headless(bodies, binding, checkout, work):
     return value, native
 
 
-def _gate_installation(body, status, binding, environment, stage):
-    value = _gate_json(body, 65536)
+def _gate_package_anchors(anchors, binding, environment, stage, selection):
+    # Five independent, same-book originals. Neither this receipt nor parsed
+    # producer DATA supplies its own original exit or signature authority.
+    binding.checked()
+    need(type(selection) is stage.BuildSelection and selection.target == binding.target, "gate-package-target")
+    stage.selected_build(selection)
     inventory, manifest = environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256"), environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
-    need(_gate_sha(inventory) and _gate_sha(manifest) and status == b"0\n", "gate-installer-status-binding")
-    fixed = {"schemaVersion": 1, "sourceCommit": binding.source, "inventorySha256": inventory,
-        "runtimeManifestSha256": manifest, "release": stage.RELEASE, "installerDeadlineMetAfterFinalCloses": True,
-        "installerReportedOriginalsSettled": True, "applicationLaunched": False, "guiSaveQualified": False,
-        "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
-    need(set(value) == set(fixed) | {"nonrootReadbackFileCount", "originalInstallerResult", "installerResultExport",
-         "installationMetadata", "maintenanceGate"}, "gate-installation-keys")
+    need(_gate_sha(inventory) and _gate_sha(manifest) and type(anchors["package-install.status"]) is bytes
+         and anchors["package-install.status"] == b"0\n", "gate-package-original-status")
+    request_body = anchors["package-request-id.txt"]
+    need(type(request_body) is bytes and re.fullmatch(rb"[0-9a-f]{32}\n", request_body)
+         and request_body != b"0" * 32 + b"\n", "gate-package-request-original")
+    request = request_body[:-1].decode("ascii")
+    descriptor = anchors["producer-descriptor-input.json"]
+    producer = stage.maintenance_producer_data(descriptor, target=binding.target)
+    current = producer["releaseSet"]["current"]
+    for key, expected in {"release": selection.release, "packageVersion": selection.package_version,
+            "sourceCommit": binding.source, "protocolSha256": stage.CURRENT_PROTOCOL,
+            "inventorySha256": inventory, "runtimeManifestSha256": manifest}.items():
+        _exact(current[key], expected)
+    audit = _gate_json(anchors["package-audit.json"], 16384)
+    need(set(audit) == {"schemaVersion", "packageSha256", "packageSize", "originalPackageSha256", "packageInfoSha256",
+                       "packageIdentifier", "scriptFileCount", "finalDestinationPayloadEntries", "qualification"}, "gate-package-audit-keys")
+    for key, expected in {"schemaVersion": 1, "packageSha256": current["packageSha256"], "packageIdentifier": stage.PACKAGE_ID,
+            "finalDestinationPayloadEntries": 0, "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}.items():
+        _exact(audit[key], expected)
+    need(type(audit["packageSize"]) is int and 0 < audit["packageSize"] <= stage.MAX_BYTES
+         and type(audit["scriptFileCount"]) is int and 0 < audit["scriptFileCount"] <= stage.MAX_FILES
+         and all(_gate_sha(audit[key]) for key in ("originalPackageSha256", "packageInfoSha256")), "gate-package-audit-bound")
+    receipt = _gate_json(anchors["android-helper-package-install.json"], 16384)
+    fixed = {"schemaVersion": 1, "phase": "package-install", "target": binding.target, "source": binding.source,
+        "workflowSource": binding.source, "workflow": WORKFLOW, "runId": binding.run, "runAttempt": binding.attempt,
+        "packageRole": "installed-shell-observation", "toolchain": "1.98.1",
+        "helperIdentifier": "dev.mobile-release-kit.desktop.android-register", "passed": True,
+        "originalClosesKnown": True, "targetRetired": True, "outerFinalityRequired": True,
+        "directStagerIOPending": None, "cleanupErrors": [], "androidServiceAuthenticated": False,
+        "androidRegisteredCopyQualified": False, "androidBuildQualified": False,
+        "developerIdOrNotarizationQualified": False, "productReady": False}
+    need(set(fixed) <= receipt.keys() and "failure" not in receipt, "gate-package-helper-keys")
+    for key, expected in fixed.items():
+        _exact(receipt[key], expected)
+    # Separate credential diagnostics may be added by the same owner. They
+    # cannot weaken these original package calls or independent saved status0.
+    calls = receipt.get("originalCalls")
+    need(type(calls) is list and len(calls) == len(stage.PACKAGING_CALL_ROLES), "gate-package-call-roster")
+    for call, role in zip(calls, stage.PACKAGING_CALL_ROLES):
+        need(type(call) is dict and set(call) == {"role", "entered", "returned", "capturesSettled", "returncode",
+                                                "stdoutSha256", "stderrSha256"}, "gate-package-call-shape")
+        for key, expected in {"role": role, "entered": True, "returned": True, "capturesSettled": True}.items():
+            _exact(call[key], expected)
+        codes = (0, 1) if role in ("installer-log-cursor", "installer-log-capture") else (0,)
+        need(type(call["returncode"]) is int and call["returncode"] in codes
+             and _gate_sha(call["stdoutSha256"]) and _gate_sha(call["stderrSha256"]), "gate-package-call-original")
+    _exact(receipt.get("packageMount"), {"attachEntered": True, "originalKnown": True, "detached": True, "retained": False,
+        "installerEntered": True, "installerOriginalZero": True, "sameRequestV2Readback": True, "systemServiceExitClaimed": False})
+    distribution = receipt.get("distribution")
+    fixed = {"schemaVersion": 1, "kind": "mrk-ordinary-package-observed-v2", "target": binding.target,
+        "packageVersion": selection.package_version, "release": selection.release, "requestId": request,
+        "packageSha256": audit["packageSha256"], "packageBytes": audit["packageSize"], "descriptorSha256": digest(descriptor),
+        "originalInstallerReturnedZero": True, "sameRequestV2Readback": True, "originalMountDetached": True,
+        "groupEndpointMet": True, "originalOuterReturnRequired": True,
+        "developerIdPurposeAuthority": "native-parent-and-application-checks-separate", "notarizationQualified": False,
+        "gatekeeperQualified": False, "systemServiceExitClaimed": False, "productReady": False}
+    need(type(distribution) is dict and set(distribution) == set(fixed) | {"signatureSha256", "producerSummary", "userImage",
+         "observationImage", "sourceProducerProfileSha256", "sourceServiceProfileSha256", "mountIdentity"}, "gate-package-distribution-keys")
+    for key, expected in fixed.items():
+        _exact(distribution[key], expected)
+    need(all(_gate_sha(distribution[key]) for key in ("signatureSha256", "sourceProducerProfileSha256", "sourceServiceProfileSha256")),
+         "gate-package-distribution-digests")
+    summary = distribution["producerSummary"]
+    need(type(summary) is dict and set(summary) == {"schemaVersion", "kind", "packageSha256", "descriptorSha256",
+         "signatureSha256", "descriptorBytes", "signatureBytes"}, "gate-package-producer-summary")
+    for key, expected in {"schemaVersion": 1, "kind": "mrk-package-producer-emitted", "packageSha256": audit["packageSha256"],
+            "descriptorSha256": digest(descriptor), "signatureSha256": distribution["signatureSha256"], "descriptorBytes": len(descriptor)}.items():
+        _exact(summary[key], expected)
+    need(type(summary["signatureBytes"]) is int and 0 < summary["signatureBytes"] <= stage.PRODUCER_SIGNATURE_BYTES,
+         "gate-package-signature-bound")
+    for key, name in (("userImage", "MobileReleaseKit.dmg"), ("observationImage", "MobileReleaseKit-Observation.dmg")):
+        image = distribution[key]
+        need(type(image) is dict and set(image) == {"file", "sha256", "bytes"} and image["file"] == name
+             and _gate_sha(image["sha256"]) and type(image["bytes"]) is int and 0 < image["bytes"] <= stage.MAX_BYTES,
+             "gate-package-image-data")
+    identity = distribution["mountIdentity"]
+    need(type(identity) is list and len(identity) == 5 and all(type(v) is int and 0 <= v < 1 << 64 for v in identity)
+         and identity[1] > 0 and stat.S_ISDIR(identity[2]), "gate-package-mount-data")
+    return producer, request, summary
+
+
+def _gate_installation(body, status, binding, environment, stage, selection, anchors):
+    need(type(status) is bytes and status == b"0\n", "gate-installer-status-binding")
+    producer, request, summary = _gate_package_anchors(anchors, binding, environment, stage, selection)
+    current = producer["releaseSet"]["current"]
+    value = _gate_json(body, 65536)
+    fixed = {"schemaVersion": 2, "sourceCommit": binding.source, "inventorySha256": current["inventorySha256"],
+        "runtimeManifestSha256": current["runtimeManifestSha256"], "completedPackageSha256": current["packageSha256"],
+        "release": selection.release, "requestId": request, "originalInstallerReturnedZero": True, "originalWriterJoined": True,
+        "producerSignatureAuthority": "native-parent-and-application-checks-separate", "historicalOuterExit": "unverified",
+        "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
+        "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
+    need(set(value) == set(fixed) | {"invocation", "nonrootReadbackFileCount", "originalInstallerResult", "installerResultExport",
+                                   "installationMetadata", "maintenanceGate"}, "gate-installation-keys")
     for key, expected in fixed.items():
         _exact(value[key], expected)
-    need(type(value["nonrootReadbackFileCount"]) is int and 0 < value["nonrootReadbackFileCount"] <= 2048, "gate-installation-count")
-    original = value["originalInstallerResult"]
-    # Reuse the current pinned nested contract, never invoke observation_command.
-    stage.bound_original_result(original, (None, "confirmed", "confirmed", "installed", True, 0), binding.source, inventory, manifest)
-    need(type(original["staging"]) is str and re.fullmatch(r"\.install-[0-9a-f]{32}", original["staging"])
-         and original["staging"][9:] != "0" * 32, "gate-installation-instance")
+    # This is semantic validation by the current pinned parser, NOT the raw
+    # exported original's byte encoding, SHA or future finality. Its exception
+    # remains the same original object. No v1 or generic-success fallback.
+    original = stage.maintenance_result_data(stage.canonical(value["originalInstallerResult"]) + b"\n", request)
+    _exact(value["invocation"], original["invocation"])
+    count = value["nonrootReadbackFileCount"]
+    need(type(count) is int and 0 < count <= stage.MAX_FILES, "gate-installation-count")
     metadata = value["installationMetadata"]
-    need(type(metadata) is dict and set(metadata) == {"state", "instance", "inventoryBytes", "descriptorBytes", "originalFinality"}
-         and metadata["state"] == "recorded-current-data-correspondence" and metadata["instance"] == original["staging"][9:]
-         and metadata["originalFinality"] == "separate-Installer-status"
-         and type(metadata["inventoryBytes"]) is int and 0 < metadata["inventoryBytes"] <= 1024 * 1024
-         and type(metadata["descriptorBytes"]) is int and 0 < metadata["descriptorBytes"] <= stage.INSTALLATION_RECORD_LIMIT
-         and metadata["inventoryBytes"] + metadata["descriptorBytes"] == original["installationMetadata"]["plannedBytes"]
-             == original["installationMetadata"]["writtenBytes"], "gate-installation-metadata")
+    need(type(metadata) is list and 1 <= len(metadata) <= 9, "gate-installation-generations")
+    predecessors = {row["release"] for row in producer["releaseSet"]["acceptedPredecessors"]}
+    releases, instances, files, byte_count = set(), set(), 0, 0
+    for index, row in enumerate(metadata):
+        need(type(row) is dict and set(row) == {"release", "instance", "inventoryBytes", "descriptorBytes", "producerDescriptorBytes",
+             "producerSignatureBytes", "verifiedCurrentFiles", "declaredPayloadFiles", "declaredBytes", "historicalOuterExit"},
+             "gate-installation-metadata-keys")
+        release, instance = row["release"], row["instance"]
+        need(type(release) is str and release not in releases and (release == selection.release if index == 0 else release in predecessors)
+             and stage.maintenance_hex(instance, 32) and instance not in instances and row["historicalOuterExit"] == "unverified",
+             "gate-installation-generation-binding")
+        releases.add(release); instances.add(instance)
+        for key, limit in (("inventoryBytes", 1024 * 1024), ("descriptorBytes", stage.INSTALLATION_RECORD_LIMIT),
+                ("producerDescriptorBytes", stage.PRODUCER_DESCRIPTOR_BYTES), ("producerSignatureBytes", stage.PRODUCER_SIGNATURE_BYTES)):
+            need(type(row[key]) is int and 0 < row[key] <= limit, "gate-installation-metadata-bound")
+        declared, verified, extent = row["declaredPayloadFiles"], row["verifiedCurrentFiles"], row["declaredBytes"]
+        need(type(declared) is int and 0 < declared <= stage.MAX_FILES and type(verified) is int
+             and verified == (count if index == 0 else 0) and (index != 0 or declared == count)
+             and type(extent) is int and sum(row[key] for key in ("inventoryBytes", "descriptorBytes", "producerDescriptorBytes", "producerSignatureBytes"))
+                 <= extent <= stage.MAX_BYTES, "gate-installation-generation-accounting")
+        files += declared; byte_count += extent
+        need(files <= stage.MAX_FILES and byte_count <= stage.MAX_BYTES, "gate-installation-generation-total")
+    _exact(metadata[0]["producerDescriptorBytes"], summary["descriptorBytes"])
+    _exact(metadata[0]["producerSignatureBytes"], summary["signatureBytes"])
+    action = original["action"]
+    need((action != "fresh-install" or len(metadata) == 1) and (action != "update" or len(metadata) >= 2), "gate-installation-action-generations")
+    if action in ("fresh-install", "update"):
+        _exact(metadata[0]["instance"], original["invocation"])
+    # Noop/restore retain an older instance, not the new invocation. Full
+    # linked state/intent/capsule transitions and the current payload hashes
+    # were checked by maintenance_history_data + observation_command before
+    # the independent helper0. This reduced metadata cannot replay that history
+    # or establish a historical outer exit, exclusion or signature authority.
     _exact(value["maintenanceGate"], {"state": "protected-permanent-gate-data-correspondence", "bytes": len(stage.MAINTENANCE_GATE_BYTES),
                                     "exclusionObserved": False, "workerFinalityEstablished": False})
     exported = value["installerResultExport"]
@@ -5783,26 +5942,32 @@ def _gate_recheck(fixtures):
         need(_gate_file_read(record)[1] == record["sha256"], "gate-original-hash-changed")
 
 
-def _gate_load_stager(fixtures, checkout):
+def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET):
     import importlib.util
-    selected = []
+    target_row = target_data(target)
+    selected, bodies = [], {}
     for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
         body, original = _gate_file(fixtures, str(checkout / relative), None, 256 * 1024)
         need(digest(body) == expected, "gate-stager-source-pin")
         selected.append(original)
+        bodies[relative] = body
     name = "_mrk_shipping_gate_stager"
     need(name not in sys.modules, "gate-stager-already-imported")
     spec = importlib.util.spec_from_file_location(name, checkout / "desktop/tools/stage_macos_installed.py")
     need(spec is not None and spec.loader is not None, "gate-stager-loader")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    # Import reads only pinned build-release SOURCE through the existing bounded
-    # stager reader (including its read-only source xattr check on Darwin).
+    # ARM is mandatory import support even on Intel. Both release originals
+    # remain in this same book; no second source_build_selection filesystem read.
     # No Installer, protected-installation readback or payload command is called.
     spec.loader.exec_module(module)
+    release = module.build_release_data(bodies["desktop/macos-installed-inputs/" + target_row["releaseInput"]], target=target)
+    selection = module.BuildSelection(target, release["packageVersion"], release["release"])
     for original in selected:
         need(_gate_file_read(original)[1] == original["sha256"], "gate-stager-source-changed")
-    return module
+    # Retained through use, rechecked by the ordinary gate POST, then consumed
+    # only by its existing final settlement. Import is never a close witness.
+    return module, selection
 
 
 def _gate_dependencies(fixtures, binding, checkout, work, environment):
@@ -5811,20 +5976,23 @@ def _gate_dependencies(fixtures, binding, checkout, work, environment):
          and environment.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "gate-fixed-work-route")
     fixtures.gate_work = _gate_directory(fixtures, str(work), private=True)
     limits = {"headless-tests.receipt.json": 16384, "headless-build.jsonl": 4 * 1024 * 1024, "headless-build.status": 4,
-              "installation-observation.json": 65536, "installer-output.status": 4}
+              "installation-observation.json": 65536, "installer-output.status": 4,
+              "package-install.status": 4, "package-request-id.txt": 33, "package-audit.json": 16384,
+              "producer-descriptor-input.json": 65536, "android-helper-package-install.json": 16384}
     for prefix in ("headless", "headless-native"):
         limits.update({prefix + "-tests.stdout": 65536, prefix + "-tests.stderr": 65536, prefix + "-tests.status": 4})
     bodies = {name: _gate_file(fixtures, name, fixtures.gate_work, limit)[0] for name, limit in limits.items()}
     headless, native = _gate_headless(bodies, binding, checkout, work)
     need(_gate_integers(headless["workOriginal"], 5) == signature(os.fstat(fixtures.gate_work))[:5], "gate-original-work-binding")
-    stage = _gate_load_stager(fixtures, checkout)
-    _gate_installation(bodies["installation-observation.json"], bodies["installer-output.status"], binding, environment, stage)
+    stage, selection = _gate_load_stager(fixtures, checkout, target=binding.target)
+    _gate_installation(bodies["installation-observation.json"], bodies["installer-output.status"], binding, environment,
+                       stage, selection, bodies)
     return bodies, headless, native
 
 
 def _gate_new_report(binding, scope):
     return {"schemaVersion": 1, "type": "macos-installed-shipping-gate-control", **binding.public(),
-        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": "macOS26-arm64",
+        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": target_data(binding.target)["platform"],
         "toolchain": "1.98.1", "testName": SHIPPING_GATE_TEST, "headlessReceiptSha256": None,
         "compilerJsonSha256": None, "installationReadbackSha256": None, "artifact": None,
         "ownerEntered": False, "originalCallReturned": False, "ownerReturncode": None, "ownerElapsedNanoseconds": None,
@@ -5934,7 +6102,7 @@ def run_shipping_gate_control(binding, fixtures, run_owned, checkout, work, envi
         target = _gate_directory(fixtures, "cargo-target", fixtures.gate_work, private=True)
         need(signature(os.fstat(target))[:5] == _gate_integers(headless["cargoTargetOriginal"], 5), "gate-original-target-binding")
         parent = target
-        for name in ("aarch64-apple-darwin", "debug", "deps"):
+        for name in (binding.target, "debug", "deps"):
             parent = _gate_directory(fixtures, name, parent)
         binary = Path(native["path"])
         _body, original = _gate_file(fixtures, binary.name, parent, 1024 * 1024 * 1024, capture=False)
@@ -6025,11 +6193,11 @@ def require_shipping_gate_receipt(binding, uid, gid, checkout, work, environment
     return result
 
 
-def shipping_gate_control_main():
+def shipping_gate_control_main(*, target=ARM_TARGET):
     binding = None
     try:
         root = Path(__file__).absolute().parents[2]
-        binding, uid, gid, _username = admit(os.environ, root)
+        binding, uid, gid, _username = admit(os.environ, root, target=target)
         need(os.environ.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "gate-fixed-shipping-scope")
         owner = load_owner(root)
         os.umask(0o077)
@@ -6077,7 +6245,7 @@ def _capacity_dependencies(fixtures, binding, checkout, work, environment):
 
 def _capacity_new_report(binding, scope):
     return {"schemaVersion": 1, "type": "macos-shipping-capacity-data", **binding.public(),
-        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": "macOS26-arm64",
+        "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": target_data(binding.target)["platform"],
         "toolchain": "1.98.1", "names": list(SHIPPING_CAPACITY_TESTS), "features": [],
         "headlessReceiptSha256": None, "compilerJsonSha256": None, "artifact": None,
         "ownerCallsEntered": 0, "ownerCallsReturned": 0, "originalCallReturned": False, "ownerReturncode": None,
@@ -6164,7 +6332,7 @@ def run_shipping_capacity_data(binding, fixtures, run_owned, checkout, work, env
         target = _gate_directory(fixtures, "cargo-target", fixtures.gate_work, private=True)
         need(signature(os.fstat(target))[:5] == _gate_integers(headless["cargoTargetOriginal"], 5), "capacity-original-target-binding")
         parent = target
-        for name in ("aarch64-apple-darwin", "debug", "deps"):
+        for name in (binding.target, "debug", "deps"):
             parent = _gate_directory(fixtures, name, parent)
         binary = Path(app["path"])
         _body, original = _gate_file(fixtures, binary.name, parent, 1024 * 1024 * 1024, capture=False)
@@ -6221,10 +6389,10 @@ def run_shipping_capacity_data(binding, fixtures, run_owned, checkout, work, env
     return report
 
 
-def shipping_capacity_data_main():
+def shipping_capacity_data_main(*, target=ARM_TARGET):
     try:
         root = Path(__file__).absolute().parents[2]
-        binding, uid, gid, _username = admit(os.environ, root)
+        binding, uid, gid, _username = admit(os.environ, root, target=target)
         need(os.environ.get("MRK_MACOS_AQUA_SCOPE") in SHIPPING_GATE_SCOPES, "capacity-fixed-shipping-scope")
         owner = load_owner(root)
         os.umask(0o077)
@@ -6302,9 +6470,9 @@ def main():
     not_executed = ()
     shipping_gate = None
     try:
-        scope = argument_scope(sys.argv[1:])
+        scope, target = entry_arguments(sys.argv[1:])
         root = Path(__file__).absolute().parents[2]
-        binding, uid, gid, username = admit(os.environ, root)
+        binding, uid, gid, username = admit(os.environ, root, target=target)
         if scope in (RECOVERY_CASE, IOS_ACCOUNT_CASE):
             supplier_origin, supplier_receipt_sha = recovery_supplier_route(
                 os.environ.get("MRK_MACOS_RUNTIME_SUPPLIER", "historical"),

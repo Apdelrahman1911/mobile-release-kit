@@ -620,6 +620,75 @@ mutating a completed runtime. A complete signed-app/runtime inventory is passed
 explicitly into the installer build. That per-build inventory binds this build's
 completed output, not an adjacent file, and grants no runtime/GUI qualification.
 
+## CI signing identity provisioning — implementation, not credential authority
+
+The runtime-signing shipping route, ordinary installed route, and the eleven
+package-producing Aqua scopes use the `macos-developer-id` GitHub environment.
+The credential-free runtime engineering route and the three nonpackage Aqua
+classification/private/lifecycle routes select `macos-engineering` and receive
+no signing secret. Repository administrators must independently configure the
+protected environment's permitted trusted verification branches, required
+reviewers and these two environment secrets:
+
+* `MRK_MACOS_DEVELOPER_ID_P12_BASE64`: canonical base64 of the owner-authorized
+  Developer ID Application identity PKCS12, at most32KiB decoded;
+* `MRK_MACOS_DEVELOPER_ID_P12_PASSWORD`: its nonempty bounded printable-ASCII
+  password. No secret or secret hash belongs in SOURCE, artifacts or a public
+  receipt. The public SOURCE profiles/certificates must independently match.
+
+An environment name in YAML is not proof that protection rules or credentials
+exist. Unconfigured profiles still refuse shipping before credential allocation;
+no ad-hoc fallback, guessed identity or future signed-capsule/M pin is supplied.
+Each secret-bearing combined build/sign step disables tracing and allexport and
+unexports both variables before its first child. Only the fixed packaging helper
+receives inline assignments; Cargo, rustc, stagers, native probes and unrelated
+children receive neither variable. No `$GITHUB_ENV`, exported job secret,
+workspace key file or cross-step keychain adoption is used.
+
+The existing original invocation owner provisions one private keychain per fixed
+signing purpose. Its240s ceiling is clipped to the original enclosing endpoint,
+with30s cleanup reserved inside that same ceiling, at most64 auxiliary calls per
+operation and16KiB private captures per call. Exact search-list/default originals
+are queried, and the user search list is temporarily restricted to the single
+private keychain only after exact public SOURCE identity/certificate admission.
+The default keychain is never changed. The ordered original list is restored and
+rechecked, then the private keychain is removed with the Security API. Each phase
+must finish all original closes and default/search-list POST before later work.
+Unknown/late/mutating/close results retain private state rather than adopt or
+delete an unproven object; they forbid further signing/probe/Installer dispatch
+and success. Public facts contain only fixed roles/status/finality, not private
+argv, search paths, output, passwords or credential hashes.
+
+The exclusive held0700 private root is outside the work/artifact roots. The one
+decoded PKCS12 has exact0600 mode, full original write/readback/POST/close and is
+removed before the signing callback. Opaque Security-created database/sidecar
+contents are never read: a bounded owned-single-link regular-file census permits
+readable metadata modes such as0644 under the private root, rejects special,
+executable and nonowner-write bits, and retains named/held/root identity checks.
+It does not assume every Security version creates0600 databases or chmod an
+unknown API result. Empty-root API cleanup and known closes are required.
+
+Existing code signing retains the exact Developer ID Application SHA1 and current
+flags/empty entitlement policy. Five fixed helper phases replace only the prior
+vault-helper/desktop-image/payload-app/root-app/root-installer signing commands;
+there is no arbitrary path/argv signer or `--deep`. The native package-producer
+copy is first ad-hoc signed/strictly verified and bound to its actual CDHash and
+unchanged compiled content, sealed0555, and only then admitted by exact `-T` plus
+its CDHash partition. It uses the same per-purpose keychain for the existing
+`SecIdentityCreateWithCertificate(NULL, sourceCertificate)` call. This is distinct
+from an unsigned or compiler-future executable permission grant. Public package
+original-call roles and the existing15-call emission/Installer sequence remain.
+
+This wiring does **not** configure a Developer ID Installer identity: the current
+bounded package producer uses the Application identity and existing raw producer
+signature; adopting Installer/package signing would require a separate explicit
+policy. No Apple ID/notary API key, `notarytool`, staple, Gatekeeper or distributable
+notarization claim is added. Genuine configured key discovery/use, signature
+verification, native emitter/Installer, final signed-runtime nomination/M and
+installed/Aqua journeys remain required. Credential-free hardened-runtime
+engineering results remain reusable for their exact executed SOURCE; they are
+not substituted for Developer ID, environment protection or notarization.
+
 ## Python signature derivation before the final runtime manifest
 
 The fresh public CPython suppliers for both targets are already built, probed,

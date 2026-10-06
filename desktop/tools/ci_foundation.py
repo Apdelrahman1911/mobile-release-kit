@@ -715,7 +715,27 @@ GTK_COMPILE_CHECKS = {
                 "gtk-js-syntax-only", "gtk-c-pkg-config", "gtk-c-compile-only",
                 "vite-assets", "gtk-integration-compile-only"),
 }
+MAC_COMPILE_SCOPE = "macos-normal-compile-v1"
+MAC_COMPILE_WORKFLOW = ".github/workflows/desktop-macos-normal-compile.yml"
+MAC_COMPILE_REF = "refs/heads/verify/desktop-macos-normal-compile"
+MAC_COMPILE_RUST = "1.98.1"
+MAC_COMPILE_RUST_COMMIT = "48a229ceaefd4985c50990b14116b6d856af0985"
+MAC_COMPILE_HOSTS = {
+    "aarch64-apple-darwin": ("ARM64", "arm64", ("macos26", "macos26-arm64"), "build-release.json", "macos26-arm64-"),
+    "x86_64-apple-darwin": ("X64", "x86_64", ("macos26",), "build-release-intel.json", "macos26-x86_64-"),
+}
+MAC_COMPILE_GRAPHS = (
+    ("mac-normal-bin-compile-only", "desktop/src-tauri/Cargo.toml", "release", "desktop-shell,custom-protocol", "mobile-release-kit-desktop"),
+    ("mac-observer-compile-only", "desktop/src-tauri/Cargo.toml", "test", "desktop-shell,custom-protocol,macos-installed-observation", "installed-shell-observation"),
+    ("mac-image-compile-only", "desktop/helpers/macos-desktop-image/Cargo.toml", "release", "macos-installed-desktop-image", "lib"),
+)
+MAC_COMPILE_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata", "mac-image-locked-metadata", "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version", "typescript-no-emit", "vite-assets", *(row[0] for row in MAC_COMPILE_GRAPHS)),
+}
 COMPILE_PROFILES = {
+    MAC_COMPILE_SCOPE: {"workflow": MAC_COMPILE_WORKFLOW, "ref": MAC_COMPILE_REF,
+                        "evidence": "desktop-macos-normal-compile-only-v1", "checks": MAC_COMPILE_CHECKS},
     COMPILE_SCOPE: {"workflow": COMPILE_WORKFLOW, "ref": COMPILE_REF,
                     "evidence": COMPILE_EVIDENCE_SCOPE, "checks": COMPILE_CHECKS},
     GTK_COMPILE_SCOPE: {"workflow": GTK_COMPILE_WORKFLOW, "ref": GTK_COMPILE_REF,
@@ -2630,6 +2650,8 @@ VERSION_NATIVE_SOURCES = tuple(sorted({
 }))
 
 TOOL_CHECKS = frozenset({
+    "mac-cargo-version", "mac-normal-locked-metadata", "mac-image-locked-metadata",
+    "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-image-compile-only",
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
     "node-version", "npm-locked-no-scripts", "headless-test-compile-only",
@@ -2704,6 +2726,7 @@ def admit_phase(scope: str, phase: str) -> None:
 
 def admit_platform(scope: str, platform: str) -> None:
     require(platform in TARGETS, "Unknown desktop verification platform")
+    require(scope != MAC_COMPILE_SCOPE or platform == "macos", "Normal Mac compilation requires macOS")
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
@@ -2712,6 +2735,77 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
     require(scope != GITHUB_TLS_SCOPE or platform == "linux", "TLS verification requires Linux")
+
+
+def mac_compile_target(environment: dict[str, str]) -> str:
+    """Fixed hosted row DATA; actual uname and original compiler are separate checks."""
+    target = environment.get("MRK_MACOS_TARGET", "")
+    require(target in MAC_COMPILE_HOSTS, "Unknown normal Mac compiler target")
+    arch, _, images, _, _ = MAC_COMPILE_HOSTS[target]
+    require(environment.get("RUNNER_OS") == "macOS" and environment.get("RUNNER_ARCH") == arch
+            and environment.get("ImageOS") in images, "Normal Mac compiler runner row differs")
+    return target
+
+
+def compiler_binding(context: dict) -> dict:
+    if context.get("executionScope") == MAC_COMPILE_SCOPE:
+        target = context.get("macCompile", {}).get("target")
+        require(context.get("platform") == "macos" and target in MAC_COMPILE_HOSTS,
+                "Normal Mac compiler context differs")
+        return {"release": MAC_COMPILE_RUST, "commitHash": MAC_COMPILE_RUST_COMMIT, "target": target}
+    return {"release": RUST, "target": TARGETS[context["platform"]]}
+
+
+def mac_compile_release(raw: bytes, target: str, cargo: bytes, tauri: bytes) -> str:
+    require(target in MAC_COMPILE_HOSTS and type(raw) is bytes and 0 < len(raw) <= 4096,
+            "Normal Mac SOURCE release exceeds its fixed bound")
+    value = parse_compile_receipt(raw)
+    require(type(value) is dict and set(value) == {"schemaVersion", "packageVersion", "release"}
+            and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1,
+            "Normal Mac SOURCE release shape differs")
+    version, release = value["packageVersion"], value["release"]
+    require(type(version) is str and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version) is not None
+            and len(version) <= 32 and all(int(part) <= 0xffffffff for part in version.split(".")),
+            "Normal Mac SOURCE package version differs")
+    require(type(release) is str and 0 < len(release) <= 128
+            and release.startswith(MAC_COMPILE_HOSTS[target][4])
+            and re.fullmatch(r"[a-z0-9][a-z0-9_.-]*[a-z0-9]", release) is not None,
+            "Normal Mac SOURCE release target differs")
+    require(tomllib.loads(cargo.decode("utf-8"))["package"]["version"] == version
+            and parse_compile_receipt(tauri)["version"] == version,
+            "Normal Mac SOURCE package/tauri versions differ")
+    return release
+
+
+def mac_compile_inputs(source: Path, target: str) -> dict:
+    require(target in MAC_COMPILE_HOSTS, "Unknown normal Mac source target")
+    paths = ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
+             "desktop/helpers/macos-desktop-image/Cargo.toml", "desktop/helpers/macos-desktop-image/Cargo.lock",
+             "desktop/src-tauri/tauri.conf.json", "desktop/native/macos-installed-native/build.rs",
+             "desktop/packaging/macos-android-service-signing.profile", "desktop/packaging/macos-install-producer-signing.profile",
+             "desktop/macos-installed-inputs/" + MAC_COMPILE_HOSTS[target][3])
+    bodies, rows = {}, []
+    for name in paths:
+        path = source / name
+        ordinary(path)
+        with path.open("rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        require(0 < len(raw) <= 1024 * 1024, "Normal Mac compiler SOURCE exceeds its bound")
+        bodies[name] = raw
+        rows.append({"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    release = mac_compile_release(bodies[paths[-1]], target, bodies[paths[0]], bodies[paths[4]])
+    return {"target": target, "release": release, "sources": rows,
+            "graphs": [list(row) for row in MAC_COMPILE_GRAPHS], "execution": "compile-only"}
+
+
+def mac_compile_source_guard(source: Path, root: Path) -> None:
+    no_cargo_configuration((source / "desktop/helpers/macos-desktop-image", source / "desktop/helpers",
+                            source / "desktop/src-tauri", source / "desktop", source, *source.parents,
+                            root, *root.parents))
+    # This manifest must never select a stale adjacent output instead of the
+    # single explicit private Cargo target. Check again after acquisition.
+    generated = source / "desktop/helpers/macos-desktop-image/target"
+    require(not generated.exists() and not generated.is_symlink(), "Helper manifest has a preexisting generated target")
 
 
 def compile_profile(scope: str) -> dict:
@@ -2836,9 +2930,11 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
     expected = {
         "schemaVersion": 1, "scope": profile["evidence"], "phase": phase, "status": "passed",
         **{name: context[name] for name in binding_names},
-        "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": NODE,
+        "rust": compiler_binding(context), "node": NODE,
         "checks": [{"check": name, "exitCode": 0} for name in profile["checks"][phase]],
     }
+    if context["executionScope"] == MAC_COMPILE_SCOPE:
+        expected.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -2976,6 +3072,10 @@ def admitted_host(*, retention_only: bool = False) -> str:
         "linux": "linux", "darwin": "macos", "win32": "windows",
     }.get(sys.platform), "Unexpected host platform")
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == MAC_COMPILE_SCOPE:
+        target = mac_compile_target(os.environ)
+        require(os.uname().sysname == "Darwin" and os.uname().machine == MAC_COMPILE_HOSTS[target][1]
+                and os.geteuid() != 0, "Normal Mac compiler requires its actual non-root native host")
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
@@ -3038,14 +3138,14 @@ def clean_environment(root: Path) -> dict[str, str]:
     return environment
 
 
-def source_unchanged(context: dict) -> None:
+def source_unchanged(context: dict, *, timeout_for=None) -> None:
     source, root = Path(context["source"]), Path(context["root"])
     git = context["git"]
     environment = clean_environment(root)
-    require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True)
+    require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15 if timeout_for is None else timeout_for(15), capture=True)
             == context["sourceSha"], "Checkout commit changed")
     run([git, "diff", "--no-ext-diff", "--no-textconv", "--exit-code", "--quiet", "HEAD", "--"],
-        check="source-clean", cwd=source, env=environment, timeout=15)
+        check="source-clean", cwd=source, env=environment, timeout=15 if timeout_for is None else timeout_for(15))
 
 
 def no_cargo_configuration(directories: tuple[Path, ...]) -> None:
@@ -6914,7 +7014,7 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
     value = {
         "schemaVersion": 1, "scope": scope, "phase": name,
         "status": "passed", "sourceSha": context["sourceSha"], "platform": context["platform"],
-        "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": node,
+        "rust": compiler_binding(context), "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
     }
     if compiled is not None:
@@ -6930,6 +7030,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "Compiler-only phase cannot produce native evidence")
         value.update(scope=profile["evidence"],
                      **{key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")})
+        if context["executionScope"] == MAC_COMPILE_SCOPE:
+            value.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
         if context["executionScope"] == GTK_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
@@ -7052,6 +7154,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     sha = os.environ["GITHUB_SHA"]
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None, "Invalid source SHA")
+    mac_target = mac_compile_target(os.environ) if scope == MAC_COMPILE_SCOPE else None
+    if mac_target is not None:
+        mac_compile_source_guard(source, temp)
     for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
         require(not (source / relative).exists() and not (source / relative).is_symlink(),
                 "Fresh checkout contains an existing generated output")
@@ -7078,8 +7183,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     for name in empty_files:
         (root / name).touch(mode=0o600, exist_ok=False)
     git = shutil.which("git")
-    rustup = shutil.which("rustup")
-    require(git is not None and rustup is not None, "Hosted compiler tools unavailable")
+    rustup = None if scope == MAC_COMPILE_SCOPE else shutil.which("rustup")
+    require(git is not None and (scope == MAC_COMPILE_SCOPE or rustup is not None), "Hosted compiler tools unavailable")
     environment = clean_environment(root)
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
@@ -7113,6 +7218,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True))}
     context.update(binding)
+    if mac_target is not None:
+        require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Normal Mac source tree differs")
+        context["macCompile"] = mac_compile_inputs(source, mac_target)
     if windows:
         context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])
     workflow = (profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_edit
@@ -7169,6 +7277,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if profile:
         public.update(binding)
         public["notQualified"].append("test-execution")
+    if scope == MAC_COMPILE_SCOPE:
+        public.update(expectedRust=MAC_COMPILE_RUST, compiler=compiler_binding(context), macCompile=context["macCompile"])
+        public["notQualified"].extend(("signed-runtime", "Developer-ID-identity", "service-registration", "ordinary-UI"))
     if scope == GTK_COMPILE_SCOPE:
         public["sg1"] = context["sg1"]
         public["notQualified"].extend(("SG1-native-qualification", "installed-API-loader-writer-admission"))
@@ -7231,6 +7342,10 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
         require(all(context.get(key) == value for key, value in binding.items())
                 and context.get("workflowSha256") == hash_file(Path(context["source"]) / profile["workflow"]),
                 "Compiler task workflow binding changed")
+        if scope == MAC_COMPILE_SCOPE:
+            require(context.get("macCompile") == mac_compile_inputs(Path(context["source"]), mac_compile_target(os.environ))
+                    and re.fullmatch(r"[0-9a-f]{40}", context.get("sourceTree", "")) is not None,
+                    "Normal Mac compiler source/target binding changed")
         if scope == GTK_COMPILE_SCOPE:
             require(type(context.get("sourceTree")) is str
                     and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
@@ -7315,8 +7430,25 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
     return context
 
 
-def tools(context: dict, environment: dict[str, str]) -> tuple[str, str]:
+def tools(context: dict, environment: dict[str, str], *, timeout_for=None) -> tuple[str, str]:
     root = Path(context["root"])
+    if context.get("executionScope") == MAC_COMPILE_SCOPE:
+        selected = compiler_binding(context)
+        binary = Path("/Users/runner/.rustup/toolchains") / ("stable-" + selected["target"]) / "bin"
+        cargo, rustc = str(binary / "cargo"), str(binary / "rustc")
+        ordinary(Path(cargo))
+        ordinary(Path(rustc))
+        version = run([rustc, "-vV"], check="rust-version-target", cwd=root, env=environment,
+                      timeout=15 if timeout_for is None else timeout_for(15), capture=True)
+        require(len(version.encode()) <= 4096 and "release: " + MAC_COMPILE_RUST in version.splitlines()
+                and "commit-hash: " + MAC_COMPILE_RUST_COMMIT in version.splitlines()
+                and "host: " + selected["target"] in version.splitlines(), "Direct Mac compiler version/commit/host differs")
+        cargo_version = run([cargo, "--version"], check="mac-cargo-version", cwd=root, env=environment,
+                            timeout=15 if timeout_for is None else timeout_for(15), capture=True)
+        require(len(cargo_version.encode()) <= 4096 and re.fullmatch(r"cargo [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)", cargo_version) is not None,
+                "Direct Mac Cargo version differs")
+        environment.update(RUSTC=rustc, RUSTUP_AUTO_INSTALL="0", PATH=str(binary) + os.pathsep + environment["PATH"])
+        return cargo, rustc
     cargo = run([context["rustup"], "which", "--toolchain", RUST, "cargo"], cwd=root,
                 check="cargo-selection", env=environment, timeout=15, capture=True)
     rustc = run([context["rustup"], "which", "--toolchain", RUST, "rustc"], cwd=root,
@@ -7901,6 +8033,98 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
     return observed_node
 
 
+def phase_mac_compile(name: str, context: dict) -> None:
+    """Three fixed compile-only graphs through the SAME existing run/cleanup owner."""
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("platform") == "macos",
+            "Wrong normal Mac compiler scope")
+    require(name in ("acquire", "compile", "clean"), "Wrong normal Mac compiler phase")
+    if name == "clean":
+        source_unchanged(context)
+        mac_compile_source_guard(Path(context["source"]), Path(context["root"]))
+        require(context["macCompile"] == mac_compile_inputs(Path(context["source"]), context["macCompile"]["target"]),
+                "Normal Mac cleanup source inputs changed")
+        clean_compile(context)
+        return
+    started = time.monotonic()
+    deadline = started + (900 if name == "acquire" else 1500)
+    previous = started
+    def remaining(cap: int) -> int:
+        nonlocal previous
+        now = time.monotonic()
+        require(previous <= now < deadline - 30, "Normal Mac compiler endpoint expired or clock reversed")
+        previous = now
+        value = min(cap, int(deadline - now - 30))
+        require(value > 0, "Normal Mac compiler has no remaining original time")
+        return value
+    root, source = Path(context["root"]), Path(context["source"])
+    remaining(30)
+    source_unchanged(context, timeout_for=remaining)
+    mac_compile_source_guard(source, root)
+    require(context["macCompile"] == mac_compile_inputs(source, context["macCompile"]["target"]),
+            "Normal Mac source inputs changed")
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    remaining(30)
+    cargo, _ = tools(context, environment, timeout_for=remaining)
+    remaining(30)
+    target = context["macCompile"]["target"]
+    desktop, manifest = source / "desktop", source / "desktop/src-tauri/Cargo.toml"
+    image_manifest = source / "desktop/helpers/macos-desktop-image/Cargo.toml"
+    if name == "acquire":
+        # Separate locked graphs, shared fresh private Cargo cache; metadata does
+        # not build or unify their deliberately incompatible native roles.
+        for check, cargo_manifest, features, output_path in (
+            ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[1][3]], root / "metadata.json"),
+            ("mac-image-locked-metadata", image_manifest, [], root / "target/mac-image-metadata.json"),
+        ):
+            with output_path.open("x", encoding="utf-8") as output:
+                run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                     *features, "--filter-platform", target, "--manifest-path", str(cargo_manifest)],
+                    check=check, cwd=root, env=environment, timeout=remaining(600), output=output)
+            remaining(30)
+    node = shutil.which("node")
+    require(node is not None, "Selected Node unavailable")
+    observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
+    require(observed == NODE, "Selected Node version differs")
+    if name == "acquire":
+        npm = Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+        ordinary(npm)
+        run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
+             "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
+             "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
+            check="npm-locked-no-scripts", cwd=desktop, env=environment, timeout=remaining(300))
+    else:
+        run([node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
+            check="typescript-no-emit", cwd=desktop, env=environment, timeout=remaining(60))
+        run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
+             str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
+            check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
+        # SOURCE projections are DATA, not invented runtime or signing anchors.
+        environment.update(MRK_MACOS_INSTALL_SOURCE_COMMIT=context["sourceSha"], MRK_IMAGE_RELEASE_ID=context["macCompile"]["release"])
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", target,
+                  "--target-dir", str(root / "target")]
+        for check, relative, profile, features, artifact in MAC_COMPILE_GRAPHS:
+            argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
+            if profile == "test":
+                argv += ["--features", features, "--test", artifact, "--no-run"]
+            elif artifact == "lib":
+                argv += ["--release", "--lib"]
+            else:
+                argv += ["--release", "--features", features, "--bin", artifact]
+            run(argv, check=check, cwd=root, env=environment, timeout=remaining(1500))
+            remaining(30)
+    remaining(30)
+    mac_compile_source_guard(source, root)
+    require(context["macCompile"] == mac_compile_inputs(source, target), "Normal Mac source inputs changed after compilation")
+    remaining(30)
+    source_unchanged(context, timeout_for=remaining)
+    remaining(30)
+    phase_receipt(context, name, list(MAC_COMPILE_CHECKS[name]), node=observed)
+    # A retained receipt is not an original phase exit. If publication arrives
+    # late, fail the SAME phase; the fixed workflow never cleans on that return.
+    remaining(30)
+
+
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
@@ -7924,6 +8148,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         return
     if scope == GITHUB_TLS_SCOPE:
         phase_github_tls(name, context)
+        return
+    if scope == MAC_COMPILE_SCOPE:
+        phase_mac_compile(name, context)
         return
     windows = scope == WINDOWS_SNAPSHOT_SCOPE
     root, source = Path(context["root"]), Path(context["source"])

@@ -712,8 +712,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         btm = section(publish, "              btm_log = None", "              # This committed workflow selects the ordinary native fixture route.")
         self.assertEqual(flat(active(btm)), flat("""btm_log = None
             btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
-            fixture.need(type(btm_record["schemaVersion"]) is int and btm_record["schemaVersion"] == 2
-                         and btm_record["type"] == "mrk-e2-fixture-btm-log-observation-v2", "summary-btm-version")
+            fixture.need(type(btm_record["schemaVersion"]) is int and btm_record["schemaVersion"] == 3
+                         and btm_record["type"] == "mrk-e2-fixture-btm-log-observation-v3", "summary-btm-version")
             if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                     and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
                 btm_log = btm_record"""))
@@ -738,9 +738,10 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                 if not value:
                     raise ValueError(label)
         projection = compile(ast.parse(textwrap.dedent(btm)), "<fixed-btm-projection>", "exec")
-        original_record = {"schemaVersion": 2, "type": "mrk-e2-fixture-btm-log-observation-v2",
+        original_record = {"schemaVersion": 3, "type": "mrk-e2-fixture-btm-log-observation-v3",
                            "ownEventDetails": [{"ordinal": 1, "messageSha256": "c" * 64,
-                                                "pathMask": 1, "markerMask": 3, "codeMask": 0}],
+                                                "pathMask": 1, "markerMask": 3, "codeMask": 0,
+                                                "trace": {'characters': 269, 'knownTokens': 4, 'unknownRuns': 0, 'tokens': [[0, 42, 10], [43, 8, 13], [52, 5, 27], [59, 209, 0]]}}],
                            "ownEventDetailsOmitted": 0}
         for refused in (None, "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "returned", "cleanup"):
             validations = []
@@ -753,7 +754,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             self.assertEqual(validations, [original_record])
             self.assertIs(namespace["btm_log"], original_record if refused is None else None)
             self.assertFalse(namespace["accepted"])
-        for mutation in ({"schemaVersion": 1}, {"schemaVersion": True}, {"type": "mrk-e2-fixture-btm-log-observation-v1"}):
+        for mutation in ({"schemaVersion": 1}, {"schemaVersion": 2}, {"schemaVersion": True},
+                         {"type": "mrk-e2-fixture-btm-log-observation-v1"}, {"type": "mrk-e2-fixture-btm-log-observation-v2"}):
             good_record = original_record
             original_record = dict(good_record, **mutation)
             original_calls, validations = [{"returned": True}], []

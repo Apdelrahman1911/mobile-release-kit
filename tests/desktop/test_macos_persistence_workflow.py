@@ -4,6 +4,7 @@ These are parser/failure-injection checks, not XCTest, Keychain, app or signing
 evidence. No native command is run; every synthetic output is discarded.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -17,6 +18,7 @@ ROOT = Path(__file__).absolute().parents[2]
 WORKFLOW = ROOT / ".github/workflows/desktop-macos-installed.yml"
 SHA = "a" * 40
 HELPER = "b" * 64
+TARGETS = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
 SELECTED = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticPersistentCredentials]"
 START = ("Test Case '" + SELECTED + "' started.").encode()
 PASS = ("Test Case '" + SELECTED + "' passed (1.000 seconds).").encode()
@@ -43,15 +45,15 @@ def parser_body(marker):
     raise AssertionError("missing parser terminator")
 
 
-def inputs():
+def inputs(target="aarch64-apple-darwin"):
     preview = {"scope": "normal-macos-early-preview", "sourceCommit": SHA,
                "sourceTree": "c" * 40, "runId": "1234", "runAttempt": "1",
-               "platform": "macOS26-arm64", "instrumented": False,
+               "platform": TARGETS[target], "instrumented": False,
                "normalBuild": "passed", "packageAudit": "passed", "installationReadback": "passed",
                "signedAppBinarySha256": "d" * 64, "packageSha256": "e" * 64,
                "normalBinaryBeforeSigningSha256": "f" * 64, "packageSize": 128,
                "runtimeManifestSha256": "1" * 64, "installerInventorySha256": "2" * 64}
-    basic = {"scope": "normal-app-launch-cancel-navigation-quit-ui-only",
+    basic = {"scope": "normal-app-launch-cancel-navigation-quit-ui-only", "target": target,
              "applicationSourceCommit": SHA, "harnessSourceCommit": SHA,
              "runId": "1234", "runAttempt": "1", "signedAppBinarySha256": "d" * 64,
              "packageSha256": "e" * 64, "launchRenderCancelNavigationQuitUI": "passed",
@@ -70,6 +72,49 @@ def inputs():
     for name in ("xcode-version", "sdk-path", "sdk-version", "sdk-build"):
         files["normal-ui/" + name + ".txt"] = b"synthetic-tool-binding\n"
     files["normal-ui/persistence-test.log"] = b"\n".join((START, FIRST, SECOND, FINAL, PASS)) + b"\n"
+    # These are deliberately synthetic DATA, never recorded native commands.
+    # Match the three fixed current parser inputs and hash the fixture's own
+    # raw summary/tool bytes; do not substitute a parser or weaken its checks.
+    roster = ("normal-ui-source-roster", 15, 1048576)
+    specifications = (
+        ("build.command-admission.json", "build", None, 450,
+         (roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+          ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+          ("normal-ui-build", 240, 1048576), roster)),
+        ("persistence-test.runner-admission.json", "test", "persistence-test.xcresult", 585,
+         (roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+          ("one-admitted-ui-test", 420, 1048576), roster)),
+        ("persistence-summary.command-admission.json", "summary", "persistence-test.xcresult", 90,
+         (roster, ("normal-ui-summary", 30, 262144), roster)),
+    )
+    tool_files = ("xcode-version", "sdk-path", "sdk-version", "sdk-build")
+    for name, phase, bundle, seconds, roles in specifications:
+        limit = 32 * 1024**3 if phase == "build" else 1024**3
+        value = {"schemaVersion": 1, "sourceCommit": SHA, "target": target,
+                 "scope": "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only",
+                 "normalPhase" if phase == "test" else "phase": phase, "resultBundle": bundle,
+                 "sourcePrePostMatched": True, "originalCommandReturned": True,
+                 "sourceRosterSha256": hashlib.sha256(b"synthetic-current-source-roster").hexdigest(),
+                 "fileLimitBytes": [limit, limit], "receiptPolicy": "exclusive0600-readback-consuming-close",
+                 "originalTestReturncode" if phase == "test" else "originalReturncode": 0,
+                 "phaseClock": {"startNs": "1000000000", "deadlineNs": str((seconds + 1) * 1_000_000_000),
+                                "beforePublicationNs": "2000000000", "postCloseDeadlineRequired": True},
+                 "commands": []}
+        if phase == "test":
+            value.update(appSandboxEntitlement="absent", strictCodesignOriginalZero=True,
+                         originalProductsPrePostMatched=True, originalClosesCompleted=True,
+                         reSignedOrRepaired=False)
+        else:
+            value["originalCommandRole"] = roles[-2][0]
+        for index, (role, cap, output_limit) in enumerate(roles):
+            stdout = (files["normal-ui/" + tool_files[index - 1] + ".txt"] if phase == "build" and 1 <= index <= 4 else
+                      files["normal-ui/persistence-summary.raw.json"] if phase == "summary" and index == 1 else b"")
+            value["commands"].append({"role": role, "returncode": 0, "roleCapSeconds": cap,
+                "timeoutSeconds": 1, "outputLimitBytes": output_limit,
+                "stdoutBytes": len(stdout), "stderrBytes": 0,
+                "argvSha256": hashlib.sha256(("synthetic-not-executed-" + role).encode()).hexdigest(),
+                "stdoutSha256": hashlib.sha256(stdout).hexdigest(), "stderrSha256": hashlib.sha256(b"").hexdigest()})
+        files["normal-ui/" + name] = json.dumps(value, sort_keys=True).encode()
     return files
 
 
@@ -80,7 +125,7 @@ def replace_field(files, name, key, value):
 
 
 @contextlib.contextmanager
-def private_fixture(files):
+def private_fixture(files, *, target="aarch64-apple-darwin"):
     with tempfile.TemporaryDirectory(prefix="mrk-persistence-parser-") as directory:
         root = Path(directory)
         for name, data in files.items():
@@ -89,7 +134,7 @@ def private_fixture(files):
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)
-        environment = {"MRK_MACOS_WORK": directory, "GITHUB_SHA": SHA, "GITHUB_WORKFLOW_SHA": SHA,
+        environment = {"MRK_MACOS_WORK": directory, "MRK_MACOS_TARGET": target, "GITHUB_SHA": SHA, "GITHUB_WORKFLOW_SHA": SHA,
                        "GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "1",
                        "MRK_MACOS_VAULT_HELPER_SHA256": HELPER, "MRK_MACOS_VAULT_HELPER_BYTES": "4096"}
         with patch.dict(os.environ, environment, clear=True):
@@ -103,26 +148,34 @@ def execute(marker):
 
 
 class MacPersistenceWorkflowTests(unittest.TestCase):
-    def rejected(self, files):
-        with private_fixture(files) as root:
+    def rejected(self, files, *, target="aarch64-apple-darwin"):
+        with private_fixture(files, target=target) as root:
             with self.assertRaises((ValueError, KeyError, TypeError, OSError)):
                 execute("PY_PERSISTENCE_RESULT")
             self.assertFalse((root / "normal-ui/persistence-result.json").exists())
 
     def test_exact_synthetic_result_keeps_native_limitations(self):
-        with private_fixture(inputs()) as root:
-            execute("PY_PERSISTENCE_RESULT")
-            result = json.loads((root / "normal-ui/persistence-result.json").read_text())
-            self.assertEqual(result["applicationSourceCommit"], SHA)
-            self.assertEqual(result["vaultHelperSha256"], HELPER)
-            self.assertEqual(result["testCounts"], json.loads(inputs()["normal-ui/persistence-summary.raw.json"]))
-            self.assertEqual(result["applicationRestart"], "passed")
-            self.assertEqual(result["ordinaryApplicationLifetimes"], 2)
-            self.assertIs(result["originalReferenceAndGateTerminalObserved"], True)
-            self.assertIsNone(result["cleanExitStatus"])
-            self.assertEqual(result["allWorkerFinality"], "not-established-by-XCTest-UI-state")
-            for field in ("signingOrStoreValidated", "fullUIQualified", "distributionQualified", "productReady"):
-                self.assertIs(result[field], False)
+        for target in TARGETS:
+            files = inputs(target)
+            with self.subTest(target=target), private_fixture(files, target=target) as root:
+                execute("PY_PERSISTENCE_RESULT")
+                result = json.loads((root / "normal-ui/persistence-result.json").read_text())
+                self.assertEqual(result["applicationSourceCommit"], SHA)
+                self.assertEqual(result["vaultHelperSha256"], HELPER)
+                self.assertEqual(result["testCounts"], json.loads(files["normal-ui/persistence-summary.raw.json"]))
+                self.assertEqual(result["applicationRestart"], "passed")
+                self.assertEqual(result["ordinaryApplicationLifetimes"], 2)
+                self.assertIs(result["originalReferenceAndGateTerminalObserved"], True)
+                self.assertIsNone(result["cleanExitStatus"])
+                self.assertEqual(result["allWorkerFinality"], "not-established-by-XCTest-UI-state")
+                for field in ("signingOrStoreValidated", "fullUIQualified", "distributionQualified", "productReady"):
+                    self.assertIs(result[field], False)
+                self.assertEqual(result["target"], target)
+                self.assertEqual(result["platform"], TARGETS[target])
+                for field, leaf in (("buildCommandAdmissionSha256", "build.command-admission.json"),
+                                    ("generatedRunnerAdmissionSha256", "persistence-test.runner-admission.json"),
+                                    ("summaryCommandAdmissionSha256", "persistence-summary.command-admission.json")):
+                    self.assertEqual(result[field], hashlib.sha256(files["normal-ui/" + leaf]).hexdigest())
 
     def test_both_lifetimes_and_final_marker_are_unique_ordered_and_inside_the_test(self):
         original = inputs()["normal-ui/persistence-test.log"]
@@ -179,11 +232,22 @@ class MacPersistenceWorkflowTests(unittest.TestCase):
             ("app-result.json", "vaultHelperSha256", "9" * 64),
             ("app-result.json", "appBinarySha256BeforeSigning", "9" * 64),
         )
-        for name, key, value in mutations:
-            with self.subTest(name=name, key=key):
-                files = inputs()
-                replace_field(files, name, key, value)
-                self.rejected(files)
+        for target in TARGETS:
+            other = next(value for value in TARGETS if value != target)
+            target_mutations = (("preview/PREVIEW.json", "platform", TARGETS[other]),
+                                ("normal-ui/result.json", "target", other),
+                                ("normal-ui/result.json", "target", "unsupported-target"))
+            for leaf in ("build.command-admission.json", "persistence-test.runner-admission.json",
+                         "persistence-summary.command-admission.json"):
+                target_mutations += (("normal-ui/" + leaf, "target", other),
+                                     ("normal-ui/" + leaf, "target", "unsupported-target"))
+            for name, key, value in mutations + target_mutations:
+                with self.subTest(target=target, name=name, key=key):
+                    files = inputs(target)
+                    replace_field(files, name, key, value)
+                    self.rejected(files, target=target)
+            self.rejected(inputs(target), target=other)
+            self.rejected(inputs(target), target="unsupported-target")
 
     def test_only_actual_zero_status_and_exact_one_test_summary_can_pass(self):
         for command in ("build", "persistence-test", "persistence-summary"):

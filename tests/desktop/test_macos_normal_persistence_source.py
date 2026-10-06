@@ -232,11 +232,11 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         # not native-success receipts. Keep success-only admission, package/test
         # count bindings, deadlines and finality limitations intact.
         pins = {
-            b"normal_ui_build": "f0585df260579d0eb39bae2d7ae265f950887e7fc1ce60320f54ef03678e647b",
-            b"normal_ui_test": "9236e0e1f50bebcbd63c942fa5f228794dc53a01df1ba548b23dcd18ba67227a",
-            b"normal_project_ui_test": "9f7298b660ad22517d17e3e8420bec3c1d8071e18003ac435aa1df7e6f20256b",
-            b"normal_project_ui_result": "60253d2653f54318ce00023737e8f50034018fa45d5d1a3809e9280cca41282f",
-            b"normal_persistence_ui_test": "3ff4b7295bf3be9a52887f06e2c83acfb7010a6cad2113ffcd434a423a7fc259",
+            b"normal_ui_build": "c6ebf32fdd6f2d7eb52fe542e50c684a651f241420fc3092194efb63a775f615",
+            b"normal_ui_test": "1ccc1cbd1059565b87a50fa767e9772e3e6c133975d536607d4af65ed5e0b56e",
+            b"normal_project_ui_test": "8610371ad9fbc357cac42d8b6796275799a0c1ed436c8331416455974f2c99b5",
+            b"normal_project_ui_result": "b0c6b67f2f0914e1e69cd5182b20e04043ce95a7c9299d5115225a1f62f9acf2",
+            b"normal_persistence_ui_test": "9cc77c35a6fe15ae7cc52155f2b5def9dedd72f9a266f031698fdb7c1e295635",
         }
         for identifier, expected in pins.items():
             self.assertEqual(ids.count(identifier), 1, identifier)

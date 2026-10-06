@@ -17,6 +17,7 @@ concurrency:
 jobs:
   signed-python:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-engineering' || github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-shipping')
+    environment: ${{ github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-shipping' && 'macos-developer-id' || 'macos-engineering' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
@@ -108,7 +109,12 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-shipping' && secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 || '' }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-shipping' && secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD || '' }}
         run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           umask 077
           ulimit -c 0
@@ -118,7 +124,10 @@ jobs:
           /bin/chmod 400 "$MRK_MACOS_WORK/python-supplier-transport/supplier.tar" "$MRK_MACOS_WORK/python-supplier-transport/supplier-receipt.json"
           # Fixed six pins, exact TAR/receipt inverse, immutable inputs, signature
           # checks and all four native probes are inside this one existing owner.
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py "$MRK_PYTHON_SIGNING_PHASE" --target "$MRK_PYTHON_TARGET"
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py "$MRK_PYTHON_SIGNING_PHASE" --target "$MRK_PYTHON_TARGET"
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Preserve only bounded purpose facts, never raw command transcripts
         if: always() && (steps.sign.outcome == 'success' || steps.sign.outcome == 'failure')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,10 +1,12 @@
-"""In-memory compiler-only admission/cleanup contracts, never helper execution."""
+"""In-memory compiler-only contracts; no compiler, application or native execution."""
 from __future__ import annotations
 
 from copy import deepcopy
+import contextlib
 import importlib.util
+import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +37,56 @@ def receipt(phase: str) -> dict:
             "checks": [{"check": check, "exitCode": 0} for check in helper.COMPILE_CHECKS[phase]]}
 
 
+def mac_environment(target="aarch64-apple-darwin"):
+    arch, _, images, _, _ = helper.MAC_COMPILE_HOSTS[target]
+    return {**environment(), "GITHUB_REF": helper.MAC_COMPILE_REF,
+            "GITHUB_WORKFLOW_REF": f"fictional/project/{helper.MAC_COMPILE_WORKFLOW}@{helper.MAC_COMPILE_REF}",
+            "MRK_MACOS_TARGET": target, "RUNNER_OS": "macOS", "RUNNER_ARCH": arch, "ImageOS": images[0],
+            "GITHUB_WORKSPACE": "/inert/source", "RUNNER_TEMP": "/inert/tmp", "PATH": "/selected/bin",
+            "GITHUB_OUTPUT": "/inert/output", "MRK_DESKTOP_PLATFORM": "macos",
+            "MRK_DESKTOP_HOSTED_CHECKS": helper.MAC_COMPILE_SCOPE}
+
+
+def mac_context(target="aarch64-apple-darwin"):
+    return {**helper.compile_workflow_binding(mac_environment(target), helper.MAC_COMPILE_SCOPE),
+            "root": "/inert/tmp/mrk-desktop-foundation-original", "source": "/inert/source", "git": "/usr/bin/git",
+            "platform": "macos", "sourceTree": "3" * 40, "workflowSha256": "2" * 64,
+            "executionScope": helper.MAC_COMPILE_SCOPE,
+            # Synthetic in-memory context only; never an admitted source receipt.
+            "macCompile": {"target": target, "release": helper.MAC_COMPILE_HOSTS[target][4] + "desktop-01",
+                           "sources": [], "graphs": [list(row) for row in helper.MAC_COMPILE_GRAPHS], "execution": "compile-only"}}
+
+
+def memory_paths(events):
+    class Stream:
+        def __init__(self, *args, **kwargs):
+            self.name = str(args[0]) if args else "memory"
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            events.append(("closed", self.name))
+        def write(self, value):
+            events.append(("write", self.name, value))
+            return len(value)
+    class MemoryPath(PurePosixPath):
+        def resolve(self, strict=False):
+            return self
+        def exists(self):
+            return False
+        def is_symlink(self):
+            return False
+        def mkdir(self, **kwargs):
+            events.append(("mkdir", str(self)))
+        def touch(self, **kwargs):
+            events.append(("touch", str(self)))
+        def rglob(self, pattern):
+            return iter(())
+        def open(self, *args, **kwargs):
+            events.append(("open", str(self), args))
+            return Stream(self)
+    return MemoryPath, Stream
+
+
 class ShellCompileContractTests(unittest.TestCase):
     def test_compile_scope_refuses_every_native_phase_before_context_or_tools(self):
         with patch.object(helper, "load_context", side_effect=AssertionError("context must not be opened")), \
@@ -48,6 +100,24 @@ class ShellCompileContractTests(unittest.TestCase):
         helper.admit_phase(helper.BOUNDARY_SCOPE, "native")  # No native call.
         with self.assertRaises(helper.CheckFailure):
             helper.admit_phase("unknown", "compile")
+
+        with patch.object(helper, "load_context", side_effect=AssertionError("no source IO")):
+            for phase in ("native", "windows-snapshot", "environment-native", "workflow-owner", "unknown"):
+                with self.subTest(phase=phase), self.assertRaises(helper.CheckFailure):
+                    helper.phase(phase, "macos", helper.MAC_COMPILE_SCOPE)
+            for platform in ("linux", "windows", "unknown"):
+                for phase in helper.COMPILE_PHASES:
+                    with self.subTest(platform=platform, phase=phase), self.assertRaises(helper.CheckFailure):
+                        helper.phase(phase, platform, helper.MAC_COMPILE_SCOPE)
+        for target in helper.MAC_COMPILE_HOSTS:
+            env = mac_environment(target)
+            self.assertEqual(helper.mac_compile_target(env), target)
+            for key, bad in (("MRK_MACOS_TARGET", "foreign"), ("RUNNER_ARCH", "other"),
+                             ("RUNNER_OS", "Linux"), ("ImageOS", "macos15")):
+                with self.subTest(target=target, key=key), self.assertRaises(helper.CheckFailure):
+                    helper.mac_compile_target({**env, key: bad})
+        self.assertEqual(helper.RUST, "1.98.0")
+        self.assertEqual(helper.TARGETS["macos"], "aarch64-apple-darwin")
 
     def test_compile_binding_requires_actual_fixed_workflow_ref_source_and_attempt(self):
         original = environment()
@@ -63,6 +133,36 @@ class ShellCompileContractTests(unittest.TestCase):
         with self.assertRaises(helper.CheckFailure):
             helper.compile_workflow_binding(dispatched)
         self.assertEqual(helper.compile_workflow_binding({**dispatched, "MRK_EXPECTED_SHA": "1" * 40}), expected)
+
+        for target in helper.MAC_COMPILE_HOSTS:
+            env = mac_environment(target)
+            binding = helper.compile_workflow_binding(env, helper.MAC_COMPILE_SCOPE)
+            self.assertEqual(binding["workflowPath"], helper.MAC_COMPILE_WORKFLOW)
+            for key, bad in (("GITHUB_REF", helper.COMPILE_REF), ("GITHUB_WORKFLOW_SHA", "4" * 40),
+                             ("GITHUB_WORKFLOW_REF", environment()["GITHUB_WORKFLOW_REF"]), ("GITHUB_RUN_ATTEMPT", "0")):
+                with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                    helper.compile_workflow_binding({**env, key: bad}, helper.MAC_COMPILE_SCOPE)
+            release = {"schemaVersion": 1, "packageVersion": "0.1.1", "release": helper.MAC_COMPILE_HOSTS[target][4] + "desktop-01"}
+            cargo, tauri = b'[package]\nversion = "0.1.1"\n', b'{"version":"0.1.1"}'
+            self.assertEqual(helper.mac_compile_release(json.dumps(release).encode(), target, cargo, tauri), release["release"])
+            for bad in ({**release, "schemaVersion": True}, {**release, "extra": 1}, {**release, "packageVersion": "0.1.0"},
+                        {**release, "release": "foreign-desktop-01"}):
+                with self.subTest(bad=bad), self.assertRaises(helper.CheckFailure):
+                    helper.mac_compile_release(json.dumps(bad).encode(), target, cargo, tauri)
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_compile_release(b'{"schemaVersion":1,"schemaVersion":1}', target, cargo, tauri)
+        workflow = (HELPER.parents[2] / helper.MAC_COMPILE_WORKFLOW).read_text(encoding="utf-8")
+        self.assertIn("os: macos-26\n", workflow)
+        self.assertIn("os: macos-26-intel\n", workflow)
+        self.assertIn("desktop-macos-normal-compile-${{ matrix.target }}-", workflow)
+        self.assertNotIn("ubuntu-", workflow)
+        self.assertNotIn("windows-2025", workflow)
+        self.assertNotIn("secrets.", workflow)
+        self.assertEqual(workflow.count("ci_foundation.py compile'"), 1)
+        self.assertIn("MRK_DESKTOP_HOSTED_CHECKS: macos-normal-compile-v1", workflow)
+        cleanup = workflow.split("      - name: Immediately remove positively settled compiler outputs\n", 1)[1]
+        self.assertIn("        if: success()\n", cleanup)
+        self.assertIn("ci_foundation.py clean'", cleanup)
 
     def test_compile_cleanup_requires_complete_matching_original_positive_receipts(self):
         for phase in helper.COMPILE_CHECKS:
@@ -87,6 +187,45 @@ class ShellCompileContractTests(unittest.TestCase):
             with self.assertRaises(helper.CheckFailure):
                 helper.validate_compile_receipt(original, {**context(), "executionScope": helper.BOUNDARY_SCOPE}, phase)
 
+        for target in helper.MAC_COMPILE_HOSTS:
+            bound = mac_context(target)
+            for phase in helper.MAC_COMPILE_CHECKS:
+                original = {"schemaVersion": 1, "scope": "desktop-macos-normal-compile-only-v1", "phase": phase, "status": "passed",
+                    **{key: bound[key] for key in ("sourceSha", "platform", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "sourceTree", "macCompile")},
+                    "rust": helper.compiler_binding(bound), "node": helper.NODE,
+                    "checks": [{"check": name, "exitCode": 0} for name in helper.MAC_COMPILE_CHECKS[phase]]}
+                self.assertEqual(helper.validate_compile_receipt(original, bound, phase), original)
+                for key, bad in (("rust", {"release": "1.98.0", "target": target}), ("sourceTree", "4" * 40),
+                                 ("macCompile", {**bound["macCompile"], "graphs": bound["macCompile"]["graphs"][:-1]}),
+                                 ("checks", original["checks"][:-1])):
+                    with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                        helper.validate_compile_receipt({**original, key: bad}, bound, phase)
+                failed = deepcopy(original)
+                failed["checks"][-1]["exitCode"] = 1
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_compile_receipt(failed, bound, phase)
+        direct = mac_context()
+        calls = []
+        version = "rustc 1.98.1\nrelease: 1.98.1\ncommit-hash: " + helper.MAC_COMPILE_RUST_COMMIT + "\nhost: aarch64-apple-darwin\n"
+        def probe(argv, **kw):
+            calls.append((argv, kw))
+            return version if kw["check"] == "rust-version-target" else "cargo 1.98.0 (abcdef123 2026-09-01)"
+        with patch.object(helper, "ordinary"), patch.object(helper, "run", side_effect=probe), \
+                patch.object(helper.shutil, "which", side_effect=AssertionError("no ambient compiler")):
+            env = {"PATH": "/selected/bin"}
+            cargo, rustc = helper.tools(direct, env)
+            prefix = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/"
+            self.assertEqual((cargo, rustc), (prefix + "cargo", prefix + "rustc"))
+            self.assertEqual([row[0] for row in calls], [[rustc, "-vV"], [cargo, "--version"]])
+            self.assertEqual(env["RUSTC"], rustc)
+            self.assertEqual(env["RUSTUP_AUTO_INSTALL"], "0")
+            calls.clear()
+            helper.tools(direct, {"PATH": "/selected/bin"}, timeout_for=lambda cap: min(cap, 3))
+            self.assertEqual([row[1]["timeout"] for row in calls], [3, 3])
+            version = version.replace("host: aarch64-apple-darwin", "host: x86_64-apple-darwin")
+            with self.assertRaises(helper.CheckFailure):
+                helper.tools(direct, {"PATH": "/selected/bin"})
+
     def test_compile_cleanup_never_adopts_native_or_unexpected_outputs(self):
         names = set(helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES + helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES)
         helper.validate_compile_inventory(names, set())
@@ -95,6 +234,68 @@ class ShellCompileContractTests(unittest.TestCase):
                 helper.validate_compile_inventory(altered, set())
         with self.assertRaises(helper.CheckFailure):
             helper.validate_compile_inventory(names, {"native"})
+
+        # Actual prepare and acquire, all filesystem/process edges inert and
+        # scoped. No patched decorator or sibling fixture is bypassed.
+        events, calls, written, guards = [], [], [], []
+        MemoryPath, Stream = memory_paths(events)
+        bound = mac_context()
+        def invoke(argv, **kw):
+            calls.append((list(map(str, argv)), kw))
+            if kw["check"] == "source-head":
+                return bound["sourceSha"]
+            if kw["check"] == "source-tree":
+                return bound["sourceTree"]
+            if kw["check"] == "rust-version-target":
+                return "release: 1.98.1\ncommit-hash: " + helper.MAC_COMPILE_RUST_COMMIT + "\nhost: aarch64-apple-darwin"
+            if kw["check"] == "mac-cargo-version":
+                return "cargo 1.98.0 (abcdef123 2026-09-01)"
+            if kw["check"] == "node-version":
+                return helper.NODE
+            return ""
+        def selected(name):
+            self.assertIn(name, ("git", "node"))
+            return "/usr/bin/git" if name == "git" else "/selected/bin/node"
+        with patch.dict(helper.os.environ, mac_environment(), clear=True), \
+                patch.object(helper, "Path", MemoryPath), patch.object(helper, "run", side_effect=invoke), \
+                patch.object(helper, "ordinary"), patch.object(helper, "hash_file", return_value="5" * 64), \
+                patch.object(helper, "mac_compile_inputs", return_value=bound["macCompile"]), \
+                patch.object(helper, "no_cargo_configuration", side_effect=lambda paths: guards.append(tuple(map(str, paths)))), \
+                patch.object(helper, "write_json", side_effect=lambda path, value: written.append((str(path), deepcopy(value)))), \
+                patch.object(helper.shutil, "which", side_effect=selected), \
+                patch.object(helper.tempfile, "mkdtemp", return_value=bound["root"]), \
+                patch.object(helper.zipfile, "ZipFile", Stream), patch.object(helper.time, "monotonic", return_value=100.0):
+            with io.StringIO() as prepared_stdout, contextlib.redirect_stdout(prepared_stdout):
+                helper.prepare("macos", helper.MAC_COMPILE_SCOPE)
+                self.assertEqual(prepared_stdout.getvalue(),
+                    "Prepared bounded source ZIP and source-bound synthetic check inputs.\n")
+            prepared = next(value for path, value in written if path.endswith("context.json"))
+            self.assertIsNone(prepared["rustup"])
+            self.assertEqual(prepared["macCompile"], bound["macCompile"])
+            self.assertTrue(any("/inert/source/desktop/helpers/macos-desktop-image" in paths
+                                and "/inert/source/desktop/helpers" in paths for paths in guards))
+            helper.phase_mac_compile("acquire", prepared)
+        commands = [row for row in calls if row[1]["check"] in ("mac-normal-locked-metadata", "mac-image-locked-metadata")]
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0][0][-1], "/inert/source/desktop/src-tauri/Cargo.toml")
+        self.assertEqual(commands[1][0][-1], "/inert/source/desktop/helpers/macos-desktop-image/Cargo.toml")
+        self.assertNotIn("--features", commands[1][0])
+        self.assertEqual([row[0][1] for row in commands], ["metadata", "metadata"])
+        self.assertFalse(any("rustup" == Path(arg).name for row, _ in calls for arg in row))
+        receipt_value = next(value for path, value in written if path.endswith("acquire-checks.json"))
+        self.assertEqual(receipt_value["checks"], [{"check": name, "exitCode": 0} for name in helper.MAC_COMPILE_CHECKS["acquire"]])
+        self.assertTrue(any(event[:2] == ("closed", bound["root"] + "/target/mac-image-metadata.json") for event in events))
+        cleanup_order = []
+        with patch.object(helper, "source_unchanged", side_effect=lambda *args, **kw: cleanup_order.append("source")), \
+                patch.object(helper, "mac_compile_source_guard", side_effect=lambda *args: cleanup_order.append("guard")), \
+                patch.object(helper, "mac_compile_inputs", return_value=bound["macCompile"]), \
+                patch.object(helper, "clean_compile", side_effect=lambda *args: cleanup_order.append("cleanup")):
+            helper.phase_mac_compile("clean", bound)
+            self.assertEqual(cleanup_order, ["source", "guard", "cleanup"])
+            cleanup_order.clear()
+            with patch.object(helper, "mac_compile_inputs", return_value={}), self.assertRaises(helper.CheckFailure):
+                helper.phase_mac_compile("clean", bound)
+            self.assertEqual(cleanup_order, ["source", "guard"])
 
     def test_compile_receipt_bytes_reject_duplicate_nonfinite_extra_or_oversized_frames(self):
         value = receipt("compile")
@@ -105,6 +306,76 @@ class ShellCompileContractTests(unittest.TestCase):
                        raw + b'{}', b'{"secret":"not real","bad":NaN}', b'\xff', b' ' * 16385, b''):
             with self.assertRaises(helper.CheckFailure):
                 helper.parse_compile_receipt(broken)
+
+        bound = mac_context()
+        calls, receipts, clock = [], [], [100.0]
+        def invoke(argv, **kw):
+            calls.append((list(argv), deepcopy({key: value for key, value in kw.items() if key != "output"})))
+            return helper.NODE if kw["check"] == "node-version" else ""
+        with patch.object(helper, "source_unchanged"), patch.object(helper, "mac_compile_source_guard"), \
+                patch.object(helper, "mac_compile_inputs", return_value=bound["macCompile"]), \
+                patch.object(helper, "tools", return_value=("/direct/cargo", "/direct/rustc")), \
+                patch.object(helper.shutil, "which", return_value="/selected/bin/node"), \
+                patch.object(helper, "run", side_effect=invoke), \
+                patch.object(helper, "phase_receipt", side_effect=lambda *args, **kw: receipts.append((args, kw))), \
+                patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "synthetic-never-exported"}, clear=True):
+            helper.phase_mac_compile("compile", bound)
+            builds = [(argv, kw) for argv, kw in calls if kw["check"] in {row[0] for row in helper.MAC_COMPILE_GRAPHS}]
+            self.assertEqual(len(builds), 3)
+            self.assertEqual([argv[1] for argv, _ in builds], ["build", "test", "build"])
+            self.assertEqual([argv[argv.index("--target-dir") + 1] for argv, _ in builds], [bound["root"] + "/target"] * 3)
+            self.assertEqual(builds[0][0][-5:], ["--release", "--features", "desktop-shell,custom-protocol", "--bin", "mobile-release-kit-desktop"])
+            self.assertEqual(builds[1][0][-5:], ["--features", "desktop-shell,custom-protocol,macos-installed-observation", "--test", "installed-shell-observation", "--no-run"])
+            self.assertEqual(builds[2][0][-2:], ["--release", "--lib"])
+            self.assertNotIn("--features", builds[2][0])
+            for argv, kw in builds:
+                self.assertIn("--offline", argv)
+                self.assertEqual(argv[argv.index("--jobs") + 1], "1")
+                self.assertNotIn("development-runtime", argv)
+                self.assertNotIn("MRK_MACOS_DEVELOPER_ID_P12_BASE64", kw["env"])
+                self.assertNotIn("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", kw["env"])
+                self.assertEqual(kw["env"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], bound["sourceSha"])
+                self.assertEqual(kw["env"]["MRK_IMAGE_RELEASE_ID"], bound["macCompile"]["release"])
+            self.assertEqual(len(receipts), 1)
+            calls.clear(); receipts.clear()
+            intel = mac_context("x86_64-apple-darwin")
+            with patch.object(helper, "mac_compile_inputs", return_value=intel["macCompile"]):
+                helper.phase_mac_compile("compile", intel)
+            intel_builds = [(argv, kw) for argv, kw in calls if kw["check"] in {row[0] for row in helper.MAC_COMPILE_GRAPHS}]
+            self.assertEqual(len(intel_builds), 3)
+            for argv, kw in intel_builds:
+                self.assertEqual(argv[argv.index("--target") + 1], "x86_64-apple-darwin")
+                self.assertEqual(kw["env"]["MRK_IMAGE_RELEASE_ID"], intel["macCompile"]["release"])
+            self.assertEqual(len(receipts), 1)
+            calls.clear(); receipts.clear()
+            def failed(argv, **kw):
+                result = invoke(argv, **kw)
+                if kw["check"] == "mac-normal-bin-compile-only":
+                    raise helper.CheckFailure("original compiler failed")
+                return result
+            with patch.object(helper, "run", side_effect=failed), self.assertRaisesRegex(helper.CheckFailure, "original compiler failed"):
+                helper.phase_mac_compile("compile", bound)
+            self.assertFalse(receipts)
+            self.assertFalse(any(kw["check"] == "mac-observer-compile-only" for _, kw in calls))
+            calls.clear()
+            def late(argv, **kw):
+                result = invoke(argv, **kw)
+                if kw["check"] == "mac-normal-bin-compile-only":
+                    clock[0] = 1601.0
+                return result
+            with patch.object(helper, "run", side_effect=late), self.assertRaises(helper.CheckFailure):
+                helper.phase_mac_compile("compile", bound)
+            self.assertFalse(receipts)
+            self.assertFalse(any(kw["check"] == "mac-observer-compile-only" for _, kw in calls))
+            clock[0] = 100.0
+            def late_publication(*args, **kw):
+                receipts.append((args, kw))
+                clock[0] = 1601.0
+            with patch.object(helper, "phase_receipt", side_effect=late_publication), self.assertRaises(helper.CheckFailure):
+                helper.phase_mac_compile("compile", bound)
+            # Retained bytes are diagnostic only without this original phase0.
+            self.assertEqual(len(receipts), 1)
 
 
 if __name__ == "__main__":

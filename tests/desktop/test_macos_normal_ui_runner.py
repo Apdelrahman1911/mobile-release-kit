@@ -1359,7 +1359,10 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(label), 1)
         source_end = workflow.index("          PY_SOURCE\n")
         start = workflow.index(label)
-        self.assertEqual(workflow[source_end + len("          PY_SOURCE\n"):start], "")
+        between = workflow[source_end + len("          PY_SOURCE\n"):start]
+        self.assertEqual([line[len("      - name: "):] for line in between.splitlines()
+                          if line.startswith("      - name: ")], ['Admit the fixed image Rust tools without installing a distribution', 'Admit only a fresh independently pinned Python transport destination', 'Download the independently accepted fresh Python transport', 'Project the pinned fresh Python transport without executing it', 'Download only the configured signed Python capsule', 'Project the configured capsule as DATA without executing it', 'Prepare the current payload from the independently accepted fresh Python supplier'])
+        self.assertLess(source_end, start)
         self.assertLess(start, workflow.index("      - name: Acquire and verify the two fixed Android support archives as DATA"))
         build = workflow.split(label, 1)[1].split("      - name:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/verify/desktop-macos-preview'", build)
@@ -1371,8 +1374,17 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertIn('exclusive_output(normal / "build.admission-diagnostics.json"', build)
         action = workflow.split("      - name: Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally\n", 1)[1].split("      - name:", 1)[0]
         self.assertIn("steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'", action)
-        self.assertLess(workflow.index("      - name: Nonroot byte/mode readback, not a headless GUI substitute"),
-                        workflow.index("      - name: Launch the exact ordinary app,"))
+        install = workflow.index("macos_android_helper_package.py package-install")
+        saved_original = workflow.index('"$package_status_saved" == 0', install)
+        preview = workflow.index("stage_macos_installed.py preview", saved_original)
+        upload = workflow.index("      - name: Upload only the normal user preview package and guide", preview)
+        launch = workflow.index("      - name: Launch the exact ordinary app,", upload)
+        self.assertLess(install, saved_original)
+        self.assertLess(saved_original, preview)
+        self.assertLess(preview, upload)
+        self.assertLess(upload, launch)
+        self.assertIn('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-build', build)
+        self.assertIn('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building', action)
         artifact = workflow.split("        id: evidence\n", 1)[1]
         self.assertIn("/normal-ui/build.admission-diagnostics.json", artifact)
         self.assertNotIn("/normal-ui/build.log", artifact.split("      # Do not start", 1)[0])

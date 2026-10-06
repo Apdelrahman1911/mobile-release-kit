@@ -1494,26 +1494,26 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
 
 
 def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET):
-    arm_only(target)
+    target = mac_target(target)
     root, name = DESKTOP / "src-tauri", "installed-shell-observation"
     binary, target_dir = Path(binary), Path(target_dir)
     need(binary.is_absolute() and target_dir.is_absolute()
          and all(part not in (".", "..") for part in binary.parts + target_dir.parts)
-         and binary.parent == target_dir / "aarch64-apple-darwin/debug/deps"
+         and binary.parent == target_dir / target / "debug/deps"
          and re.fullmatch(r"installed_shell_observation-[0-9a-f]+", binary.name) is not None,
          "observer-cargo-fixed-output")
     records = cargo_records(messages)
     selected = [row for row in records if row["target"].get("name") == name or row.get("executable") == str(binary)]
     need(len(selected) == 1, "observer-cargo-one-test")
     row = selected[0]
-    target = row["target"]
+    cargo_target = row["target"]
     features = ["custom-protocol", "desktop-shell", "macos-installed-observation"]
     need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1"
          and row.get("manifest_path") == str(root / "Cargo.toml")
-         and target.get("name") == name and target.get("kind") == ["test"]
-         and target.get("crate_types") == ["bin"]
-         and target.get("src_path") == str(root / "tests/installed_shell_observation.rs")
-         and target.get("edition") == "2021" and row.get("executable") == str(binary)
+         and cargo_target.get("name") == name and cargo_target.get("kind") == ["test"]
+         and cargo_target.get("crate_types") == ["bin"]
+         and cargo_target.get("src_path") == str(root / "tests/installed_shell_observation.rs")
+         and cargo_target.get("edition") == "2021" and row.get("executable") == str(binary)
          and row.get("filenames") == [str(binary)], "observer-cargo-source-test")
     cargo_profile(row, test=True)
     cargo_features(row, features)
@@ -1541,16 +1541,15 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
     need(not any(item["target"].get("kind") in (["cdylib"], ["bin"], ["example"], ["bench"])
                  or item is not row and item["target"].get("kind") == ["test"]
                  for item in records), "observer-cargo-no-image-or-bin")
-    macho(body)
+    macho(body, target=target)
     return {"schemaVersion": 1, "entrypoint": "tests/installed_shell_observation.rs", "targetKind": "test",
-            "target": "aarch64-apple-darwin", "profileTest": True, "features": features,
+            "target": target, "profileTest": True, "features": features,
             "cargoMessagesSha256": digest(messages), "binarySha256": digest(body), "binarySize": len(body),
             "instrumented": True, "qualification": "observer-executable-data-not-image-or-launched"}
 
 
 def preview_command(args):
     """Copy only an audited, normally built and read-back package to fresh output."""
-    arm_only(command_target(args))
     selection = source_build_selection(command_target(args))
     need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source),
          "preview-source")
@@ -1571,11 +1570,11 @@ def preview_command(args):
     need(read(work / "normal-build.status", 4) == b"0\n"
          and read(work / "installer-output.status", 4) == b"0\n"
          and read(work / "package-install.status", 4) == b"0\n", "preview-original-statuses")
-    original = work / "cargo-target/aarch64-apple-darwin/release/libmrk_desktop_image.dylib"
+    original = work / "cargo-target" / selection.target / "release/libmrk_desktop_image.dylib"
     normal = image_cargo_artifact(read(work / "normal-build.jsonl", 8 * 1024 * 1024),
-                                 original, work / "cargo-target", read(original), "desktop")
+                                 original, work / "cargo-target", read(original), "desktop", target=selection.target)
     facade = read(work / "mobile-release-kit-desktop", 1024 * 1024)
-    entry_macho(facade)
+    entry_macho(facade, target=selection.target)
     app = decode(read(work / "app-result.json", 16384))
     need(type(app) is dict and app.get("packageRole") == "ordinary-image"
          and app.get("desktopImageCargoArtifact") == normal and "observerCargoArtifact" not in app
@@ -1627,7 +1626,7 @@ def preview_command(args):
         "state": "protected-permanent-gate-data-correspondence", "bytes": len(MAINTENANCE_GATE_BYTES),
         "exclusionObserved": False, "workerFinalityEstablished": False}, "preview-maintenance-gate-readback")
     expected = observation_inventory(argparse.Namespace(input=work / "input",
-        expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"], target=selection.target))
+        expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"], target=selection.target), selection=selection)
     need(observed.get("nonrootReadbackFileCount") == len(expected)
          and all("app/" + path in expected for path in (ENTRY_BINARY, APP_BINARY, ANDROID_HELPER,
                      ANDROID_SERVICE_PLIST, DESKTOP_IMAGE, RESIDENT_IMAGE))
@@ -1658,7 +1657,7 @@ def preview_command(args):
          "preview-original-distribution-image")
     summary = {"schemaVersion": 2, "scope": "normal-macos-early-preview", "sourceCommit": args.expected_source,
         "sourceTree": source["tree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
-        "runId": binding["runId"], "runAttempt": binding["runAttempt"], "platform": "macOS26-arm64",
+        "runId": binding["runId"], "runAttempt": binding["runAttempt"], "platform": "macOS26-arm64" if selection.target == ARM_TARGET else "macOS26-x86_64",
         "packageSha256": digest(package), "packageSize": len(package), "runtimeManifestSha256": observed["runtimeManifestSha256"],
         "distributionSha256": digest(image), "distributionBytes": len(image), "descriptorSha256": emitted["descriptorSha256"],
         "signatureSha256": emitted["signatureSha256"], "requestId": request_id, "originalInstallerReturnedZero": True,
@@ -1829,7 +1828,7 @@ def android_service_input(app, expected, expected_image=None, *, target=ARM_TARG
 def app_command(args):
     target = command_target(args)
     role = package_role(getattr(args, "package_role", None))
-    need(role == "ordinary-image" or target == ARM_TARGET, "unqualified-intel-route")
+    # Both explicit roles must pass their own selected-target artifact parser.
     selection = source_build_selection(target)
     desktop_inputs = [getattr(args, key, None) for key in
                       ("desktop_image", "expected_desktop_image", "desktop_image_cargo_messages", "desktop_image_cargo_target_dir")]
@@ -1907,10 +1906,32 @@ def runtime_tree(root, expected, *, current=False, target=ARM_TARGET):
     return files
 
 
-def input_command(args):
+def ticket_input_names(app, expectations):
+    """Match only explicit ticket DATA; this does not establish notarization.
+
+    The existing tree reader supplies regular, single-link, original-bound
+    leaves. Native Accepted/stapler verification belongs to the later owner;
+    neither these bytes nor their hashes grant that authority.
+    """
+    if expectations is None:
+        return set()
+    paths = ("Contents/CodeResources", PAYLOAD_CONTENTS + "CodeResources")
+    need(type(expectations) is list and len(expectations) == 2, "ticket-input-expectations")
+    for row, path in zip(expectations, paths):
+        need(type(row) is dict and set(row) == {"path", "bytes", "sha256"}
+             and row["path"] == path and type(row["bytes"]) is int
+             and 1 <= row["bytes"] <= 1024 * 1024 and sha(row["sha256"]), "ticket-input-expectations")
+        need(path in app, "ticket-input-correspondence")
+        body, mode = app[path]
+        need(type(body) is bytes and type(mode) is int and mode & 0o7133 == 0
+             and len(body) == row["bytes"] and digest(body) == row["sha256"], "ticket-input-correspondence")
+    return set(paths)
+
+
+def input_command(args, *, ticket_expectations=None):
     target = command_target(args)
     role = package_role(getattr(args, "package_role", None))
-    need(target == ARM_TARGET or role == "ordinary-image" and args.current_runtime is True, "unqualified-intel-route")
+    need(target == ARM_TARGET or args.current_runtime is True, "unqualified-intel-route")
     selection = source_build_selection(target)
     expected_desktop = getattr(args, "expected_desktop_image", None)
     expected_resident = getattr(args, "expected_resident_image", None)
@@ -1928,6 +1949,7 @@ def input_command(args):
                       "Contents/_CodeSignature/CodeResources", PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
     if role == "ordinary-image":
         expected_names.add(DESKTOP_IMAGE)
+    expected_names.update(ticket_input_names(app, ticket_expectations))
     need(set(app) == expected_names and app["Contents/Info.plist"][0] == source_entry_info(selection=selection)
          and app[PAYLOAD_INFO][0] == source_app_info(selection=selection), "signed-app-roster")
     need(sha(args.expected_entry) and digest(app[ENTRY_BINARY][0]) == args.expected_entry
@@ -1974,14 +1996,12 @@ def input_command(args):
 
 
 def scripts_command(args):
-    target = command_target(args)
-    if args.fixture:
-        arm_only(target)
+    selection = source_build_selection(command_target(args))
     need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source), "installer-source-binding")
     source = tree(args.input)
     need("install-inventory.json" in source and digest(source["install-inventory.json"][0]) == args.expected_inventory, "installer-input-anchor")
     installer = read(args.installer)
-    macho(installer, target=target)
+    macho(installer, target=selection.target)
     scripts = {"input/" + path: value for path, value in source.items()}
     scripts["mrk-macos-install"] = (installer, 0o555)
     scripts["postinstall"] = (read(DESKTOP / "macos-installed-inputs/postinstall", 8192), 0o555)
@@ -2093,8 +2113,6 @@ def cpio_members(body):
 
 def package_info(body, *, fixture=False, selection=None):
     selection = selected_build(selection)
-    if fixture:
-        arm_only(selection.target)
     need(type(fixture) is bool, "fixed-package-kind")
     identifier = PACKAGE_ID + ("-fixture" if fixture else "")
     info = ET.fromstring(body)
@@ -2111,8 +2129,6 @@ def package_info(body, *, fixture=False, selection=None):
 
 def original_package(scripts_path, package_path, *, fixture=False, selection=None):
     selection = selected_build(selection)
-    if fixture:
-        arm_only(selection.target)
     owner = packager_ids()
     scripts = tree(scripts_path, packager=True)
     with parent(package_path) as (fd, name):
@@ -2131,10 +2147,7 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
 
 
 def prepare_package_command(args):
-    target = command_target(args)
-    if args.fixture:
-        arm_only(target)
-    selection = source_build_selection(target)
+    selection = source_build_selection(command_target(args))
     scripts, package, members, identifier, owner = original_package(args.scripts, args.package, fixture=args.fixture, selection=selection)
     # This is not archive extraction: only validated, unchanged PackageInfo
     # DATA is copied to a fixed literal name in an exclusively-created root.
@@ -2153,10 +2166,7 @@ def package_format_input_command(args):
 
 
 def audit_command(args):
-    target = command_target(args)
-    if args.fixture:
-        arm_only(target)
-    selection = source_build_selection(target)
+    selection = source_build_selection(command_target(args))
     scripts, original, original_members, identifier, _owner = original_package(args.scripts, args.original_package, fixture=args.fixture, selection=selection)
     package = read(args.package)
     members = xar_members(package)
@@ -3087,8 +3097,6 @@ def installation_record_data(body, inventory_body, source, manifest, root, relea
                              expected_protocol=CURRENT_PROTOCOL):
     """Closed DATA comparison, never permission or native/old finality evidence."""
     selection = selected_build(selection)
-    if fixture:
-        arm_only(selection.target)
     need(type(body) is bytes and 0 < len(body) <= INSTALLATION_RECORD_LIMIT
          and type(inventory_body) is bytes and 0 < len(inventory_body) <= 1024 * 1024
          and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
@@ -3230,8 +3238,6 @@ def installation_metadata_leaf(fd, name, limit):
 
 
 def installation_metadata_readback(args, root, original, *, fixture=False, occupant=None, selection=None):
-    if fixture:
-        arm_only(selected_build(selection).target if selection is not None else command_target(args))
     selection = selected_build(selection) if selection is not None else source_build_selection(command_target(args))
     source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
     need(digest(source_inventory) == args.expected_inventory, "installation-inventory-source")
@@ -3442,22 +3448,24 @@ def observation_command(args):
             "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
 
 
-def visible_occupant(case):
+def visible_occupant(case, *, selection=None):
+    selection = selected_build(selection)
     if case in ("occupied-app", "first-publication-second-refusal"):
         return APP_NAME + "/occupied.txt"
     if case in ("occupied-release", "runtime-publication-collision"):
-        return "versions/" + RELEASE + "/runtime/occupied.txt"
+        return "versions/" + selection.release + "/runtime/occupied.txt"
     if case == "metadata-descriptor-collision":
-        return "versions/" + RELEASE + "/" + INSTALLATION_RECORD_NAME
+        return "versions/" + selection.release + "/" + INSTALLATION_RECORD_NAME
     return None
 
 
-def fixture_record(log, source, inventory, manifest):
+def fixture_record(log, source, inventory, manifest, *, selection=None):
     # Legacy marker parser is diagnostic/test-only, never readback authority.
-    return bound_fixture_result(installer_record(log, fixture=True), source, inventory, manifest)
+    return bound_fixture_result(installer_record(log, fixture=True), source, inventory, manifest, selection=selection)
 
 
-def bound_fixture_result(result, source, inventory, manifest):
+def bound_fixture_result(result, source, inventory, manifest, *, selection=None):
+    selection = selected_build(selection)
     need(type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source) and sha(inventory) and sha(manifest), "fixture-input-binding")
     need(type(result) is dict and set(result) == {"schemaVersion", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "fixtureBase", "setupError",
          "setupOriginalsSettled", "setupDeadlineMet", "inertCloseDeadlinePolicyTable", "fixedCasesComplete", "passed", "cases",
@@ -3475,7 +3483,7 @@ def bound_fixture_result(result, source, inventory, manifest):
         need(type(row) is dict and set(row) == {"case", "passed", "proofError", "originalResult", "originalExit", "occupant",
              "absenceObservedBeforeCollision", "stagingOpenErrno", "persistence"} and row["case"] == name
              and row["passed"] is True and row["proofError"] is None and type(row["originalExit"]) is int and row["originalExit"] == expected[-1], "fixture-case-shape-or-outcome")
-        bound_original_result(row["originalResult"], expected, source, inventory, manifest)
+        bound_original_result(row["originalResult"], expected, source, inventory, manifest, selection=selection)
         need((row["originalResult"]["staging"] is None) == (name in ("occupied-app", "occupied-release")), "fixture-staging-phase")
         collision = name in ("runtime-publication-collision", "staging-file-collision", "first-publication-second-refusal", "metadata-descriptor-collision")
         need(row["absenceObservedBeforeCollision"] is collision, "fixture-absence-observation")
@@ -3492,7 +3500,7 @@ def bound_fixture_result(result, source, inventory, manifest):
             need(persistence is None, "unexpected-fixture-persistence-report")
             witness = row["occupant"]
             need(type(witness) is dict and set(witness) == {"visibleRelativePath", "sha256", "before", "after", "verifiedByOriginalInstaller"}
-                 and witness["visibleRelativePath"] == visible_occupant(name) and witness["sha256"] == digest(FIXTURE_MARKER)
+                 and witness["visibleRelativePath"] == visible_occupant(name, selection=selection) and witness["sha256"] == digest(FIXTURE_MARKER)
                  and witness["verifiedByOriginalInstaller"] is True and witness["before"] == witness["after"], "fixture-occupant-witness")
             identity = witness["before"]
             need(type(identity) is dict and set(identity) == {"device", "inode", "mode", "uid", "gid", "links", "size",
@@ -3534,10 +3542,10 @@ def observe_occupant(path, witness):
 
 
 def fixture_observation_command(args):
-    arm_only(command_target(args))
-    expected = observation_inventory(args)
+    selection = source_build_selection(command_target(args))
+    expected = observation_inventory(args, selection=selection)
     result, exported = installer_result_readback(args, fixture=True)
-    bound_fixture_result(result, args.expected_source, args.expected_inventory, args.expected_manifest)
+    bound_fixture_result(result, args.expected_source, args.expected_inventory, args.expected_manifest, selection=selection)
     base = INSTALL_ROOT.parent / result["fixtureBase"]  # Closed source/nonce component validated above.
     published = {name: row for name, row in expected.items() if name.startswith("runtime/")}
     observations = []
@@ -3564,12 +3572,12 @@ def fixture_observation_command(args):
                 if app_occupant:
                     observe_occupant(root / APP_NAME / "occupied.txt", row["occupant"])
                 if has_versions:
-                    with fixture_directory(root / "versions", {RELEASE} if has_release else set()):
+                    with fixture_directory(root / "versions", {selection.release} if has_release else set()):
                         if has_release:
                             metadata_reached = row["originalResult"]["installationMetadata"]["state"] != "not-attempted"
                             members = {"runtime"} | ({INSTALLATION_INVENTORY_NAME, INSTALLATION_RECORD_NAME} if metadata_reached else set())
-                            with fixture_directory(root / "versions" / RELEASE, members):
-                                runtime_path = root / "versions" / RELEASE / "runtime"
+                            with fixture_directory(root / "versions" / selection.release, members):
+                                runtime_path = root / "versions" / selection.release / "runtime"
                                 if runtime_published:
                                     files = tree(runtime_path, installed=True)
                                     byte_correspondence({"runtime/" + key: value for key, value in files.items()}, published)
@@ -3578,8 +3586,8 @@ def fixture_observation_command(args):
                                     observe_occupant(runtime_path / "occupied.txt", row["occupant"])
                                 if metadata_reached:
                                     metadata_observation = installation_metadata_readback(args, root, row["originalResult"], fixture=True,
-                                        occupant=row["occupant"] if name == "metadata-descriptor-collision" else None)
-            observations.append({"case": name, "accessibleOccupantChecked": visible_occupant(name) is not None,
+                                        occupant=row["occupant"] if name == "metadata-descriptor-collision" else None, selection=selection)
+            observations.append({"case": name, "accessibleOccupantChecked": visible_occupant(name, selection=selection) is not None,
                                  "runtimeReadbackFileCount": runtime_files, "protectedStagingOpened": False, "installationMetadata": metadata_observation,
                                  "maintenanceGate": gate})
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,

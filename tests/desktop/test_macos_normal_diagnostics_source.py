@@ -88,15 +88,15 @@ ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875
 SAVED_CHECKS_ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
 ROSTER_SHA256 = "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"
 # The normal result also binds M2-A entry identity without claiming full M2/maintenance readiness.
-BLOCK_PINS = {'normal_ui_result': '9665ebd13fa186678201f972c5cb165812b9fa59a3d5959d9b38e72c860d6ccf',
- 'normal_project_ui_test': '9f7298b660ad22517d17e3e8420bec3c1d8071e18003ac435aa1df7e6f20256b',
- 'normal_project_ui_result': '60253d2653f54318ce00023737e8f50034018fa45d5d1a3809e9280cca41282f',
- 'normal_persistence_ui_test': '3ff4b7295bf3be9a52887f06e2c83acfb7010a6cad2113ffcd434a423a7fc259',
- 'normal_persistence_ui_result': '865a2243d5cc1bf3e9929d6db1a6bb657f15817135a2a6e11041a60adea0b7cf',
- 'normal_diagnostics_ui_test': 'c09b1404ff79414f26b4be3c5b071be5472e66a9de129804f728400e1386279d',
- 'normal_diagnostics_ui_result': '4ee7d7621ba1eea58ba2a6866f61f3d45780a1bcead90717684d16a442232642',
- 'normal_saved_checks_ui_test': '55b8cce29447bb324074bdeab676ed1cc1d63993a2a1655a87b4717e90480ccf',
- 'normal_saved_checks_ui_result': '56be39e09548a801b0b5c88ac6393672c8e6d76a97e5a4c27cb465878312c5f9'}
+BLOCK_PINS = {'normal_ui_result': '10624295dc658af933e3abbaf4bc0dd512d558dcb8776ee38d93f06148300527',
+ 'normal_project_ui_test': '8610371ad9fbc357cac42d8b6796275799a0c1ed436c8331416455974f2c99b5',
+ 'normal_project_ui_result': 'b0c6b67f2f0914e1e69cd5182b20e04043ce95a7c9299d5115225a1f62f9acf2',
+ 'normal_persistence_ui_test': '9cc77c35a6fe15ae7cc52155f2b5def9dedd72f9a266f031698fdb7c1e295635',
+ 'normal_persistence_ui_result': 'e5a27529527fc9c3f79eea85071b14da1b5930337518a8618cd7f57f058b3430',
+ 'normal_diagnostics_ui_test': '433ccae8e525cea7eb90ce2946e2fe74d6fd1723027135ee05cedf0c1ff9583a',
+ 'normal_diagnostics_ui_result': '42c762abee679550f043efaefdf0a5f0031e0c46d90adc7da5f1fe1263696cf3',
+ 'normal_saved_checks_ui_test': '8604b52879c59a82655ba8e92ff0c7c07f57e8611f0380aad54a5127bfb8cdb0',
+ 'normal_saved_checks_ui_result': '90ad440589ee026a98635883f63e2878295b80da87e34b4d8a74617b46d96105'}
 # One added source regression covers the two deliberately separate GUI scopes.
 # This is method82 after the unchanged original81; two already-reviewed Android
 # caller/source checks follow it in the current fixed84 workflow selection.
@@ -525,6 +525,12 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def checked_diagnostics_source(self) -> tuple[str, str]:
         swift = self.restored_semantic_heading_queries((ROOT / SWIFT).read_text())
+        # Require only the two accepted paired-host compile substitutions;
+        # historical semantic/owner bytes remain under their original hash.
+        for old, current in (('#if !os(macOS) || !arch(arm64)\n#error("This external UI scenario requires a fresh hosted ARM64 macOS 26 job.")\n', '#if !os(macOS) || !(arch(arm64) || arch(x86_64))\n#error("This external UI scenario requires a fresh hosted native64 macOS 26 job.")\n'), ('        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",\n', '        #if arch(arm64)\n        let hostedJob = "github-hosted-macos26-arm64"\n        #elseif arch(x86_64)\n        let hostedJob = "github-hosted-macos26-x86_64"\n        #endif\n        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == hostedJob,\n')):
+            self.assertEqual(swift.count(current), 1)
+            self.assertNotIn(old, swift)
+            swift = swift.replace(current, old, 1)
         swift = self.restored_renderer_queries(swift)
         swift = self.restored_dashboard_query(swift)
         added = self.checked_saved_checks_block(swift)
@@ -644,7 +650,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         result = blocks['normal_diagnostics_ui_result']
         self.assertIn("steps.normal_persistence_ui_result.outcome == 'success'", test)
         self.assertIn("steps.normal_diagnostics_ui_test.outcome == 'success'", result)
-        self.assertEqual(test.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 1)
+        self.assertEqual(test.count('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building'), 1)
         selector = '-only-testing:MRKNormalAppUITests/NormalAppUITests/' + METHOD
         self.assertEqual(workflow.count(selector), 1)
         for fragment in ('timeout-minutes: 11', 'ulimit -f 1048576', 'resource.getrlimit(resource.RLIMIT_FSIZE)',
@@ -654,12 +660,12 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          '-derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData"',
                          '-resultBundlePath "$MRK_MACOS_WORK/normal-ui/diagnostics-test.xcresult"',
                          '-default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300',
-                         'TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64',
+                         '"TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB"',
                          'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA',
                          'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA',
                          '[[ "$test_status" == 0 ]] || exit "$test_status"'):
             self.assertIn(fragment, test, fragment)
-        self.assertLess(test.index('[[ "$file_budget_status" == 0 ]]'), test.index('desktop/tools/macos_normal_ui_runner.py test-without-building'))
+        self.assertLess(test.index('[[ "$file_budget_status" == 0 ]]'), test.index('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building'))
         budget = inline_python(test, 'PY_UI_FILE_BUDGET')
         safe = inline_python(test, 'PY_DIAGNOSTICS_SAFE_FACTS')
         result_source = inline_python(result, 'PY_DIAGNOSTICS_RESULT')
@@ -745,13 +751,13 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         # affected selection adds new helper tests, never the existing native84.
         self.assertIn('    timeout-minutes: 300\n', workflow)
         ceilings = [int(value) for value in re.findall(r'^        timeout-minutes: ([0-9]+)$', workflow, re.M)]
-        self.assertEqual((len(ceilings), sum(ceilings)), (33, 244))
-        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --normal-summary '), 5)
+        self.assertEqual((len(ceilings), sum(ceilings)), (38, 266))
+        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary '), 5)
         build = blocks['normal_ui_build']
         self.assertIn('timeout-minutes: 9', build)
         self.assertIn('ulimit -f 33554432', build)
-        self.assertIn('desktop/tools/macos_normal_ui_runner.py --normal-build', build)
-        for fragment in ('TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64',
+        self.assertIn('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-build', build)
+        for fragment in ('"TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB"',
                          'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA',
                          'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA'):
             self.assertIn(fragment, build)
@@ -766,9 +772,9 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             self.assertIn('timeout-minutes: ' + str(minutes), original_test)
             self.assertIn('timeout-minutes: 3', original_result)
             self.assertIn('ulimit -f 1048576', original_result)
-            self.assertIn('desktop/tools/macos_normal_ui_runner.py --normal-summary ' + stem + '.xcresult', original_result)
+            self.assertIn('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary ' + stem + '.xcresult', original_result)
             for fragment in (
-                'TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64',
+                '"TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB"',
                 'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA', 'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA',
                 'checked_admission("build.command-admission.json", "build", None, 450,',
                 'checked_admission("' + stem + '.runner-admission.json", "test", "' + stem + '.xcresult", ',
@@ -776,6 +782,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                 'runner.get("strictCodesignOriginalZero") is not True', 'runner.get("originalClosesCompleted") is not True',
                 'runner.get("originalProductsPrePostMatched") is not True', 'runner.get("reSignedOrRepaired") is not False',
                 'value.get("sourcePrePostMatched") is not True', 'value.get("originalCommandReturned") is not True',
+                'value.get("target") != build_target', 'preview["platform"] != platforms[build_target]',
+                '"target": build_target, "platform": preview["platform"]',
                 'end - start != seconds * 1_000_000_000 or not start <= before_close < end',
                 'clock["postCloseDeadlineRequired"] is not True',
                 'build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]',
@@ -818,9 +826,9 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         saved_methods = ['testSyntheticProjectSavedOfflineChecks', 'testSyntheticProjectEmptyBuildInputInspection']
         saved_identifiers = ['MRKNormalAppUITests/NormalAppUITests/' + name for name in saved_methods]
         self.assertNotIn('/usr/bin/xcodebuild build-for-testing', workflow)
-        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --normal-build'), 1)
-        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 5)
-        self.assertEqual(saved_test.count('desktop/tools/macos_normal_ui_runner.py test-without-building'), 1)
+        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-build'), 1)
+        self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building'), 5)
+        self.assertEqual(saved_test.count('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building'), 1)
         self.assertEqual(re.findall(r'-only-testing:MRKNormalAppUITests/NormalAppUITests/(test[A-Za-z0-9_]+)', saved_test), saved_methods)
         for identifier in saved_identifiers:
             self.assertEqual(workflow.count('-only-testing:' + identifier), 1)
@@ -831,17 +839,17 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          '[[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"',
                          '[[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"',
                          '-project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI',
-                         "-configuration Debug -destination 'platform=macOS,arch=arm64' -destination-timeout 15",
+                         '-configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15',
                          '-derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData"',
                          '-resultBundlePath "$MRK_MACOS_WORK/normal-ui/saved-checks-test.xcresult"',
                          '-parallel-testing-enabled NO -test-timeouts-enabled YES',
                          '-default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300',
-                         'TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64',
+                         '"TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB"',
                          'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA',
                          'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA',
                          '[[ "$test_status" == 0 ]] || exit "$test_status"'):
             self.assertIn(fragment, saved_test, fragment)
-        self.assertLess(saved_test.index('[[ "$file_budget_status" == 0 ]]'), saved_test.index('desktop/tools/macos_normal_ui_runner.py test-without-building'))
+        self.assertLess(saved_test.index('[[ "$file_budget_status" == 0 ]]'), saved_test.index('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building'))
         saved_budget = inline_python(saved_test, 'PY_UI_FILE_BUDGET')
         saved_safe = inline_python(saved_test, 'PY_SAVED_CHECKS_SAFE_FACTS')
         saved_result_source = inline_python(saved_result, 'PY_SAVED_CHECKS_RESULT')
@@ -917,8 +925,12 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                 mode='eval').body
             self.assertEqual(ast.dump(choice.value), ast.dump(wanted))
             gates = [node for node in prior_loop.body if isinstance(node, ast.If)]
-            self.assertEqual(len(gates), 1)
-            gate = ast.get_source_segment(code, gates[0].test)
+            self.assertEqual(len(gates), 2)
+            self.assertEqual(ast.dump(gates[0].test), ast.dump(ast.parse(
+                'type(prior) is not dict or prior.get("target") != build_target', mode='eval').body))
+            self.assertEqual(ast.get_source_segment(code, gates[0].body[0]),
+                             'raise ValueError("normal-prior-target")')
+            gate = ast.get_source_segment(code, gates[1].test)
             self.assertIn('for key, value in prior_expected_counts.items()', gate)
             self.assertNotIn('for key, value in ' + baseline + '.items()', gate)
             if baseline == 'prior_expected':

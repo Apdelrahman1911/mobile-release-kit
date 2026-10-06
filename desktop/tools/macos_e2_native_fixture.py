@@ -120,6 +120,14 @@ BTM_PATHS = (str(ROOT / PLIST), str(ROOT / (APP + "/Contents/Library/LaunchDaemo
              str(ROOT / NESTED), str(ROOT / APP), str(ROOT / CLIENT), str(ROOT / ENTRY),
              str(ROOT / RESIDENT), RESIDENT[len(NESTED) + 1:])
 BTM_DETAIL_LIMIT = 4
+BTM_TRACE_LIMIT = 16
+# Ordered lexical mentions only: never an Apple grammar or a causal classifier.
+BTM_TRACE_WORDS = (
+    "not", "no", "notfound", "found", "find", "missing", "failed", "cannot", "unable", "error",
+    "open", "load", "resolve", "lookup", "status", "register", "plist", "executable",
+    "bundleprogram", "bundle", "file", "path", "url", "service", "responsibility",
+    "in", "for", "at", "from", "to", "with", "of",
+)
 BTM_STATES = ("not-requested", "window-unavailable", "tool-unavailable", "call-failed",
               "call-unknown", "unparseable", "empty", "observed")
 BTM_MARKERS = (
@@ -133,7 +141,8 @@ BTM_MARKERS = (
     ("mentions-launch-constraint", ("launch constraint",)),
 )
 BTM_DOMAINS = (("SMAppServiceErrorDomain", "smappservice"),
-               ("NSOSStatusErrorDomain", "osstatus"), ("NSCocoaErrorDomain", "cocoa"))
+               ("NSOSStatusErrorDomain", "osstatus"), ("NSCocoaErrorDomain", "cocoa"),
+               ("NSPOSIXErrorDomain", "posix"))
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 CLOSE_FLAGS = ("mainReturned", "mainClosed", "clientClosed", "workerJoined", "identityClosed")
 CASE_FLAGS = ("registered", "watchRegistered", "refused", "tailAdmissionIssued",
@@ -242,6 +251,40 @@ def btm_argv(window):
             "--timezone", "UTC", "--info", "--debug", "--no-pager", "--predicate", predicate]
 
 
+def btm_trace(message, path_patterns, code_spans, ordered_codes):
+    """Bounded ordered mentions, with unknown words left opaque; not cause."""
+    covered, tokens = bytearray(len(message)), []
+    def consume(start, end, token):
+        if not any(covered[start:end]):
+            covered[start:end] = b"\x01" * (end - start)
+            tokens.append([start, end - start, token])
+
+    # Same literal path matches as pathMask; longest overlaps are operands,
+    # not additional lookup words or identifiers inside those operands.
+    paths = [(match.start(), match.end(), bit)
+             for bit, pattern in enumerate(path_patterns) for match in re.finditer(pattern, message)]
+    for start, end, bit in sorted(paths, key=lambda item: (-(item[1] - item[0]), item[0], item[2])):
+        consume(start, end, bit)
+    for bit, value in enumerate(BTM_IDS):
+        pattern = r"(?<![\w.-])" + re.escape(value) + r"(?![\w.-])"
+        for match in re.finditer(pattern, message):
+            consume(match.start(), match.end(), len(BTM_PATHS) + bit)
+    code_base = len(BTM_PATHS) + len(BTM_IDS) + len(BTM_TRACE_WORDS)
+    for start, end, code in code_spans:
+        consume(start, end, code_base + ordered_codes.index(code))
+    # The inner ASCII case rule does NOT change the outer Unicode boundaries
+    # or original character offsets (e.g. capital dotted-I must not expand).
+    words = r"(?<!\w)(?ai:" + "|".join(re.escape(word) for word in BTM_TRACE_WORDS) + r")(?!\w)"
+    for match in re.finditer(words, message):
+        consume(match.start(), match.end(), len(BTM_PATHS) + len(BTM_IDS)
+                + BTM_TRACE_WORDS.index(match.group().lower()))
+    opaque = "".join(" " if covered[index] else char for index, char in enumerate(message))
+    tokens.sort(key=lambda item: item[0])
+    return {"characters": len(message), "knownTokens": len(tokens),
+            "unknownRuns": sum(1 for _match in re.finditer(r"\w+", opaque)),
+            "tokens": tokens[:BTM_TRACE_LIMIT]}
+
+
 def btm_events(body):
     """Closed mentions/codes, not arbitrary logs, causal findings or authority."""
     need(type(body) is bytes and 0 < len(body) <= BTM_LIMIT, "btm-log-data")
@@ -257,8 +300,8 @@ def btm_events(body):
     codes, matched, details = set(), 0, []
     own = r"(?<![\w.-])(?:" + "|".join(re.escape(value) for value in BTM_IDS) + r")(?![\w.-])"
     domains = dict(BTM_DOMAINS)
-    error_pattern = (r"(?<![\w])Domain=(SMAppServiceErrorDomain|NSOSStatusErrorDomain|NSCocoaErrorDomain)"
-                     r" Code=(-?(?:0|[1-9][0-9]{0,9}))(?=$|[^\w.+-])")
+    error_pattern = (r"(?<![\w])Domain=(" + "|".join(re.escape(name) for name, _alias in BTM_DOMAINS)
+                     + r") Code=(-?(?:0|[1-9][0-9]{0,9}))(?=$|[^\w.+-])")
     path_patterns = []
     for bit, path in enumerate(BTM_PATHS):
         spellings = (path, "file://" + path.replace(" ", "%20")) if bit < 7 else (path,)
@@ -283,12 +326,14 @@ def btm_events(body):
         if not marker_mask:
             counts["other"] += 1
             marker_mask = 1 << len(BTM_MARKERS)
-        row_codes = set()
-        for domain, raw in re.findall(error_pattern, message):
+        row_codes, code_spans = set(), []
+        for match in re.finditer(error_pattern, message):
+            domain, raw = match.groups()
             code = int(raw)
             if str(code) == raw and -(1 << 31) <= code < 1 << 31:
                 row_codes.add((domains[domain], code))
                 codes.add((domains[domain], code))
+                code_spans.append((match.start(), match.end(), (domains[domain], code)))
         need(len(codes) <= 8, "btm-log-data")
         if len(details) < BTM_DETAIL_LIMIT:
             try:
@@ -298,17 +343,19 @@ def btm_events(body):
             details.append(({"ordinal": ordinal, "messageSha256": digest(message_bytes),
                              "pathMask": sum(1 << bit for bit, pattern in enumerate(path_patterns)
                                              if re.search(pattern, message) is not None),
-                             "markerMask": marker_mask}, row_codes))
+                             "markerMask": marker_mask}, row_codes, message, code_spans))
     ordered_codes = sorted(codes)
+    public_details = [dict(detail, codeMask=sum(1 << bit for bit, code in enumerate(ordered_codes) if code in row_codes),
+                           trace=btm_trace(message, path_patterns, code_spans, ordered_codes))
+                      for detail, row_codes, message, code_spans in details]
     return {"eventCount": len(rows), "ownEventCount": matched, "unmatchedEventCount": len(rows) - matched,
             "markerCounts": counts, "errorCodes": [{"domain": domain, "code": code} for domain, code in ordered_codes],
-            "ownEventDetails": [dict(detail, codeMask=sum(1 << bit for bit, code in enumerate(ordered_codes)
-                                                         if code in row_codes)) for detail, row_codes in details],
+            "ownEventDetails": public_details,
             "ownEventDetailsOmitted": matched - len(details)}
 
 
 def btm_record(source):
-    return {"schemaVersion": 2, "type": "mrk-e2-fixture-btm-log-observation-v2", "sourceCommit": source,
+    return {"schemaVersion": 3, "type": "mrk-e2-fixture-btm-log-observation-v3", "sourceCommit": source,
             "diagnosticOnly": True, "state": "not-requested", "window": None, "commandIndex": None,
             "toolSha256": None, "stdoutSha256": None, "stderrSha256": None, "eventCount": None,
             "ownEventCount": None, "unmatchedEventCount": None, "markerCounts": None, "errorCodes": None,
@@ -319,8 +366,8 @@ def btm_record(source):
 
 def btm_log_data(value, source, calls):
     need(type(value) is dict and set(value) == set(btm_record(source))
-         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 2
-         and value["type"] == "mrk-e2-fixture-btm-log-observation-v2" and value["sourceCommit"] == source
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 3
+         and value["type"] == "mrk-e2-fixture-btm-log-observation-v3" and value["sourceCommit"] == source
          and identity(source, 40) and value["diagnosticOnly"] is True
          and all(value[key] is False for key in ("rawOutputIncluded", "absenceEstablished",
                                                 "ownershipEstablished", "nativeLifecycleQualified"))
@@ -385,7 +432,7 @@ def btm_log_data(value, source, calls):
         names = (*(name for name, _words in BTM_MARKERS), "other")
         projected, last = dict.fromkeys(names, 0), -1
         for detail in details:
-            need(type(detail) is dict and set(detail) == {"ordinal", "messageSha256", "pathMask", "markerMask", "codeMask"}
+            need(type(detail) is dict and set(detail) == {"ordinal", "messageSha256", "pathMask", "markerMask", "codeMask", "trace"}
                  and type(detail["ordinal"]) is int and last < detail["ordinal"] < value["eventCount"]
                  and identity(detail["messageSha256"], 64)
                  and type(detail["pathMask"]) is int and 0 <= detail["pathMask"] < 1 << len(BTM_PATHS)
@@ -393,6 +440,37 @@ def btm_log_data(value, source, calls):
                  and (not detail["markerMask"] & (1 << len(BTM_MARKERS))
                       or detail["markerMask"] == 1 << len(BTM_MARKERS))
                  and type(detail["codeMask"]) is int and 0 <= detail["codeMask"] < 1 << len(codes), "btm-log-data")
+            trace = detail["trace"]
+            need(type(trace) is dict and set(trace) == {"characters", "knownTokens", "unknownRuns", "tokens"}
+                 and type(trace["characters"]) is int and 0 < trace["characters"] <= 8192
+                 and type(trace["knownTokens"]) is int and 0 < trace["knownTokens"] <= trace["characters"]
+                 and type(trace["unknownRuns"]) is int and 0 <= trace["unknownRuns"] <= trace["characters"]
+                 and trace["knownTokens"] + trace["unknownRuns"] <= trace["characters"]
+                 and type(trace["tokens"]) is list
+                 and len(trace["tokens"]) == min(trace["knownTokens"], BTM_TRACE_LIMIT), "btm-log-data")
+            word_base, code_base, end = len(BTM_PATHS) + len(BTM_IDS), len(BTM_PATHS) + len(BTM_IDS) + len(BTM_TRACE_WORDS), 0
+            for token in trace["tokens"]:
+                need(type(token) is list and len(token) == 3 and all(type(item) is int for item in token)
+                     and end <= token[0] and 0 < token[1] and token[0] + token[1] <= trace["characters"]
+                     and 0 <= token[2] < code_base + len(codes), "btm-log-data")
+                start, length, token_id = token
+                end = start + length
+                if token_id < len(BTM_PATHS):
+                    path = BTM_PATHS[token_id]
+                    spellings = (path, "file://" + path.replace(" ", "%20")) if token_id < 7 else (path,)
+                    if token_id in (2, 3):
+                        spellings += tuple(spelling + "/" for spelling in spellings)
+                    need(detail["pathMask"] & (1 << token_id) and length in {len(item) for item in spellings}, "btm-log-data")
+                elif token_id < word_base:
+                    need(length == len(BTM_IDS[token_id - len(BTM_PATHS)]), "btm-log-data")
+                elif token_id < code_base:
+                    need(length == len(BTM_TRACE_WORDS[token_id - word_base]), "btm-log-data")
+                else:
+                    code_index = token_id - code_base
+                    code = codes[code_index]
+                    domain = next(name for name, alias in BTM_DOMAINS if alias == code["domain"])
+                    need(detail["codeMask"] & (1 << code_index)
+                         and length == len("Domain=" + domain + " Code=" + str(code["code"])), "btm-log-data")
             last = detail["ordinal"]
             for bit, name in enumerate(names):
                 projected[name] += bool(detail["markerMask"] & (1 << bit))

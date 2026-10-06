@@ -9,6 +9,8 @@ path is separate; ordinary V2 distribution requires genuine configured inputs.
 from __future__ import annotations
 
 import argparse
+import base64
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -64,6 +66,92 @@ PYTHON_SUPPLIERS = {
         "tarSha256": "739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd",
         "sourceCommit": "079ab2a2c8fef88f01bf909e7669c685f07e1375", "runId": "37476532238", "runAttempt": "1", "artifactId": "11419502465"},
 }
+
+
+SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer")
+CREDENTIAL_VARIABLES = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPER_ID_P12_PASSWORD")
+CREDENTIAL_ROLES = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import",
+                    "partitions", "identity", "certificates", "search-admit", "restrict", "search-restricted",
+                    "search-after-callback", "restore", "search-restored", "delete", "default-after", "search-final",
+                    "producer-adhoc", "producer-adhoc-verify", "producer-cdhash")
+
+
+def credential_values(environment):
+    """Bounded secrets only; neither inputs nor their hashes are public evidence."""
+    encoded, password = (environment.get(key) for key in CREDENTIAL_VARIABLES)
+    need(type(encoded) is str and 4 <= len(encoded) <= 43692 and encoded.isascii()
+         and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", encoded) is not None
+         and type(password) is str and 1 <= len(password) <= 1024
+         and all(0x20 <= ord(value) <= 0x7e for value in password), "credential-input-bound")
+    try:
+        body = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        raise Refused("credential-base64") from None
+    need(0 < len(body) <= 32768 and base64.b64encode(body).decode("ascii") == encoded, "credential-base64")
+    return body, password
+
+
+def credential_paths(body, *, single=False):
+    """Decode only security's quoted user-domain path list, without escapes."""
+    need(type(body) is bytes and len(body) <= 16384 and (not body or body.endswith(b"\n")), "credential-search-format")
+    paths = []
+    for line in body.splitlines(keepends=True):
+        match = re.fullmatch(rb'[ \t]*"(/[\x20-\x21\x23-\x5b\x5d-\x7e]{1,4094})"\n', line)
+        need(match is not None, "credential-search-format")
+        path = match[1].decode("ascii")
+        need(all(part not in ("", ".", "..") for part in path[1:].split("/")), "credential-search-format")
+        paths.append(path)
+    need(len(paths) <= 16 and len(paths) == len(set(paths)) and (not single or len(paths) == 1), "credential-search-format")
+    return tuple(paths)
+
+
+def credential_identity(identity_body, certificate_body, identity, certificates):
+    """Exact public SOURCE identity and cert bytes; no general PKCS12 parser."""
+    signing_requirement(identity, PYTHON_IDENTIFIER)
+    need(type(identity_body) is bytes and type(certificate_body) is bytes
+         and len(identity_body) <= 16384 and len(certificate_body) <= 16384
+         and type(certificates) is tuple and len(certificates) == 3 and all(type(value) is bytes for value in certificates),
+         "credential-identity-bound")
+    try:
+        text = identity_body.decode("utf-8")
+    except UnicodeError:
+        raise Refused("credential-identity-format") from None
+    rows, summaries = [], []
+    for line in text.splitlines():
+        match = re.fullmatch(r'[ \t]*1\) ([0-9A-Fa-f]{40}) "([^"\x00-\x1f\x7f]{1,512})"', line)
+        if match is not None:
+            rows.append(match[1].lower())
+        elif re.fullmatch(r"[ \t]*1 valid identities found", line):
+            summaries.append(True)
+        else:
+            need(not line.strip(), "credential-identity-format")
+    need(rows == [identity[1]] and summaries == [True], "credential-source-identity")
+    pattern = rb"-----BEGIN CERTIFICATE-----\n([A-Za-z0-9+/=\n]+)-----END CERTIFICATE-----\n"
+    values, end = [], 0
+    for match in re.finditer(pattern, certificate_body):
+        need(match.start() == end and len(values) < 3, "credential-certificate-format")
+        encoded = match[1].replace(b"\n", b"")
+        try:
+            value = base64.b64decode(encoded, validate=True)
+        except ValueError:
+            raise Refused("credential-certificate-format") from None
+        need(0 < len(value) <= 16384 and base64.b64encode(value) == encoded, "credential-certificate-format")
+        values.append(value); end = match.end()
+    need(end == len(certificate_body) and values and len(values) == len(set(values))
+         and certificates[0] in values and all(value in certificates for value in values), "credential-source-certificates")
+
+
+def credential_cdhash(body):
+    need(type(body) is bytes and len(body) <= 16384, "producer-cdhash-bound")
+    try:
+        text = body.decode("utf-8")
+    except UnicodeError:
+        raise Refused("producer-cdhash-format") from None
+    hashes = [line for line in text.splitlines() if line.startswith("CDHash=")]
+    signatures = [line for line in text.splitlines() if line.startswith("Signature=")]
+    need(len(hashes) == 1 and re.fullmatch(r"CDHash=[0-9a-f]{40}", hashes[0]) is not None
+         and signatures == ["Signature=adhoc"], "producer-cdhash-format")
+    return hashes[0][7:]
 
 
 def python_sign_command(path, entitlements, phase, identity):
@@ -190,7 +278,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in PHASES + PYTHON_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -430,12 +518,16 @@ class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
     def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET):
-        need(phase in PHASES + PYTHON_PHASES, "closed-phase")
+        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
         self.phase, self.environment, self.stager = phase, environment, stager
         self.entries, self.calls, self.errors = [], [], []
+        self.credential_calls, self.credential_contexts = [], []
+        self.credential_active = None
+        self.credential_unknown = self.credential_failed = self.signing_mutation_pending = False
+        self.fixed_sign_complete = False
         self.directories = {}
         self.work_entry = self.target_entry = None
         self.profile_entry = self.source_entry = None
@@ -461,6 +553,7 @@ class Operation:
                         "workflow": environment["GITHUB_WORKFLOW_REF"], "runId": environment["GITHUB_RUN_ID"],
                         "runAttempt": environment["GITHUB_RUN_ATTEMPT"], "toolchain": "1.98.1",
                         "helperIdentifier": IDENTIFIER, "originalCalls": self.calls,
+                        "credentialOriginals": self.credential_calls, "credentialContexts": self.credential_contexts,
                         "targetRetired": False, "originalClosesKnown": False, "passed": False,
                         "outerFinalityRequired": True, "androidServiceAuthenticated": False,
                         "androidRegisteredCopyQualified": False, "androidBuildQualified": False,
@@ -574,6 +667,15 @@ class Operation:
         need(entry["closed"], "output-close-unknown")
 
     def call(self, role, argv, environment, *, cwd, timeout, limit):
+        need(self.credential_known() and not self.credential_failed, "credential-dispatch-unknown")
+        if self.credential_active is not None:
+            context = self.credential_active
+            need(context["ready"] and not context["retiring"] and role in context["roles"], "credential-callback-purpose")
+            now = self.credential_clock(context)
+            need(now + (timeout + 3) * 1_000_000_000 < context["endpoint"] - 30_000_000_000, "credential-callback-deadline")
+            self.credential_census(context)
+            environment = dict(environment, HOME="/Users/runner")
+        need(not any(name in environment for name in CREDENTIAL_VARIABLES), "credential-child-environment")
         if self.phase in PYTHON_PHASES:
             need(not self.python_retiring and not self.errors and self.stager_io_pending is None
                  and len(self.calls) < len(PYTHON_ROLES) and role == PYTHON_ROLES[len(self.calls)]
@@ -624,7 +726,518 @@ class Operation:
         record["capturesSettled"] = True  # All original output/readback/closes returned.
         diagnostic = self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
         need(result.returncode == 0 or diagnostic and result.returncode == 1, "original-nonzero-" + role)
+        if self.credential_active is not None:
+            self.credential_clock(self.credential_active)
+            self.credential_census(self.credential_active)
         return result
+
+    def credential_known(self):
+        return (not self.credential_unknown and all(row["returned"] and row["settled"] for row in self.credential_calls))
+
+    def credential_clock(self, context, *, cleanup=False):
+        now = time.monotonic_ns()
+        need(type(now) is int and context["observed"] <= now < context["endpoint"] - (0 if cleanup else 30_000_000_000),
+             "credential-original-deadline")
+        context["observed"] = now
+        if self.phase in PYTHON_PHASES:
+            self.python_clock(work=not cleanup)
+        elif self.package_endpoint is not None:
+            self.package_clock()
+        return now
+
+    def credential_new_clock(self):
+        now = time.monotonic_ns()
+        need(type(now) is int, "credential-original-clock")
+        endpoint = now + 240_000_000_000
+        if self.phase in PYTHON_PHASES:
+            _observed, outer = self.python_clock()
+            endpoint = min(endpoint, outer)
+        elif self.package_endpoint is not None:
+            self.package_clock()
+            endpoint = min(endpoint, self.package_endpoint)
+        return {"observed": now, "endpoint": endpoint, "ready": False, "retiring": False, "pending": None,
+                "directories": [], "root": None, "created": False, "p12": None, "entries": [], "roles": ()}
+
+    def credential_io(self, context, label, function, *args, **kwargs):
+        need(self.credential_known() and context["pending"] is None, "credential-original-unknown")
+        self.credential_clock(context, cleanup=context["retiring"])
+        context["pending"] = label
+        try:
+            value = function(*args, **kwargs)
+            self.credential_clock(context, cleanup=context["retiring"])
+        except BaseException:
+            self.credential_unknown = True
+            raise
+        context["pending"] = None
+        return value
+
+    def credential_open(self, context, name, flags, mode=0o600, *, parent=None, directory=False):
+        entry = self.register(None, "credential-directory" if directory else "credential-file", "credential-original")
+        context["entries"].append(entry)  # Before the original acquisition/result assignment.
+        entry["name"], entry["parent_entry"] = name, parent
+        entry["fd"] = self.credential_io(context, "open", os.open, name, flags, mode,
+                                          **({} if parent is None else {"dir_fd": parent["fd"]}))
+        return entry
+
+    def credential_directories_post(self, context):
+        for entry in context["directories"]:
+            parent = entry["parent_entry"]
+            named = os.stat(entry["name"], follow_symlinks=False,
+                            **({} if parent is None else {"dir_fd": parent["fd"]}))
+            held = os.fstat(entry["fd"])
+            value = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+            need(stat.S_ISDIR(held.st_mode) and value(held) == value(named) == entry["identity"],
+                 "credential-directory-original")
+
+    def credential_census(self, context):
+        """Opaque DBs may be0644: held0700 root, not tool-mode guesses, confines them.
+
+        No special/execute/nonowner-write bits or private DB content reads. The
+        one decoded credential file retains its separate exact0600 contract.
+        """
+        if context["root"] is None:
+            return
+        def inspect():
+            self.credential_directories_post(context)
+            root = context["root"]
+            names = os.listdir(root["fd"])
+            need(len(names) <= 8 and len(names) == len(set(names)) and all(type(name) is str
+                 and re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", name) and name not in (".", "..") for name in names),
+                 "credential-private-census")
+            total = 0
+            for name in sorted(names):
+                entry = self.register(None, "credential-census-file", "credential-original")
+                context["entries"].append(entry)
+                entry["fd"] = os.open(name, READ_FLAGS, dir_fd=root["fd"])
+                try:
+                    info = os.fstat(entry["fd"])
+                    need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
+                         and info.st_gid == os.getgid() and not info.st_mode & 0o7133
+                         and (name != "identity.p12" or stat.S_IMODE(info.st_mode) == 0o600)
+                         and 0 <= info.st_size <= 16 * 1024 * 1024, "credential-private-file")
+                    total += info.st_size
+                    need(total <= 16 * 1024 * 1024 and signature(os.fstat(entry["fd"])) == signature(info)
+                         == signature(os.stat(name, dir_fd=root["fd"], follow_symlinks=False)), "credential-private-file-post")
+                finally:
+                    self.close(entry)
+                need(entry["closed"], "credential-census-close-unknown")
+            self.credential_directories_post(context)
+        self.credential_io(context, "census", inspect)
+
+    def credential_call(self, context, role, argv, *, timeout=10):
+        """The SAME process owner, but no public raw argv/captures/exception text."""
+        need(context is self.credential_active and role in CREDENTIAL_ROLES
+             and self.credential_known() and context["pending"] is None
+             and len(self.credential_calls) < 64 and timeout in (10, 30), "credential-fixed-original")
+        now = self.credential_clock(context, cleanup=context["retiring"])
+        endpoint = context["endpoint"] - (0 if context["retiring"] else 30_000_000_000)
+        need(now + (timeout + 3) * 1_000_000_000 < endpoint, "credential-dispatch-reserve")
+        self.credential_census(context)
+        record = {"role": role, "entered": True, "returned": False, "settled": False, "status": None}
+        self.credential_calls.append(record)
+        environment = self.native_environment()
+        environment["HOME"] = "/Users/runner"
+        try:
+            result = self.owner.run_owned(argv, environ=environment, cwd=self.work, timeout=timeout,
+                                          capture=True, text=False, output_limit=16384)
+            need(type(result) is subprocess.CompletedProcess and type(result.returncode) is int and -65536 <= result.returncode <= 65535
+                 and type(result.args) in (tuple, list) and tuple(result.args) == tuple(argv)
+                 and type(result.stdout) is bytes and type(result.stderr) is bytes
+                 and len(result.stdout) + len(result.stderr) <= 16384, "credential-original-return")
+            record.update(returned=True, settled=True, status=result.returncode)
+            self.credential_clock(context, cleanup=context["retiring"])
+            self.credential_census(context)
+        except BaseException:
+            self.credential_unknown = True
+            raise
+        if result.returncode != 0:
+            # A normally returned mutator may still have partially changed the
+            # database/searchlist. Do not guess its state or delete its names.
+            if role in ("create", "settings", "unlock", "import", "partitions", "restrict", "restore", "delete", "producer-adhoc"):
+                self.credential_unknown = True
+            raise Refused("credential-original-nonzero")
+        return result
+
+    def credential_search(self, context, role, *, default=False, expected=None):
+        result = self.credential_call(context, role, ["/usr/bin/security",
+            "default-keychain" if default else "list-keychains", "-d", "user"])
+        try:
+            need(not result.stderr, "credential-search-stderr")
+            observed = credential_paths(result.stdout, single=default)
+            need(expected is None or observed == expected, "credential-search-value-changed")
+            return observed
+        except BaseException:
+            self.credential_unknown = True  # Cannot restore/adopt an unknown list.
+            raise
+
+    def credential_sources(self):
+        source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
+        need(self.signing == (source.team, source.leaf_sha1), "credential-profile-identity")
+        fields = dict(line.split("=", 1) for line in self.producer_profile.decode("ascii").splitlines())
+        certificates = []
+        for name, field in (("leaf", "leaf-certificate-sha256"), ("issuer", "issuer-certificate-sha256"), ("root", "root-certificate-sha256")):
+            entry = self.source_original("desktop/packaging/macos-install-producer-certificates/" + name + ".der",
+                                         "credential-source-" + name, 16384)
+            body = self.read(entry)
+            need(digest(body) == fields[field], "credential-source-certificate")
+            certificates.append(body)
+            self.package_sources.append((entry, body))
+        need(hashlib.sha1(certificates[0]).hexdigest() == self.signing[1], "credential-source-leaf")
+        return tuple(certificates)
+
+    def credential_private_root(self, context, body):
+        parts = WORK_PARENT.parts
+        need(WORK_PARENT.is_absolute() and self.work.parent == WORK_PARENT,
+             "credential-private-parent")
+        parent = None
+        for part in parts:
+            entry = self.credential_open(context, part, READ_FLAGS | os.O_DIRECTORY, parent=parent, directory=True)
+            info = os.fstat(entry["fd"])
+            need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid())
+                 and (not info.st_mode & 0o022 or info.st_uid == 0 and info.st_mode & stat.S_ISVTX),
+                 "credential-ancestor-mode")
+            entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+            context["directories"].append(entry)
+            self.credential_io(context, "ancestor-post", self.credential_directories_post, context)
+            parent = entry
+        capacity = self.credential_io(context, "capacity", os.fstatvfs, parent["fd"])
+        need(capacity.f_frsize > 0 and capacity.f_bavail * capacity.f_frsize >= 16 * 1024 * 1024 + 32768,
+             "credential-private-storage-reserve")
+        name = "mrk-macos-signing-private." + os.urandom(16).hex()
+        context["path"] = WORK_PARENT / name
+        context["parent"] = parent
+        self.credential_io(context, "private-mkdir", os.mkdir, name, 0o700, dir_fd=parent["fd"])
+        context["created"] = True
+        root = self.credential_open(context, name, READ_FLAGS | os.O_DIRECTORY, parent=parent, directory=True)
+        info = os.fstat(root["fd"])
+        need(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+             and info.st_uid == os.getuid() and info.st_gid == os.getgid(), "credential-root-mode")
+        root["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+        context["root"] = root
+        context["directories"].append(root)
+        self.credential_census(context)
+        need(not os.listdir(root["fd"]), "credential-root-exclusive")
+        entry = self.credential_open(context, "identity.p12", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     parent=root)
+        context["p12"] = entry
+        context["body"] = body
+        def write():
+            offset = 0
+            while offset < len(body):
+                count = os.write(entry["fd"], body[offset:])
+                need(type(count) is int and count > 0, "credential-short-write")
+                offset += count
+            os.fchmod(entry["fd"], 0o600)
+            os.fsync(entry["fd"])
+            entry["identity"] = signature(os.fstat(entry["fd"]))
+            self.credential_p12_post(context)
+        self.credential_io(context, "p12-write-readback", write)
+
+    def credential_p12_post(self, context):
+        entry, root, body = context["p12"], context["root"], context["body"]
+        self.credential_directories_post(context)
+        info = os.fstat(entry["fd"])
+        need(signature(info) == entry["identity"] == signature(os.stat("identity.p12", dir_fd=root["fd"], follow_symlinks=False))
+             and stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
+             and info.st_uid == os.getuid() and info.st_gid == os.getgid() and info.st_size == len(body), "credential-p12-original")
+        need(os.pread(entry["fd"], len(body) + 1, 0) == body and os.pread(entry["fd"], 1, len(body)) == b""
+             and signature(os.fstat(entry["fd"])) == entry["identity"], "credential-p12-readback")
+        self.credential_directories_post(context)
+
+    def credential_p12_retire(self, context):
+        entry = context["p12"]
+        if entry is None:
+            return
+        self.credential_io(context, "p12-post", self.credential_p12_post, context)
+        self.close(entry)
+        need(entry["closed"] and not self.errors, "credential-p12-close-unknown")
+        def remove():
+            self.credential_directories_post(context)
+            need(signature(os.stat("identity.p12", dir_fd=context["root"]["fd"], follow_symlinks=False)) == entry["identity"],
+                 "credential-p12-after-close")
+            os.unlink("identity.p12", dir_fd=context["root"]["fd"])
+        self.credential_io(context, "p12-remove", remove)
+        context["p12"] = None
+        context.pop("body", None)
+
+    @contextlib.contextmanager
+    def credential_scope(self, purpose, *, producer=None):
+        pairs = {"python": PYTHON_ROLES[:2], "resident-image": ("resident-image-sign", "resident-image-verify-signed"),
+                 "helper": ("sign", "verify-signed"), "producer": ("producer-emitter",),
+                 **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES}}
+        need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
+              or purpose == "producer" and self.phase == "package-install" or purpose in SIGNING_PHASES and self.phase == purpose)
+             and self.credential_active is None and not self.credential_failed and self.credential_known(), "credential-fixed-purpose")
+        if self.phase == "python-engineering" or self.phase == "prepare" and self.signing is None:
+            yield  # No secret read, directory, keychain or auxiliary call.
+            return
+        need(self.environment.get("HOME") == "/Users/runner", "credential-user-domain")
+        certificates = self.credential_sources()
+        context = self.credential_new_clock()
+        context["roles"] = pairs[purpose]
+        fact = {"purpose": purpose, "searchRestored": False, "defaultUnchanged": False, "retired": False, "closed": False}
+        primary, original_list, original_default, expected_list = None, None, None, None
+        keychain, password, secret = None, None, None
+        keychain_created = False
+        try:
+            self.credential_active = context  # Inside the whole acquisition/use/unwind guard.
+            self.credential_contexts.append(fact)
+            body, secret = credential_values(self.environment)
+            password = os.urandom(32).hex()
+            self.credential_private_root(context, body)
+            keychain = str(context["path"] / "identity.keychain-db")
+            original_list = self.credential_search(context, "search-before")
+            original_default = self.credential_search(context, "default-before", default=True)
+            expected_list = original_list
+            self.credential_call(context, "create", ["/usr/bin/security", "create-keychain", "-p", password, keychain])
+            keychain_created = True
+            observed = self.credential_search(context, "search-created")
+            if not (observed.count(keychain) <= 1 and tuple(value for value in observed if value != keychain) == original_list):
+                self.credential_unknown = True
+                raise Refused("credential-created-searchlist")
+            expected_list = observed
+            self.credential_call(context, "settings", ["/usr/bin/security", "set-keychain-settings", "-l", "-u", "-t", "240", keychain])
+            self.credential_call(context, "unlock", ["/usr/bin/security", "unlock-keychain", "-p", password, keychain])
+            if purpose == "producer":
+                need(type(producer) is tuple and len(producer) == 3 and re.fullmatch(r"[0-9a-f]{40}", producer[2]),
+                     "credential-producer-admission")
+                copied, copied_body, code_hash = producer
+                need(self.read(copied) == copied_body, "credential-producer-original")
+                trusted = str(self.work / "macos-package-producer")
+                partitions = "apple-tool:,cdhash:" + code_hash
+            else:
+                need(producer is None, "credential-code-purpose")
+                trusted, partitions = "/usr/bin/codesign", "apple-tool:,apple:"
+            self.credential_io(context, "p12-import-pre", self.credential_p12_post, context)
+            self.credential_call(context, "import", ["/usr/bin/security", "import", str(context["path"] / "identity.p12"),
+                "-k", keychain, "-f", "pkcs12", "-P", secret, "-T", trusted, "-T", "/usr/bin/security"])
+            if purpose == "producer":
+                need(self.read(copied) == copied_body, "credential-producer-import-post")
+            self.credential_p12_retire(context)  # No encoded key file exists during the callback.
+            secret = None
+            self.credential_call(context, "partitions", ["/usr/bin/security", "set-key-partition-list", "-S", partitions,
+                                                       "-s", "-k", password, keychain])
+            identities = self.credential_call(context, "identity", ["/usr/bin/security", "find-identity", "-v", "-p", "codesigning", keychain])
+            certs = self.credential_call(context, "certificates", ["/usr/bin/security", "find-certificate", "-a", "-p", keychain])
+            need(not identities.stderr and not certs.stderr, "credential-private-query-stderr")
+            credential_identity(identities.stdout, certs.stdout, self.signing, certificates)
+            self.credential_search(context, "search-admit", expected=expected_list)
+            self.credential_call(context, "restrict", ["/usr/bin/security", "list-keychains", "-d", "user", "-s", keychain])
+            expected_list = (keychain,)
+            self.credential_search(context, "search-restricted", expected=expected_list)
+            for entry, data in self.package_sources:
+                need(self.read(entry) == data, "credential-source-post")
+            maximum = 126 if purpose == "producer" else 66
+            need(self.credential_clock(context) + maximum * 1_000_000_000 < context["endpoint"] - 30_000_000_000,
+                 "credential-callback-reserve")
+            before = len(self.calls)
+            context["ready"] = True
+            yield
+            context["ready"] = False
+            need(tuple(row["role"] for row in self.calls[before:]) == context["roles"], "credential-callback-roster")
+            if purpose == "producer":
+                need(self.read(copied) == copied_body, "credential-producer-callback-post")
+            for entry, data in self.package_sources:
+                need(self.read(entry) == data, "credential-source-post")
+            self.credential_clock(context)
+        except BaseException as error:
+            primary = error
+        finally:
+            context["ready"] = False
+            context["retiring"] = True
+            try:
+                need(self.credential_known() and context["pending"] is None and not self.errors
+                     and self.stager_io_pending is None and not self.python_mutation_pending and not self.signing_mutation_pending
+                     and all(row["returned"] and row.get("capturesSettled") is True for row in self.calls),
+                     "credential-unwind-original-unknown")
+                self.credential_clock(context, cleanup=True)
+                if keychain_created:
+                    self.credential_census(context)
+                    self.credential_search(context, "search-after-callback", expected=expected_list)
+                    self.credential_call(context, "restore", ["/usr/bin/security", "list-keychains", "-d", "user", "-s", *original_list])
+                    self.credential_search(context, "search-restored", expected=original_list)
+                    fact["searchRestored"] = True
+                    self.credential_p12_retire(context)
+                    self.credential_call(context, "delete", ["/usr/bin/security", "delete-keychain", keychain])
+                elif original_list is not None:
+                    self.credential_search(context, "search-final", expected=original_list)
+                    fact["searchRestored"] = True
+                    if original_default is not None:
+                        self.credential_search(context, "default-after", default=True, expected=original_default)
+                        fact["defaultUnchanged"] = True
+                if context["root"] is not None:
+                    self.credential_p12_retire(context)
+                    self.credential_census(context)
+                    need(not os.listdir(context["root"]["fd"]), "credential-private-root-not-empty")
+                    self.credential_io(context, "private-rmdir", os.rmdir, context["path"].name,
+                                       dir_fd=context["parent"]["fd"])
+                    context["directories"].remove(context["root"])
+                    context["root"] = None
+                    self.credential_io(context, "private-parent-post", self.credential_directories_post, context)
+                    try:
+                        os.stat(context["path"].name, dir_fd=context["parent"]["fd"], follow_symlinks=False)
+                    except FileNotFoundError:
+                        fact["retired"] = True
+                    else:
+                        raise Refused("credential-private-root-remains")
+            except BaseException as error:
+                self.credential_unknown = True
+                self.errors.append({"stage": "credential-unwind", "type": type(error).__name__})
+                if primary is None:
+                    primary = error
+            finally:
+                secret = password = None
+                context.pop("body", None)
+                for entry in reversed(context["entries"]):
+                    self.close(entry)  # Known held FDs only, even if a process is unknown.
+                fact["closed"] = all(entry["closed"] for entry in context["entries"])
+                if not fact["closed"] or context["pending"] is not None:
+                    self.credential_unknown = True
+                    if primary is None:
+                        primary = Refused("credential-close-unknown")
+                try:
+                    if not self.credential_unknown and original_list is not None:
+                        self.credential_search(context, "search-final", expected=original_list)
+                        if original_default is not None:
+                            self.credential_search(context, "default-after", default=True, expected=original_default)
+                            fact["defaultUnchanged"] = True
+                    self.credential_clock(context, cleanup=True)
+                except BaseException as error:
+                    self.credential_unknown = True
+                    self.errors.append({"stage": "credential-final-post", "type": type(error).__name__})
+                    if primary is None:
+                        primary = error
+                # Every exit, including BaseException/constructor gaps, latches
+                # pending/unknown state before any later command/retirement.
+                if context["created"] and not fact["retired"]:
+                    self.credential_unknown = True
+                self.credential_active = None
+        if primary is not None:
+            self.credential_failed = True
+            raise primary
+        need(fact["retired"] and fact["closed"] and fact["searchRestored"] and fact["defaultUnchanged"]
+             and self.credential_known(), "credential-finality-incomplete")
+
+    def signing_matcher(self):
+        entry = self.source_original("desktop/tools/macos_cpython_orchestrator.py", "signing-content-source", 256 * 1024)
+        body = self.read(entry)
+        # Existing DATA parser, admitted from the exact held SOURCE before/after
+        # loading; not a new native process, signing owner or executable input.
+        self.stager_io_pending = "signing-content-source-load"
+        matcher = load_data(self.checkout, "macos_cpython_orchestrator.py", "_mrk_credential_signing_content")
+        need(self.read(entry) == body, "signing-content-source-post")
+        self.stager_io_pending = None
+        self.package_sources.append((entry, body))
+        return matcher
+
+    def fixed_sign(self):
+        """Five fixed existing workflow roles, never a user-selected path/argv."""
+        need(self.phase in SIGNING_PHASES and self.signing is not None, "fixed-signing-purpose")
+        base = "app/Mobile Release Kit.app"
+        payload = base + "/Contents/Helpers/MobileReleaseKitPayload.app"
+        selected = {
+            "sign-vault-helper": "vault-helper-target/" + self.target + "/release/mrk-vault-keychain",
+            "sign-desktop-image": payload + "/Contents/Frameworks/libmrk_desktop_image.dylib",
+            "sign-desktop-payload": payload,
+            "sign-root-app": base,
+            "sign-root-installer": "cargo-target/" + self.target + "/release/mrk-macos-install",
+        }[self.phase]
+        if self.phase == "sign-desktop-image":
+            need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "fixed-desktop-image-role")
+        if self.phase == "sign-root-installer":
+            need(self.environment.get("CARGO_TARGET_DIR") == str(self.work / "cargo-target"), "fixed-installer-target")
+        path = self.work / selected
+        bundled = self.phase in ("sign-desktop-payload", "sign-root-app")
+        root = self.descend(self.work_entry, tuple(selected.split("/"))) if bundled else None
+        binary_name = ("mobile-release-kit-desktop" if self.phase == "sign-desktop-payload" else ENTRY)
+        binary = selected + "/Contents/MacOS/" + binary_name if bundled else selected
+        parent = self.descend(self.work_entry, tuple(binary.split("/")[:-1]))
+        old = self.original(parent, binary.split("/")[-1], "fixed-sign-input", 64 * 1024 * 1024, (0o555, 0o700, 0o755), alias=not bundled)
+        original = self.read(old)
+        if self.phase == "sign-desktop-image":
+            self.stager.image_macho(original, "desktop", target=self.target)
+        else:
+            self.stager.macho(original, system_only=True, target=self.target)
+        matcher = self.signing_matcher()
+        entitlements = self.source_original("desktop/packaging/macos-empty-entitlements.plist", "fixed-sign-empty-entitlements", 1024)
+        empty = self.read(entitlements)
+        need(digest(empty) == self.stager.SIGNED_ENTITLEMENTS_SHA256, "fixed-sign-empty-profile")
+        self.package_sources.append((entitlements, empty))
+        arguments = ["--options", "runtime", "--entitlements",
+            str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist")]
+        with self.credential_scope(self.phase):
+            self.stage = self.phase
+            self.signing_mutation_pending = True
+            self.call(self.phase, ["/usr/bin/codesign", "--force", "--sign", self.signing[1], *arguments, "--timestamp", str(path)],
+                      self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            if root is not None:
+                self.recheck_directory(root)
+            self.recheck_directory(parent)
+            signed = self.original(parent, binary.split("/")[-1], "fixed-sign-output", 64 * 1024 * 1024,
+                                   (0o555, 0o700, 0o755), alias=not bundled)
+            body = self.read(signed)
+            matcher.macho_content_valid(original, body, self.arch, signing=True)
+            self.close(old)
+            need(old["closed"] and not self.errors, "fixed-sign-input-close-unknown")
+            self.signing_mutation_pending = False
+            verified = self.call(self.phase + "-verify", ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+                                 self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            need(not verified.stdout and not verified.stderr and self.read(signed) == body, "fixed-sign-original-verification")
+            if root is not None:
+                self.recheck_directory(root)
+        self.sha256 = digest(body)
+        self.fixed_sign_complete = True
+        self.receipt.update(fixedSigningRole=self.phase, signedBytesSha256=self.sha256,
+                            signingAuthority="unchanged-source-identity-native-verification-still-required")
+
+    def producer_signing_copy(self, executable, executable_body):
+        """Give only the final compiler-derived copy an exact ad-hoc CDHash ACL."""
+        self.publish("macos-package-producer", executable_body, mode=0o755)
+        need(self.read(executable) == executable_body, "producer-compiler-copy-post")
+        old = self.original(self.work_entry, "macos-package-producer", "producer-unsigned-copy", 64 * 1024 * 1024, (0o755,))
+        need(self.read(old) == executable_body, "producer-copy-original")
+        matcher = self.signing_matcher()
+        context = self.credential_new_clock()
+        need(self.credential_active is None and self.credential_known() and not self.credential_failed, "producer-seal-finality")
+        primary = None
+        try:
+            self.credential_active = context
+            self.stage = "producer-private-copy-sealing"
+            self.signing_mutation_pending = True
+            self.credential_call(context, "producer-adhoc", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none",
+                                 str(self.work / "macos-package-producer")], timeout=30)
+            copied = self.original(self.work_entry, "macos-package-producer", "producer-sealed-copy", 64 * 1024 * 1024, (0o755,))
+            body = self.read(copied)
+            matcher.macho_content_valid(executable_body, body, self.arch, signing=True)
+            self.close(old)
+            need(old["closed"] and not self.errors, "producer-copy-close-unknown")
+            self.signing_mutation_pending = False
+            verified = self.credential_call(context, "producer-adhoc-verify", ["/usr/bin/codesign", "--verify", "--strict",
+                str(self.work / "macos-package-producer")], timeout=30)
+            need(not verified.stdout and not verified.stderr, "producer-seal-verification")
+            display = self.credential_call(context, "producer-cdhash", ["/usr/bin/codesign", "--display", "--verbose=4",
+                str(self.work / "macos-package-producer")], timeout=30)
+            need(not display.stdout and self.read(copied) == body and self.read(executable) == executable_body,
+                 "producer-seal-post")
+            code_hash = credential_cdhash(display.stderr)
+            self.signing_mutation_pending = True
+            os.fchmod(copied["fd"], 0o555)
+            copied["identity"] = signature(os.fstat(copied["fd"]))
+            need(stat.S_IMODE(copied["identity"][2]) == 0o555 and self.read(copied) == body, "producer-final-seal-original")
+            self.signing_mutation_pending = False
+            self.credential_clock(context)
+        except BaseException as error:
+            primary = error
+            self.credential_failed = True
+            if self.signing_mutation_pending or not self.credential_known():
+                self.credential_unknown = True
+        finally:
+            self.credential_active = None
+        if primary is not None:
+            raise primary
+        self.package_outputs.append((copied, digest(body)))
+        self.package_post()
+        return copied, body, code_hash
 
     def native_environment(self):
         return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.work),
@@ -651,12 +1264,13 @@ class Operation:
         return now, limit
 
     def python_known(self):
-        return (not self.errors and self.stager_io_pending is None and not self.python_mutation_pending
+        return (not self.errors and self.credential_known()
+                and not self.signing_mutation_pending and self.stager_io_pending is None and not self.python_mutation_pending
                 and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls))
 
     def python_io(self, label, function, *args, **kwargs):
         self.python_clock()
-        need(self.python_known() and not self.python_retiring, "python-originals-unknown")
+        need(self.python_known() and not self.credential_failed and not self.python_retiring, "python-originals-unknown")
         self.stage = label
         self.stager_io_pending = label
         # A raised external DATA operation has no transferable close proof.
@@ -666,7 +1280,7 @@ class Operation:
         return value
 
     def python_call(self, role, argv, *, maximum=30, limit=65536):
-        need(self.python_known() and not self.python_retiring, "python-originals-unknown")
+        need(self.python_known() and not self.credential_failed and not self.python_retiring, "python-originals-unknown")
         self.python_post()
         now, endpoint = self.python_clock()
         self.stage = role
@@ -827,37 +1441,38 @@ class Operation:
         path = self.work / self.target_name / "signing-slot/python3"
         old = self.python_write("signing-slot/python3", python, 0o755)
         self.python_post()
-        now, endpoint = self.python_clock()
-        self.stage = "python-sign"
-        self.python_mutation_pending = True
-        self.call("python-sign", python_sign_command(path, self.checkout / "desktop/packaging/macos-empty-entitlements.plist",
-                  self.phase, self.signing), self.native_environment(), cwd=self.work,
-                  timeout=package_timeout_data(now, endpoint, 30), limit=65536)
-        self.python_clock()
-        slot = self.python_directories["signing-slot"]
-        self.recheck_directory(slot)
-        need(set(os.listdir(slot["fd"])) == {"python3"}, "python-sign-slot-members")
-        output = self.original(slot, "python3", "python-signed-original", MAX_HELPER, (0o755,))
-        signed = self.read(output)
-        matcher.macho_content_valid(python, signed, self.arch, signing=True)
-        try:
-            self.python_flags = python_code_flags(signed, self.arch, self.phase, matcher)
-        except Refused as error:
-            if type(error) is Refused and error.args == ("python-signature-superblob",):
-                try:
-                    self.receipt["pythonSignatureDiagnostic"] = {
-                        "schemaVersion": 1, "available": False, "authority": "original-byte-data-only"}
-                    self.receipt["pythonSignatureDiagnostic"] = python_signature_diagnostic(python, signed, self.arch, matcher)
-                except BaseException:
-                    pass  # Optional observation must not replace the identical primary refusal.
-            raise
-        self.close(old)
-        need(old["closed"] and not self.errors, "python-input-slot-close-unknown")
-        self.python_files["signing-slot/python3"] = (output, signed)
-        self.python_mutation_pending = False
-        requirement = [] if self.phase == "python-engineering" else ["--test-requirement", signing_requirement(self.signing, PYTHON_IDENTIFIER)]
-        verified = self.python_call("python-verify", ["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", *requirement, str(path)])
-        need(not verified.stdout and not verified.stderr and self.read(output) == signed, "python-strict-signature-original")
+        with self.credential_scope("python"):
+            now, endpoint = self.python_clock()
+            self.stage = "python-sign"
+            self.python_mutation_pending = True
+            self.call("python-sign", python_sign_command(path, self.checkout / "desktop/packaging/macos-empty-entitlements.plist",
+                      self.phase, self.signing), self.native_environment(), cwd=self.work,
+                      timeout=package_timeout_data(now, endpoint, 30), limit=65536)
+            self.python_clock()
+            slot = self.python_directories["signing-slot"]
+            self.recheck_directory(slot)
+            need(set(os.listdir(slot["fd"])) == {"python3"}, "python-sign-slot-members")
+            output = self.original(slot, "python3", "python-signed-original", MAX_HELPER, (0o755,))
+            signed = self.read(output)
+            matcher.macho_content_valid(python, signed, self.arch, signing=True)
+            try:
+                self.python_flags = python_code_flags(signed, self.arch, self.phase, matcher)
+            except Refused as error:
+                if type(error) is Refused and error.args == ("python-signature-superblob",):
+                    try:
+                        self.receipt["pythonSignatureDiagnostic"] = {
+                            "schemaVersion": 1, "available": False, "authority": "original-byte-data-only"}
+                        self.receipt["pythonSignatureDiagnostic"] = python_signature_diagnostic(python, signed, self.arch, matcher)
+                    except BaseException:
+                        pass  # Optional observation must not replace the identical primary refusal.
+                raise
+            self.close(old)
+            need(old["closed"] and not self.errors, "python-input-slot-close-unknown")
+            self.python_files["signing-slot/python3"] = (output, signed)
+            self.python_mutation_pending = False
+            requirement = [] if self.phase == "python-engineering" else ["--test-requirement", signing_requirement(self.signing, PYTHON_IDENTIFIER)]
+            verified = self.python_call("python-verify", ["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", *requirement, str(path)])
+            need(not verified.stdout and not verified.stderr and self.read(output) == signed, "python-strict-signature-original")
         derived = dict(original)
         derived[self.stager.SIGNED_PYTHON_PATH] = (signed, 0o555)
         for name, (body, mode) in sorted(derived.items()):
@@ -977,7 +1592,8 @@ class Operation:
                     self.close(entry)
                     if not entry["closed"] and primary is None:
                         primary = Refused("python-publication-close-unknown")
-            self.receipt["originalClosesKnown"] = (self.stager_io_pending is None and not self.python_mutation_pending
+            self.receipt["originalClosesKnown"] = (self.credential_known() and self.credential_active is None and not self.signing_mutation_pending
+                                               and self.stager_io_pending is None and not self.python_mutation_pending
                                                    and all(entry["closed"] for entry in self.entries))
             try:
                 need(directory_identity(self.work.lstat()) == original, "python-publication-work-after-close")
@@ -1039,16 +1655,17 @@ class Operation:
             if entry["role"] in ("compiler-artifact", "compiler-alias"):
                 self.close(entry)
                 need(entry["closed"], "compiler-artifact-close-unknown")
-        self.stage = "resident-image-source-selected-signing"
-        self.call("resident-image-sign", ["/usr/bin/codesign", "--force", "--sign", "-" if self.signing is None else self.signing[1],
-                  "--identifier", IDENTIFIER + ".image", "--options", "runtime",
-                  "--entitlements", str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist"),
-                  "--timestamp=none" if self.signing is None else "--timestamp", str(self.work / RESIDENT_IMAGE)],
-                  self.native_environment(), cwd=self.work, timeout=30, limit=65536)
-        signed = self.original(self.work_entry, RESIDENT_IMAGE, "signed-resident-image", MAX_HELPER, (0o755,))
-        body = self.read(signed)
-        self.stager.image_macho(body, "resident", target=self.target)
-        self.strict_verify(signed, body, "resident-image-verify-signed", self.work / RESIDENT_IMAGE)
+        with self.credential_scope("resident-image"):
+            self.stage = "resident-image-source-selected-signing"
+            self.call("resident-image-sign", ["/usr/bin/codesign", "--force", "--sign", "-" if self.signing is None else self.signing[1],
+                      "--identifier", IDENTIFIER + ".image", "--options", "runtime",
+                      "--entitlements", str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist"),
+                      "--timestamp=none" if self.signing is None else "--timestamp", str(self.work / RESIDENT_IMAGE)],
+                      self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            signed = self.original(self.work_entry, RESIDENT_IMAGE, "signed-resident-image", MAX_HELPER, (0o755,))
+            body = self.read(signed)
+            self.stager.image_macho(body, "resident", target=self.target)
+            self.strict_verify(signed, body, "resident-image-verify-signed", self.work / RESIDENT_IMAGE)
         self.resident_image_sha256 = digest(body)
         self.receipt.update(residentImageSha256=self.resident_image_sha256, residentImageBytes=len(body),
                             residentImageOriginal=signed["identity"],
@@ -1094,15 +1711,16 @@ class Operation:
         if role == "desktop":
             self.desktop_facade_sha256 = digest(body)
             return
-        self.stage = "helper-source-selected-signing"
-        self.call("sign", ["/usr/bin/codesign", "--force", "--sign", "-" if self.signing is None else self.signing[1], "--identifier", IDENTIFIER,
-                           "--options", "runtime", "--entitlements", str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist"),
-                           "--timestamp=none" if self.signing is None else "--timestamp", str(self.work / HELPER)],
-                  self.native_environment(), cwd=self.work, timeout=30, limit=65536)
-        signed = self.original(self.work_entry, HELPER, "signed-helper", MAX_HELPER, (0o755,))
-        body = self.read(signed)
-        self.stager.entry_macho(body, target=self.target)
-        self.strict_verify(signed, body, "verify-signed", self.work / HELPER)
+        with self.credential_scope("helper"):
+            self.stage = "helper-source-selected-signing"
+            self.call("sign", ["/usr/bin/codesign", "--force", "--sign", "-" if self.signing is None else self.signing[1], "--identifier", IDENTIFIER,
+                               "--options", "runtime", "--entitlements", str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist"),
+                               "--timestamp=none" if self.signing is None else "--timestamp", str(self.work / HELPER)],
+                      self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            signed = self.original(self.work_entry, HELPER, "signed-helper", MAX_HELPER, (0o755,))
+            body = self.read(signed)
+            self.stager.entry_macho(body, target=self.target)
+            self.strict_verify(signed, body, "verify-signed", self.work / HELPER)
         self.sha256 = digest(body)
         self.receipt.update(helperSha256=self.sha256, helperBytes=len(body), helperOriginal=signed["identity"],
                             signing=("ad-hoc-fixed-identifier-runtime-empty-entitlements-strictly-verified" if self.signing is None else
@@ -1188,7 +1806,8 @@ class Operation:
         return now
 
     def package_settled(self):
-        return (self.stager_io_pending is None and not self.errors
+        return (self.stager_io_pending is None and not self.errors and self.credential_known()
+                and not self.credential_failed and not self.signing_mutation_pending
                 and all(call["returned"] and call.get("capturesSettled") is True for call in self.calls)
                 and all(entry["closed"] for entry in self.entries if entry["role"].startswith("output-")))
 
@@ -1416,21 +2035,18 @@ class Operation:
         self.stager.macho(executable_body, system_only=True, target=self.target)
         # Cargo may retain an alias. Execute only a fresh single-link copy, not
         # either compiler-owned name; keep the original through copy POST.
-        self.publish("macos-package-producer", executable_body, mode=0o555)
-        need(self.read(executable) == executable_body, "producer-compiler-copy-post")
-        emitted_binary = self.original(self.work_entry, "macos-package-producer", "producer-executed-copy", 64 * 1024 * 1024, (0o555,))
-        self.package_outputs.append((emitted_binary, digest(executable_body)))
-        self.package_post()
-        self.stage = "package-producer-emission"
-        need(package_timeout_data(self.package_clock(), self.package_endpoint, 123) == 123, "producer-original-clock-reserve")
-        emitted = self.package_call("producer-emitter", [str(self.work / "macos-package-producer"), "--package-root", str(self.work / "producer-root"),
-            "--descriptor-input", str(self.work / "producer-descriptor-input.json")], timeout=123, limit=4096)
-        signed_entry = self.original(root, "producer.sig", "producer-original-signature", self.stager.PRODUCER_SIGNATURE_BYTES, (0o444,))
-        descriptor_entry = self.original(root, "producer.json", "producer-original-descriptor", self.stager.PRODUCER_DESCRIPTOR_BYTES, (0o444,))
-        signed, actual_descriptor = self.read(signed_entry), self.read(descriptor_entry)
-        need(actual_descriptor == descriptor, "producer-exact-descriptor-emission")
-        summary = self.stager.emitted_package_data(emitted.stdout, emitted.stderr, emitted.returncode, body, actual_descriptor, signed, target=self.target)
-        self.package_outputs.extend(((signed_entry, digest(signed)), (descriptor_entry, digest(descriptor))))
+        producer = self.producer_signing_copy(executable, executable_body)
+        with self.credential_scope("producer", producer=producer):
+            self.stage = "package-producer-emission"
+            need(package_timeout_data(self.package_clock(), self.package_endpoint, 123) == 123, "producer-original-clock-reserve")
+            emitted = self.package_call("producer-emitter", [str(self.work / "macos-package-producer"), "--package-root", str(self.work / "producer-root"),
+                "--descriptor-input", str(self.work / "producer-descriptor-input.json")], timeout=123, limit=4096)
+            signed_entry = self.original(root, "producer.sig", "producer-original-signature", self.stager.PRODUCER_SIGNATURE_BYTES, (0o444,))
+            descriptor_entry = self.original(root, "producer.json", "producer-original-descriptor", self.stager.PRODUCER_DESCRIPTOR_BYTES, (0o444,))
+            signed, actual_descriptor = self.read(signed_entry), self.read(descriptor_entry)
+            need(actual_descriptor == descriptor, "producer-exact-descriptor-emission")
+            summary = self.stager.emitted_package_data(emitted.stdout, emitted.stderr, emitted.returncode, body, actual_descriptor, signed, target=self.target)
+            self.package_outputs.extend(((signed_entry, digest(signed)), (descriptor_entry, digest(descriptor))))
         expected = {"Install.pkg": body, "producer.json": descriptor, "producer.sig": signed}
         self.stager.distribution_layout_data(os.listdir(root["fd"]), "Install.pkg", expected,
             {name: (value, 0o444) for name, value in expected.items()})
@@ -1542,7 +2158,8 @@ class Operation:
         ordinary_closes = all(entry["closed"] for entry in self.entries
                               if entry is not self.work_entry and entry is not self.target_entry)
         mount_safe = not self.mount_entered or self.mount_detached
-        if (self.target_entry and mount_safe and self.stager_io_pending is None and not self.python_mutation_pending
+        if (self.target_entry and mount_safe and self.credential_known() and self.credential_active is None
+                and not self.signing_mutation_pending and self.stager_io_pending is None and not self.python_mutation_pending
                 and ordinary_closes and not self.errors
                 and all(call["returned"] and call.get("capturesSettled") is True for call in self.calls)):
             try:
@@ -1583,7 +2200,8 @@ class Operation:
                 self.python_clock(work=False)
             except BaseException as error:
                 self.errors.append({"stage": "python-post-close-deadline", "type": type(error).__name__})
-        self.receipt["originalClosesKnown"] = (self.stager_io_pending is None and not self.python_mutation_pending
+        self.receipt["originalClosesKnown"] = (self.credential_known() and self.credential_active is None and not self.signing_mutation_pending
+                                               and self.stager_io_pending is None and not self.python_mutation_pending
                                                and all(entry["closed"] for entry in self.entries))
         self.receipt["cleanupErrors"] = self.errors
 
@@ -1600,7 +2218,7 @@ class Operation:
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "python-shipping"))
+                allow_unconfigured=self.phase not in ("package-install", "python-shipping") + SIGNING_PHASES)
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in PYTHON_PHASES:
@@ -1613,6 +2231,8 @@ class Operation:
                     self.prepare()
                 elif self.phase == "package-install":
                     self.package_install()
+                elif self.phase in SIGNING_PHASES:
+                    self.fixed_sign()
                 else:
                     self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
             need(self.read(self.profile_entry) == self.service_profile
@@ -1636,8 +2256,13 @@ class Operation:
             self.finish()
         roles = (PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
-                 PREPARE_ROLES if self.phase == "prepare" else (self.phase, self.phase + "-resident-image"))
-        self.receipt["passed"] = ("failure" not in self.receipt and not self.errors
+                 PREPARE_ROLES if self.phase == "prepare" else
+                 (self.phase, self.phase + "-verify") if self.phase in SIGNING_PHASES else (self.phase, self.phase + "-resident-image"))
+        self.receipt["passed"] = ("failure" not in self.receipt and not self.errors and self.credential_known()
+                                  and not self.credential_failed and self.credential_active is None
+                                  and all(row["status"] == 0 for row in self.credential_calls)
+                                  and all(all(row[key] is True for key in ("retired", "closed", "searchRestored", "defaultUnchanged"))
+                                          for row in self.credential_contexts)
                                   and self.receipt["targetRetired"] and self.receipt["originalClosesKnown"]
                                   and tuple(call["role"] for call in self.calls) == roles
                                   and all(call["returned"] and call.get("capturesSettled") is True
@@ -1646,7 +2271,8 @@ class Operation:
                                   and self.sha256 is not None
                                   and ((self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase not in PYTHON_PHASES
-                                           and (self.phase == "package-install" or self.resident_image_sha256 is not None)
+                                            and (self.phase == "package-install" or self.resident_image_sha256 is not None
+                                                 or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
                                                 and self.desktop_facade_sha256 is not None))))
@@ -1715,7 +2341,6 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
                 "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview") else None)
     need(workflow is not None, "closed-workflow-route")
-    need(target == ARM_TARGET or workflow in ("desktop-macos-installed.yml", "desktop-macos-python-runtime-signing.yml"), "closed-workflow-target")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
                 "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
@@ -1746,7 +2371,7 @@ def main():
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "python-shipping"))
+                                     allow_unconfigured=phase not in ("package-install", "python-shipping") + SIGNING_PHASES)
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")
         owner = qualification.load_owner(CHECKOUT)
         operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target)

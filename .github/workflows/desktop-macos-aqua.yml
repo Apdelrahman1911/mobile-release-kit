@@ -16,39 +16,57 @@ concurrency:
 jobs:
   aqua:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-aqua'
-    name: aqua-${{ matrix.scope }}
+    name: aqua-${{ matrix.scope }}-${{ matrix.target }}
+    environment: ${{ contains(fromJSON('["project-fields","ios-current-synthetic","android-inputs","project-fields-android-inputs","vault-helper-shipping","installation-inspection","vault-helper-shipping-installation-inspection","project-recovery-pending","ios-recovery-pending","doctor-preflight2","local-edits3"]'), matrix.scope) && 'macos-developer-id' || 'macos-engineering' }}
     permissions:
       contents: read
       actions: read
     strategy:
       fail-fast: false
       matrix:
-        scope:
-          - project-fields
-          - project-recovery-pending
-          - ios-recovery-pending
-    runs-on: macos-26
+        include:
+          - scope: local-edits3
+            target: aarch64-apple-darwin
+            runner: macos-26
+            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'
+            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'
+            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'
+            supplier_run: '37467019389'
+            supplier_attempt: '1'
+            supplier_artifact: '11415902210'
+          - scope: local-edits3
+            target: x86_64-apple-darwin
+            runner: macos-26-intel
+            supplier_receipt: 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b'
+            supplier_tar: '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd'
+            supplier_source: '079ab2a2c8fef88f01bf909e7669c685f07e1375'
+            supplier_run: '37476532238'
+            supplier_attempt: '1'
+            supplier_artifact: '11419502465'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.scope == 'doctor-preflight2' && 150 || 75 }}
     env:
       RUSTUP_TOOLCHAIN: "1.98.1"
+      MRK_MACOS_TARGET: ${{ matrix.target }}
+      MRK_MACOS_RUNNER: ${{ matrix.runner }}
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
       # Final signed M comes only from the fixed configured SOURCE nomination.
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108
-      # Independently accepted ARM supplier six pins; signing requires a new final M.
+      # Independently accepted paired supplier six pins; each signing capsule requires a new final M.
       MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
-      MRK_MACOS_PYTHON_SUPPLIER_SHA256: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'
-      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'
-      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: '158cdff422e3837f7ab5e6192af76a578faf6fab'
-      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: '37467019389'
-      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: '1'
-      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: '11415902210'
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: ${{ matrix.supplier_receipt }}
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: ${{ matrix.supplier_tar }}
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: ${{ matrix.supplier_source }}
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: ${{ matrix.supplier_run }}
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: ${{ matrix.supplier_attempt }}
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: ${{ matrix.supplier_artifact }}
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       # Independent immutable publisher bindings; caller hashes come from build.rs.
       MRK_GITHUB_PREFLIGHT_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
       MRK_GITHUB_RELEASE_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
-      # local-edits3 and doctor-preflight2 are opt-in source selectors; the default matrix is unchanged.
+      # Only local-edits3 is selected on the two fixed hosts; every other route remains unexecuted.
       # 150min is a worst-case bound only for doctor/preflight, not a runtime estimate.
       # Share one engineering installation; each selected journey keeps its original owner/results.
       MRK_MACOS_AQUA_SCOPE: ${{ matrix.scope }}
@@ -62,25 +80,46 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping || "$MRK_MACOS_AQUA_SCOPE" == installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == vault-helper-shipping-installation-inspection || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private || "$MRK_MACOS_AQUA_SCOPE" == android-registration-lifecycle || "$MRK_MACOS_AQUA_SCOPE" == project-recovery-pending || "$MRK_MACOS_AQUA_SCOPE" == ios-recovery-pending || "$MRK_MACOS_AQUA_SCOPE" == doctor-preflight2 || "$MRK_MACOS_AQUA_SCOPE" == local-edits3 ]] || exit 1
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]] || exit 1
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]] || exit 1
           [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
           [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
-          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          case "$MRK_MACOS_TARGET" in
+            aarch64-apple-darwin)
+              [[ "$MRK_MACOS_RUNNER" == macos-26 && "$RUNNER_ARCH" == ARM64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+              expected_supplier_receipt=2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d
+              expected_supplier_tar=ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695
+              expected_supplier_source=158cdff422e3837f7ab5e6192af76a578faf6fab
+              expected_supplier_run=37467019389
+              expected_supplier_attempt=1
+              expected_supplier_artifact=11415902210
+              ;;
+            x86_64-apple-darwin)
+              [[ "$MRK_MACOS_AQUA_SCOPE" == local-edits3 && "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
+              expected_supplier_receipt=a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b
+              expected_supplier_tar=739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd
+              expected_supplier_source=079ab2a2c8fef88f01bf909e7669c685f07e1375
+              expected_supplier_run=37476532238
+              expected_supplier_attempt=1
+              expected_supplier_artifact=11419502465
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
           [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
           if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private && "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle ]]; then
             # Supplier/CLT admission belongs only to the unchanged build routes.
             [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108 ]] || exit 1
             [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
             [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
-            [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == 2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d ]] || exit 1
-            [[ "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" == ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695 ]] || exit 1
-            [[ "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" == 158cdff422e3837f7ab5e6192af76a578faf6fab ]] || exit 1
-            [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" == 37467019389 ]] || exit 1
-            [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" == 1 ]] || exit 1
-            [[ "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" == 11415902210 ]] || exit 1
+            [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == "$expected_supplier_receipt" ]] || exit 1
+            [[ "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" == "$expected_supplier_tar" ]] || exit 1
+            [[ "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" == "$expected_supplier_source" ]] || exit 1
+            [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" == "$expected_supplier_run" ]] || exit 1
+            [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" == "$expected_supplier_attempt" ]] || exit 1
+            [[ "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" == "$expected_supplier_artifact" ]] || exit 1
             [[ -d "$DEVELOPER_DIR" ]] || exit 1
           fi
           if [[ "$MRK_MACOS_AQUA_SCOPE" == android-registration-lifecycle ]]; then
@@ -111,7 +150,7 @@ jobs:
           umask 077
           [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
           selection=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C TZ=UTC \
-            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py runtime-signing-selection --target aarch64-apple-darwin)
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py runtime-signing-selection --target "$MRK_MACOS_TARGET")
           [[ ${#selection} -le 4096 ]] || exit 1
           "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_SIGNING_SELECTION'
           import json, os, re, stat, sys
@@ -132,7 +171,7 @@ jobs:
           if (type(value) is not dict or set(value) != set(fields) | fixed
                   or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
                   or value["kind"] != "configured-signed-runtime-selection-data"
-                  or value["state"] != "configured" or value["target"] != "aarch64-apple-darwin"
+                  or value["state"] != "configured" or value["target"] != os.environ["MRK_MACOS_TARGET"]
                   or value["nativeAuthority"] is not False
                   or value["sourceInputsSha256"] != os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]):
               raise ValueError("fixed configured runtime selection required")
@@ -227,15 +266,18 @@ jobs:
           "$MRK_PYTHON" -I -S -B - <<'PY_DIRECT_RUST'
           import importlib.util, os, re, stat, subprocess, sys, tomllib
           from pathlib import Path
-          
+
           checkout = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
           home = Path('/Users/runner')
           cargo_home, rustup_home = home / '.cargo', home / '.rustup'
-          bin_directory = rustup_home / 'toolchains/stable-aarch64-apple-darwin/bin'
+          build_target = os.environ['MRK_MACOS_TARGET']
+          machines = {'aarch64-apple-darwin': 'arm64', 'x86_64-apple-darwin': 'x86_64'}
+          if build_target not in machines: raise ValueError('direct-rust-target')
+          bin_directory = rustup_home / ('toolchains/stable-' + build_target + '/bin')
           compiler_path = str(bin_directory) + ':/usr/bin:/bin:/usr/sbin:/sbin'
           def need(value, reason):
               if not value: raise ValueError(reason)
-          need(sys.platform == 'darwin' and sys.maxsize == 2**63-1 and os.uname().machine == 'arm64'
+          need(sys.platform == 'darwin' and sys.maxsize == 2**63-1 and os.uname().machine == machines[build_target]
                and os.getuid() != 0 and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), 'direct-rust-host')
           need(os.environ.get('HOME') == str(home) and os.environ.get('GITHUB_WORKSPACE') == str(checkout)
                and os.environ.get('RUSTUP_TOOLCHAIN') == '1.98.1'
@@ -318,7 +360,7 @@ jobs:
                       else: raise ValueError('direct-rust-ambient-configuration')
           def check_originals():
               for row in originals: current(row)
-          
+
           try:
               directory(cargo_home); directory(rustup_home); directory(bin_directory)
               selected = original_file(checkout / 'desktop/rust-toolchain.toml')
@@ -352,7 +394,7 @@ jobs:
                   need(result.returncode == 0 and not result.stderr and result.stdout, 'direct-rust-version-return')
                   lines = result.stdout.decode('utf-8', 'strict').strip().splitlines()
                   need(lines[0].startswith(tool + ' ') and lines.count('release: 1.98.1') == 1
-                       and lines.count('host: aarch64-apple-darwin') == 1, 'direct-rust-version-host')
+                       and lines.count('host: ' + build_target) == 1, 'direct-rust-version-host')
                   if tool == 'rustc':
                       need(lines.count('commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985') == 1, 'direct-rust-clock-commit')
                   no_configuration(); check_originals()
@@ -404,7 +446,7 @@ jobs:
           umask 077
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_python_supplier_transport.py \
-            --target aarch64-apple-darwin \
+            --target "$MRK_MACOS_TARGET" \
             --transport-root "$MRK_MACOS_WORK/fresh-python-transport" \
             --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
             --expected-tar "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" \
@@ -434,7 +476,7 @@ jobs:
           umask 077
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
             "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py project-signed-python \
-            --target aarch64-apple-darwin \
+            --target "$MRK_MACOS_TARGET" \
             --transport-root "$MRK_MACOS_WORK/signed-python-transport" \
             --output "$MRK_MACOS_WORK/signed-python-capsule" > "$MRK_MACOS_WORK/signed-python-transport-result.json"
       - name: Prepare the current payload from the independently accepted fresh Python supplier
@@ -447,7 +489,7 @@ jobs:
           umask 077
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
             "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
-            --target aarch64-apple-darwin \
+            --target "$MRK_MACOS_TARGET" \
             --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
             --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
             --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
@@ -492,7 +534,7 @@ jobs:
             MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \
             MRK_MACOS_WORK='${{ steps.work.outputs.root }}' \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_xcode_host_preparation.py --classify-installed
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_xcode_host_preparation.py --classify-installed --target '${{ matrix.target }}'
           # The genuine step exit is the final-close result. The immutable
           # classification JSON is provisional and never preparation/iOS authority.
       - name: Prepare only the fixed disposable Xcode ancestor before any worker
@@ -524,7 +566,7 @@ jobs:
             MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \
             MRK_MACOS_WORK='${{ steps.work.outputs.root }}' \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_xcode_host_preparation.py
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_xcode_host_preparation.py --target '${{ matrix.target }}'
           # Only this original helper's exit0 after every final close admits
           # later steps. Its immutable JSON is explicitly provisional, not a
           # substitute for workflow status. Never restore0775 before VM disposal.
@@ -557,11 +599,18 @@ jobs:
           scope_label, case_names = scope_cases[aqua_scope]
           selected_scopes = ["project-fields", "android-inputs"] if aqua_scope == "project-fields-android-inputs" else ["vault-helper-shipping", "installation-inspection"] if aqua_scope == "vault-helper-shipping-installation-inspection" else [aqua_scope]
           native_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "vault-helper-shipping", "installation-inspection", "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3")
-          rust_environment = dict(os.environ, PATH="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc", RUSTUP_AUTO_INSTALL="0")
+          build_target = os.environ["MRK_MACOS_TARGET"]
+          supplier_routes = {
+              "aarch64-apple-darwin": (".github/workflows/desktop-macos-cpython-source-build.yml", "refs/heads/verify/desktop-macos-cpython-source-build"),
+              "x86_64-apple-darwin": (".github/workflows/desktop-macos-cpython-source-build-intel.yml", "refs/heads/verify/desktop-macos-cpython-source-build-intel"),
+          }
+          if build_target not in supplier_routes: raise ValueError("source-binding-target")
+          rust_bin = "/Users/runner/.rustup/toolchains/stable-" + build_target + "/bin"
+          rust_environment = dict(os.environ, PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0")
           tools = {}
           for name, command in (
-              ("rustc", ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc", "--version", "--verbose"]),
-              ("cargo", ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "--version", "--verbose"]),
+              ("rustc", [rust_bin + "/rustc", "--version", "--verbose"]),
+              ("cargo", [rust_bin + "/cargo", "--version", "--verbose"]),
               ("cltSdkPath", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"]),
               ("cltSdkVersion", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
               ("cltSdkBuild", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"]),
@@ -577,7 +626,7 @@ jobs:
               if name in ("rustc", "cargo"):
                   lines = output.splitlines()
                   if (not output.startswith(name + " ") or lines.count("release: 1.98.1") != 1
-                          or lines.count("host: aarch64-apple-darwin") != 1
+                          or lines.count("host: " + build_target) != 1
                           or name == "rustc" and lines.count("commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985") != 1):
                       raise ValueError("direct Rust source binding differs from admitted image")
                   # Existing closed schema records logical role, not an executable selector.
@@ -605,8 +654,8 @@ jobs:
                     "freshPythonSupplier": {
                         "origin": os.environ["MRK_MACOS_RUNTIME_SUPPLIER"],
                         "repository": "Apdelrahman1911/mobile-release-kit",
-                        "workflow": ".github/workflows/desktop-macos-cpython-source-build.yml",
-                        "ref": "refs/heads/verify/desktop-macos-cpython-source-build",
+                        "workflow": supplier_routes[build_target][0],
+                        "ref": supplier_routes[build_target][1],
                         "source": os.environ["MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT"],
                         "runId": os.environ["MRK_MACOS_PYTHON_SUPPLIER_RUN_ID"],
                         "runAttempt": os.environ["MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT"],
@@ -723,7 +772,7 @@ jobs:
           if [[ "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle && "$MRK_MACOS_AQUA_SCOPE" != vault-helper-shipping && "$MRK_MACOS_AQUA_SCOPE" != vault-helper-shipping-installation-inspection ]]; then
             set +e
             # The same locked graph builds both existing native DATA regressions.
-            PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --locked --no-default-features --jobs 2 --target aarch64-apple-darwin \
+            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --jobs 2 --target "$MRK_MACOS_TARGET" \
               --package mobile-release-kit-desktop --package mrk-macos-installed-native \
               --lib --no-run --message-format=json \
               > "$MRK_MACOS_WORK/headless-build.jsonl" 2> "$MRK_MACOS_WORK/headless-build.stderr"
@@ -734,6 +783,10 @@ jobs:
           fi
           "$MRK_PYTHON" -I -S -B - <<'PY_HEADLESS'
           import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess, sys, time
+          build_target = os.environ["MRK_MACOS_TARGET"]
+          if build_target not in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+              raise ValueError("headless-fixed-build-target")
+          rust_bin = "/Users/runner/.rustup/toolchains/stable-" + build_target + "/bin"
           work = pathlib.Path(os.environ["MRK_MACOS_WORK"])
           checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
           android_lifecycle = os.environ["MRK_MACOS_AQUA_SCOPE"] == "android-registration-lifecycle"
@@ -1161,12 +1214,12 @@ jobs:
                   # Exact compiler environment, not test/app/service authority.
                   # No ambient wrapper/flags, packaged-runtime or tool selection.
                   build_env = {key: os.environ[key] for key in ("DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET")}
-                  build_env.update(PATH="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc", RUSTUP_AUTO_INSTALL="0")
+                  build_env.update(PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0")
                   build_env.update(LANG="C", LC_ALL="C", TZ="UTC", RUSTUP_TOOLCHAIN="1.98.1",
                                    CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=str(work / "cargo-target"),
                                    MRK_MACOS_INSTALL_SOURCE_COMMIT=os.environ["GITHUB_SHA"])
-                  compiler_argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
-                      "--target", "aarch64-apple-darwin", "--package", "mobile-release-kit-desktop",
+                  compiler_argv = [rust_bin + "/cargo", "test", "--locked", "--no-default-features", "--jobs", "1",
+                      "--target", build_target, "--package", "mobile-release-kit-desktop",
                       "--package", "mrk-macos-installed-native", "--lib", "--no-run", "--message-format=json"]
                   if shipping_gate:
                       compiler_argv += ["--features", "mrk-macos-installed-native/installed-observation"]
@@ -1223,7 +1276,7 @@ jobs:
                           or target.get("profile", {}).get("test") is not True or target.get("features") != features):
                       raise ValueError("headless-fixed-non-observer-library")
                   binary = pathlib.Path(target["executable"])
-                  expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/deps"
+                  expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / build_target / "debug/deps"
                   if binary.parent != expected or not re.fullmatch(re.escape(library) + r"-[0-9a-f]+", binary.name):
                       raise ValueError("headless-original-artifact-path")
                   record = {"role": role, "packageId": package_id, "features": features, "names": test_names,
@@ -1440,7 +1493,7 @@ jobs:
           qualification = importlib.util.module_from_spec(spec)
           sys.modules[spec.name] = qualification
           spec.loader.exec_module(qualification)
-          raise SystemExit(qualification.shipping_capacity_data_main())
+          raise SystemExit(qualification.shipping_capacity_data_main(target=os.environ["MRK_MACOS_TARGET"]))
           PY_SHIPPING_CAPACITY
           status=$?
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/shipping-capacity-data.status"
@@ -3144,12 +3197,14 @@ jobs:
           umask 077
           [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py package-format-input \
+            --target "$MRK_MACOS_TARGET" \
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
           [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version 0.1.1 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
             --output "$MRK_MACOS_WORK/package-format-parts" > "$MRK_MACOS_WORK/package-format-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.
@@ -3182,6 +3237,7 @@ jobs:
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-format-xar.status"
           [[ $xar_status == 0 ]] || exit "$xar_status"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
+            --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
           # Only inert archive bytes were checked. Never run this exit97 hook.
@@ -3208,6 +3264,7 @@ jobs:
             > "$work/aapt2-8.9.2-12782657-osx.jar"
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
             '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/stage_macos_installed.py android-support \
+            --target '${{ matrix.target }}' \
             --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \
             > "$work/android-support-result.json"
       - name: Require the fixed SOURCE producer identity and release before ordinary signing
@@ -3221,7 +3278,7 @@ jobs:
           # Public SOURCE DATA only. This is not a signature/purpose verdict or
           # a credential source; the native producer/parent verify independently.
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
-            --target aarch64-apple-darwin > "$MRK_MACOS_WORK/packaging-selection.json"
+            --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/packaging-selection.json"
           "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
           import json, os, re
           from pathlib import Path
@@ -3230,7 +3287,7 @@ jobs:
           row = json.loads(body)
           if (type(row) is not dict or row.get("schemaVersion") != 1
                   or row.get("kind") != "source-packaging-selection-data"
-                  or row.get("target") != "aarch64-apple-darwin" or row.get("nativeAuthority") is not False
+                  or row.get("target") != os.environ["MRK_MACOS_TARGET"] or row.get("nativeAuthority") is not False
                   or not isinstance(row.get("leafCertificateSha1"), str)
                   or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
                   or row["leafCertificateSha1"] == "0" * 40
@@ -3251,25 +3308,40 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
         run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
           umask 077
           # The same original owner builds the real resident dylib and fixed C
           # facades, then retires its target. No helper registration or execution.
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare >> "$GITHUB_OUTPUT"
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare --target "$MRK_MACOS_TARGET" >> "$GITHUB_OUTPUT"
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Build and sign the separate fixed vault helper before binding the app
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 8
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
         run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
           umask 077
           set +e
-          PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build \
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
             --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --release \
-            --target aarch64-apple-darwin --message-format=json \
+            --target "$MRK_MACOS_TARGET" --message-format=json \
             > "$MRK_MACOS_WORK/vault-helper-build.jsonl" 2> "$MRK_MACOS_WORK/vault-helper-build.stderr"
           status=$?
           set -e
@@ -3279,13 +3351,14 @@ jobs:
             /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2
             exit "$status"
           fi
-          helper="$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
-          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --options runtime \
-            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp "$helper"
+          helper="$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain"
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-vault-helper --target "$MRK_MACOS_TARGET"
           /usr/bin/codesign --verify --strict "$helper"
           "$MRK_PYTHON" -I -S -B - <<'PY_HELPER'
           import hashlib, json, os, pathlib, stat
-          path = pathlib.Path(os.environ["MRK_MACOS_WORK"]) / "vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
+          path = pathlib.Path(os.environ["MRK_MACOS_WORK"]) / "vault-helper-target" / os.environ["MRK_MACOS_TARGET"] / "release/mrk-vault-keychain"
           with path.open("rb") as stream:
               before = os.fstat(stream.fileno())
               if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 32 * 1024 * 1024:
@@ -3308,6 +3381,7 @@ jobs:
               output.write("MRK_MACOS_VAULT_HELPER_SHA256=" + hashlib.sha256(body).hexdigest() + "\n")
               output.write("MRK_MACOS_VAULT_HELPER_BYTES=" + str(len(body)) + "\n")
           PY_HELPER
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Compile the fixed debug actual-main observer and normal embedded frontend once
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 24
@@ -3323,8 +3397,8 @@ jobs:
           npm run build
           cd src-tauri
           set +e
-          PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
-            --target aarch64-apple-darwin --test installed-shell-observation --no-run --message-format=json \
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
+            --target "$MRK_MACOS_TARGET" --test installed-shell-observation --no-run --message-format=json \
             > "$MRK_MACOS_WORK/observer-build.jsonl" 2> "$MRK_MACOS_WORK/observer-build.stderr"
           status=$?
           set -e
@@ -3343,7 +3417,7 @@ jobs:
           targets = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == "installed-shell-observation" and r["target"].get("kind") == ["test"] and r.get("executable")]
           if len(targets) != 1 or targets[0].get("profile", {}).get("test") is not True: raise ValueError("one actual-main test target required")
           binary = pathlib.Path(targets[0]["executable"])
-          expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/deps"
+          expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / os.environ["MRK_MACOS_TARGET"] / "debug/deps"
           if binary.parent != expected or not re.fullmatch(r"installed_shell_observation-[0-9a-f]+", binary.name): raise ValueError("fixed observation target path")
           m = binary.lstat()
           if not stat.S_ISREG(m.st_mode) or m.st_nlink != 1 or m.st_mode & 0o111 == 0: raise ValueError("original compiler artifact type")
@@ -3375,14 +3449,20 @@ jobs:
           MRK_MACOS_ANDROID_HELPER_SHA256: ${{ steps.android_helper.outputs.sha256 }}
           MRK_MACOS_RESIDENT_IMAGE_SHA256: ${{ steps.android_helper.outputs['resident-image-sha256'] }}
           MRK_MACOS_ENTRY_SHA256: ${{ steps.android_helper.outputs['entry-sha256'] }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
         run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
+            --target "$MRK_MACOS_TARGET" \
             --package-role installed-shell-observation \
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
-            --vault-helper "$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain" \
+            --vault-helper "$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
             --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
@@ -3394,19 +3474,21 @@ jobs:
             --observer-cargo-messages "$MRK_MACOS_WORK/observer-build.jsonl" \
             --observer-cargo-target-dir "$CARGO_TARGET_DIR" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before --target "$MRK_MACOS_TARGET"
           payload="$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app"
           # Explicit non-image observer fixture: real resident image/helper,
           # actual observer executable, no dummy desktop image or role fallback.
-          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --options runtime \
-            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp "$payload"
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-desktop-payload --target "$MRK_MACOS_TARGET"
           /usr/bin/codesign --verify --strict "$payload"
           payload_sha=$(/usr/bin/shasum -a 256 "$payload/Contents/MacOS/mobile-release-kit-desktop")
           payload_sha=${payload_sha%% *}
           [[ "$payload_sha" =~ ^[0-9a-f]{64}$ ]]
-          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --options runtime \
-            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-root-app --target "$MRK_MACOS_TARGET"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after --target "$MRK_MACOS_TARGET"
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-vault-keychain"
           /usr/bin/codesign --verify --strict "$payload"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
@@ -3414,6 +3496,7 @@ jobs:
           entry_sha=${entry_sha%% *}
           [[ "$entry_sha" =~ ^[0-9a-f]{64}$ ]]
           printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\n' "$entry_sha" "$payload_sha" >> "$GITHUB_ENV"
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Bind this signed app and current-source runtime into fresh Installer DATA
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 3
@@ -3426,6 +3509,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
+            --target "$MRK_MACOS_TARGET" \
             --package-role installed-shell-observation \
             --expected-entry "$MRK_MACOS_SIGNED_ENTRY_SHA256" --expected-app-binary "$MRK_MACOS_SIGNED_PAYLOAD_SHA256" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
@@ -3460,18 +3544,28 @@ jobs:
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 8
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
         run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
           (
             cd desktop/src-tauri
-            PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --locked --release --no-default-features --features macos-installed-installer \
-              --target aarch64-apple-darwin --bin mrk-macos-install
+            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
+              --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
           )
-          installer="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mrk-macos-install"
-          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --timestamp "$installer"
+          installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-root-installer --target "$MRK_MACOS_TARGET"
           /usr/bin/codesign --verify --strict "$installer"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts \
+            --target "$MRK_MACOS_TARGET" \
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
@@ -3480,6 +3574,7 @@ jobs:
             --identifier dev.mobile-release-kit.desktop.installed --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --target "$MRK_MACOS_TARGET" \
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" \
             --output "$MRK_MACOS_WORK/package-parts" > "$MRK_MACOS_WORK/package-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.
@@ -3512,13 +3607,19 @@ jobs:
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
           [[ $xar_status == 0 ]] || exit "$xar_status"
           # Final original archive audit is the first action of package-install below.
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Application installation uses only standard privileged Installer; app and Python stay nonroot
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 18
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
         run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
           umask 077
@@ -3527,7 +3628,9 @@ jobs:
           # nonroot readback. Its one990s group includes known mount retirement.
           # Previous pkgbuild/tar/xar construction is not relabeled as owned.
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py package-install \
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py package-install --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/package-install.stdout" 2> "$MRK_MACOS_WORK/package-install.stderr"
           package_status=$?
           printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-install.status"
@@ -3538,6 +3641,7 @@ jobs:
           # The receipt is not its own exit proof: only this original0, the
           # saved Installer0, same-request readback and known detach permit use.
           # Unknown resources remain retained; no forced detach or root Python.
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: One installed no-GO shipping-helper gate-custody control before any Aqua entry
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection')
         timeout-minutes: 2
@@ -3549,7 +3653,7 @@ jobs:
           set -o noclobber
           umask 077
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
-          git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py desktop/tools/stage_macos_installed.py desktop/macos-installed-inputs/build-release.json
+          git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py desktop/tools/stage_macos_installed.py desktop/macos-installed-inputs/build-release.json desktop/macos-installed-inputs/build-release-intel.json
           set +e
           "$MRK_PYTHON" -I -S -B - > "$MRK_MACOS_WORK/shipping-gate-control.receipt.json" <<'PY_SHIPPING_GATE'
           import importlib.util, os, pathlib, sys
@@ -3558,7 +3662,7 @@ jobs:
           qualification = importlib.util.module_from_spec(spec)
           sys.modules[spec.name] = qualification
           spec.loader.exec_module(qualification)
-          raise SystemExit(qualification.shipping_gate_control_main())
+          raise SystemExit(qualification.shipping_gate_control_main(target=os.environ["MRK_MACOS_TARGET"]))
           PY_SHIPPING_GATE
           status=$?
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/shipping-gate-control.status"
@@ -3580,7 +3684,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope project-fields \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope project-fields --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-project-fields-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-project-fields-failure.jsonl"
           status=$?
           set -e
@@ -3602,7 +3706,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope android-inputs \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope android-inputs --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-android-inputs-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-android-inputs-failure.jsonl"
           status=$?
           set -e
@@ -3624,7 +3728,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope local-edits3 \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope local-edits3 --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-local-edits3-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-local-edits3-failure.jsonl"
           status=$?
           set -e
@@ -3648,7 +3752,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope doctor-preflight2 \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope doctor-preflight2 --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-doctor-preflight2-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-doctor-preflight2-failure.jsonl"
           status=$?
           set -e
@@ -3674,7 +3778,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope project-recovery-pending \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope project-recovery-pending --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-project-recovery-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-project-recovery-failure.jsonl"
           status=$?
           set -e
@@ -3696,7 +3800,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope ios-recovery-pending \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope ios-recovery-pending --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-ios-account-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-ios-account-failure.jsonl"
           status=$?
           set -e
@@ -3721,7 +3825,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope vault-helper-shipping \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope vault-helper-shipping --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-vault-helper-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-vault-helper-failure.jsonl"
           status=$?
           set -e
@@ -3744,7 +3848,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope installation-inspection \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope installation-inspection --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-installation-inspection-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-installation-inspection-failure.jsonl"
           status=$?
           set -e
@@ -3766,7 +3870,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope ios-current-synthetic \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope ios-current-synthetic --target "$MRK_MACOS_TARGET" \
             > "$MRK_MACOS_WORK/aqua-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-failure.jsonl"
           status=$?
           set -e
@@ -3883,7 +3987,7 @@ jobs:
         if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.MRK_MACOS_AQUA_SCOPE }}
+          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
             ${{ steps.work.outputs.root }}/package-format-input.json
@@ -3966,6 +4070,10 @@ jobs:
             ${{ steps.work.outputs.root }}/android-helper-verify-after.status
             ${{ steps.work.outputs.root }}/android-helper-verify-before.json
             ${{ steps.work.outputs.root }}/android-helper-verify-after.json
+            ${{ steps.work.outputs.root }}/android-helper-sign-vault-helper.json
+            ${{ steps.work.outputs.root }}/android-helper-sign-desktop-payload.json
+            ${{ steps.work.outputs.root }}/android-helper-sign-root-app.json
+            ${{ steps.work.outputs.root }}/android-helper-sign-root-installer.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json
             ${{ steps.work.outputs.root }}/scripts-result.json
