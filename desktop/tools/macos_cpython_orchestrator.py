@@ -491,6 +491,34 @@ def runtime_facts_valid(facts, root, machine):
     return True
 
 
+def optional_private_header_alias(name, rows):
+    """Inventory-only optional Tcl/Tk development metadata, never a loader grant.
+
+    Embedded Tcl/Tk install their PrivateHeaders alias even when the optional
+    private-header target is omitted. Preserve that exact contained alias in
+    the fixed PSF package; runtime resolution must still reject its absent leaf.
+    """
+    if type(name) is not str or type(rows) is not dict:
+        return False
+    for component in ("Tcl", "Tk"):
+        framework = VERSION_RELATIVE + "/Frameworks/" + component + ".framework"
+        if name != framework + "/PrivateHeaders":
+            continue
+        version = framework + "/Versions/9.0"
+        alias = rows.get(name)
+        current = rows.get(framework + "/Versions/Current")
+        if (type(alias) is not dict or alias.get("kind") != "link"
+                or alias.get("target") != "Versions/Current/PrivateHeaders"
+                or type(current) is not dict or current.get("kind") != "link"
+                or current.get("target") != "9.0" or version + "/PrivateHeaders" in rows):
+            return False
+        parts = version.split("/")
+        parents = ["."] + ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
+        return all(type(rows.get(parent)) is dict and rows[parent].get("kind") == "directory"
+                   for parent in parents)
+    return False
+
+
 def scan_tree(root, *, readonly=False, closure=False, expanded=False, deadline=None):
     """Observe a finite owned tree without traversing any directory alias."""
     need(type(expanded) is bool and not (expanded and (readonly or closure)), "inventory-role")
@@ -546,7 +574,7 @@ def scan_tree(root, *, readonly=False, closure=False, expanded=False, deadline=N
         if deadline is not None:
             b.remaining(deadline, time.monotonic(), PREP_SECONDS)
         need(list(identity((root / name).lstat())) == row["identity"], "inventory-original-post")
-        if closure and row["kind"] == "link":
+        if closure and row["kind"] == "link" and not optional_private_header_alias(name, rows):
             resolve_member(name, rows)
     need(b.DATA.known, "inventory-close-finality")
     return dict(sorted(rows.items()))

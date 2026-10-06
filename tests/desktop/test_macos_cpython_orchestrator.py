@@ -586,6 +586,63 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             bad_rows = copy.deepcopy(rows); bad_rows["Versions/Current"]["target"] = target
             with self.subTest(alias_target=target), self.assertRaises(PREP.PreparationRefused):
                 PREP.resolve_member("Versions/Current/lib/libssl.3.dylib", bad_rows)
+        # Tcl/Tk create this development-only alias even in embedded builds
+        # that omit private headers. Inventory preservation is not resolution.
+        for component in ("Tcl", "Tk"):
+            framework = "Versions/3.14/Frameworks/" + component + ".framework"
+            version = framework + "/Versions/9.0"
+            alias = framework + "/PrivateHeaders"
+            current = framework + "/Versions/Current"
+            missing = version + "/PrivateHeaders"
+            metadata = inventory_rows(version + "/" + component, links={
+                alias: "Versions/Current/PrivateHeaders", current: "9.0"})
+            metadata["."] = {"kind": "directory"}
+            self.assertIs(PREP.optional_private_header_alias(alias, metadata), True)
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^member-missing$"):
+                PREP.resolve_member(alias, metadata)
+            combined = {**rows, **metadata}
+            metadata_load = PREP.FRAMEWORK_ORIGINAL + "/" + alias
+            for command in (0xC, 0x8000001C):
+                with self.subTest(metadata_runtime_reference=(component, command)), self.assertRaisesRegex(
+                        PREP.PreparationRefused, "^member-missing$"):
+                    PREP.relocation_plan(thin_fixture(commands=(cstring_command(command, metadata_load),)),
+                                         "arm64", caller, combined, images)
+            # The exception is not inherited by another alias into the same
+            # missing leaf, and a real header directory uses ordinary resolution.
+            other_alias = framework + "/OtherHeaders"
+            indirect = copy.deepcopy(metadata)
+            indirect[other_alias] = {"kind": "link", "target": "PrivateHeaders"}
+            self.assertIs(PREP.optional_private_header_alias(other_alias, indirect), False)
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^member-missing$"):
+                PREP.resolve_member(other_alias, indirect)
+            present = copy.deepcopy(metadata); present[missing] = {"kind": "directory"}
+            self.assertIs(PREP.optional_private_header_alias(alias, present), False)
+            self.assertEqual(PREP.resolve_member(alias, present), missing)
+            for selected, field, value in ((alias, "target", "/outside"),
+                                            (alias, "target", "Versions/Current/Headers"),
+                                            (alias, "target", "Versions/Current/PrivateHeaders/child"),
+                                            (alias, "kind", "file"),
+                                            (current, "target", "9.1"),
+                                            (current, "target", "../outside"),
+                                            (current, "kind", "directory")):
+                bad = copy.deepcopy(metadata); bad[selected][field] = value
+                with self.subTest(optional_metadata_shape=(component, selected, field, value)):
+                    self.assertIs(PREP.optional_private_header_alias(alias, bad), False)
+            parents = [name for name, row in metadata.items() if row["kind"] == "directory"]
+            for parent in parents:
+                absent = copy.deepcopy(metadata); del absent[parent]
+                rebound = copy.deepcopy(metadata)
+                rebound[parent] = {"kind": "link", "target": "9.0"}
+                with self.subTest(optional_metadata_parent=(component, parent)):
+                    self.assertIs(PREP.optional_private_header_alias(alias, absent), False)
+                    self.assertIs(PREP.optional_private_header_alias(alias, rebound), False)
+            foreign = {name.replace(component + ".framework", "Other.framework"): row
+                       for name, row in metadata.items()}
+            self.assertIs(PREP.optional_private_header_alias(
+                alias.replace(component + ".framework", "Other.framework"), foreign), False)
+            for bad_name, bad_rows in ((None, metadata), (1, metadata), (alias, None), (alias, [])):
+                self.assertIs(PREP.optional_private_header_alias(bad_name, bad_rows), False)
+
 
     def test_runtime_facts_and_prestart_configuration_stay_private(self):
         root = Path("/task-owned/preparation")
@@ -867,9 +924,24 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             binary.write_bytes(b"passive not-executable image DATA"); binary.chmod(0o700)
             os.symlink("3.14", source / "Versions/Current")
             os.symlink("Versions/Current/Python", source / "Python")
+            # Exact embedded development aliases stay present and dangling;
+            # neither copy nor readonly admission invents target directories.
+            private_aliases = []
+            for component in ("Tcl", "Tk"):
+                framework = source / "Versions/3.14/Frameworks" / (component + ".framework")
+                (framework / "Versions/9.0").mkdir(parents=True, mode=0o700)
+                os.symlink("9.0", framework / "Versions/Current")
+                os.symlink("Versions/Current/PrivateHeaders", framework / "PrivateHeaders")
+                private_aliases.append((framework / "PrivateHeaders").relative_to(source).as_posix())
             expected = PREP.scan_tree(source, closure=True, deadline=deadline)
             self.assertEqual(expected["Versions/Current"]["kind"], "link")
             self.assertEqual(expected["Python"]["target"], "Versions/Current/Python")
+            for name in private_aliases:
+                self.assertIs(PREP.optional_private_header_alias(name, expected), True)
+                self.assertTrue((source / name).is_symlink())
+                self.assertFalse((source / name).exists())
+                with self.assertRaisesRegex(PREP.PreparationRefused, "^member-missing$"):
+                    PREP.resolve_member(name, expected)
 
             successful = root / "successful"
             copied = PREP.copy_framework(source, successful, expected, deadline=deadline)
@@ -891,6 +963,11 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                 elif row["kind"] == "file":
                     path.chmod(0o555 if row["identity"][2] & 0o111 else 0o444)
             protected = PREP.scan_tree(successful, readonly=True, closure=True, deadline=deadline)
+            for name in private_aliases:
+                self.assertTrue((successful / name).is_symlink())
+                self.assertFalse((successful / name).exists())
+                self.assertEqual(os.readlink(successful / name), expected[name]["target"])
+                self.assertEqual(protected[name], copied[name])
             PREP.retire_tree(successful, protected, known=True, deadline=deadline)
             self.assertFalse(successful.exists() or successful.is_symlink())
             self.assertEqual(PREP.scan_tree(source, closure=True, deadline=deadline), expected)
