@@ -425,6 +425,48 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             self.assertIsNone(PREP.public_member_failure(original, "image-slicing"))
         self.assertIsNone(PREP.public_member_failure(PREP.PreparationRefused("fat-slice-header"), "image-slicing"))
 
+        missing = PREP.PreparationRefused("fat-native-missing")
+        missing._image_member_context = member
+        context = (0xCAFEBABE, 1, (INTEL,), "arm64", True, (True,))
+        missing._fat_native_missing = context
+        observed = PREP.public_member_failure(missing, "image-slicing")
+        self.assertEqual(observed["tableCpus"], [INTEL])
+        self.assertEqual(observed["requestedMachine"], "arm64")
+        self.assertIs(observed["allSlicesAreArchives"], True)
+        self.assertIs(observed["diagnosticOnly"], True)
+        self.assertEqual(missing.args, ("fat-native-missing",))
+        for malformed in (None, list(context), context[:-1],
+                          (True, *context[1:]), (context[0], True, *context[2:]),
+                          (context[0], 2, *context[2:]),
+                          (context[0], 1, (True,), *context[3:]),
+                          (context[0], 1, (7,), *context[3:]),
+                          (context[0], 2, (INTEL, INTEL), *context[3:]),
+                          (*context[:3], "x86_64", *context[4:]),
+                          (*context[:3], "MRK-PRIVATE-CANARY", *context[4:]),
+                          (*context[:4], False, (True,)), (*context[:4], 1, (True,)),
+                          (*context[:5], (1,)), (*context[:5], (False, True))):
+            missing._fat_native_missing = malformed
+            self.assertIsNone(PREP.public_member_failure(missing, "image-slicing"))
+        missing._fat_native_missing = context
+        self.assertIsNone(PREP.public_member_failure(missing, "image-relocation"))
+        for code in ("fat-native-missing", "macho-input", "fat-count", "fat-reserved",
+                     "fat-slice-range", "fat-slice-kind", "macho-native-header"):
+            closed = PREP.PreparationRefused(code)
+            closed._image_member_context = member
+            closed._fat_native_missing = context
+            facts = PREP.public_member_failure(closed, "image-slicing")
+            self.assertEqual(facts["code"], code)
+            self.assertEqual(PREP.json.loads(facts["member"]), member[0])
+            self.assertIs(facts["diagnosticOnly"], True)
+            for unsafe in (("/private/MRK-PRIVATE-CANARY", *member[1:]),
+                           ("a/../MRK-PRIVATE-CANARY", *member[1:]),
+                           (member[0], True, member[2]), (member[0], member[1], "bad")):
+                closed._image_member_context = unsafe
+                self.assertIsNone(PREP.public_member_failure(closed, "image-slicing"))
+        closed = PREP.PreparationRefused("not-a-reviewed-code")
+        closed._image_member_context = member
+        self.assertIsNone(PREP.public_member_failure(closed, "image-slicing"))
+
         # An unavailable diagnostic attribute must not replace the original.
         class AttributeUnavailable(PREP.PreparationRefused):
             def __setattr__(self, name, value):
@@ -604,8 +646,29 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
                 PREP.native_slice(data, "arm64", archive_data=True)
         single_header = struct.pack(">2I", 0xCAFEBABF, 1) + struct.pack(">IIQQII", ARM, 0, 64, len(archive), 6, 0)
         single_archive = single_header + bytes(64 - len(single_header)) + archive
-        with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-native-missing$"):
+        with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-native-missing$") as absent:
             PREP.native_slice(single_archive, "x86_64", archive_data=True)
+        self.assertEqual(absent.exception._fat_native_missing,
+                         (0xCAFEBABF, 1, (ARM,), "x86_64", True, (True,)))
+        with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-native-missing$") as absent:
+            PREP.native_slice(wide, "x86_64")
+        self.assertEqual(absent.exception._fat_native_missing,
+                         (0xCAFEBABF, 1, (ARM,), "x86_64", False, (False,)))
+        class UnavailableMissing(PREP.PreparationRefused):
+            def __setattr__(self, name, value):
+                if name == "_fat_native_missing":
+                    raise MemoryError("inert missing-target diagnostic allocation failure")
+                return super().__setattr__(name, value)
+        original_missing = UnavailableMissing("fat-native-missing")
+        def refuse_missing(condition, code):
+            if code == "fat-native-missing" and not condition:
+                raise original_missing
+            return original_need(condition, code)
+        with mock.patch.object(PREP, "need", side_effect=refuse_missing):
+            with self.assertRaises(UnavailableMissing) as absent:
+                PREP.native_slice(wide, "x86_64")
+            self.assertIs(absent.exception, original_missing)
+        self.assertIs(PREP.need, original_need)
         with self.assertRaises(PREP.PreparationRefused):
             PREP.native_slice(archives, "arm64", archive_data="yes")
 

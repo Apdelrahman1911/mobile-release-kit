@@ -107,6 +107,45 @@ def public_member_failure(error, phase):
               "signed-inventory", "sealed-inventory", "runtime-inventory", "expanded-retirement")
     if type(phase) is not str or phase not in phases or type(error) is not PreparationRefused:
         return None
+    image_codes = ("fat-native-missing", "macho-input", "fat-count", "fat-reserved",
+                   "fat-slice-range", "fat-slice-kind", "macho-native-header")
+    if len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in image_codes:
+        member = error.__dict__.get("_image_member_context")
+        if phase != "image-slicing" or type(member) is not tuple or len(member) != 3:
+            return None
+        name, file_size, file_sha = member
+        if (type(file_size) is not int or not 32 <= file_size <= FILE_LIMIT
+                or type(name) is not str or not 0 < len(name) <= 4096 or name.startswith("/")
+                or "\\" in name or not all(32 <= ord(char) < 127 for char in name)
+                or any(part in ("", ".", "..") for part in name.split("/"))
+                or type(file_sha) is not str or re.fullmatch(r"[0-9a-f]{64}", file_sha) is None):
+            return None
+        spelling = json.dumps(name, ensure_ascii=True)
+        if len(spelling) > 4096:
+            return None
+        facts = {"phase": phase, "code": error.args[0], "diagnosticOnly": True,
+                 "representation": "public-package-member-and-closed-image-classification",
+                 "member": spelling, "fileSize": file_size, "fileSha256": file_sha}
+        if error.args[0] == "fat-native-missing":
+            context = error.__dict__.get("_fat_native_missing")
+            if type(context) is not tuple or len(context) != 6:
+                return None
+            magic, count, cpus, machine, archive_data, kinds = context
+            if (type(magic) is not int or magic not in (0xCAFEBABE, 0xCAFEBABF)
+                    or type(count) is not int or not 1 <= count <= 8
+                    or type(cpus) is not tuple or len(cpus) != count
+                    or any(type(cpu) is not int or cpu not in CPUS.values() for cpu in cpus)
+                    or tuple(sorted(set(cpus))) != cpus
+                    or type(machine) is not str or machine not in CPUS or CPUS[machine] in cpus
+                    or type(archive_data) is not bool or type(kinds) is not tuple
+                    or len(kinds) != 1 or type(kinds[0]) is not bool
+                    or kinds[0] and not archive_data):
+                return None
+            facts.update(fatMagic=magic, sliceCount=count, tableCpus=list(cpus),
+                         requestedMachine=machine, archiveDataRequested=archive_data,
+                         allSlicesAreArchives=kinds[0])
+        return facts
+
     if error.args == ("fat-slice-header",):
         context = error.__dict__.get("_fat_slice_header")
         member = error.__dict__.get("_image_member_context")
@@ -328,7 +367,15 @@ def native_slice(body, machine, *, archive_data=False):
             need(len(kinds) == 1, "fat-slice-kind")
             if cpu == CPUS[machine]:
                 selected = thin
-        need(selected is not None, "fat-native-missing")
+        try:
+            need(selected is not None, "fat-native-missing")
+        except PreparationRefused as error:
+            try:
+                error._fat_native_missing = (magic, count, tuple(sorted(cpus)), machine,
+                                             archive_data, tuple(sorted(kinds)))
+            except BaseException:
+                pass  # Optional facts cannot replace the original missing-target refusal.
+            raise
         if True in kinds:
             return None  # Preserve the complete authenticated nonimage unchanged.
         body = selected
@@ -1318,7 +1365,10 @@ def prepare(ctx):
                 try:
                     body = native_image_bytes(path, ctx["machine"])
                 except PreparationRefused as error:
-                    if error.args == ("fat-slice-header",):
+                    if (len(error.args) == 1 and type(error.args[0]) is str
+                            and error.args[0] in ("fat-slice-header", "fat-native-missing", "macho-input",
+                                                 "fat-count", "fat-reserved", "fat-slice-range",
+                                                 "fat-slice-kind", "macho-native-header")):
                         try:
                             error._image_member_context = (name, row["size"], row["sha256"])
                         except BaseException:
