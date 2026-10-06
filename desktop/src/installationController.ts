@@ -1,5 +1,7 @@
 import type { ApiError, DesktopApi } from './types.ts';
 import { installationCheckActive, installationCheckError, parseInstallationStatus, sameInstallationStatus, type InstallationStatus } from './installation.ts';
+import { installationPreparationActive, installationPreparationError, parseInstallationPreparationStatus, PREPARE_QUIT_CONFIRMATION,
+  type InstallationPreparationStatus } from './installation.ts';
 
 export type InstallationCheckApi = Pick<DesktopApi, 'installationStatus' | 'inspectInstallation' | 'cancelInstallation'>;
 export interface InstallationCheckView {
@@ -108,5 +110,105 @@ export class InstallationCheckController {
     this.disposed = true; this.listener = null; this.refreshAgain = false;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+  }
+}
+
+export type InstallationPreparationApi = Pick<DesktopApi, 'installationPreparationStatus' | 'prepareInstallationQuit'>;
+export interface InstallationPreparationView {
+  status: InstallationPreparationStatus | null; error: ApiError | null; starting: boolean; refreshing: boolean;
+}
+// One serialized UI connection, not a native owner. Disposing this view only
+// retires its own polling timer; the original Document/Completion still owns Quit.
+export class InstallationPreparationController {
+  private view: InstallationPreparationView = { status: null, error: null, starting: false, refreshing: false };
+  private listener: ((view: InstallationPreparationView) => void) | null = null;
+  private attached = false;
+  private disposed = false;
+  private pending = false;
+  private refreshAgain = false;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly api: InstallationPreparationApi | null;
+  private readonly enabled: boolean;
+  constructor(api: InstallationPreparationApi | null, enabled: boolean) { this.api = api; this.enabled = enabled; }
+  snapshot(): InstallationPreparationView { return this.view; }
+  attach(listener: (view: InstallationPreparationView) => void): void {
+    if (this.disposed || this.attached) return;
+    this.attached = true; this.listener = listener; listener(this.view);
+    if (this.enabled && this.api) void this.refresh();
+  }
+  private update(change: Partial<InstallationPreparationView>): void {
+    if (this.disposed) return;
+    this.view = { ...this.view, ...change }; this.listener?.(this.view);
+  }
+  private clearTimer(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+  }
+  private accept(value: unknown): void {
+    const next = parseInstallationPreparationStatus(value);
+    if (!next) throw installationPreparationError(null);
+    const before = this.view.status;
+    if (before?.generation != null) {
+      if (next.generation === null || next.generation < before.generation) throw installationPreparationError(null);
+      if (next.generation === before.generation) {
+        if (next.operationId !== before.operationId) throw installationPreparationError(null);
+        const rank = { 'not-started': 0, preparing: 1, unregistering: 2, settling: 3, prepared: 4, refused: 4, unknown: 4 };
+        if (rank[next.phase] < rank[before.phase]
+          || ['prepared', 'refused', 'unknown'].includes(before.phase) && next.phase !== before.phase
+          || before.phase === 'refused' && next.newWorkClosed !== before.newWorkClosed
+          || before.reason !== 'none' && next.reason === 'none') throw installationPreparationError(null);
+      } else if (before.phase !== 'refused' || before.newWorkClosed) {
+        // An unknown or active original cannot be replaced by a newer counter.
+        throw installationPreparationError(null);
+      }
+    }
+    this.update({ status: next, error: null });
+  }
+  private schedule(): void {
+    this.clearTimer();
+    if (!this.disposed && !this.view.error && installationPreparationActive(this.view.status)) {
+      this.timer = setTimeout(() => { this.timer = null; void this.refresh(); }, 1000);
+    }
+  }
+  async refresh(): Promise<void> {
+    if (this.disposed || !this.enabled || !this.api) return;
+    if (this.pending) { this.refreshAgain = true; return; }
+    this.clearTimer(); this.pending = true; this.update({ refreshing: true });
+    try {
+      if (this.disposed) return;
+      const status = await this.api.installationPreparationStatus();
+      if (!this.disposed) this.accept(status);
+    } catch (error) { this.update({ error: installationPreparationError(error) }); }
+    finally {
+      this.pending = false; this.update({ refreshing: false });
+      const again = this.refreshAgain; this.refreshAgain = false;
+      if (!this.disposed && again) void this.refresh(); else this.schedule();
+    }
+  }
+  start(confirmed: boolean): boolean {
+    if (confirmed !== true || this.disposed || !this.enabled || !this.api || this.pending
+      || this.view.error || !this.view.status?.canStart) return false;
+    const generation = this.view.status.generation;
+    this.clearTimer(); this.pending = true; this.update({ starting: true, error: null });
+    void Promise.resolve().then(() => {
+      if (this.disposed) return null;
+      return this.api!.prepareInstallationQuit({ confirmation: PREPARE_QUIT_CONFIRMATION });
+    }).then((value) => {
+      if (this.disposed) return;
+      const next = parseInstallationPreparationStatus(value);
+      if (!next || next.generation === null || generation !== null && next.generation <= generation)
+        throw installationPreparationError(null);
+      this.accept(next);
+    }).catch((error: unknown) => { this.update({ error: installationPreparationError(error) }); })
+      .finally(() => {
+        this.pending = false; this.refreshAgain = false; this.update({ starting: false });
+        // Lost/malformed acknowledgement gets a read-only reconciliation, not
+        // another Start, native cancellation, helper registration or renderer Quit.
+        if (!this.disposed) void this.refresh();
+      });
+    return true;
+  }
+  dispose(): void {
+    this.disposed = true; this.listener = null; this.refreshAgain = false; this.clearTimer();
   }
 }

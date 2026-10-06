@@ -261,7 +261,7 @@ function AndroidToolSources({ state, controller, onHelp }: {
     <p className="save-note">This step only remembers the selected directories for this app session. It does not execute, install or change them. Browsing alone neither inspects supplier contents nor registers a copy; separate inspection and protected-copy approval stay disabled until their actual prerequisites are available.</p>
     {sourceRoles.map((role) => {
       const help = androidToolSourceHelp[role], selected = sameProject ? sources?.selections.find((item) => item.role === role) : null;
-      return <div className="session-review" key={role}>
+      return <div className="session-review" key={role} role="group" aria-label={`${help.label} source folder`}>
         <div className="inline-heading"><h4>{help.label}</h4>{onHelp && <HelpButton content={help} onHelp={onHelp} />}</div>
         <p>{help.what}</p><p className="save-note">{help.where}</p>
         <p className="save-note">Required before registering Android tools. {selected ? <>Selected folder: <strong>{selected.displayName}</strong> · folder selection only.</> : 'No folder selected for this project.'}</p>

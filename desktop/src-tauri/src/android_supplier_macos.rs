@@ -5,6 +5,7 @@ use std::{cmp::Ordering, mem::size_of, sync::OnceLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::android_toolchain_macos_policy as policy;
+use crate::android_build_protocol::Profile;
 use crate::android_toolchain_macos_policy::{Alias, FileSpec, Inventory, Roles, Versions, Distribution};
 use crate::android_supplier_macos_source::*;
 use crate::android_sdk_metadata_macos as sdk_metadata;
@@ -1305,6 +1306,14 @@ pub(crate) fn available() -> bool {
     // Called under Registry/control books: never initialize or wait here.
     catalogue_available(&COMPILED_CATALOGUE)
 }
+/// Comparison DATA alone cannot make the ARM whole-supplier reference Intel.
+/// Unsupported profiles do not consult or initialize the ARM cache.
+pub(crate) fn available_for(profile: Profile) -> bool {
+    match profile {
+        Profile::MacArm64 => available(),
+        Profile::MacX64 | Profile::LinuxX64 => false,
+    }
+}
 /// Pure compiled DATA, not a grant or a second64MiB pool. The app source book
 /// adds its concrete layout/capacities and the whole existing caller census.
 #[derive(Clone, Copy)]
@@ -1386,6 +1395,14 @@ fn choose<'a>(catalogue: &'static [Reference], layout: &SourceLayouts<'a>) -> Re
 }
 pub(crate) fn recipe(layout: &SourceLayouts<'_>) -> Result<Recipe, Failure> {
     choose_checked(REFERENCES, layout, |index, _| compiled_catalogue()[index])
+}
+/// A whole reference is selected only for its currently complete profile.
+/// Keep matching-invalid and duplicate semantics in the unchanged ARM chooser.
+pub(crate) fn recipe_for(profile: Profile, layout: &SourceLayouts<'_>) -> Result<Recipe, Failure> {
+    match profile {
+        Profile::MacArm64 => recipe(layout),
+        Profile::MacX64 | Profile::LinuxX64 => Err(Failure::Unavailable),
+    }
 }
 impl Recipe {
     /// Exact roster first. The source book must retain the selected roots and
@@ -2021,6 +2038,16 @@ mod tests {
     }
 
     pub(super) fn checked_ordinals_preserve_selection_failure_and_duplicate_semantics_data() {
+        let real_layout = SourceLayouts { jdk: JdkLayout::Bundle,
+            jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" };
+        // Same vendor/version does not borrow an ARM reference, including while
+        // its original cache is cold. No fixture reference or cache reset here.
+        let before = COMPILED_CATALOGUE.get().map(|entries| entries as *const CheckedCatalogue);
+        for profile in [Profile::MacX64, Profile::LinuxX64] {
+            assert!(!available_for(profile));
+            assert!(matches!(recipe_for(profile, &real_layout), Err(Failure::Unavailable)));
+        }
+        assert_eq!(COMPILED_CATALOGUE.get().map(|entries| entries as *const CheckedCatalogue), before);
         let base = fixture();
         let layout = SourceLayouts { jdk: JdkLayout::Bundle, jdk_vendor: base.observed_jdk_vendor,
             jdk_version: base.observed_jdk_version };
@@ -2068,6 +2095,15 @@ mod tests {
             assert_eq!(admit_checked(&[Some(checked)], &inventory, &checked.digest), Ok(()));
             assert_eq!(admit(&inventory, &checked.digest), Err(SupplierFailure::Unavailable));
         });
+        assert_eq!(available_for(Profile::MacArm64), available());
+        match (recipe_for(Profile::MacArm64, &real_layout), recipe(&real_layout)) {
+            (Ok(explicit), Ok(original)) => {
+                assert_eq!(explicit.selected.digest, original.selected.digest);
+                assert!(explicit.jdk_layout() == original.jdk_layout());
+            }
+            (Err(explicit), Err(original)) => assert_eq!(explicit, original),
+            _ => panic!("ARM profile must delegate the same original recipe"),
+        }
     }
     #[test]
     fn checked_ordinals_preserve_selection_failure_and_duplicate_semantics() {
@@ -3166,7 +3202,7 @@ pub(crate) fn assert_macos_supplier_builder_data_contract() {
     tests::checked_ordinals_preserve_selection_failure_and_duplicate_semantics_data();
     tests::catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data();
     tests::compiled_six_component_catalogue_roundtrips_and_rejects_mismatches_data();
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     crate::saved_command_owner::SavedCommandOwner::assert_android_catalogue_whole_owner_data_contract();
     tests::implicit_archive_parents_bind_complete_source_closure_data();
     tests::implicit_archive_parent_component_prefix_and_bounds_refuse_data();

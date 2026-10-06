@@ -24,7 +24,7 @@ SOURCE = Path('/source')
 TARGET = Path('/tmp/target')
 REGISTRY = set(json.loads(Path('/inputs.json').read_bytes())['registryPackages'])
 LOCAL = {
-    'path+file://' + str(SOURCE / 'desktop/src-tauri') + '#mobile-release-kit-desktop@0.1.0',
+    'path+file://' + str(SOURCE / 'desktop/src-tauri') + '#mobile-release-kit-desktop@0.1.1',
     'path+file://' + str(SOURCE / 'desktop/vendor/secret-service-5.2.0') + '#secret-service@5.2.0',
     'path+file://' + str(SOURCE / 'desktop/vendor/zbus-5.19.0') + '#zbus@5.19.0',
     'path+file://' + str(SOURCE / 'desktop/native/linux-mount-observation') + '#mrk-linux-mount-observation@0.1.0',

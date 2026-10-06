@@ -505,8 +505,10 @@ class PendingAccountRecoveryDataTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
         self.assertIn('result=run_owned(argv,**options);row[2]=result', source)
         owner = (ROOT / "desktop/src-tauri/src/saved_command_owner.rs").read_text()
-        for gate in ("IOS_SIGNED_NATIVE_QUALIFIED", "IOS_RECOVERY_NATIVE_QUALIFIED"):
-            self.assertIn(f"const {gate}: bool = false;", owner)
+        selection = owner.split("fn ios_mode_selection(", 1)[1].split("const IOS_WORK", 1)[0]
+        self.assertIn("if !installed { return ios_wire::ModeCapabilities::NONE; }", selection)
+        self.assertIn("ios_mode_selection(self.ios_installed_selected(), Some(", owner)
+        self.assertIn("return same_original && self.ios_observed_mode_capabilities(observation).supports(selected.operation)", owner)
         self.assertIn('originals: [Option<InstalledIOSOriginal>; 2]', owner)
         self.assertIn('Arc::ptr_eq(&inspected.original, &first.original)', owner)
         self.assertIn('observation.control.slot_for(selected)', owner)

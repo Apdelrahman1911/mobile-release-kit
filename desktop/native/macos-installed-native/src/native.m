@@ -27,12 +27,39 @@
 #include <time.h>
 #endif
 
+#if !defined(__APPLE__) || !defined(__LP64__) || !defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
+#error "the installed native seam requires macOS LP64"
+#endif
+#if defined(__arm64__) && !defined(__x86_64__)
+#define MRK_NATIVE_MACHINE "arm64"
+#elif defined(__x86_64__) && !defined(__arm64__)
+#define MRK_NATIVE_MACHINE "x86_64"
+#else
+#error "the installed native seam requires exactly one supported Mac architecture"
+#endif
+_Static_assert(sizeof(int) == 4 && sizeof(void *) == 8 && sizeof(size_t) == 8,
+    "documented macOS int32 and LP64 scalar widths required");
+
+// Private query-free DATA predicate, shared only with the cfg(test) Rust FFI.
+// These supplied scalars never replace the actual zero-argument observation.
+int mrk_platform_native_data(const char *sysname, const char *machine, int returned,
+                             int observed_errno, size_t length, int translated) {
+    if (!sysname || !machine || strcmp(sysname, "Darwin") || strcmp(machine, MRK_NATIVE_MACHINE)) return ENOTSUP;
+    // errno is unspecified on success. Failed-call output cells are not facts.
+    if (returned == 0) return length == sizeof(int) && translated == 0 ? 0 : ENOTSUP;
+    // Apple's documented absent-key native case, after compiled-machine match.
+    return returned == -1 && observed_errno == ENOENT ? 0 : ENOTSUP;
+}
 int mrk_platform(void) {
     struct utsname u; char version[64] = {0}; size_t length = sizeof(version);
-    if (uname(&u) || strcmp(u.sysname, "Darwin") || strcmp(u.machine, "arm64")) return ENOTSUP;
+    if (uname(&u) || strcmp(u.sysname, "Darwin") || strcmp(u.machine, MRK_NATIVE_MACHINE)) return ENOTSUP;
     if (sysctlbyname("kern.osproductversion", version, &length, NULL, 0) || length == 0 || length >= sizeof(version)
         || strncmp(version, "26.", 3)) return ENOTSUP;
-    return 0;
+    int translated = 0; size_t translated_length = sizeof(translated);
+    errno = 0;
+    int returned = sysctlbyname("sysctl.proc_translated", &translated, &translated_length, NULL, 0);
+    int observed_errno = errno;
+    return mrk_platform_native_data(u.sysname, u.machine, returned, observed_errno, translated_length, translated);
 }
 int mrk_user(uint32_t *uid) {
     if (!uid || getuid() == 0 || getuid() != geteuid() || getgid() != getegid() || issetugid()) return EPERM;
@@ -200,6 +227,38 @@ int mrk_sync(int fd, int file) {
 }
 int mrk_publish(int from, const char *source, int to, const char *destination) {
     if (renameatx_np(from, source, to, destination, RENAME_EXCL)) return errno ? errno : EIO;
+    return 0;
+}
+int mrk_swap_installation_state(int root, const char *archived) {
+    // The parent owns both held originals and EX. These last name/shape checks
+    // are defense in depth, not a substitute for that custody or content pins.
+    static const char prefix[] = ".maintenance-";
+    static const char suffix[] = ".state.json";
+    const size_t prefix_n = sizeof(prefix) - 1, suffix_n = sizeof(suffix) - 1;
+    if (!archived || strnlen(archived, 256) != prefix_n + 32 + suffix_n
+        || strncmp(archived, prefix, prefix_n) || strcmp(archived + prefix_n + 32, suffix)) return EINVAL;
+    int nonzero = 0;
+    for (size_t i = 0; i < 32; ++i) {
+        unsigned char c = (unsigned char)archived[prefix_n + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return EINVAL;
+        nonzero |= c != '0';
+    }
+    if (!nonzero || getuid() || geteuid() || getgid() || getegid()) return EPERM;
+    struct stat directory, canonical, pending;
+    if (fstat(root, &directory) || fstatat(root, "installation-v2.json", &canonical, AT_SYMLINK_NOFOLLOW)
+        || fstatat(root, archived, &pending, AT_SYMLINK_NOFOLLOW)) return errno ? errno : EIO;
+    if (directory.st_mode != (S_IFDIR | 0755) || directory.st_uid || directory.st_gid || directory.st_flags
+        || canonical.st_mode != (S_IFREG | 0444) || canonical.st_uid || canonical.st_gid || canonical.st_flags
+        || pending.st_mode != (S_IFREG | 0444) || pending.st_uid || pending.st_gid || pending.st_flags
+        || canonical.st_nlink != 1 || pending.st_nlink != 1
+        || canonical.st_size <= 0 || canonical.st_size > 16384 || pending.st_size <= 0 || pending.st_size > 16384
+        || directory.st_dev != canonical.st_dev || directory.st_dev != pending.st_dev
+        || canonical.st_ino == pending.st_ino) return EPERM;
+    // Apple rename(2): SWAP is atomic and cannot be combined with EXCL. Single
+    // fixed leaves plus nofollow/beneath prohibit redirected intermediate paths.
+    // Nonzero is never retried as an overwrite or a second rename.
+    if (renameatx_np(root, archived, root, "installation-v2.json",
+        RENAME_SWAP | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH)) return errno ? errno : EIO;
     return 0;
 }
 int mrk_main_thread(void) { return pthread_main_np(); }

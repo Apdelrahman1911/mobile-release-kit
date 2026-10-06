@@ -55,13 +55,48 @@ pub enum Decision { Proceed,Defer,Stop,Unknown }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Progress { Deferred,Finished(Observation),Unknown(Observation) }
 
+/// Fixture-only copied lookup facts. The fixed words never authorize a service
+/// operation and say nothing about private SMAppService bundle selection.
+#[cfg(feature="e2-native-fixture")]
+#[repr(C)]
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+pub(crate) struct FixtureBundleLookup { pub(crate) words:[u32;4] }
+#[cfg(feature="e2-native-fixture")]
+impl FixtureBundleLookup {
+    fn observed(self)->bool { self.words!=[0;4] }
+    pub(crate) fn valid(self)->bool {
+        if !self.observed() { return true; }
+        let [bundle,executable,identifier,plist]=self.words;
+        if !(1..=4).contains(&bundle) || !(1..=4).contains(&executable)
+            || !(1..=4).contains(&identifier) || !(1..=6).contains(&plist) { return false; }
+        match bundle {
+            1=>matches!(plist,1|2|6),2=>matches!(plist,3|4|6),3=>plist==5,
+            4=>executable==4 && identifier==4 && plist==6,_=>false,
+        }
+    }
+    pub(crate) fn labels(self)->Option<[(&'static str,&'static str);4]> {
+        if !self.observed() || !self.valid() { return None; }
+        let [bundle,executable,identifier,plist]=self.words;
+        let locations=["", "fixture-client", "fixture-outer", "other", "unavailable"];
+        let executables=["", "fixture-client", "fixture-entry", "other", "unavailable"];
+        let plists=["", "held-client-match", "client-identity-mismatch", "outer-library-absent",
+            "outer-library-present", "other-bundle-not-read", "unavailable"];
+        Some([("bundle",locations[bundle as usize]),("executable",executables[executable as usize]),
+            ("identifier",locations[identifier as usize]),("plist",plists[plist as usize])])
+    }
+}
 #[repr(C)]
 #[derive(Clone,Copy,Debug,Default)]
 struct Report {
     version:u32,action:u32,status:u32,outcome:u32,entered:u32,returned:u32,cleanup_known:u32,unknown:u32,
     phase:u32,service_state:u32,called:u32,reserved:u32,
+    #[cfg(feature="e2-native-fixture")] fixture_lookup:FixtureBundleLookup,
 }
 fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
+    #[cfg(feature="e2-native-fixture")]
+    if !raw.fixture_lookup.valid() || raw.fixture_lookup.observed()
+        && (action!=Action::Observe || !matches!(phase,Phase::ObserveStatus|Phase::ReleaseService)
+            || raw.status==4) { return None; }
     if action==Action::UnregisterAfterQuiescence{return decode_maintenance(raw,phase);}
     if raw.version!=2 || raw.action!=action.code() || Some(raw.phase)!=phase.code()
         || raw.status>5 || raw.outcome>9 || raw.entered>1 || raw.returned>raw.entered
@@ -341,6 +376,14 @@ impl ServiceManager {
     } }
     /// Supplied C cell + complete Rust owner only, not framework/RSS storage.
     pub fn project_owned_upper_bound()->Option<usize> { 1024_usize.checked_add(std::mem::size_of::<Self>()) }
+    /// The current original fixture Observe only; no FFI or new authority.
+    #[cfg(feature="e2-native-fixture")]
+    pub(crate) fn fixture_bundle_lookup(&self)->Option<FixtureBundleLookup> {
+        let value=self.report.fixture_lookup;
+        (self.fixture_identity_address!=0 && self.report.action==Action::Observe.code()
+            && !self.in_call && !self.in_gate && !self.unknown && value.observed() && value.valid())
+            .then_some(value)
+    }
     /// Pure copied facts; no FFI, acquisition, clock renewal or settlement.
     pub fn custody(&self)->Custody {
         let mut observation=self.observation;
@@ -487,6 +530,8 @@ impl ServiceManager {
             let returned=native.step(pointer.as_ptr(),code,&mut raw);
             let at=Instant::now();self.in_call=false;
             let decoded=(returned==1).then(||decode(raw,action,phase)).flatten().filter(|_| {
+                #[cfg(feature="e2-native-fixture")]
+                if self.report.fixture_lookup.observed() && raw.fixture_lookup!=self.report.fixture_lookup { return false; }
                 raw.entered>=self.report.entered && raw.returned>=self.report.returned
             });
             if let Some(observation)=decoded {
@@ -923,7 +968,7 @@ mod tests {
     }
     #[test]
     fn native_report_cannot_fabricate_authority_or_inconsistent_phase_success() {
-        assert_eq!(std::mem::size_of::<Report>(),48);
+        assert_eq!(std::mem::size_of::<Report>(),if cfg!(feature="e2-native-fixture") {64}else{48});
         let observed=Report { version:2,action:0,status:1,outcome:1,phase:3,service_state:2,called:1,..Report::default() };
         let result=decode(observed,Action::Observe,Phase::ObserveStatus).unwrap();
         assert_eq!(result.status,Status::Enabled);

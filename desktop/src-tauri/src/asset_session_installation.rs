@@ -24,7 +24,7 @@ pub(super) struct Work {
     pub(super) end: Instant,
     failure: Mutex<FailureLatch>, poisoned: AtomicBool,
     stop: watch::Sender<bool>, stopped: watch::Receiver<bool>,
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native: Mutex<crate::installed_runtime::InstallationSlots>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         feature = "macos-installed-observation", not(feature = "development-runtime"),
@@ -36,7 +36,7 @@ impl Work {
     pub(super) fn new(end: Instant) -> Self {
         let (stop, stopped) = watch::channel(false);
         Self { end, failure: Mutex::new(FailureLatch::default()), poisoned: AtomicBool::new(false), stop, stopped,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native: Mutex::new(crate::installed_runtime::InstallationSlots::new()),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 feature = "macos-installed-observation", not(feature = "development-runtime"),
@@ -68,23 +68,23 @@ impl Work {
         Some((first, unknown))
     }
     pub(super) fn settled(&self) -> bool {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.native.try_lock().is_ok_and(|slots| slots.settled()) }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { true } // No native adapter exists or can enter on this profile.
     }
     fn observed_settled(&self) -> bool {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.native.try_lock().is_ok_and(|slots| slots.observed_settled()) }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { false }
     }
     pub(super) fn retained_bytes_if_settled(&self) -> Option<usize> {
         if !self.settled() || self.poisoned.load(Ordering::SeqCst)
             || self.failure.try_lock().ok()?.unknown { return None; }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let native = self.native.try_lock().ok()?.control_bytes()?;
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let native = 0;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
             feature = "macos-installed-observation", not(feature = "development-runtime"),
@@ -375,7 +375,7 @@ impl DocumentBinding {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn cleanup_expired(owner: &OriginalWork, native: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) -> bool {
     if let Some((reason, at)) = native {
         failure(owner, crate::installed_runtime::installation_native_problem(reason), at);
@@ -386,7 +386,7 @@ fn cleanup_expired(owner: &OriginalWork, native: Option<(crate::installed_runtim
 }
 pub(super) fn execute(owner: &Arc<OriginalWork>) -> Result<Matching, CheckReason> {
     let Some(work) = &owner.installation else { return Err(CheckReason::CleanupUnknown); };
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         // Only execute_child calls this, after exact handle registration/GO.
         // Poison retains the Book in its original cell; never recover it to
@@ -400,7 +400,7 @@ pub(super) fn execute(owner: &Arc<OriginalWork>) -> Result<Matching, CheckReason
             &mut |first| cleanup_expired(owner, first),
             &mut |files, bytes| read_returned(owner, files, bytes))
     }
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { let _ = work; failure(owner, CheckReason::UnavailableProfile, Instant::now()); Err(CheckReason::UnavailableProfile) }
 }
 fn read_returned(_owner: &OriginalWork, _files: u32, _bytes: u64) {

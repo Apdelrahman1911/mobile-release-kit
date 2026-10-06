@@ -1,7 +1,7 @@
 //! The one fixed ordinary C image entry. No release engine or alternate UI.
 #![deny(unsafe_op_in_unsafe_fn)]
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-compile_error!("the ordinary installed image requires macOS ARM64");
+#[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+compile_error!("the ordinary installed image requires LP64 ARM64 or Intel macOS");
 #[cfg(not(panic = "unwind"))]
 compile_error!("the image ABI requires unwind containment, never panic=abort");
 

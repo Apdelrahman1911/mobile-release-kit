@@ -22,10 +22,10 @@ METHOD = "testSyntheticProjectBuildToolDiagnostics"
 SCOPE = "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"
 SOURCE_METHODS = ['test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
  'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result']
-# Exact product two-lifetime baseline plus reviewed require-site diagnostics.
+# Exact two-lifetime/dashboard, draft-only fields and selection-only Android baseline.
 # Only the explicitly checked heading/readiness/diagnostic blocks below are
 # restored or removed; original-owner and restart paths remain bound.
-ORIGINAL_SWIFT_SHA256 = "43e84e8f4b8cf917b3b1505cdeca927dcf3b61003dbcd7faaeade2473ca14790"
+ORIGINAL_SWIFT_SHA256 = "ff4f7c461fb48e2c71f720ba9facebcb0716bb81e50a37f0dc4c0e9f167e9d98"
 DIAGNOSTICS_INSERTION_SHA256 = "d6c1730aa9c3b82467a5f6f15b549a463746e0901556174fc52a602d903b798d"
 DASHBOARD_QUERY_BEGIN = '        // Fixed dashboard query diagnostics only; observations are non-atomic.\n'
 DASHBOARD_QUERY_END = '        // End fixed dashboard query diagnostics.\n'
@@ -43,13 +43,13 @@ SEMANTIC_HEADING_LINES = (
     ('        _ = try waitElement(storage.staticTexts.matching(identifier: "Supplied-input assessment"), in: storage,\n',
      '        _ = try waitElement(storage.staticTexts.matching(NSPredicate(format: "title == %@", "Supplied-input assessment")), in: storage,\n', 1),
     ('            _ = try waitElement(renderer.staticTexts.matching(identifier: "Let’s get project ready."), in: renderer,\n',
-     '            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,\n', 5),
+     '            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,\n', 7),
     ('            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"), in: renderer,\n',
      '            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")), in: renderer,\n', 1),
     ('            _ = try waitElement(review.staticTexts.matching(identifier: "Submitted configuration saved"), in: review,\n',
      '            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Submitted configuration saved")), in: review,\n', 1),
     ('            _ = try waitElement(proposal.staticTexts.matching(identifier: "Four read-only workflow previews"), in: proposal)\n',
-     '            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)\n', 1),
+     '            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)\n', 2),
     ('            _ = try waitElement(review.staticTexts.matching(identifier: "Reviewed local workflow bundle installed"), in: review,\n',
      '            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Reviewed local workflow bundle installed")), in: review,\n', 1),
     ('            _ = try waitElement(review.staticTexts.matching(identifier: "Text saved"), in: review, timeout: 48, failures: Self.textFailures)\n',
@@ -68,6 +68,12 @@ SEMANTIC_HEADING_LINES = (
      '            let fresh = panel.staticTexts.matching(NSPredicate(format: "title == %@", "Tool observations from this run"))\n', 1),
     ('                _ = try unique(panel.staticTexts.matching(identifier: label), "fixed Android diagnostics card is missing or repeated")\n',
      '                _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)), "fixed Android diagnostics card is missing or repeated")\n', 1),
+    ('            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation needs attention"),\n',
+     '            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation needs attention")),\n', 1),
+    ('            _ = try unique(review.staticTexts.matching(identifier: "Local workflow bundle refused"),\n',
+     '            _ = try unique(review.staticTexts.matching(NSPredicate(format: "title == %@", "Local workflow bundle refused")),\n', 1),
+    ('            _ = try waitElement(review.staticTexts.matching(identifier: "Local workflow bundle refused"),\n',
+     '            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Local workflow bundle refused")),\n', 1),
     ('            _ = try waitElement(restartedRenderer.staticTexts.matching(identifier: "Let’s get project ready."), in: restartedRenderer,\n',
      '            _ = try waitElement(restartedRenderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: restartedRenderer,\n', 1),
 )
@@ -79,19 +85,21 @@ RENDERER_READINESS_BEGIN = '        // Bounded initial renderer readiness; obser
 RENDERER_READINESS_END = '        // End bounded initial renderer readiness.\n'
 RENDERER_READINESS_SHA256 = '9f8936dd612d12ae8dc10c561181686359171a3ce98021603c12c17a486c2a8a'
 ORIGINAL_ROSTER_SHA256 = "293426d49f6bb226563ea325527858b894aa98ac2e72dea6b70875157cfd58e4"
-ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
+SAVED_CHECKS_ROSTER_SHA256 = "1cf265f8c97381708d68c1dedc8bc61ebcaf182c104d3021bda8b8211f016d65"
+ROSTER_SHA256 = "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"
 # The normal result also binds M2-A entry identity without claiming full M2/maintenance readiness.
 BLOCK_PINS = {'normal_ui_result': '9665ebd13fa186678201f972c5cb165812b9fa59a3d5959d9b38e72c860d6ccf',
- 'normal_project_ui_test': '8edcd4ca6e2b730673c830a24591909f050256cbb6661f724fa04e55b4ce7be7',
- 'normal_project_ui_result': 'f6c8d14dde9b58bad7a0803508fb343b82703bd4ed5e09a1de0ca903117cc55b',
+ 'normal_project_ui_test': '9f7298b660ad22517d17e3e8420bec3c1d8071e18003ac435aa1df7e6f20256b',
+ 'normal_project_ui_result': '60253d2653f54318ce00023737e8f50034018fa45d5d1a3809e9280cca41282f',
  'normal_persistence_ui_test': '3ff4b7295bf3be9a52887f06e2c83acfb7010a6cad2113ffcd434a423a7fc259',
  'normal_persistence_ui_result': '865a2243d5cc1bf3e9929d6db1a6bb657f15817135a2a6e11041a60adea0b7cf',
  'normal_diagnostics_ui_test': 'c09b1404ff79414f26b4be3c5b071be5472e66a9de129804f728400e1386279d',
- 'normal_diagnostics_ui_result': '8b9d4423a7cce285acc24d27e32d2eebfc1f056142f839a53bc534c84a52d5e7',
+ 'normal_diagnostics_ui_result': '4ee7d7621ba1eea58ba2a6866f61f3d45780a1bcead90717684d16a442232642',
  'normal_saved_checks_ui_test': '55b8cce29447bb324074bdeab676ed1cc1d63993a2a1655a87b4717e90480ccf',
- 'normal_saved_checks_ui_result': '7d79d1b912cfe9d37312a871347e90e25991b4eb1cad085b35b83468116d2065'}
+ 'normal_saved_checks_ui_result': '56be39e09548a801b0b5c88ac6393672c8e6d76a97e5a4c27cb465878312c5f9'}
 # One added source regression covers the two deliberately separate GUI scopes.
-# The workflow appends only this method after the unchanged original81 selection.
+# This is method82 after the unchanged original81; two already-reviewed Android
+# caller/source checks follow it in the current fixed84 workflow selection.
 SAVED_CHECKS_SOURCE_METHOD = 'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only'
 SAVED_CHECKS_BEGIN = "    // Ordinary saved offline checks and empty project-recovery inspection only.\n"
 SAVED_CHECKS_END = "    // End ordinary saved offline and empty recovery journeys.\n\n"
@@ -221,17 +229,18 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         end = swift.index(RENDERER_QUERY_END, begin) + len(RENDERER_QUERY_END)
         block = swift[begin:end]
         self.assertEqual(swift.count(block), 2)
-        for signature, following in (
-            ('    func testLaunchCancelAndQuit() throws {', '    // Finite synthetic files only.'),
+        for signature, following, dashboard_call in (
+            ('    @MainActor private func launchCancelAndQuit(profile: SourceProfile) throws {',
+             '    // Finite synthetic files only.', '        try dashboard(renderer, diagnosticOrdinal: 1)\n'),
             ('    @MainActor private func launchForJourney() throws -> (XCUIApplication, XCUIElement, XCUIElement) {',
-             '    private enum PrivateInput: String {'),
+             '    private enum PrivateInput: String {', '        try dashboard(renderer)\n'),
         ):
             self.assertEqual(swift.count(signature), 1)
             self.assertEqual(swift.count(following), 1)
             caller = swift.split(signature, 1)[1].split(following, 1)[0]
             self.assertEqual(caller.count(block), 1)
             self.assertIn('try require(window.isHittable, "ordinary main window is not usable")\n' + block
-                          + '        try dashboard(renderer)\n', caller)
+                          + dashboard_call, caller)
         for fragment in (
             'let rendererQuery = window.webViews',
             'let rendererCount = rendererQuery.count',
@@ -264,8 +273,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def restored_semantic_heading_queries(self, swift: str) -> str:
         # Refuse a missing, duplicate, broadened or unexpected title selector
         # before restoring only the reviewed complete source lines.
-        self.assertEqual(len(SEMANTIC_HEADING_LINES), 17)
-        self.assertEqual(swift.count(SEMANTIC_HEADING_PREFIX), 22)
+        self.assertEqual(len(SEMANTIC_HEADING_LINES), 20)
+        self.assertEqual(swift.count(SEMANTIC_HEADING_PREFIX), 28)
         for original, semantic, count in SEMANTIC_HEADING_LINES:
             self.assertEqual(swift.count(semantic), count, semantic)
             self.assertEqual(swift.count(original), 0, original)
@@ -283,7 +292,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         end = swift.index(DASHBOARD_QUERY_END) + len(DASHBOARD_QUERY_END)
         self.assertLess(begin, end)
         block = swift[begin:end]
-        dashboard = swift.split('    @MainActor private func dashboard(_ renderer: XCUIElement) throws {', 1)[1].split(
+        dashboard = swift.split('    @MainActor private func dashboard(_ renderer: XCUIElement, diagnosticOrdinal: UInt8? = nil) throws {', 1)[1].split(
             '    @MainActor private func quitSheet(', 1)[0]
         self.assertEqual(dashboard.count(block), 1)
         for fragment in (
@@ -526,8 +535,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(swift.count(end), 1)
         insertion = start + swift.split(start, 1)[1].split(end, 1)[0]
         self.assertEqual(digest(insertion.encode()), DIAGNOSTICS_INSERTION_SHA256)
-        # Fixture/content policy is unchanged; the separately reviewed common
-        # original-owner/deadline migration is included in this pinned baseline.
+        # Bind the reviewed current owner/deadline/menu/dashboard source and the
+        # separate bounded projectFields fixture; no broad source normalization.
         self.assertEqual(digest(swift.replace(insertion, "", 1).encode()), ORIGINAL_SWIFT_SHA256)
         return swift, insertion
 
@@ -689,40 +698,54 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         data = blocks['data_contracts']
         names = ast.literal_eval(re.search(r'          names = (\[\n.*?\n          \])\n', data, re.S)[1])
         selected_digest = lambda values: digest(json.dumps(values, separators=(',', ':')).encode())
-        self.assertEqual(len(names), 82)
-        self.assertEqual(len(set(names)), 82)
+        self.assertEqual(len(names), 84)
+        self.assertEqual(len(set(names)), 84)
         self.assertEqual(selected_digest(names[:79]), '81ca0c9325763f3aaf2a181e521d7b6adde06b7c0321eecacfc2b93a78c3c051')
         self.assertEqual(names[79:81], SOURCE_METHODS)
         self.assertEqual(selected_digest(names[:81]), ORIGINAL_ROSTER_SHA256)
-        self.assertEqual(names[81:], [SAVED_CHECKS_SOURCE_METHOD])
+        self.assertEqual(names[81:82], [SAVED_CHECKS_SOURCE_METHOD])
+        self.assertEqual(selected_digest(names[:82]), SAVED_CHECKS_ROSTER_SHA256)
+        self.assertEqual(names[82:], [
+            'test_android_build_tools.MacToolAdmissionDataTests.test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only',
+            'test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot',
+        ])
         self.assertEqual(selected_digest(names), ROSTER_SHA256)
         self.assertEqual(data.count(ROSTER_SHA256), 2)
         sources = ast.literal_eval(re.search(r'          source_names = (\(\n.*?\n          \))\n', data, re.S)[1])
-        self.assertEqual(len(sources), 69)
+        self.assertEqual(len(sources), 77)
         self.assertEqual(len(sources), len(set(sources)))
         self.assertEqual(selected_digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
         self.assertEqual(list(sources[53:64]), SAVED_CHECKS_SOURCE_REFS)
-        self.assertEqual(list(sources[64:]), [
+        self.assertEqual(list(sources[64:69]), [
             "desktop/macos-installed-inputs/build-release.json",
             "desktop/src-tauri/src/macos_build_release.rs",
             "desktop/src-tauri/src/macos_install_fixed_paths.rs",
             "desktop/src-tauri/src/macos_install_paths.rs",
             "desktop/src-tauri/tauri.conf.json",
         ])
+        self.assertEqual(list(sources[69:]), [
+            "tests/desktop/test_android_build_tools.py",
+            "src/mobile_release/android_build_tools.py",
+            "src/mobile_release/android_build_tools_macos.py",
+            "src/mobile_release/android_build_operation.py",
+            "src/mobile_release/_desktop_android_build_files.py",
+            "src/mobile_release/android.py", "src/mobile_release/credentials.py",
+            "src/mobile_release/local_signing.py",
+        ])
         self.assertTrue(set(SOURCE_REFS).issubset(sources))
-        for fragment in ('len(names) != 82 or len(set(names)) != 82', 'suite.countTestCases() != 82',
-                         'facts["testsRun"] == 82', 'counts.get("testsRun") != 82', '"pythonExpectedCount": 82',
+        for fragment in ('len(names) != 84 or len(set(names)) != 84', 'suite.countTestCases() != 84',
+                         'facts["testsRun"] == 84', 'counts.get("testsRun") != 84', '"pythonExpectedCount": 84',
                          '"githubActionCount": 22, "normalDiagnosticsSourceCount": 3',
-                         '"test_macos_normal_diagnostics_source") or not method.startswith("test_")'):
+                         '"test_macos_normal_diagnostics_source", "test_android_build_tools") or not method.startswith("test_")'):
             self.assertIn(fragment, data, fragment)
 
 
 
         # All native commands now use the fixed original owner; only the local
-        # affected selection adds new helper tests, never the existing native82.
+        # affected selection adds new helper tests, never the existing native84.
         self.assertIn('    timeout-minutes: 300\n', workflow)
         ceilings = [int(value) for value in re.findall(r'^        timeout-minutes: ([0-9]+)$', workflow, re.M)]
-        self.assertEqual((len(ceilings), sum(ceilings)), (33, 239))
+        self.assertEqual((len(ceilings), sum(ceilings)), (33, 244))
         self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --normal-summary '), 5)
         build = blocks['normal_ui_build']
         self.assertIn('timeout-minutes: 9', build)
@@ -734,7 +757,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             self.assertIn(fragment, build)
         for ident, stem, summary_stem, minutes in (
             ('normal_ui', 'test', 'summary', 7),
-            ('normal_project_ui', 'project-test', 'project-summary', 11),
+            ('normal_project_ui', 'project-test', 'project-summary', 16),
             ('normal_persistence_ui', 'persistence-test', 'persistence-summary', 11),
             ('normal_diagnostics_ui', 'diagnostics-test', 'diagnostics-summary', 11),
             ('normal_saved_checks_ui', 'saved-checks-test', 'saved-checks-summary', 17),
@@ -866,6 +889,40 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIs(idle_result['projectCleanlinessEstablished'], False)
         for name in ('result.json', 'project-result.json', 'persistence-result.json', 'diagnostics-result.json'):
             self.assertIn('("' + name + '", ', saved_result_source)
+        # The same project producer has two cases. Its two downstream consumers
+        # must select2/2 only for that fixed prior, not relax every prior to1or2.
+        # This is SOURCE/AST inspection only; no inline workflow code is run.
+        for code, baseline, names in (
+                (result_source, 'expected',
+                 ('result.json', 'project-result.json', 'persistence-result.json')),
+                (saved_result_source, 'prior_expected',
+                 ('result.json', 'project-result.json', 'persistence-result.json', 'diagnostics-result.json'))):
+            parsed = ast.parse(code)
+            bases = [node.value for node in parsed.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == baseline for target in node.targets)]
+            self.assertEqual(len(bases), 1)
+            self.assertEqual(ast.literal_eval(bases[0]),
+                             {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0})
+            loops = [node for node in parsed.body if isinstance(node, ast.For)
+                     and ast.dump(node.target) == ast.dump(ast.parse('name, scope, test, passed = ()').body[0].targets[0])]
+            self.assertEqual(len(loops), 1)
+            prior_loop = loops[0]
+            self.assertEqual(tuple(row[0] for row in ast.literal_eval(prior_loop.iter)), names)
+            choice = prior_loop.body[0]
+            self.assertIsInstance(choice, ast.Assign)
+            self.assertEqual([ast.dump(target) for target in choice.targets],
+                             [ast.dump(ast.Name(id='prior_expected_counts', ctx=ast.Store()))])
+            wanted = ast.parse(
+                f'dict({baseline}, totalTestCount=2, passedTests=2) if name == "project-result.json" else {baseline}',
+                mode='eval').body
+            self.assertEqual(ast.dump(choice.value), ast.dump(wanted))
+            gates = [node for node in prior_loop.body if isinstance(node, ast.If)]
+            self.assertEqual(len(gates), 1)
+            gate = ast.get_source_segment(code, gates[0].test)
+            self.assertIn('for key, value in prior_expected_counts.items()', gate)
+            self.assertNotIn('for key, value in ' + baseline + '.items()', gate)
+            if baseline == 'prior_expected':
+                self.assertIn('set(prior["testCounts"]) != set(prior_expected_counts)', gate)
         for fragment in ('source != os.environ["MRK_EXPECTED_SHA"]', 'prior["sourceTree"] != preview["sourceTree"]',
                          'prior["signedAppBinarySha256"] != preview["signedAppBinarySha256"]',
                          'prior["runtimeManifestSha256"] != preview["runtimeManifestSha256"]',

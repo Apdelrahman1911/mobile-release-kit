@@ -69,7 +69,7 @@ jobs:
           e4a681d9efede88951fd09102dae054c4a3db256d7c19c6978486717849c3bc9  desktop/tools/gnome_session_native/compile-only.sh
           f4fde79383d60442c722bf2ebc50e15954f55460fadd0431007efcfa142a4f45  desktop/tools/gnome_session_native/host-admit.py
           f2ddbeb70dc2c786f59a38126177290c64ed046f107f3abe9333dad8bb767628  desktop/tools/gnome_session_native/prepare.py
-          08cc339e94507434d146b4af338ddc345d3aabc4343013559f5f92e5dce55832  desktop/tools/gnome_session_native/check-compile.py
+          2aed15fe44bff14af492c11bf2ecc0ebbf295fcfb63fad7a9f8d91c1d6207825  desktop/tools/gnome_session_native/check-compile.py
           b009148067794c9f4cedf6a284ac1dc0892e0efe718a30580cb5e382978463a4  desktop/tools/gnome_session_native/runtime-layout.json
           773b0f17fcad61744a9e1c0f632fbbc0da21bcafc638a7e4ff277cca43d6b819  desktop/tools/gnome_session_native/runtime-suppliers.json
           3abe061799a23f75d763fe8c78ec2d363fabbbbfd1dc254b83cb6aa68c5e3a30  tests/desktop/test_gnome_session_hosted_contract.py

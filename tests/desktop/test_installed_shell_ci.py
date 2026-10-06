@@ -67,7 +67,7 @@ def messages(rows):
 
 def metadata():
     packages = [
-        {"id": "root", "name": "mobile-release-kit-desktop", "version": "0.1.0", "source": None,
+        {"id": "root", "name": "mobile-release-kit-desktop", "version": "0.1.1", "source": None,
          "manifest_path": "/source/desktop/src-tauri/Cargo.toml"},
         {"id": "mount", "name": "mrk-linux-mount-observation", "version": "0.1.0", "source": None,
          "manifest_path": "/source/desktop/native/linux-mount-observation/Cargo.toml"},
@@ -86,7 +86,7 @@ def metadata():
             ("mrk-linux-mount-observation", "linux-mount-observation",
              'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'),
             ("mrk-macos-installed-native", "macos-installed-native",
-             'cfg(all(target_os = "macos", target_arch = "aarch64"))'),
+             'cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))'),
             ("mrk-windows-installed-native", "windows-installed-native",
              'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'),
         )
@@ -1167,31 +1167,53 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         observed = set(re.findall(r'^#\[path = "\.\./src/[^"\n]+\.rs"\] mod ([a-z0-9_]+);$', observer, re.MULTILINE))
         publishers = {"runtime_publication", "runtime_publication_windows"}
         android_helpers = {"android_catalog_query_helper", "android_registration_publisher", "android_registration_helper"}
-        self.assertEqual(production - observed, publishers | android_helpers)
+        producer_data = {"macos_install_transaction", "macos_install_producer"}
+        selection_data = {"macos_install_producer_selection_data"}
+        self.assertEqual(production - observed, publishers | android_helpers | producer_data | selection_data)
         self.assertEqual(observed - production, set())
+        attributes = r"((?:#\[[^\n]+\]\n)*)"
+        # These public producer/Installer DATA APIs have no observer caller.
+        # They are not a blanket exception for new ordinary app dependencies.
+        for name in producer_data:
+            declared = re.findall(r"^" + attributes + r"pub mod " + name + r";$", library, re.MULTILINE)
+            self.assertEqual(declared, [""], name)
+            self.assertEqual(library.count("mod " + name + ";"), 1, name)
+            self.assertNotIn("mod " + name + ";", observer)
+        # This is the exact build-only SOURCE parser exercised by libtest,
+        # not an ordinary observer module or another signing implementation.
+        selected = "macos_install_producer_selection_data"
+        declared = re.findall(r"^" + attributes + r"mod " + selected + r";$", library, re.MULTILINE)
+        self.assertEqual(declared, ['#[cfg(test)]\n#[path = "../../native/macos-installed-native/build_support/producer_selection.rs"]\n'])
+        self.assertEqual(library.count("mod " + selected + ";"), 1)
+        self.assertNotIn("mod " + selected + ";", observer)
         # These are separate Cargo helper roles, not missing app dependencies.
-        helper_cfg = '#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-android-registration-helper"))]\n'
+        helper_cfg = '#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-android-registration-helper"))]\n'
         for name in android_helpers:
             visibility = "pub " if name == "android_registration_helper" else ""
             self.assertIn(helper_cfg + visibility + "mod " + name + ";", library)
             self.assertEqual(library.count("mod " + name + ";"), 1)
             self.assertNotIn("mod " + name + ";", observer)
-        mac = '#[cfg(all(target_os = "macos", target_arch = "aarch64"))]\n'
-        data = '#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]\n'
-        client = '#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]\n'
-        for name, expected in (
-                ("android_registration_protocol", ""), ("android_registration_app_protocol", ""),
-                ("android_native_macos_profile", ""), ("android_shared_lease_macos", mac),
-                ("android_catalog_query_client", client), ("android_supplier_macos_source", data),
-                ("android_sdk_metadata_macos", data), ("android_supplier_macos", data)):
+        # Ordinary Mac supports both LP64 targets. This existing native
+        # observation target remains ARM-only; do not infer Intel qualification.
+        library_mac = '#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]\n'
+        library_data = '#[cfg(any(test, all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]\n'
+        library_client = '#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]\n'
+        observer_mac = '#[cfg(all(target_os = "macos", target_arch = "aarch64"))]\n'
+        observer_data = '#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]\n'
+        observer_client = '#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]\n'
+        for name, declared_expected, included_expected in (
+                ("macos_build_profile", "#[allow(dead_code)]\n", "#[allow(dead_code)]\n"),
+                ("android_registration_protocol", "", ""), ("android_registration_app_protocol", "", ""),
+                ("android_native_macos_profile", "", ""), ("android_shared_lease_macos", library_mac, observer_mac),
+                ("android_catalog_query_client", library_client, observer_client), ("android_supplier_macos_source", library_data, observer_data),
+                ("android_sdk_metadata_macos", library_data, observer_data), ("android_supplier_macos", library_data, observer_data)):
             # Exact adjacent attributes catch changed/missing cfgs as well as a
             # missing or duplicated source declaration, before a native build.
-            attributes = r"((?:#\[[^\n]+\]\n)*)"
             declared = re.findall(r"^" + attributes + r"mod " + name + r";$", library, re.MULTILINE)
             included = re.findall(r"^" + attributes + re.escape(
                 '#[path = "../src/' + name + '.rs"] mod ' + name + ';') + r"$", observer, re.MULTILINE)
-            self.assertEqual(declared, [expected], name)
-            self.assertEqual(included, [expected], name)
+            self.assertEqual(declared, [declared_expected], name)
+            self.assertEqual(included, [included_expected], name)
             self.assertEqual(observer.count("mod " + name + ";"), 1, name)
         windows = '#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]\n'
         self.assertIn(windows + 'mod installed_runtime_windows;', library)
@@ -1207,7 +1229,9 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertIn('#![forbid(unsafe_code)]', observer)
         self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",', observer)
         self.assertIn('not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")', observer)
-        self.assertIn('not(feature = "macos-android-registration-helper")', observer.split("compile_error!", 1)[0])
+        observation_guard = observer.split("compile_error!", 1)[0]
+        self.assertIn('not(feature = "macos-android-registration-helper")', observation_guard)
+        self.assertIn('all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))', observation_guard)
         self.assertIn('fn main() -> std::process::ExitCode { shell::installed_observation::main() }', observer)
 
     def test_shell_source_manifest_accepts_actual_version_qualified_hashing_profile(self):

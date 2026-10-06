@@ -17,7 +17,7 @@ class AndroidBootstrapTests(unittest.TestCase):
     def invoke(self, *, platform="darwin", machine="arm64", isolated=True, no_site=True,
                bytecode=False, version=(3, 11), core="/protected/core.zip",
                filename="/protected/android_build_bootstrap.py", extra=False,
-               uname_error=False):
+               uname_error=False, maxsize=2**63 - 1):
         # Compile only the actual two function bodies as DATA. No module top-level
         # entry, filesystem/core acquisition, native command or subprocess runs.
         parsed = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
@@ -28,7 +28,7 @@ class AndroidBootstrapTests(unittest.TestCase):
         model_sys = SimpleNamespace(platform=platform, flags=SimpleNamespace(isolated=isolated, no_site=no_site),
                                     dont_write_bytecode=not bytecode, version_info=version,
                                     argv=["bootstrap", core] + (["extra"] if extra else []),
-                                    path=["fixed-stdlib"])
+                                    path=["fixed-stdlib"], maxsize=maxsize)
 
         def uname():
             calls.append("uname")
@@ -55,9 +55,9 @@ class AndroidBootstrapTests(unittest.TestCase):
             result = namespace["main"]()
         return result, calls, model_sys.path
 
-    def test_actual_bootstrap_accepts_native_mac_arm64_and_preserves_linux_clock(self):
-        for platform, machine in (("darwin", "arm64"), ("linux", "x86_64")):
-            with self.subTest(platform=platform):
+    def test_actual_bootstrap_accepts_paired_mac_host_shapes_and_preserves_linux_clock(self):
+        for platform, machine in (("darwin", "arm64"), ("darwin", "x86_64"), ("linux", "x86_64")):
+            with self.subTest(platform=platform, machine=machine):
                 result, calls, path = self.invoke(platform=platform, machine=machine)
                 self.assertEqual(result, 0)
                 self.assertEqual(calls[0], "clock")
@@ -68,7 +68,8 @@ class AndroidBootstrapTests(unittest.TestCase):
 
     def test_unsupported_or_unisolated_entry_never_imports_core_or_changes_path(self):
         refusals = [
-            {"platform": "win32"}, {"platform": "darwin", "machine": "x86_64"},
+            {"platform": "win32"}, {"platform": "darwin", "machine": "unknown"},
+            {"platform": "darwin", "machine": "x86_64", "maxsize": 2**31 - 1},
             {"platform": "darwin", "machine": "aarch64"}, {"uname_error": True},
             {"isolated": False}, {"no_site": False}, {"bytecode": True},
             {"version": (3, 10)}, {"core": "relative-core.zip"},
@@ -79,6 +80,7 @@ class AndroidBootstrapTests(unittest.TestCase):
                 result, calls, path = self.invoke(**options)
                 self.assertEqual(result, 78)
                 self.assertEqual(calls[0], "clock")
+                self.assertEqual(calls.count("clock"), 1)
                 self.assertFalse(any(isinstance(call, tuple) for call in calls))
                 self.assertEqual(path, ["fixed-stdlib"])
 

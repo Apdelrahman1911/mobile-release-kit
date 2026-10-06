@@ -495,7 +495,8 @@ impl SourceSlots {
         end: Instant, stop: &watch::Receiver<bool>, publish: &mut Publish<'_>) -> Result<()> {
         let result = (|| {
             let (root_data, layout, vendor, version) = self.begin(roots, SourcePhase::Inspection, end, stop)?;
-            let recipe = supplier::recipe(&SourceLayouts { jdk: layout, jdk_vendor: &vendor, jdk_version: &version })
+            let profile = crate::android_build_protocol::Profile::current().ok_or(AdmissionFailure::Inventory)?;
+            let recipe = supplier::recipe_for(profile, &SourceLayouts { jdk: layout, jdk_vendor: &vendor, jdk_version: &version })
                 .map_err(|_| AdmissionFailure::Inventory)?;
             if !self.reservation.is_some_and(|reserved| reserved.covers(&recipe, SourcePhase::Inspection)) {
                 return Err(AdmissionFailure::Bounds);
@@ -530,7 +531,8 @@ impl SourceSlots {
             }
             // Only prove the small layout against the SAME reviewed reference.
             // Never regenerate instance, proposal, consent or reviewed documents.
-            let observed_recipe = supplier::recipe(&SourceLayouts { jdk: layout, jdk_vendor: &vendor, jdk_version: &version })
+            let profile = crate::android_build_protocol::Profile::current().ok_or(AdmissionFailure::Inventory)?;
+            let observed_recipe = supplier::recipe_for(profile, &SourceLayouts { jdk: layout, jdk_vendor: &vendor, jdk_version: &version })
                 .map_err(|_| AdmissionFailure::Inventory)?;
             let old = reviewed.recipe.source_roster(); let new = observed_recipe.source_roster();
             if !std::ptr::eq(old.members, new.members) || !std::ptr::eq(old.support, new.support)

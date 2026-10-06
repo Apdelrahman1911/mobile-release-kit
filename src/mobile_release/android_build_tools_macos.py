@@ -18,8 +18,14 @@ from pathlib import Path
 from . import android_build_tools as common
 
 PROFILE = "android-registered-macos-arm64-v1"
+INTEL_PROFILE = "android-registered-macos-x86_64-v1"
 PREFIX = "/Library/Application Support/MobileReleaseKit/android"
 OS_PROFILE = "macos26-arm64-sealed-system-v1"
+INTEL_OS_PROFILE = "macos26-x86_64-sealed-system-v1"
+_PROFILES = {
+    PROFILE: ("macos-arm64", "gradle-macos-private-jvm-arm64-v1", OS_PROFILE, "arm64"),
+    INTEL_PROFILE: ("macos-x86_64", "gradle-macos-private-jvm-x86_64-v1", INTEL_OS_PROFILE, "x86_64"),
+}
 OS_FILES = ("/System/Library/CoreServices/SystemVersion.plist", "/bin/bash", "/bin/ls", "/bin/sh",
             "/usr/bin/basename", "/usr/bin/dirname", "/usr/bin/expr", "/usr/bin/sed", "/usr/bin/tr",
             "/usr/bin/uname", "/usr/bin/xargs")
@@ -34,6 +40,11 @@ _INSTANCE = re.compile(r"[0-9a-f]{32}\Z")
 _need, _keys, _text, _integer = common._need, common._keys, common._text, common._integer
 
 
+def _profile(value: object) -> tuple[str, str, str, str]:
+    _need(type(value) is str and value in _PROFILES)
+    return _PROFILES[value]
+
+
 def parts(value: object, *, absolute: bool = False) -> tuple[str, ...]:
     _need(type(value) is str and 0 < len(value) <= common.MAX_PATH_BYTES)
     _need(value.startswith("/") if absolute else not value.startswith("/"))
@@ -45,7 +56,8 @@ def parts(value: object, *, absolute: bool = False) -> tuple[str, ...]:
 
 def binding(value: object) -> common._Binding:
     value = _keys(value, {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256", "selection"})
-    _need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 2 and value["profile"] == PROFILE)
+    _need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 2)
+    _profile(value["profile"])
     from ._desktop_android_build_protocol import ProtocolError, mac_toolchain_selection
     try:
         selected = mac_toolchain_selection(value["selection"])
@@ -59,7 +71,7 @@ def binding(value: object) -> common._Binding:
           and type(identity["uid"]) is int and type(identity["gid"]) is int and identity["uid"] == identity["gid"] == 0)
     return common._Binding(root, selected["instance"],
         (int(identity["device"]), int(identity["inode"]), identity["mode"], 0, 0),
-        selected["inventorySha256"], PROFILE, tuple(sorted(selected.items())))
+        selected["inventorySha256"], value["profile"], tuple(sorted(selected.items())))
 
 
 def _json(raw: bytes, limit: int, *, shaped: bool = True) -> dict:
@@ -116,7 +128,7 @@ def _aliases(value: object, files: tuple[common._FileSpec, ...], java_home: str)
 
 
 def parse_profile(raw: bytes, provider_raw: bytes, record_raw: bytes, selected: common._Binding) -> common._Profile:
-    _need(selected.profile == PROFILE)
+    target, launch_contract, os_profile, _ = _profile(selected.profile)
     anchors = dict(selected.selection)
     _need(hashlib.sha256(raw).hexdigest() == selected.sha256
           and hashlib.sha256(provider_raw).hexdigest() == anchors["osProviderSha256"]
@@ -124,16 +136,16 @@ def parse_profile(raw: bytes, provider_raw: bytes, record_raw: bytes, selected: 
     record = _keys(_json(record_raw, HEADER_LIMITS[0], shaped=False),
         {"schemaVersion", "profile", "target", "instance", "ownerUid", "inventorySha256", "osProviderSha256", "licenseAcknowledged"})
     _need(type(record["schemaVersion"]) is int and record["schemaVersion"] == 1
-          and record["profile"] == PROFILE and record["target"] == "macos-arm64"
+          and record["profile"] == selected.profile and record["target"] == target
           and record["instance"] == selected.instance and type(record["ownerUid"]) is int and record["ownerUid"] == anchors["ownerUid"]
           and record["inventorySha256"] == selected.sha256 and record["osProviderSha256"] == anchors["osProviderSha256"]
           and record["licenseAcknowledged"] is True)
     value = _keys(_json(raw, common.MAX_MANIFEST_BYTES),
         {"schemaVersion", "profile", "target", "instance", "launchContract", "versions", "gradleDistribution",
          "bundletool", "roles", "files", "aliases", "osProviderSha256"})
-    _need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["profile"] == PROFILE
-          and value["target"] == "macos-arm64" and value["instance"] == selected.instance
-          and value["launchContract"] == "gradle-macos-private-jvm-arm64-v1"
+    _need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["profile"] == selected.profile
+          and value["target"] == target and value["instance"] == selected.instance
+          and value["launchContract"] == launch_contract
           and value["osProviderSha256"] == anchors["osProviderSha256"])
     roles = _keys(value["roles"], set(common.TOOL_ROLES))
     java = parts(roles["java"])
@@ -170,8 +182,8 @@ def parse_profile(raw: bytes, provider_raw: bytes, record_raw: bytes, selected: 
     _need(len(names) <= common.MAX_ENTRIES and len({p.casefold() for p in names}) == len(names), "input-limit")
     provider = _keys(_json(provider_raw, HEADER_LIMITS[2]),
         {"schemaVersion", "profile", "target", "shell", "executablePath", "roots", "files"})
-    _need(type(provider["schemaVersion"]) is int and provider["schemaVersion"] == 1 and provider["profile"] == OS_PROFILE
-          and provider["target"] == "macos-arm64" and provider["shell"] == "/bin/sh"
+    _need(type(provider["schemaVersion"]) is int and provider["schemaVersion"] == 1 and provider["profile"] == os_profile
+          and provider["target"] == target and provider["shell"] == "/bin/sh"
           and provider["executablePath"] == ["/usr/bin", "/bin"] and provider["roots"] == list(OS_ROOTS)
           and type(provider["files"]) is list and len(provider["files"]) == len(OS_FILES))
     native = []
@@ -183,7 +195,7 @@ def parse_profile(raw: bytes, provider_raw: bytes, record_raw: bytes, selected: 
         native.append(common._FileSpec(expected, item["size"], item["sha256"], item["mode"]))
     _need(sum(f.size for f in (*files, *native)) <= common.MAX_TOTAL_BYTES, "input-limit")
     return common._Profile(selected, tuple(sorted(versions.items())), distribution["url"], distribution["sha256"],
-        OS_PROFILE, anchors["osProviderSha256"], tuple(path.rsplit("/", 1)[1] for path in OS_FILES[1:]),
+        os_profile, anchors["osProviderSha256"], tuple(path.rsplit("/", 1)[1] for path in OS_FILES[1:]),
         files, tuple(native), tuple(sorted(directories, key=lambda path: (path.count("/"), path))),
         home, tuple(sorted(roles.items())), aliases)
 
@@ -207,13 +219,16 @@ class MacAdmission:
 
     def owner(self) -> None:
         _need(type(self) is MacAdmission and type(self.tools) is common.AndroidValidationTools
-              and self.tools._mac is self and self.tools.binding.profile == PROFILE, "toolchain-unavailable")
+              and self.tools._mac is self and type(self.tools.binding.profile) is str
+              and self.tools.binding.profile in _PROFILES, "toolchain-unavailable")
         self.tools._owner(active=not self.tools._cleanup_mode)
 
     def platform(self) -> None:
         self.owner()
         self.tools._point()
-        _need(sys.platform == "darwin" and os.uname().machine == "arm64"
+        expected_machine = _profile(self.tools.binding.profile)[3]
+        _need(sys.platform == "darwin" and os.uname().machine == expected_machine
+              and (expected_machine != "x86_64" or sys.maxsize == 2**63 - 1)
               and hasattr(os.stat_result, "st_flags") and hasattr(os, "listxattr"), "toolchain-unavailable")
         import resource
         soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)

@@ -28,7 +28,7 @@ pub(crate) fn qualified_for(supervisor: &Supervisor) -> bool {
 // Supplied private-session DATA for PG01 only. No ticket, socket, credential
 // collection or GitHub qualification is minted by the offline registration.
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) fn offline_fixture_private(permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
     owner: &crate::offline_preflight_owner::OfflinePreflightOwner) -> Result<ConnectionState, BridgeError> {
     let (id, _, generation) = permit.validate(owner)?;

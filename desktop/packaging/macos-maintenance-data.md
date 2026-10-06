@@ -9,7 +9,8 @@ Release selection remains build-bound; there is no destination-derived expectati
 No real v2 release/publisher tuple is configured by this preparation.
 
 The actual app/Installer/observer build and package stager now select version and
-release from the single fixed source `macos-installed-inputs/build-release.json`.
+release from the fixed target-selected sources `macos-installed-inputs/build-release.json`
+(ARM64) and `macos-installed-inputs/build-release-intel.json` (x86_64).
 Cargo emits their constants for every app-crate target and checks the Cargo/Tauri
 version projections. Staging checks the signed app/package against the same DATA;
 the existing Info.plist and Distribution versions remain checked projections.
@@ -42,17 +43,33 @@ keep the raw C facade, original desktop image and final signed image hashes
 distinct. No native acceptance or shipping-signing authority follows from this
 SOURCE layout or its inert fixture regressions.
 
-This source selects engineering `0.1.0` / `macos26-arm64-entry-m2a-01` for the
-ordinary entry/payload layout. That release, historical
-`macos26-arm64-project-draft-01` and engineering version `0.1.0` remain excluded
-from v2 producer DATA. Entry participation does not create a v2 release,
-authenticate signing policy, authorize a predecessor or settle an invocation.
+This source selects candidate package version `0.1.1` with release IDs
+`macos26-arm64-desktop-01` and `macos26-x86_64-desktop-01` for the ordinary
+entry/payload layout. These are not published or qualified releases. The
+historical `macos26-arm64-entry-m2a-01`, `macos26-arm64-project-draft-01` and
+engineering version `0.1.0` remain excluded from v2 producer DATA. The
+source history remains empty for fresh installation; no predecessor is
+authorized. Selecting candidate names does not authenticate signing policy,
+produce a completed package or settle an invocation.
 The permanent root gate is never deleted/replaced; public maintenance remains unavailable.
-The private E2 preparation path still needs distinct integrated/native acceptance;
-it is not G/vault completion or Installer update, restore or uninstall. A future
-producer must select a genuine unique new build identity
-before signing and inventory generation, then publish its completed package
-digest in detached schema2 DATA only after complete package audit.
+The normal UI now has a separate **Prepare app to quit** entry. It requires exact
+local confirmation, the ordinary installed-image profile, configured helper and
+the original settled Document/Android owners. It delegates to the existing native
+preparation; only its private Completion can request normal Quit. Read-only status
+and a checked confirmation are not ownership or Installer authority. Early known
+refusal can reopen only through that private completion; started/unknown effects
+retain the original closure. Browser preview, observer and helper profiles cannot
+use this entry. Moving between UI screens neither cancels nor restarts native work.
+
+This normal entry still needs actual packaged-Mac verification with the original
+helper, including failure and interrupted Quit. It does not complete G or grant
+global descendant finality, Installer update, restore, pruning or uninstall.
+Projects, credentials and protected files are not deleted by preparation. A future
+producer must still bind this candidate identity to the genuine configured
+Developer ID signer before signing and inventory generation, then publish
+its completed package digest in detached schema2 DATA only after complete
+package audit. Notarization is separate; an unsigned engineering fixture
+does not satisfy ordinary v2 producer identity.
 
 The classifier consumes explicitly supplied comparison labels. It does not inspect
 names, validate a signature, observe prior settlement, create a lease or authorize
@@ -74,3 +91,37 @@ Target macOS26 tool binding and a complete outer-product audit are still require
 Update/restore/uninstall availability, legacy migration, qualified M2 participant
 retention, M3/M4 mutation, shipping signing/notarization and native acceptance are
 not provided here.
+
+## B2 private original writer (not a maintenance activation)
+
+The native Installer contains an inactive, fixed self-image parent/worker route.
+It shares the existing prepared copy/readback/EXCL publication body with the
+ordinary fresh Installer; it is not a second copier or an arbitrary command API.
+Neither ordinary `run`, fixture `run`, nor `postinstall` selects that private role.
+This source implementation does not establish native acceptance or make update,
+same-package, restore, pruning or uninstall available.
+
+One original monotonic120s endpoint starts before admission; work/GO/publication
+stops at110s, leaving10s inside that same budget for original settlement. The
+parent's actual EX precedes spawn and GO. A duplicated read-only gate OFD reaches
+workerfd2; neither process unlocks/reopens it. The parent's one-use Command
+reference and the worker's fd2 are explicitly kernel-retained, not reported as
+consuming closes. The worker requires exact GO **and actual command EOF** before
+payload writes. Separate Darwin pipe endpoints are checked against their own
+original facts, not against the opposite endpoint's inode number.
+
+A pre-exit worker result contains only returned effects, bounded closed failure
+labels, known book closes and timing. It cannot attest its stdout/fd2 close or its
+own join. The parent constructs its private `JoinedWriter` only after real EOF,
+original channel closes, original Child wait, source POST and the common deadline.
+A joined nonzero result remains failure. Parent/Command kernel finality still
+requires the **outer original Installer process return**; a parsed result cannot
+provide that fact. Unknown originals are retained rather than adopted or repaired.
+
+B3 ordinary entry and result/export integration are mandatory: genuine completed
+package context and independently selected producer/release trust, B1 linked
+state/capsules, occupied-state/no-op/restore/update handling, unique invocation
+exports and outer-parent finality must use this same writer. There is no permissive
+enable/trusted flag. Genuine ARM/Intel native process/lock/parent-loss/collision
+and installation verification remain required; SOURCE and inert native-unit checks
+do not replace those observations.

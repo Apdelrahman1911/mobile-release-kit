@@ -4,13 +4,17 @@ use sha2::{Digest, Sha256};
 #[path = "src/macos_build_release.rs"]
 mod macos_build_release;
 
-fn macos_build_release_data() {
-    // Every app-crate target needs the same facade, including headless and
-    // actual-main observer builds. This is deliberately not feature/OS gated.
+fn macos_build_release_data(target: &str, target_os: &str) {
+    // Every app-crate target needs this facade, including headless and
+    // actual-main observer builds. Non-Mac declarations stay byte-identical;
+    // selecting Intel build DATA does not enable any Intel runtime/native gate.
+    println!("cargo:rerun-if-changed=../macos-installed-inputs/platforms-v1.json");
     println!("cargo:rerun-if-changed=../macos-installed-inputs/build-release.json");
+    println!("cargo:rerun-if-changed=../macos-installed-inputs/build-release-intel.json");
+    println!("cargo:rerun-if-changed=src/macos_build_profile.rs");
     println!("cargo:rerun-if-changed=src/macos_build_release.rs");
     println!("cargo:rerun-if-changed=tauri.conf.json");
-    let release = macos_build_release::BuildRelease::parse(include_bytes!("../macos-installed-inputs/build-release.json"))
+    let release = macos_build_release::BuildRelease::from_source(target, target_os)
         .expect("fixed macOS build-release DATA refused");
     release.check_projections(&env::var("CARGO_PKG_VERSION").expect("Cargo package version required"),
         include_bytes!("tauri.conf.json")).expect("fixed macOS build-release version projections differ");
@@ -174,7 +178,10 @@ fn github_release_tooling() {
 }
 
 fn main() {
-    macos_build_release_data();
+    // Cargo's target, not the host running this build script, selects DATA.
+    let target = env::var("TARGET").expect("Cargo target required");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS required");
+    macos_build_release_data(&target, &target_os);
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEVELOPMENT_RUNTIME");
     println!("cargo:rerun-if-env-changed=PROFILE");
     if env::var_os("CARGO_FEATURE_DEVELOPMENT_RUNTIME").is_some()
@@ -186,7 +193,8 @@ fn main() {
     anchor("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
     anchor("MRK_BUNDLED_PROTOCOL_SHA256");
     anchor("MRK_MACOS_INSTALL_INVENTORY_SHA256");
-    if env::var("TARGET").as_deref() == Ok("aarch64-apple-darwin") {
+    if target_os == "macos" && matches!(target.as_str(), "aarch64-apple-darwin" | "x86_64-apple-darwin")
+        && env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64") {
         anchor("MRK_MACOS_VAULT_HELPER_SHA256");
         println!("cargo:rerun-if-env-changed=MRK_MACOS_VAULT_HELPER_BYTES");
         if let Ok(value) = env::var("MRK_MACOS_VAULT_HELPER_BYTES") {
@@ -215,7 +223,6 @@ fn main() {
     anchor("MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256");
     // A closed hosted diagnostics fixture input, never runtime qualification.
     anchor("MRK_ENVIRONMENT_NATIVE_INPUTS_SHA256");
-    let target = env::var("TARGET").unwrap_or_default();
     android_compile_data(&target);
     github_preflight_tooling();
     github_release_tooling();
@@ -223,7 +230,9 @@ fn main() {
     #[cfg(feature = "desktop-shell")]
     {
         const COMMANDS: &[&str] = &[
-            "app_info", "reveal_installation", "installation_status", "inspect_installation", "cancel_installation", "choose_project", "choose_project_path", "project_snapshot", "catalog",
+            "app_info", "reveal_installation", "installation_status", "inspect_installation", "cancel_installation",
+            "installation_preparation_status", "prepare_installation_quit",
+            "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",

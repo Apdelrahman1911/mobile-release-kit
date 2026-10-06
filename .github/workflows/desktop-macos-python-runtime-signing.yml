@@ -1,0 +1,138 @@
+name: Fixed Python hardened engineering or configured signed derivation
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-python-runtime-signing-engineering
+      - verify/desktop-macos-python-runtime-signing-shipping
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-macos-python-runtime-signing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  signed-python:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-engineering' || github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-shipping')
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      # Intel's empty-profile observation is first, never an entitlement fallback.
+      # Both targets run independently once, even if the other target fails.
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-26-intel
+            architecture: X64
+            machine: x86_64
+            supplier_run: '37476532238'
+            supplier_artifact: '11419502465'
+          - target: aarch64-apple-darwin
+            runner: macos-26
+            architecture: ARM64
+            machine: arm64
+            supplier_run: '37467019389'
+            supplier_artifact: '11415902210'
+    env:
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      MRK_PYTHON_TARGET: ${{ matrix.target }}
+      MRK_RUNNER_ARCH: ${{ matrix.architecture }}
+      MRK_NATIVE_MACHINE: ${{ matrix.machine }}
+    steps:
+      - name: Admit only this native source and explicit signing purpose
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == "$MRK_RUNNER_ARCH" ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-python-runtime-signing.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$MRK_NATIVE_MACHINE" && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          case "$GITHUB_REF" in
+            refs/heads/verify/desktop-macos-python-runtime-signing-engineering) phase=python-engineering ;;
+            refs/heads/verify/desktop-macos-python-runtime-signing-shipping) phase=python-shipping ;;
+            *) exit 1 ;;
+          esac
+          printf 'MRK_PYTHON_SIGNING_PHASE=%s\n' "$phase" >> "$GITHUB_ENV"
+      - name: Check out exact source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the existing owner interpreter, not the supplier
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve exclusive private work before the fixed download
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-python-signing.XXXXXXXX")
+          /bin/mkdir -m 700 "$root/python-supplier-transport"
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\n' "$root" >> "$GITHUB_ENV"
+      - name: Download only the accepted original public supplier artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          github-token: ${{ github.token }}
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: ${{ matrix.supplier_run }}
+          artifact-ids: ${{ matrix.supplier_artifact }}
+          path: ${{ steps.work.outputs.root }}/python-supplier-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Sign and probe one derived executable through the same original owner
+        id: sign
+        timeout-minutes: 7
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          ulimit -n 4096
+          [[ -f "$MRK_MACOS_WORK/python-supplier-transport/supplier.tar" && ! -L "$MRK_MACOS_WORK/python-supplier-transport/supplier.tar" ]] || exit 1
+          [[ -f "$MRK_MACOS_WORK/python-supplier-transport/supplier-receipt.json" && ! -L "$MRK_MACOS_WORK/python-supplier-transport/supplier-receipt.json" ]] || exit 1
+          /bin/chmod 400 "$MRK_MACOS_WORK/python-supplier-transport/supplier.tar" "$MRK_MACOS_WORK/python-supplier-transport/supplier-receipt.json"
+          # Fixed six pins, exact TAR/receipt inverse, immutable inputs, signature
+          # checks and all four native probes are inside this one existing owner.
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py "$MRK_PYTHON_SIGNING_PHASE" --target "$MRK_PYTHON_TARGET"
+      - name: Preserve only bounded purpose facts, never raw command transcripts
+        if: always() && (steps.sign.outcome == 'success' || steps.sign.outcome == 'failure')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-signing-facts-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/android-helper-${{ env.MRK_PYTHON_SIGNING_PHASE }}.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Publish configured capsule only after the original zero exit
+        if: success() && steps.sign.outcome == 'success' && github.ref == 'refs/heads/verify/desktop-macos-python-runtime-signing-shipping'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-signed-capsule-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/python3
+            ${{ steps.work.outputs.root }}/python-signed-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

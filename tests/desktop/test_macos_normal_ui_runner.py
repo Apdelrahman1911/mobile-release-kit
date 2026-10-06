@@ -63,6 +63,30 @@ def normal_arguments(result="test.xcresult"):
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
+def normal_project_output():
+    # Literal independent roster/markers: never generated from the helper's table.
+    methods = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
+    markers = (
+        ("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version-images;cleanExitStatus=unavailable;allWorkerFinality=unavailable",),
+        ("MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
+         "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable"),
+    )
+    lines = []
+    for method, case_markers in zip(methods, markers):
+        selected = "-[MRKNormalAppUITests.NormalAppUITests " + method + "]"
+        lines.extend(("Test Case '" + selected + "' started.", MODULE.ORIGINAL_MARKER, *case_markers,
+                      "Test Case '" + selected + "' passed (1.000 seconds)."))
+    return ("\n".join(lines) + "\n").encode()
+
+
+def normal_workflow_refusal_output():
+    # Independent literal returned-output fixture; no native command is run.
+    selected = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectManagedWorkflowRefusal]"
+    return ("\n".join(("Test Case '" + selected + "' started.", MODULE.ORIGINAL_MARKER,
+        "MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=ordinary-preview-customized-candidate-whole-bundle-refused-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
+        "Test Case '" + selected + "' passed (1.000 seconds).", ""))).encode()
+
+
 class RunnerAdmissionDataTests(unittest.TestCase):
     def test_only_strict_absent_or_false_entitlement_is_admitted(self):
         self.assertEqual(MODULE.sandbox_entitlement(plistlib.dumps({})), "absent")
@@ -145,6 +169,452 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         for allowance in (True, 300, 600):
             with self.assertRaises(MODULE.Refused):
                 MODULE.xcode_test_arguments("/fixed.xctestrun", "/fresh.xcresult", (MODULE.PACKAGED_METHOD,), allowance)
+
+    def test_project_batch_is_exactly_two_methods_with_existing_finite_deadlines(self):
+        expected = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
+        self.assertEqual(MODULE.NORMAL_SELECTIONS["project-test.xcresult"], (expected, 300, 720))
+        arguments = normal_arguments("project-test.xcresult")
+        derived, result, methods, allowance, timeout = MODULE.normal_cli_arguments(arguments)
+        self.assertEqual(methods, tuple(MODULE.CLASS + method for method in expected))
+        temporary = str(derived.parent / "tmp") + "/"
+        self.assertEqual(MODULE.normal_request(arguments, temporary)["phaseSeconds"], 885)
+        fixed = MODULE.xcode_test_arguments("/fixed.xctestrun", result, methods, allowance)
+        self.assertEqual([item for item in fixed if item.startswith("-only-testing:")],
+                         ["-only-testing:" + method for method in methods])
+        for changed in (arguments[:15] + arguments[16:], arguments[:16] + arguments[17:],
+                        arguments[:16] + arguments[15:16] + arguments[16:],
+                        [item.replace("testSyntheticProjectPathFields", "testSyntheticProjectLocalEdits")
+                         for item in arguments],
+                        arguments[:15] + list(reversed(arguments[15:17])) + arguments[17:]):
+            with self.subTest(selection=changed[15:18]), self.assertRaises(MODULE.Refused):
+                MODULE.normal_cli_arguments(changed)
+
+    def test_project_output_requires_both_originals_exact_attempts_and_terminal_markers(self):
+        output = normal_project_output()
+        self.assertIs(MODULE.normal_project_markers(output), True)
+        original = MODULE.ORIGINAL_MARKER.encode() + b"\n"
+        markers = [line + b"\n" for line in output.splitlines()
+                   if line.startswith((b"MRK_MACOS_NORMAL_PROJECT", b"MRK_MACOS_NORMAL_ANDROID_SOURCE_UI="))]
+        self.assertEqual(len(markers), 3)
+        started = [line + b"\n" for line in output.splitlines() if line.endswith(b"' started.")]
+        passed = [line + b"\n" for line in output.splitlines() if b"' passed (" in line]
+        bad = [b"", b"x" * (1024 * 1024 + 1), output.replace(original, b"", 1), output + original,
+               output + b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=true\n",
+               output.replace(b"completion=1", b"completion=0", 1),
+               output.replace(b"testSyntheticProjectPathFields", b"testUnexpectedProjectMethod"),
+               output.replace(b"MRKNormalAppUITests.NormalAppUITests", b"OtherTests.OtherClass"),
+               output.replace(b"passed (1.000 seconds).", b"failed (1.000 seconds).", 1),
+               output.replace(b"passed (1.000 seconds).", b"passed (... seconds).", 1),
+               output.replace(b"backend-source-refused-selection-only", b"cancelled-selection-only")]
+        for row in markers + started + passed:
+            bad.extend((output.replace(row, b"", 1), output + row))
+        for body in bad:
+            with self.subTest(bytes=len(body)), self.assertRaises(MODULE.Refused):
+                MODULE.normal_project_markers(body)
+        for body in (None, "not bytes", bytearray(output)):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_project_markers(body)
+        with self.assertRaises(UnicodeDecodeError): MODULE.normal_project_markers(output + b"\xff")
+
+    def test_project_marker_admission_gates_zero_only_and_preserves_original_nonzero(self):
+        arguments = normal_arguments("project-test.xcresult")
+        request = MODULE.normal_request(arguments, str(Path(arguments[12]).parent / "tmp") + "/")
+        clock = SimpleNamespace(before_publication=lambda: {}, check=lambda: None)
+        phase = SimpleNamespace(call=lambda *args: self.fail("no native execution"), records=[], clock=clock)
+        for status, output in ((0, normal_project_output()), (0, b"missing original markers"), (65, b"native failed")):
+            original = subprocess.CompletedProcess([], status, output, b"")
+            with self.subTest(status=status, bytes=len(output)), \
+                    patch.object(MODULE, "normal_source_state", return_value={"inert": "source"}), \
+                    patch.object(MODULE, "run_admitted_test", return_value=(original, {})), \
+                    patch.object(MODULE, "exclusive_output") as publish, \
+                    patch.object(MODULE, "normal_project_markers", wraps=MODULE.normal_project_markers) as parse:
+                if status == 0 and output != normal_project_output():
+                    with self.assertRaises(MODULE.Refused):
+                        MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2)
+                    publish.assert_not_called()
+                    continue
+                self.assertIs(MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2), original)
+                receipt = json.loads(publish.call_args.args[1])
+                self.assertEqual(receipt["originalTestReturncode"], status)
+                if status == 0:
+                    self.assertIs(receipt["projectFieldAndEditMarkersObserved"], True)
+                    self.assertIs(receipt["androidToolSourceBrowseMarkerObserved"], True)
+                    parse.assert_called_once_with(output)
+                else:
+                    self.assertNotIn("projectFieldAndEditMarkersObserved", receipt)
+                    self.assertNotIn("androidToolSourceBrowseMarkerObserved", receipt)
+                    parse.assert_not_called()
+
+    def test_workflow_refusal_selection_is_opt_in_and_preserves_all_old_budgets(self):
+        old = {
+            "test.xcresult": (("testLaunchCancelAndQuit",), 60, 180),
+            "project-test.xcresult": (("testSyntheticProjectLocalEditsAndImages",
+                                      "testSyntheticProjectPathFields"), 300, 720),
+            "persistence-test.xcresult": (("testSyntheticPersistentCredentials",), 300, 420),
+            "diagnostics-test.xcresult": (("testSyntheticProjectBuildToolDiagnostics",), 300, 420),
+            "saved-checks-test.xcresult": (("testSyntheticProjectSavedOfflineChecks",
+                                          "testSyntheticProjectEmptyBuildInputInspection"), 300, 720),
+        }
+        result_name = "workflow-refusal-test.xcresult"
+        self.assertEqual({name: value for name, value in MODULE.NORMAL_SELECTIONS.items() if name != result_name}, old)
+        self.assertEqual(MODULE.NORMAL_SELECTIONS[result_name],
+                         (("testSyntheticProjectManagedWorkflowRefusal",), 300, 420))
+        arguments = normal_arguments(result_name)
+        derived, result, methods, allowance, timeout = MODULE.normal_cli_arguments(arguments)
+        self.assertEqual((methods, allowance, timeout),
+                         ((MODULE.CLASS + "testSyntheticProjectManagedWorkflowRefusal",), 300, 420))
+        temporary = str(derived.parent / "tmp") + "/"
+        self.assertEqual(MODULE.normal_request(arguments, temporary)["phaseSeconds"], 585)
+        summary = MODULE.normal_request(["--normal-summary", result_name], temporary)
+        self.assertEqual((summary["phase"], summary["result"], summary["timeout"], summary["phaseSeconds"]),
+                         ("summary", result, 30, 90))
+        self.assertEqual(MODULE.SUMMARY_STEMS[result_name], "workflow-refusal-summary")
+        fixed = MODULE.xcode_test_arguments("/fixed.xctestrun", result, methods, allowance)
+        self.assertEqual([arg for arg in fixed if arg.startswith("-only-testing:")],
+                         ["-only-testing:" + MODULE.CLASS + "testSyntheticProjectManagedWorkflowRefusal"])
+        for changed in (
+            arguments[:15] + arguments[16:],
+            arguments[:16] + arguments[15:16] + arguments[16:],
+            arguments + ["-retry-tests-on-failure"],
+            [arg.replace("testSyntheticProjectManagedWorkflowRefusal", "testSyntheticProjectLocalEditsAndImages")
+             for arg in arguments],
+            [arg.replace("workflow-refusal-test.xcresult", "project-test.xcresult") for arg in arguments],
+            ["60" if arg == "300" else arg for arg in arguments],
+        ):
+            with self.subTest(selection=changed[15:18]), self.assertRaises(MODULE.Refused):
+                MODULE.normal_cli_arguments(changed)
+
+    def test_workflow_refusal_output_requires_one_original_exact_final_case_and_scope(self):
+        output = normal_workflow_refusal_output()
+        self.assertIs(MODULE.normal_workflow_refusal_markers(output), True)
+        rows = output.splitlines(keepends=True)
+        self.assertEqual(len(rows), 4)
+        bad = [b"", b"x" * (1024 * 1024 + 1), output[:-1],
+               output + b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=true\n",
+               output.replace(b"completion=1", b"completion=0", 1),
+               output.replace(b"testSyntheticProjectManagedWorkflowRefusal", b"testUnexpectedMethod"),
+               output.replace(b"MRKNormalAppUITests.NormalAppUITests", b"OtherTests.OtherClass"),
+               output.replace(b"passed (1.000 seconds).", b"failed (1.000 seconds)."),
+               output.replace(b"passed (1.000 seconds).", b"passed (... seconds)."),
+               output.replace(b"whole-bundle-refused-originals-preserved", b"preview-only"),
+               output + b"Test Case 'unselected' failed (1.000 seconds).\n",
+               output + b"Test Case 'unselected' started\n",
+               rows[3] + b"".join(rows[:3]),
+               rows[0] + rows[2] + rows[1] + rows[3]]
+        for row in rows:
+            bad.extend((output.replace(row, b"", 1), output + row))
+        for prefix in (b"MRK_MACOS_UI_ORIGINAL=", b"MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI="):
+            bad.append(output + prefix + b"wrong-extra-value\n")
+        for body in bad:
+            with self.subTest(bytes=len(body)), self.assertRaises(MODULE.Refused):
+                MODULE.normal_workflow_refusal_markers(body)
+        for body in (None, "not bytes", bytearray(output)):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_workflow_refusal_markers(body)
+        with self.assertRaises(UnicodeDecodeError):
+            MODULE.normal_workflow_refusal_markers(output + b"\xff\n")
+        with self.assertRaises(MODULE.Refused):
+            MODULE.normal_workflow_refusal_markers(normal_project_output())
+        self.assertIs(MODULE.normal_project_markers(normal_project_output()), True)
+
+    def test_workflow_refusal_marker_gate_is_only_new_selection_original_zero(self):
+        clock = SimpleNamespace(before_publication=lambda: {}, check=lambda: None)
+        phase = SimpleNamespace(call=lambda *args: self.fail("no native execution"), records=[], clock=clock)
+        selected = "workflow-refusal-test.xcresult"
+        for name, status, output in (
+            (selected, 0, normal_workflow_refusal_output()), (selected, 0, b"missing original markers"),
+            (selected, 65, b"native failed"),
+            ("project-test.xcresult", 0, normal_project_output()),
+            ("diagnostics-test.xcresult", 0, b"not a workflow-refusal case"),
+        ):
+            arguments = normal_arguments(name)
+            request = MODULE.normal_request(arguments, str(Path(arguments[12]).parent / "tmp") + "/")
+            original = subprocess.CompletedProcess([], status, output, b"")
+            with self.subTest(selection=name, status=status, bytes=len(output)), \
+                    patch.object(MODULE, "normal_source_state", return_value={"inert": "source"}), \
+                    patch.object(MODULE, "run_admitted_test", return_value=(original, {})), \
+                    patch.object(MODULE, "exclusive_output") as publish, \
+                    patch.object(MODULE, "normal_workflow_refusal_markers",
+                                 wraps=MODULE.normal_workflow_refusal_markers) as parse:
+                if name == selected and status == 0 and output != normal_workflow_refusal_output():
+                    with self.assertRaises(MODULE.Refused):
+                        MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2)
+                    parse.assert_called_once_with(output)
+                    publish.assert_not_called()
+                    continue
+                self.assertIs(MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2), original)
+                receipt = json.loads(publish.call_args.args[1])
+                self.assertEqual(receipt["originalTestReturncode"], status)
+                if name == selected and status == 0:
+                    self.assertIs(receipt["managedWorkflowRefusalMarkerObserved"], True)
+                    parse.assert_called_once_with(output)
+                    self.assertNotIn("projectFieldAndEditMarkersObserved", receipt)
+                else:
+                    self.assertNotIn("managedWorkflowRefusalMarkerObserved", receipt)
+                    parse.assert_not_called()
+
+    def test_workflow_refusal_source_derives_originals_before_creation_and_never_applies(self):
+        source = SWIFT.read_text()
+        prepare = source.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split(
+            "func admitDefaultVault()", 1)[0]
+        self.assertIn("case projectEdits, projectFields, persistentCredentials, workflowRefusal", source)
+        self.assertLess(prepare.index('changes[stage] = try decode(values)'),
+                        prepare.index("if profile == .workflowRefusal"))
+        self.assertLess(prepare.index("if profile == .workflowRefusal"),
+                        prepare.index('let slash = try adoptDirectory(open("/",'))
+        for fragment in (
+            'changes["workflows"]?[preflight]', 'changes["workflows"]?[candidate]',
+            'Data("# MRK synthetic user customization; preserve exactly.\\n".utf8)',
+            "let customized = candidateTemplate + suffix", "suffix.count == 54",
+            "originals[preflight] = canonical", "originals[candidate] = customized",
+            "originals.count == 15 && Self.ancestors(Set(originals.keys)).count == 10",
+            "originalBytes == 5232 && stageBytes == 12137 && originalBytes + stageBytes == 17369",
+            "current.count == 15 && directories.count == 10 && anchors.count == 3",
+            "descriptors.count == 13",
+            "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933",
+        ):
+            self.assertIn(fragment, prepare)
+        journey = source.split("@MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {", 1)[1].split(
+            "    // Ordinary saved offline checks", 1)[0]
+        for fragment in (
+            "try beginCase(seconds: 300)", "try launchForJourney()", "try fixture.prepare(.workflowRefusal)",
+            'try goToFolder(sheet, path: fixture.projectPath)', 'try nativeOpen(sheet)',
+            'with: "Example/mobile-release-kit"', 'with: String(repeating: "a", count: 40)',
+            'equals: fixture.text(path, stage: "workflows")',
+            'Self.workflowFailures.filter { $0 != "Local workflow bundle refused" }',
+            'Observed differing callers · no Apply token', '"existing_workflow_differs"',
+            '"candidate", "2,368 observed bytes"', '"Independent native workflow outcome facts"',
+            '["Transaction effect", "not_started", "Journal", "not_created",',
+            '"Core resources", "settled", "Native finality", "settled"]',
+            '"Review unchanged confirmation"', '"Confirm unchanged plan"', '"Confirm four unchanged callers?"',
+        ):
+            self.assertIn(fragment, journey)
+        self.assertEqual(journey.count('try press(review, "Review local workflow files"'), 1)
+        self.assertEqual(journey.count("try fixture.assertUnchanged()"), 5)
+        for forbidden in ("fixture.accept(", "confirmedDialog(", "controller.", "evaluateJavaScript",
+                          'try press(review, "Confirm', 'try press(review, "Apply', "fixture.prepare()"):
+            self.assertNotIn(forbidden, journey)
+        ending = journey.split('try stage("workflow-refusal-readback-and-quit") {', 1)[1]
+        order = ("try refusedOutcome()", "try fixture.assertUnchanged()", "try quitSheet(app, window)",
+                 "try completeNormalQuit(app)", "try fixture.closeOriginals()", "ownedFixture = nil",
+                 "try acceptFinalScenario()", 'print("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=')
+        self.assertEqual([ending.index(fragment) for fragment in order], sorted(ending.index(fragment) for fragment in order))
+        after_quit = ending.split("try completeNormalQuit(app)", 1)[1]
+        self.assertLess(after_quit.index("try fixture.assertUnchanged()"), after_quit.index("try fixture.closeOriginals()"))
+        failures = source.split("private static let workflowFailures = [", 1)[1].split("\n    ]", 1)[0]
+        self.assertIn('"Local workflow bundle refused"', failures)  # Never remove it globally.
+
+    def test_project_field_fixture_and_normal_workflow_keep_draft_only_scope(self):
+        source = SWIFT.read_text()
+        prepare = source.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split(
+            "func admitDefaultVault()", 1)[0]
+        self.assertIn("let projectData = profile != .persistentCredentials", prepare)
+        self.assertNotIn("profile == .projectEdits", prepare)
+        for fragment in ('projectData ? "normal-project-v1" : "normal-persistence-v1"',
+                         "let stagePaths: [String: Set<String>] = projectData ?",
+                         "let expectedOriginals = projectData ? Self.originals : Self.persistenceOriginals",
+                         "(projectData ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil)",
+                         'projectData && path.hasPrefix("sources/")'):
+            self.assertIn(fragment, prepare)
+        ordered = ("originals = try decode(spec.files)", "if profile == .projectFields",
+                   "Set(originals.keys).isDisjoint(with: Self.projectFieldAdditions.keys)",
+                   "originals[path] = bytes", "whole fixture DATA limit",
+                   "for path in Self.ancestors(Set(originals.keys)) where !path.isEmpty {", "for path in originals.keys.sorted()",
+                   "current[path] = saved", "try checkRoster()")
+        self.assertEqual([prepare.index(item) for item in ordered], sorted(prepare.index(item) for item in ordered))
+        additions = source.split("static let projectFieldAdditions: [String: Data] = [", 1)[1].split("\n        ]", 1)[0]
+        self.assertEqual(set(re.findall(r'^\s+"([^"]+)": Data\(', additions, re.M)), {
+            "project/inputs/VERSION", "project/ios/Example.xcodeproj/project.pbxproj",
+            "project/ios/Example.xcworkspace/contents.xcworkspacedata", "project/metadata/README.txt"})
+        journey = source.split("@MainActor func testSyntheticProjectPathFields() throws {", 1)[1].split(
+            "@MainActor func testSyntheticProjectLocalEdits()", 1)[0]
+        selected = journey.split("@MainActor func selected(_ label: String, relative: String) throws {", 1)[1].split(
+            "@MainActor func browse(", 1)[0]
+        self.assertEqual(selected.count("timeout: 48"), 2)
+        self.assertIn('matching(NSPredicate(format: "value == %@", relative)), in: renderer, timeout: 48)', selected)
+        self.assertIn("in: renderer, enabled: true, timeout: 48)", selected)
+        for required in ("try beginCase(seconds: 300)", "try launchForJourney()", "try fixture.prepare(.projectFields)",
+                         'try browse("Committed version file"', 'try browse("Xcode project"',
+                         'try browse("Xcode workspace"', 'try browse("Store metadata folder"',
+                         'relative: "inputs/VERSION", file: true, cancel: true',
+                         'relative: "metadata", cancel: true', '"Review draft changes"',
+                         '"Current draft · retained baseline"', '"Format validation needs attention"'):
+            self.assertIn(required, journey)
+        self.assertGreaterEqual(journey.count('try selected("Xcode project", relative: "ios/Example.xcodeproj")'), 2)
+        for forbidden in ('"Prepare save review"', '"Unset field"', '"Unset all ', "savePrivate(", "assertStage(", "evaluateJavaScript"):
+            self.assertNotIn(forbidden, journey)
+        final = ("try completeNormalQuit(app)", "try fixture.assertUnchanged()", "try fixture.closeOriginals()",
+                 "ownedFixture = nil", "try acceptFinalScenario()", 'print("MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=')
+        quit_body = journey.split('try stage("quit") {', 1)[1]
+        self.assertEqual([quit_body.index(item) for item in final], sorted(quit_body.index(item) for item in final))
+        workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
+        block = workflow.split("id: normal_project_ui_test", 1)[1].split("id: normal_persistence_ui_test", 1)[0]
+        self.assertIn("timeout-minutes: 16", block)
+        self.assertEqual(re.findall(r"-only-testing:([^\s]+)", block),
+                         ["MRKNormalAppUITests/NormalAppUITests/" + method for method in
+                          ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")])
+        self.assertIn('expected = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}', block)
+        self.assertIn('"project-test.xcresult", 885,', block)
+        self.assertIn('("one-admitted-ui-test", 720, 1048576)', block)
+        self.assertIn('runner.get("projectFieldAndEditMarkersObserved") is not True', block)
+        self.assertIn('"projectRelativeFieldBrowseUI": "passed"', block)
+        runtime = (ROOT / "desktop/src-tauri/src/runtime.rs").read_text()
+        self.assertIn("const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = true;", runtime)
+        self.assertIn("const INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED: bool = true;", runtime)
+        self._assert_android_source_browse_bindings(source, prepare, journey, workflow, runtime)
+
+    def _assert_android_source_browse_bindings(self, source, prepare, journey, workflow, runtime):
+        # SOURCE/literal DATA inside the existing selected test. The independent
+        # Rust16-cell test and actual native journeys remain separately required.
+        rust = ROOT / "desktop/src-tauri/src"
+        sources = (rust / "android_tool_sources.rs").read_text()
+        status_helper = sources.split("pub(crate) fn status_availability(", 1)[1].split("pub(crate) fn unavailable()", 1)[0]
+        self.assertEqual(" ".join(status_helper.split()),
+                         "gate: Availability, source_selection_available: bool) -> Availability { "
+                         "match (gate, source_selection_available) { "
+                         "(Availability::Available, false) => Availability::RuntimeUnqualified, _ => gate, } }")
+        oracle = [
+            ("Available", "RuntimeUnqualified", "Available"),
+            ("Busy", "Busy", "Busy"), ("Shutdown", "Shutdown", "Shutdown"),
+            ("CleanupUnknown", "CleanupUnknown", "CleanupUnknown"),
+            ("DocumentLost", "DocumentLost", "DocumentLost"),
+            ("UnsupportedPlatform", "UnsupportedPlatform", "UnsupportedPlatform"),
+            ("RuntimeUnqualified", "RuntimeUnqualified", "RuntimeUnqualified"),
+            ("ToolchainUnqualified", "ToolchainUnqualified", "ToolchainUnqualified"),
+        ]
+        table = sources.split("let cases = [", 1)[1].split("];", 1)[0]
+        self.assertEqual(re.findall(r"^\s+\(([A-Za-z]+), ([A-Za-z]+), ([A-Za-z]+)\),$", table, re.M), oracle)
+        for literal in ("assert_eq!(status_availability(gate, false), unqualified);",
+                        "assert_eq!(status_availability(gate, true), qualified);"):
+            self.assertIn(literal, sources)
+        protocol = (rust / "android_build_protocol.rs").read_text()
+        variants = protocol.split("pub(crate) enum Availability {", 1)[1].split("}", 1)[0]
+        self.assertEqual([name.strip() for name in variants.split(",")], [row[0] for row in oracle])
+
+        document = (rust / "asset_session.rs").read_text()
+        status = document.split("pub(crate) fn android_tool_sources_status(", 1)[1].split(
+            "pub(crate) fn cancel_android_tool_source(", 1)[0]
+        ordered = ("publisher.is_none() && !self.inner.android_registration_control.is_unknown()",
+                   "crate::android_build_protocol::Availability::Busy",
+                   "} else { self.android_build_gate(&state) };",
+                   "let gate = crate::android_tool_sources::status_availability(",
+                   "gate, self.inner.bridge.installed_android_source_selection_available());",
+                   "self.inner.bridge.android_build.sources_status(gate)")
+        self.assertEqual([status.index(item) for item in ordered], sorted(status.index(item) for item in ordered))
+        self.assertEqual(status.count("status_availability("), 1)
+        self.assertEqual(status.count("installed_android_source_selection_available()"), 1)
+        self.assertEqual(status.count("sources_status(gate)"), 1)
+        self.assertNotIn(".availability =", status)
+        choose = document.split("pub(crate) fn choose_android_tool_source(", 1)[1].split("pub(crate) fn choose_project_path(", 1)[0]
+        self.assertIn("if gate != crate::android_build_protocol::Availability::Available\n"
+                      "                || !self.inner.bridge.installed_android_source_selection_available()", choose)
+        self.assertNotIn("status_availability(", choose)
+        cancel = document.split("pub(crate) fn cancel_android_tool_source(", 1)[1].split("fn observe_android_source_slot(", 1)[0]
+        self.assertIn("cancel_source(input, self.android_build_gate(&state))?", cancel)
+        self.assertNotIn("installed_android_source_selection_available", cancel)
+        self.assertNotIn("status_availability", cancel)
+        bridge = (rust / "bridge.rs").read_text()
+        self.assertEqual(bridge.count("let installed_android_source_selection_available = runtime.android_source_selection_profile_available();"), 1)
+        self.assertIn("pub(crate) fn installed_android_source_selection_available(&self) -> bool { self.installed_android_source_selection_available }", bridge)
+        profile = runtime.split("pub(crate) fn android_source_selection_profile_available(", 1)[1].split(
+            "pub(crate) fn evidence_selection_profile_available(", 1)[0]
+        self.assertIn("INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && self.project_selection_profile_available()", profile)
+        self.assertIn('#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]\n        { false }', profile)
+        ui = (ROOT / "desktop/src/components/AndroidBuild.tsx").read_text()
+        self.assertIn("const sourceRoles: AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];", ui)
+        self.assertEqual(ui.count("role=\"group\" aria-label={`${help.label} source folder`}"), 1)
+        controller = (ROOT / "desktop/src/androidBuild.ts").read_text()
+        self.assertIn("if (this.state.toolSources.availability !== 'available') return androidBuildAvailabilityText[this.state.toolSources.availability];", controller)
+
+        deep = "sources/tool-refused/" + "/".join(["d"] * 123)
+        expected_paths = {"sources/tool-jdk.jdk/README.txt", "sources/tool-sdk/README.txt", "sources/tool-gradle/README.txt",
+                          "sources/tool-jdk-replacement.jdk/README.txt", deep + "/README.txt"}
+        additions = source.split("static let androidSourceAdditions: [String: Data] = [", 1)[1].split("\n        ]", 1)[0]
+        rows = re.findall(r'^\s+"([^"]+)": Data\(("(?:\\.|[^"\\])*")\.utf8\)', additions, re.M)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual({path for path, _ in rows}, expected_paths)
+        self.assertEqual([json.loads(value) for _, value in rows], ["MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n"] * 5)
+        self.assertEqual([len(json.loads(value).encode()) for _, value in rows], [41] * 5)
+        actual_deep = json.loads(source.split("static let androidRefusedDirectory = ", 1)[1].splitlines()[0])
+        self.assertEqual(actual_deep, deep)
+        absolute = "/private/tmp/mrk-normal-project-XXXXXX/" + deep
+        self.assertEqual((len(deep.split("/")), len([part for part in absolute.split("/") if part]), len(absolute.encode())), (125, 128, 305))
+        fixture = json.loads((SWIFT.parent / "Fixtures/normal-project-v1.json").read_bytes())
+        field_paths = {"project/inputs/VERSION", "project/ios/Example.xcodeproj/project.pbxproj",
+                       "project/ios/Example.xcworkspace/contents.xcworkspacedata", "project/metadata/README.txt"}
+        leaves = set(fixture["files"]) | field_paths | expected_paths
+        directories = {""}
+        for path in leaves:
+            parts = path.split("/")
+            directories.update("/".join(parts[:count]) for count in range(1, len(parts)))
+        self.assertEqual((len(leaves), len(directories), len(directories) + 3, len(directories) + 4), (22, 143, 146, 147))
+        names = (leaves | directories) - {""}
+        fanouts = [sum(name.startswith(prefix) and "/" not in name[len(prefix):] for name in names)
+                   for prefix in (path + "/" if path else "" for path in directories)]
+        self.assertEqual((max(fanouts), len(names), len(names) + 3 * len(directories)), (7, 164, 593))
+        for fragment in ("Self.androidSourceAdditions.count == 5", "$0.count == 41",
+                         "Set(originals.keys).isDisjoint(with: Self.androidSourceAdditions.keys)",
+                         "originals.count == 22 && Self.ancestors(Set(originals.keys)).count == 143",
+                         'Self.androidRefusedDirectory.split(separator: "/").count == 125',
+                         'refusedPath.split(separator: "/").count == 128 && refusedPath.utf8.count == 305',
+                         "current.count == 22 && directories.count == 143 && anchors.count == 3", "descriptors.count == 146"):
+            self.assertIn(fragment, prepare)
+        self.assertLess(prepare.index("originals.count == 22"), prepare.index('adoptDirectory(open("/"'))
+        self.assertLess(prepare.index("try checkRoster()"), prepare.index("descriptors.count == 146"))
+        for fragment in ("result.count < 64", "bytes.count <= 32 * 1024", "<= 256 * 1024"):
+            self.assertIn(fragment, source)
+        for forbidden in ("getrlimit(", "setrlimit(", "RLIMIT_NOFILE"):
+            self.assertNotIn(forbidden, prepare)
+
+        android = journey.split("// Six ordinary native source actions", 1)[1].split("@MainActor func settings(", 1)[0]
+        self.assertLess(journey.index('try stage("project-open")'), journey.index("// Six ordinary native source actions"))
+        self.assertLess(journey.index('try stage("android-source-refused")'), journey.index('try stage("field-version")'))
+        self.assertEqual(re.findall(r'try stage\("android-source-([^"]+)"\)', android), ["jdk", "sdk", "gradle", "cancel", "reselect", "refused"])
+        self.assertEqual(re.findall(r'try androidBrowse\("([^"]+)"', android), ["jdk", "sdk", "gradle", "jdk", "jdk", "jdk"])
+        for fragment in ('"jdk": "Java development kit (JDK)"', '"sdk": "Android SDK"', '"gradle": "Gradle distribution"',
+                         'controls(renderer, [.group], label: label + " source folder")',
+                         'try nativeSheet(window, title: title)', 'try nativeOpen(sheet)',
+                         'try goToFolder(sheet, path: fixture.rootPath + "/" + relative)',
+                         'try click(sheet.buttons.matching(identifier: "Cancel")',
+                         'relative: "sources/tool-jdk.jdk", cancel: true',
+                         'relative: "sources/tool-sdk"', 'relative: "sources/tool-gradle"',
+                         'relative: "sources/tool-jdk-replacement.jdk"',
+                         "relative: LocalFixture.androidRefusedDirectory, refused: true",
+                         'try androidStatus("Folder selection cancelled."',
+                         'reason: "The native folder dialog was closed without selecting a folder."',
+                         'try androidStatus("Folder selection could not be used."',
+                         'reason: "Choose a real, readable local folder, not an alias or archive. This check does not inspect the tools inside it."',
+                         'try androidStatus("Original folder selection retained."',
+                         'reason: "Folder selection alone is not supplier inspection or a protected copy. Check the separate original registration Status."',
+                         "try androidRetained()\n            try fixture.assertUnchanged()",
+                         'in: group, enabled: true, timeout: 48)', 'in: renderer, timeout: 48, failures: failures)'):
+            self.assertIn(fragment, android)
+        self.assertEqual(android.count("androidSelections[role] = String(name)"), 1)
+        for branch in (android.split("if refused {", 1)[1].split("} else {", 1)[0],
+                       android.split("if cancel {", 1)[1].split("} else {", 1)[0]):
+            self.assertNotIn("androidSelections[role] = String(name)", branch)
+        for forbidden in ("firstMatch", "element(boundBy:", "evaluateJavaScript", "setValue(", "try?", "catch",
+                          "inspectToolSources(", "registerTools(", "checkAndroidToolService(", "requestAndroidToolServiceRegistration("):
+            self.assertNotIn(forbidden, android)
+        marker = "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable"
+        self.assertEqual(journey.count('print("' + marker + '")'), 1)
+        self.assertLess(journey.index("try acceptFinalScenario()"), journey.index('print("' + marker + '")'))
+
+        # Unchanged real directory-refusal route, not a synthetic returned DTO.
+        shared_source = (rust / "asset_source.rs").read_text()
+        mac_source = (rust / "asset_source_macos.rs").read_text()
+        self.assertIn("const COMPONENT_LIMIT: usize = 128;", shared_source)
+        self.assertIn("pub(crate) const PATH_LIMIT: usize = 4096;", shared_source)
+        parts = mac_source.split("fn parts(path: &Path)", 1)[1].split("fn source_extra(", 1)[0]
+        self.assertIn("components.len() >= COMPONENT_LIMIT - 1 { return Err(Reason::SourceRefused); }", parts)
+        probe = mac_source.split("pub(crate) fn probe_project_excluding_vault(", 1)[1].split("pub(crate) fn probe_vault_exclusion(", 1)[0]
+        self.assertLess(probe.index("let project_parts = parts(&path)?;"), probe.index("book.begin("))
+        job = document.split("Job::AndroidSource { app, binding } => {", 1)[1].split("Job::ProjectPath {", 1)[0]
+        self.assertIn("DialogChoice::AndroidToolSource(binding.role)", job)
+        self.assertIn("ChildJob::Probe { path, origins: Vec::new(), vault: None }", job)
+        self.assertIn("book.not_started() || book.settled()", document)
+        self.assertIn('runner.get("androidToolSourceBrowseMarkerObserved") is not True', workflow)
+        self.assertIn('"androidToolSourceBrowseUI": "passed"', workflow)
+        self.assertIn('"androidToolSourceBrowseScope": "selection-only-three-roles-native-cancel-reselect-backend-source-refused"', workflow)
+        self.assertIn('"supplierInspectionQualified": False, "protectedToolCopyQualified": False, "androidBuildQualified": False', workflow)
 
     def test_closed_result_requires_every_original_terminal_fact(self):
         original = result_data()
@@ -555,10 +1025,10 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         source = SWIFT.read_text()
         custody = source.split("    private final class GateObservation {", 1)[0]
         self.assertEqual(source.count("try beginCase(seconds: 60)"), 1)
-        self.assertEqual(source.count("try beginCase(seconds: 300)"), 5)
-        self.assertEqual(source.count("try completeNormalQuit(app)"), 6)
+        self.assertEqual(source.count("try beginCase(seconds: 300)"), 7)
+        self.assertEqual(source.count("try completeNormalQuit(app)"), 8)
         self.assertEqual(source.count("try completeNormalQuit(restartedApp)"), 1)
-        self.assertEqual(source.count("try acceptFinalScenario()"), 5)
+        self.assertEqual(source.count("try acceptFinalScenario()"), 7)
         self.assertEqual(source.count("try acceptPersistenceRestart()"), 1)
         self.assertEqual(source.count("normalQuitObserved = true"), 1)
         for required in ("let deadline: TimeInterval", "value.isFinite, value >= last",
@@ -613,6 +1083,24 @@ class RunnerAdmissionDataTests(unittest.TestCase):
 
     def test_reuse_profile_cannot_relax_the_existing_same_build_cases(self):
         source = SWIFT.read_text()
+        self.assertIn('#if !os(macOS) || !(arch(arm64) || arch(x86_64))\n#error(', source)
+        compiled = ('        #if arch(arm64)\n'
+                    '        let hostedJob = "github-hosted-macos26-arm64"\n'
+                    '        #elseif arch(x86_64)\n'
+                    '        let hostedJob = "github-hosted-macos26-x86_64"\n'
+                    '        #endif\n')
+        admission = source.split('private func admitHostedAccount(', 1)[1].split('let nonroot = getuid() != 0', 1)[0]
+        self.assertIn(compiled, admission)
+        self.assertIn('try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == hostedJob,', admission)
+        self.assertEqual(source.count('let hostedJob = '), 2)
+        self.assertEqual(source.count('#if arch(arm64)'), 1)
+        self.assertEqual(source.count('#elseif arch(x86_64)'), 1)
+        project = (ROOT / MODULE.PROJECT / 'project.pbxproj').read_text()
+        self.assertEqual(project.count('ARCHS = arm64;'), 1)
+        self.assertEqual(project.count('ONLY_ACTIVE_ARCH = YES;'), 1)
+        runner = (ROOT / 'desktop/tools/macos_normal_ui_runner.py').read_text()
+        self.assertIn('(["ARCHS=x86_64"] if target == INTEL_TARGET else [])', runner)
+        self.assertEqual(runner.count('ARCHS='), 1)
         self.assertEqual(source.count("try launchCancelAndQuit(profile: .packagedEntry)"), 1)
         self.assertIn("try launchCancelAndQuit(profile: .sameBuild)", source)
         self.assertIn("private func admittedJourneyApplication(profile: SourceProfile = .sameBuild)", source)
@@ -902,6 +1390,56 @@ class NormalPhaseDataTests(unittest.TestCase):
             "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
             "-derivedDataPath", str(normal / "DerivedData"), "-jobs", "2", "-disableAutomaticPackageResolution",
             "COMPILER_INDEX_STORE_ENABLE=NO"])
+        self.assertEqual(build["target"], "aarch64-apple-darwin")
+        arm_build = MODULE.normal_build_arguments(build["derived"])
+        targets = (("aarch64-apple-darwin", "arm64", "github-hosted-macos26-arm64"),
+                   ("x86_64-apple-darwin", "x86_64", "github-hosted-macos26-x86_64"))
+        requests = {}
+        for target_value, machine, marker in targets:
+            self.assertEqual(MODULE.normal_target_data(target_value), (machine, marker))
+            selected_build = MODULE.normal_request(["--target", target_value, "--normal-build"], temporary)
+            expected_build = list(arm_build)
+            expected_build[expected_build.index("-destination") + 1] = "platform=macOS,arch=" + machine
+            if machine == "x86_64": expected_build.append("ARCHS=x86_64")
+            self.assertEqual(MODULE.normal_build_arguments(build["derived"], target=target_value), expected_build)
+            self.assertEqual(selected_build, dict(build, target=target_value))
+            for name, (_, allowance, cap) in MODULE.NORMAL_SELECTIONS.items():
+                arguments = normal_arguments(name)
+                arguments[8] = "platform=macOS,arch=" + machine
+                selected_test = MODULE.normal_request(["--target", target_value, *arguments], temporary)
+                selected_summary = MODULE.normal_request(["--target", target_value, "--normal-summary", name], temporary)
+                self.assertEqual(selected_test["target"], target_value)
+                self.assertEqual((selected_test["allowance"], selected_test["timeout"], selected_test["phaseSeconds"]),
+                                 (allowance, cap, {180: 345, 420: 585, 720: 885}[cap]))
+                self.assertEqual((selected_summary["target"], selected_summary["timeout"], selected_summary["phaseSeconds"]),
+                                 (target_value, 30, 90))
+                command = MODULE.xcode_test_arguments("/fixed.xctestrun", normal / name,
+                    selected_test["methods"], allowance, target=target_value)
+                self.assertEqual(command[command.index("-destination") + 1], arguments[8])
+                self.assertFalse(any(value.startswith("ARCHS=") for value in command))
+                other = "x86_64-apple-darwin" if machine == "arm64" else "aarch64-apple-darwin"
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.normal_request(["--target", other, *arguments], temporary)
+                if name == "test.xcresult": requests[target_value] = (selected_build, selected_test, selected_summary)
+        for invalid in (None, True, "arm64", "x86_64", "X86_64-apple-darwin", "x86_64-apple-darwin "):
+            with self.subTest(target=invalid), self.assertRaises(MODULE.Refused):
+                MODULE.normal_build_arguments(build["derived"], target=invalid)
+        for arguments in (["--target"], ["--target", "x86_64-apple-darwin"],
+                          ["--target", "other", "--normal-build"],
+                          ["--target", "x86_64-apple-darwin", "--target", "x86_64-apple-darwin", "--normal-build"],
+                          ["--normal-build", "--target", "x86_64-apple-darwin"],
+                          ["--target=x86_64-apple-darwin", "--normal-build"],
+                          ["--target", "x86_64-apple-darwin", *normal_arguments()]):
+            with self.subTest(arguments=arguments), self.assertRaises(MODULE.Refused):
+                MODULE.normal_request(arguments, temporary)
+        with self.assertRaises(MODULE.Refused):
+            MODULE.xcode_test_arguments("/fixed.xctestrun", "/fresh.xcresult", (MODULE.PACKAGED_METHOD,),
+                                       60, target="x86_64-apple-darwin")
+        with patch.object(MODULE, "RunnerProducts") as unopened:
+            with self.assertRaises(MODULE.Refused):
+                MODULE.run_admitted_test(lambda *args: self.fail("no dispatch"), build["derived"], normal / "test.xcresult",
+                                         (MODULE.PACKAGED_METHOD,), 60, 180, target="x86_64-apple-darwin")
+            unopened.assert_not_called()
         for name, (_, allowance, cap) in MODULE.NORMAL_SELECTIONS.items():
             summary = MODULE.normal_request(["--normal-summary", name], temporary)
             test = MODULE.normal_request(normal_arguments(name), temporary)
@@ -947,12 +1485,84 @@ class NormalPhaseDataTests(unittest.TestCase):
             ):
                 stack.enter_context(context)
             self.assertEqual(MODULE.normal_context(build), (root, source, environment, (32 * 1024**3,) * 2))
+            for target_value, machine, marker in targets:
+                selected_environment = dict(environment, TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=marker)
+                with patch.object(MODULE.platform, "machine", return_value=machine), \
+                        patch.dict(MODULE.os.environ, selected_environment, clear=True):
+                    for request in requests[target_value]:
+                        limit = 32 * 1024**3 if request["phase"] == "build" else 1024**3
+                        with patch.object(sys.modules["resource"], "getrlimit", return_value=(limit, limit)):
+                            self.assertEqual(MODULE.normal_context(request),
+                                             (root, source, selected_environment, (limit, limit)))
+                            other_machine = "x86_64" if machine == "arm64" else "arm64"
+                            with patch.object(MODULE.platform, "machine", return_value=other_machine), self.assertRaises(MODULE.Refused):
+                                MODULE.normal_context(request)
+                            with patch.dict(MODULE.os.environ, {"TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-" + other_machine}), \
+                                    self.assertRaises(MODULE.Refused):
+                                MODULE.normal_context(request)
+                            with self.assertRaises(MODULE.Refused):
+                                MODULE.normal_context(dict(request, target="unsupported"))
             for key in ("PATH", "HOME", "LANG", "DEVELOPER_DIR", "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB",
                         "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE"):
                 with self.subTest(environment=key), patch.dict(MODULE.os.environ, {key: "not-admitted"}), self.assertRaises(MODULE.Refused):
                     MODULE.normal_context(build)
             with patch.object(MODULE.os, "geteuid", return_value=502), self.assertRaises(MODULE.Refused):
                 MODULE.normal_context(build)
+        # Actual Python handoffs, with only inert original/IO doubles. This is
+        # target propagation and first-return DATA, never native/UI evidence.
+        for target_value, machine, _ in targets:
+            for request in requests[target_value]:
+                for status in (0, 65):
+                    returned = []
+                    def fixed_call(role, arguments, timeout, output_limit=1024 * 1024):
+                        body = tools[role[len("normal-toolchain-"):]] if role.startswith("normal-toolchain-") else b"inert original"
+                        value = subprocess.CompletedProcess(arguments, 0 if role.startswith("normal-toolchain-") else status, body, b"")
+                        returned.append((role, value, timeout, output_limit))
+                        return value
+                    phase = SimpleNamespace(call=fixed_call, records=[],
+                        clock=SimpleNamespace(check=lambda: None, before_publication=lambda: {}))
+                    with self.subTest(target=target_value, phase=request["phase"], status=status), \
+                            patch.object(MODULE, "normal_source_state", return_value={"inert": "source"}) as source_check, \
+                            patch.object(MODULE, "exclusive_output") as publication, \
+                            patch.object(MODULE.os.path, "lexists", return_value=False), \
+                            patch.object(MODULE.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=501)), \
+                            patch.object(MODULE.os, "getuid", return_value=501), \
+                            patch.object(MODULE, "RunnerProducts") as products_type:
+                        products = products_type.return_value.__enter__.return_value
+                        products_type.return_value.__exit__.return_value = False
+                        products.products = build["derived"] / "Build/Products"
+                        products.manifest = "fixed.xctestrun"
+                        products.admit.return_value = {"scope": "inert-products-not-native-authority"}
+                        limit = 32 * 1024**3 if request["phase"] == "build" else 1024**3
+                        actual = MODULE.execute_normal_phase(phase, request, source, (limit, limit))
+                        self.assertIs(actual, returned[-1][1])
+                        self.assertEqual(actual.returncode, status)
+                        facts = json.loads(publication.call_args.args[1])
+                        self.assertEqual(facts["target"], target_value)
+                        self.assertEqual(source_check.call_count, 2)
+                        if request["phase"] == "build":
+                            expected = list(arm_build)
+                            expected[expected.index("-destination") + 1] = "platform=macOS,arch=" + machine
+                            if machine == "x86_64": expected.append("ARCHS=x86_64")
+                            self.assertEqual(actual.args, expected)
+                            self.assertEqual(returned[-1][2], 240)
+                            products_type.assert_not_called()
+                        elif request["phase"] == "summary":
+                            self.assertEqual(actual.args, ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary",
+                                "--path", str(normal / "test.xcresult"), "--compact"])
+                            self.assertEqual(returned[-1][2:], (30, 262144))
+                            products_type.assert_not_called()
+                        else:
+                            self.assertEqual(actual.args, ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun",
+                                str(products.products / products.manifest), "-destination", "platform=macOS,arch=" + machine,
+                                "-destination-timeout", "15", "-resultBundlePath", str(normal / "test.xcresult"),
+                                "-only-testing:" + MODULE.CLASS + "testLaunchCancelAndQuit", "-parallel-testing-enabled", "NO",
+                                "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "60",
+                                "-maximum-test-execution-time-allowance", "60", "-disableAutomaticPackageResolution"])
+                            self.assertEqual(returned[-1][2], 180)
+                            products.admit.assert_called_once_with(fixed_call)
+                            self.assertEqual(products.check.call_count, 2)
+                            products_type.return_value.__exit__.assert_called_once_with(None, None, None)
         argv = ["/usr/bin/xcodebuild", "-version"]
         original = subprocess.CompletedProcess(argv, 65, b"ordinary original", b"ordinary stderr")
         self.assertIs(MODULE.original_command(original, argv, 4096), original)

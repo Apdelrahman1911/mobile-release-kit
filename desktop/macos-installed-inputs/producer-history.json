@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "aarch64-apple-darwin": {
+      "acceptedPredecessors": [],
+      "signingPolicies": []
+    },
+    "x86_64-apple-darwin": {
+      "acceptedPredecessors": [],
+      "signingPolicies": []
+    }
+  }
+}

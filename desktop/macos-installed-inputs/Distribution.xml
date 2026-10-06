@@ -14,7 +14,7 @@
   <choice id="fixed-install" title="Fresh installation at the fixed protected location" visible="false">
     <pkg-ref id="dev.mobile-release-kit.desktop.installed"/>
   </choice>
-  <pkg-ref id="dev.mobile-release-kit.desktop.installed" version="0.1.0" auth="root">MobileReleaseKit.pkg</pkg-ref>
+  <pkg-ref id="dev.mobile-release-kit.desktop.installed" version="0.1.1" auth="root">MobileReleaseKit.pkg</pkg-ref>
   <pkg-ref id="dev.mobile-release-kit.desktop.installed">
     <must-close><app id="dev.mobile-release-kit.desktop"/></must-close>
   </pkg-ref>

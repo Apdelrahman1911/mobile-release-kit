@@ -62,7 +62,7 @@ class NormalPersistenceSourceTests(unittest.TestCase):
     def test_ordinary_journey_keeps_explicit_mutation_assignment_and_cancellation_boundaries(self):
         source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
         journey = source.split("@MainActor func testSyntheticPersistentCredentials() throws {", 1)[1]
-        journey = journey.split("@MainActor func testSyntheticProjectLocalEdits()", 1)[0]
+        journey = journey.split("@MainActor func testSyntheticProjectPathFields()", 1)[0]
         self.assertLess(journey.index("fixture.admitDefaultVault()"), journey.index("launchForJourney()"))
         self.assertIn("executionTimeAllowance = 300", journey)
         self.assertIn("try beginCase(seconds: 300)", journey)
@@ -133,7 +133,7 @@ class NormalPersistenceSourceTests(unittest.TestCase):
     def test_restart_preserves_store_and_awaits_ordinary_context_before_explicit_reassessment(self):
         source = (NATIVE / "MRKNormalAppUITests/NormalAppUITests.swift").read_text()
         journey = source.split("@MainActor func testSyntheticPersistentCredentials() throws {", 1)[1]
-        journey = journey.split("@MainActor func testSyntheticProjectLocalEdits()", 1)[0]
+        journey = journey.split("@MainActor func testSyntheticProjectPathFields()", 1)[0]
         restart = journey.split('stage("persistence-restart-launch")', 1)[1]
         self.assertLess(journey.index("try completeNormalQuit(app)"), journey.index("retainPersistenceLifetimeForRestart("))
         self.assertLess(restart.index("retainPersistenceLifetimeForRestart("), restart.index("launchForJourney()"))
@@ -232,11 +232,11 @@ class NormalPersistenceSourceTests(unittest.TestCase):
         # not native-success receipts. Keep success-only admission, package/test
         # count bindings, deadlines and finality limitations intact.
         pins = {
-            b"normal_ui_build": "b240c46f7cdad329dbdff8b51a3be428ea2c3ef78e3ff66373393367d1115e5f",
-            b"normal_ui_test": "f9a4ab10526a79ff9f87bcb2ef8ed5fc9b6126c9e38a472a43b9e71bec9d2806",
-            b"normal_project_ui_test": "d903ce62063fd858c158a87bcc2a5532c47c043f13ddaf9147a568222b306bd2",
-            b"normal_project_ui_result": "20cd5b0114ff6e2cc725e0324d62dccefd4896426ce4eff67baeea935290013d",
-            b"normal_persistence_ui_test": "2396acc5b9f10129447f2b52933feab88d06c6a84a512edaad8c637994a59a99",
+            b"normal_ui_build": "f0585df260579d0eb39bae2d7ae265f950887e7fc1ce60320f54ef03678e647b",
+            b"normal_ui_test": "9236e0e1f50bebcbd63c942fa5f228794dc53a01df1ba548b23dcd18ba67227a",
+            b"normal_project_ui_test": "9f7298b660ad22517d17e3e8420bec3c1d8071e18003ac435aa1df7e6f20256b",
+            b"normal_project_ui_result": "60253d2653f54318ce00023737e8f50034018fa45d5d1a3809e9280cca41282f",
+            b"normal_persistence_ui_test": "3ff4b7295bf3be9a52887f06e2c83acfb7010a6cad2113ffcd434a423a7fc259",
         }
         for identifier, expected in pins.items():
             self.assertEqual(ids.count(identifier), 1, identifier)

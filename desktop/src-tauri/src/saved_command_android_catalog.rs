@@ -5,7 +5,7 @@
 use super::*;
 use crate::android_toolchain_catalog as wire;
 use std::sync::{Weak,TryLockError};
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 use crate::{installed_runtime::{LeasedAndroidCatalogSlots,CatalogMode,CatalogCandidate,RowCode},
     android_shared_lease_macos::{AppCloseTail,OriginalUseIdentity}};
 const WORK:Duration=Duration::from_secs(60);
@@ -24,7 +24,7 @@ struct FrozenRow {instance:String,occupants:u8,kind:RowKind,metadata:Option<wire
 struct FrozenRows {rows:Vec<FrozenRow>,recovered:Option<android_wire::MacToolchainSelection>}
 struct WorkerReturn {
     rows:Option<FrozenRows>,entered:bool,observations:bool,retained_bytes:Option<usize>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     tail:Option<AppCloseTail>,
 }
 /// Public only to this parent owner's private consuming witness, never a shell
@@ -39,11 +39,11 @@ pub(super) struct Operation {
     coordinator:Mutex<Option<JoinHandle<bool>>>,
     coordinator_return:Mutex<Option<Result<bool,tokio::task::JoinError>>>,
     final_seen:AtomicBool,accepted_final:AtomicBool,worker_join_seen:AtomicBool,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     native:Mutex<LeasedAndroidCatalogSlots>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     control:Arc<AndroidUseControl>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     close:Arc<AndroidCloseSlot>,
 }
 pub(crate) struct Admitted {status:wire::Status,release:Option<oneshot::Sender<()>>,original:Arc<Operation>}
@@ -124,7 +124,7 @@ impl Operation {
     }
     fn mark_unknown(&self){
         self.unknown.store(true,Ordering::SeqCst);
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         self.control.mark_unknown();
         self.changed();
     }
@@ -137,7 +137,7 @@ impl Operation {
     fn stop_at(&self,reason:wire::Reason,at:Instant){
         // Preserve the genuine LOCAL captured point before the old local clamp.
         // Inverse-mapped remote F is never fed into this method.
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         self.control.local(at,at,reason==wire::Reason::CleanupUnknown);
         let at=at.max(self.admitted).min(self.work);
         let mut changed=false;
@@ -153,26 +153,26 @@ impl Operation {
     }
     fn failure(&self)->Option<(wire::Reason,Instant)>{
         let local=self.local_failure();
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {
             let data=self.control.data();
             let raw=data.failure.and_then(|f|f.first_instant);
             let first=match(local.map(|(_,at)|at),raw){(Some(a),Some(b))=>Some(a.min(b)),(a,b)=>a.or(b)};
             return first.map(|at|(local.map_or(wire::Reason::CatalogUnavailable,|(reason,_)|reason),at));
         }
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {local}
     }
     fn endpoint(&self)->Instant{
         let local=self.local_failure().map(|(_,at)|at);
         let end=local.and_then(|at|at.checked_add(SETTLEMENT)).map_or(self.hard,|end|end.min(self.hard));
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {return self.control.cutoff(local,end);}
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {end}
     }
     fn sample_control(&self){
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {
             let data=self.control.data();
             if data.unknown && !self.unknown.swap(true,Ordering::SeqCst){self.changed();}
@@ -195,12 +195,12 @@ impl Operation {
     }
     fn known_originals(&self)->bool{
         if self.unknown.load(Ordering::SeqCst) || !self.known_observations(){return false;}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {return self.close.known();}
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {false}
     }
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn join_witness_matches(&self,identity:&OriginalUseIdentity)->bool{
         self.control.identity().same_original(identity) && !self.unknown.load(Ordering::SeqCst)
             && self.known_observations() && self.worker.try_lock().is_ok_and(|slot|slot.is_none())
@@ -219,7 +219,7 @@ impl Operation {
                 }
             }
         }
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if !self.close.join_seen.load(Ordering::SeqCst){
             if let Ok(mut slot)=self.close.handle.try_lock(){
                 if slot.is_some(){
@@ -247,7 +247,7 @@ impl Catalog {
     /// No lifecycle mutation, native/book access or post-tail probing. The
     /// worker froze its positive retained charge BEFORE moving the close tail;
     /// that conservative charge is retained, never changed to zero by release.
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn registration_retained_bytes(&self)->Option<usize>{
         fn arc<T>()->Option<usize>{
             let (layout,_)=std::alloc::Layout::new::<[usize;2]>().extend(std::alloc::Layout::new::<T>()).ok()?;
@@ -410,7 +410,7 @@ impl Catalog {
         crate::edit_protocol::bounded(&status,wire::STATUS_LIMIT)?;Ok(status)
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn freeze_candidate(candidate:CatalogCandidate,generation:u32)->Option<FrozenRows>{
     if candidate.rows.len()>wire::ENTRY_LIMIT{return None;}
     let mut rows=Vec::with_capacity(candidate.rows.len());
@@ -430,7 +430,7 @@ fn freeze_candidate(candidate:CatalogCandidate,generation:u32)->Option<FrozenRow
     // Pre-tail DATA validation only; these temporary rows are never published.
     result.publish(generation)?;Some(result)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn pre_tail_charge(original:&Operation,native:&LeasedAndroidCatalogSlots,rows:Option<&FrozenRows>)->Option<usize>{
     // Snapshot BEFORE tail movement, never re-query a retired book. These
     // positive retained books/metadata charges do not become fake zero at close.
@@ -445,12 +445,12 @@ fn pre_tail_charge(original:&Operation,native:&LeasedAndroidCatalogSlots,rows:Op
         .checked_add(3usize.checked_mul(wire::STATUS_LIMIT)?)?
         .checked_add(wire::ENTRY_LIMIT.checked_mul(std::mem::size_of::<crate::installed_runtime::CatalogRow>())?)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn observe_native(original:&Operation,failure:AdmissionFailure,at:Instant){
     original.stop_at(match failure{AdmissionFailure::Deadline=>wire::Reason::TimedOut,
         AdmissionFailure::Unknown=>wire::Reason::CleanupUnknown,_=>wire::Reason::CatalogUnavailable},at);
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn worker(original:Arc<Operation>,enter:oneshot::Receiver<()>)->WorkerReturn{
     let go=enter.blocking_recv().is_ok();
     let mut native=match original.native.lock(){
@@ -494,7 +494,7 @@ fn worker(original:Arc<Operation>,enter:oneshot::Receiver<()>)->WorkerReturn{
         Err(_)=>{original.mark_unknown();WorkerReturn{rows,entered:true,observations:false,retained_bytes,tail:None}},
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 async fn coordinate(original:Arc<Operation>,enter:oneshot::Receiver<()>,release:oneshot::Sender<()>)->bool{
     let mut stopped=original.stop.subscribe();let mut changed=original.audit.subscribe();
     let ready=tokio::select!{
@@ -584,7 +584,7 @@ impl SavedCommandOwner {
         if r.stopping||gate==Availability::Shutdown{return Availability::Shutdown;}
         if r.document_lost||gate==Availability::DocumentLost{return Availability::DocumentLost;}
         if self.inner.domain!=SavedCommandDomain::AndroidBuild
-            || !cfg!(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))){return Availability::UnsupportedPlatform;}
+            || !cfg!(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))){return Availability::UnsupportedPlatform;}
         if !self.inner.android_runtime_selected(None){return Availability::RuntimeUnqualified;}
         if r.active.is_some()||r.android_catalog.busy()||r.android_sources.busy()
             ||r.android_registration.busy()||gate==Availability::Busy{return Availability::Busy;}
@@ -613,9 +613,9 @@ impl SavedCommandOwner {
         if availability!=Availability::Available||!self.inner.android_original_document_matches(Some(document)){
             return Err(if availability==Availability::Busy{self.inner.domain.busy()}else{wire::unavailable()});
         }
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {let _=(admitted_at,recover);Err(wire::unavailable())}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {
             let recovery=if let Some(input)=recover{
                 if !crate::android_supplier_macos::available(){return Err(wire::unavailable());}
@@ -701,7 +701,7 @@ impl SavedCommandOwner {
             "android_catalog_unconfirmed","The original catalog cancellation result was not confirmed."))
     }
 }
-#[cfg(all(test,not(all(target_os="macos",target_arch="aarch64"))))]
+#[cfg(all(test,not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 mod tests {
     use super::*;
     #[test]

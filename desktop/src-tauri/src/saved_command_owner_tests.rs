@@ -19,13 +19,16 @@ fn context(domain: SavedCommandDomain) -> Context { match domain {
 #[test]
 fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
     use ios_wire::{ModeCapabilities as Modes, Operation};
-    let unsigned = Modes { unsigned: true, signed: false, recovery: false };
-    let signed = Modes { unsigned: false, signed: true, recovery: false };
-    assert_eq!(ios_mode_selection(true, None), unsigned);
+    let supported = Modes { unsigned: true, signed: true, recovery: true };
+    assert_eq!(ios_mode_selection(true, None), supported);
     assert_eq!(ios_mode_selection(false, None), Modes::NONE);
-    assert_eq!(ios_mode_selection(true, Some(signed)), signed);
-    assert_eq!(ios_mode_selection(true, Some(Modes::NONE)), Modes::NONE);
-    assert_eq!(ios_mode_selection(false, Some(unsigned)), Modes::NONE);
+    // Exhaust the three-mode observer mask. DATA can narrow an installed
+    // provider, never substitute for one; a closed observation has no fallback.
+    for mask in 0..8 {
+        let observed = Modes { unsigned: mask & 1 != 0, signed: mask & 2 != 0, recovery: mask & 4 != 0 };
+        assert_eq!(ios_mode_selection(true, Some(observed)), observed);
+        assert_eq!(ios_mode_selection(false, Some(observed)), Modes::NONE);
+    }
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let owner = application(domain);
         assert_eq!(owner.inner.ios_mode_capabilities(), Modes::NONE);
@@ -36,12 +39,18 @@ fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
     }
     let ios = application(SavedCommandDomain::IOSArchive);
     let modes = ios.inner.ios_mode_capabilities();
-    assert_eq!(ios.inner.ios_mode_qualified(&context(SavedCommandDomain::IOSArchive), None),
-        modes.supports(Operation::IOSUnsignedArchive));
-    assert!(!ios.inner.ios_mode_qualified(&Context::IOSArchive(ios_wire::tests::signed_context()), None));
-    assert!(!ios.inner.ios_mode_qualified(&Context::IOSArchive(ios_wire::tests::recovery_context()), None));
+    assert_eq!(modes, ios_mode_selection(ios.inner.ios_installed_selected(), None));
+    assert_eq!(ios.inner.qualified(None), ios.inner.ios_installed_selected());
+    for (selected, operation) in [
+        (context(SavedCommandDomain::IOSArchive), Operation::IOSUnsignedArchive),
+        (Context::IOSArchive(ios_wire::tests::signed_context()), Operation::IOSSignedExport),
+        (Context::IOSArchive(ios_wire::tests::recovery_context()), Operation::IOSLocalRecovery),
+    ] {
+        assert_eq!(ios.inner.ios_mode_qualified(&selected, None), modes.supports(operation));
+    }
     assert!(!ios.inner.ios_mode_qualified(&context(SavedCommandDomain::OfflinePreflight), None));
-    assert!(!modes.signed && !modes.recovery);
+    assert_eq!((modes.unsigned, modes.signed, modes.recovery),
+        (ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected()));
 }
 #[test]
 fn mode_only_status_changes_use_the_original_counter_without_changing_other_domains() {
@@ -96,9 +105,9 @@ fn active_with_context(application: SavedCommandOwner, context: Context) -> (Sav
     let owner = Arc::new(Session { domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, native_failure: Mutex::new(None),
-        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         android_control: None,
-        #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         android_close: None,
         stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
@@ -108,7 +117,7 @@ fn active_with_context(application: SavedCommandOwner, context: Context) -> (Sav
         driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
         driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         fixture: None,
     });
     p.phase = Phase::Starting; p.intent_usable = false;
@@ -354,7 +363,7 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
 #[test]
 fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runtime() {
     let owner = application(SavedCommandDomain::ProjectRecovery);
-    assert_eq!(owner.inner.qualified(None), cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    assert_eq!(owner.inner.qualified(None), cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
         && owner.inner.recovery_installed_selected());
     assert_eq!(owner.inner.recovery_installed_selected(), cfg!(feature = "custom-protocol")
         && owner.inner.runtime.project_recovery_installed_profile_available());
@@ -454,7 +463,6 @@ fn signed_and_recovery_clocks_share_only_original_first_failure_cleanup_not_work
         assert_eq!(clocks.cleanup_end(Some(clocks.finality)), clocks.cleanup);
         assert_eq!(clocks.settlement(Some(clocks.finality)), clocks.finality);
     }
-    assert!(!IOS_SIGNED_NATIVE_QUALIFIED && !IOS_RECOVERY_NATIVE_QUALIFIED);
 }
 
 fn recovery_terminal_data() -> ios_wire::Terminal {
@@ -831,9 +839,9 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
         let selected = match domain {
             SavedCommandDomain::OfflinePreflight => application.inner.offline_installed_selected(),
             SavedCommandDomain::AndroidBuild => false, // No original document/catalog selection was bound.
-            SavedCommandDomain::ProjectRecovery => cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            SavedCommandDomain::ProjectRecovery => cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
                 && application.inner.recovery_installed_selected(),
-            SavedCommandDomain::IOSArchive => application.inner.ios_unsigned_installed_selected(),
+            SavedCommandDomain::IOSArchive => application.inner.ios_installed_selected(),
         };
         assert_eq!(application.inner.qualified(None), selected);
         let cutoff = owner.native_audit_cutoff.subscribe();
@@ -1053,7 +1061,7 @@ async fn accepted_only_eof_is_not_a_settled_decoder_in_any_domain() {
 #[test]
 fn ios_consent_is_domain_local_one_use_and_cannot_qualify_runtime_custody() {
     let owner = application(SavedCommandDomain::IOSArchive);
-    assert_eq!(owner.inner.qualified(None), owner.inner.ios_unsigned_installed_selected());
+    assert_eq!(owner.inner.qualified(None), owner.inner.ios_installed_selected());
     let mut android = serde_json::to_value(android_wire::tests::context()).unwrap();
     android.as_object_mut().unwrap().remove("platform"); android.as_object_mut().unwrap().remove("operation");
     assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());

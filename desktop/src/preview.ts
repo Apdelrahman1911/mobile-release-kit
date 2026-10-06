@@ -1,4 +1,4 @@
-import { installationError, installationCheckError } from './installation.ts';
+import { installationError, installationCheckError, installationPreparationError } from './installation.ts';
 import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
@@ -143,6 +143,8 @@ export const previewApi: DesktopApi = {
   installationStatus: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
   inspectInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
   cancelInstallation: async () => { throw installationCheckError({ code: 'installation_check_unavailable' }); },
+  installationPreparationStatus: async () => { throw installationPreparationError({ code: 'macos_maintenance_unavailable' }); },
+  prepareInstallationQuit: async () => { throw installationPreparationError({ code: 'macos_maintenance_unavailable' }); },
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
   // No invented relative path or successful native selection in design mode.
   chooseProjectPath: async () => { throw projectPathError({ code: 'project_path_unavailable' }); },

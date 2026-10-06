@@ -1,4 +1,5 @@
-import { installationError, installationCheckError, parseInstallationReveal, parseInstallationCancel, parseInstallationStatus } from './installation.ts';
+import { installationError, installationCheckError, installationPreparationError, parseInstallationReveal, parseInstallationCancel,
+  parseInstallationStatus, parseInstallationPreparationRequest, parseInstallationPreparationStatus } from './installation.ts';
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
 import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
@@ -308,6 +309,24 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!result) throw { code: 'installation_check_unconfirmed' };
         return result;
       } catch (error) { throw installationCheckError(error); }
+    },
+    installationPreparationStatus: async () => {
+      try {
+        if (mode !== 'native') throw { code: 'macos_maintenance_unavailable' };
+        const result = parseInstallationPreparationStatus(await invoke<unknown>('installation_preparation_status', {}));
+        if (!result) throw { code: 'installation_preparation_unconfirmed' };
+        return result;
+      } catch (error) { throw installationPreparationError(error); }
+    },
+    prepareInstallationQuit: async (input) => {
+      try {
+        if (mode !== 'native') throw { code: 'macos_maintenance_unavailable' };
+        const request = parseInstallationPreparationRequest(input);
+        if (!request) throw { code: 'invalid_request' };
+        const result = parseInstallationPreparationStatus(await invoke<unknown>('prepare_installation_quit', request));
+        if (!result) throw { code: 'installation_preparation_unconfirmed' };
+        return result;
+      } catch (error) { throw installationPreparationError(error); }
     },
     chooseProject: () => call<ProjectReference | null>('choose_project'),
     chooseProjectPath: async (input) => {

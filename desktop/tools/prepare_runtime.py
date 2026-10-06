@@ -261,14 +261,17 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool) -> dict
             "qualification": "prepared-not-native-verified"}
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--target", required=True, choices=sorted(TARGETS))
-    args = parser.parse_args()
+    parser.add_argument("--profile", choices=("historical", "current"), default="historical",
+                        help="Explicit current ten-bootstrap product roster, or backward-compatible historical roster")
+    args = parser.parse_args(argv)
     try:
-        print(json.dumps(prepare(args.source, args.runtime_root, args.target), sort_keys=True))
+        action = prepare_current if args.profile == "current" else prepare
+        print(json.dumps(action(args.source, args.runtime_root, args.target), sort_keys=True))
     except (OSError, ValueError, KeyError, UnicodeError):
         parser.exit(1, "Runtime preparation failed. Existing inputs/partial output were preserved; no native qualification was performed.\n")
 

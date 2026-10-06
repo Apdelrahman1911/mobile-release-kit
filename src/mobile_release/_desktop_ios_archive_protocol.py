@@ -24,7 +24,9 @@ SIGNED_PROTOCOL = "mrk-ios-archive/2"
 SIGNED_CONSENT = "saved-ios-signed-export-v2"
 SIGNED_SCOPE = "local-signed-ios-artifact-validation"
 TOOLCHAIN_PROFILE = "ios-full-xcode-macos-arm64-v1"
-PROFILES = {"macos-arm64": ("macos", "arm64")}
+X64_TOOLCHAIN_PROFILE = "ios-full-xcode-macos-x86_64-v1"
+TOOLCHAIN_PROFILES = {"macos-arm64": TOOLCHAIN_PROFILE, "macos-x86_64": X64_TOOLCHAIN_PROFILE}
+PROFILES = {"macos-arm64": ("macos", "arm64"), "macos-x86_64": ("macos", "x86_64")}
 RENDERER_REQUEST_LIMIT, REQUEST_LIMIT, RESPONSE_LIMIT = 8 * 1024, 32 * 1024, 64 * 1024
 INTENT_SECONDS, WORK_SECONDS, FINALITY_SECONDS = 300, 90 * 60, 90 * 60 + 10
 SIGNED_CLEANUP_SECONDS, SIGNED_FINALITY_SECONDS = 5520, 5530
@@ -158,7 +160,8 @@ def _native(value: object, *, signed: bool = False, recovery: bool = False) -> d
     require(_enum(value["profile"], PROFILES))
     tool = _keys(value["toolchain"], {"schemaVersion", "profile", "developerDir", "developerIdentity",
                                      "xcodebuildIdentity", "sdk", "sdkIdentity"})
-    require(type(tool["schemaVersion"]) is int and tool["schemaVersion"] == 1 and tool["profile"] == TOOLCHAIN_PROFILE)
+    require(type(tool["schemaVersion"]) is int and tool["schemaVersion"] == 1
+            and tool["profile"] == TOOLCHAIN_PROFILES[value["profile"]])
     developer, sdk = _path(tool["developerDir"]), _path(tool["sdk"])
     require(developer.endswith(".app/Contents/Developer") and developer.startswith("/Applications/")
             and sdk.startswith(developer + "/Platforms/iPhoneOS.platform/Developer/SDKs/")

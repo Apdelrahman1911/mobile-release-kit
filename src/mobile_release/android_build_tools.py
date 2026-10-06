@@ -146,7 +146,8 @@ class _Binding:
 
 
 def _binding(value: object) -> _Binding:
-    if type(value) is dict and value.get("profile") == "android-registered-macos-arm64-v1":
+    if type(value) is dict and value.get("profile") in (
+            "android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"):
         from .android_build_tools_macos import binding
         return binding(value)
     value = _keys(value, {"schemaVersion", "profile", "root", "rootIdentity", "inventorySha256"})
@@ -560,7 +561,7 @@ class AndroidValidationTools:
         self._final_hash_claimed = False
         self._first_error: BaseException | None = None
         self._mac = None
-        if self.binding.profile == "android-registered-macos-arm64-v1":
+        if self.binding.profile in ("android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"):
             from .android_build_tools_macos import MacAdmission
             self._mac = MacAdmission(self)
 

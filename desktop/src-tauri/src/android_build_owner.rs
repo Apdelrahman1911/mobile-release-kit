@@ -116,25 +116,29 @@ impl AndroidBuildOwner {
     pub(crate) fn cancel_service(&self,input:&crate::android_registration_app_protocol::ServiceCancel,
         publication:Option<&crate::saved_command_owner::AndroidRegistrationCancelPublisher>,gate:Availability)
         ->Result<crate::android_registration_app_protocol::ServiceStatus,BridgeError>{self.saved.cancel_android_tool_service(input,publication,gate)}
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn bind_service_dispatcher(&self,document:&std::sync::Arc<()>,dispatcher:crate::saved_command_owner::AndroidServiceDispatcher)->bool{
         self.saved.bind_android_service_dispatcher(document,dispatcher)
     }
 
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn maintenance_readiness(&self,document:&std::sync::Arc<()>)->(bool,bool){
+        self.saved.maintenance_readiness(document)
+    }
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn maintenance_snapshot(&self,document:&std::sync::Arc<()>,request:crate::saved_command_owner::MacosMaintenanceRequest)
         ->Result<crate::saved_command_owner::MacosMaintenanceSnapshot,BridgeError>{
         self.saved.maintenance_snapshot(document,request)
     }
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn admit_maintenance(&self,document:&std::sync::Arc<()>,checked:&crate::saved_command_owner::MacosMaintenanceChecked,
         census:&crate::asset_session::MacosMaintenanceCensus<'_>)->Result<crate::saved_command_owner::MacosMaintenanceAdmitted,BridgeError>{
         self.saved.admit_maintenance(document,checked,census)
     }
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn maintenance_status(&self,handle:&crate::saved_command_owner::MacosMaintenanceHandle)
         ->crate::saved_command_owner::MacosMaintenanceStatus{self.saved.maintenance_status(handle)}
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn finalize_maintenance(&self,document:&std::sync::Arc<()>,handle:&crate::saved_command_owner::MacosMaintenanceHandle,
         live:bool)->Option<crate::saved_command_owner::MacosMaintenanceCompletion>{
         self.saved.finalize_maintenance(document,handle,live)

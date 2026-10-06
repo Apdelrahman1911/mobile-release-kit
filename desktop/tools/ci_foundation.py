@@ -1594,7 +1594,7 @@ WINDOWS_INSTALLED_APP_LOCALS = {
 # The complete cross-platform source lock is not the active Windows graph.
 # Linux vendors stay source-bound here but must never become Windows units.
 WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
-    "mobile-release-kit-desktop": "0.1.0",
+    "mobile-release-kit-desktop": "0.1.1",
     "mrk-linux-mount-observation": "0.1.0",
     "mrk-macos-installed-native": "0.1.0",
     "mrk-windows-installed-native": "0.1.0",
@@ -12970,7 +12970,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
         require(key in locked and key not in identities, "Windows app package is duplicated/outside the original lock")
         identities.add(key)
         if key[2] is None:
-            require(key[0] in active_locals and key[0] not in local and key[1] == "0.1.0"
+            require(key[0] in active_locals and key[0] not in local and key[1] == WINDOWS_INSTALLED_APP_LOCK_LOCALS[key[0]]
                     and package["manifest_path"] == str(source / WINDOWS_INSTALLED_APP_LOCALS[key[0]]),
                     "Windows app declared local path differs")
             local[key[0]] = package["id"]
@@ -13161,7 +13161,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             ("crypto-common", "0.1.7", "^1.14", True, []),
             ("generic-array", "0.14.7", "^1.12", True, []))),
         ("tokio", "1.48.0", tokio_definitions, (
-            ("mobile-release-kit-desktop", "0.1.0", "=1.48.0", True,
+            ("mobile-release-kit-desktop", "0.1.1", "=1.48.0", True,
              ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]),)),
         ("syn", "2.0.119", syn_definitions, (
             ("serde_derive", "1.0.228", "^2.0.81", False,
@@ -13171,10 +13171,10 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         ("serde", "1.0.228", {
             "default": ["std"], "derive": ["serde_derive"],
             "serde_derive": ["dep:serde_derive"], "std": ["serde_core/std"],
-        }, (("mobile-release-kit-desktop", "0.1.0", "=1.0.228", True, ["derive"]),)),
+        }, (("mobile-release-kit-desktop", "0.1.1", "=1.0.228", True, ["derive"]),)),
         ("serde_json", "1.0.145", {
             "default": ["std"], "std": ["memchr/std", "serde_core/std"],
-        }, (("mobile-release-kit-desktop", "0.1.0", "=1.0.145", True, []),)),
+        }, (("mobile-release-kit-desktop", "0.1.1", "=1.0.145", True, []),)),
         # Parents precede core: metadata-only alloc/rc forwarding is not a
         # normal compiler grant. In this locked core manifest std does not
         # activate the alloc Cargo feature.
@@ -13218,7 +13218,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
             # that edge is DATA, not a normal compiler-feature grant.
             time_key, time_package = package("time", "0.3.55")
             plist_key, plist_package = package("plist", "1.10.1")
-            app_key, app_package = package("mobile-release-kit-desktop", "0.1.0", local=True)
+            app_key, app_package = package("mobile-release-kit-desktop", "0.1.1", local=True)
             library(time_package)
             library(plist_package)
             time_mapping, time_selected = feature_data(time_key, time_package)

@@ -10,12 +10,19 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import re
+import stat
+import struct
 import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
+from importlib.machinery import ModuleSpec, SourceFileLoader
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile, LargeZipFile, ZipFile, ZIP_DEFLATED, ZIP_STORED
+from zipimport import zipimporter
+from zlib import error as ZlibError
 
 from .config import MAX_CONFIG_BYTES
 from .errors import ValidationError
@@ -96,12 +103,125 @@ class ImageType:
     dimensions: tuple[tuple[int, int], ...]
 
 
+_PUBLIC_CATALOG_NAMES = frozenset({"metadata-images-v1.json", "metadata-image-help-v1.json"})
+_PUBLIC_CATALOG_ARCHIVE_BYTES = 40 * 1024 * 1024
+_PUBLIC_CATALOG_DIRECTORY_BYTES = 2 * 1024 * 1024
+_PUBLIC_CATALOG_MEMBERS = 2048
+
+
+def _resource_state(value: os.stat_result) -> tuple[int, ...]:
+    state = (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+             value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    if os.name == "nt":
+        # Keep full same-API observations, including descriptor ChangeTime.
+        state += (value.st_birthtime_ns, value.st_file_attributes, value.st_reparse_tag)
+    return state
+
+
+def _resource_same_file(named: os.stat_result, held: os.stat_result, path: str) -> bool:
+    left, right = _resource_state(named), _resource_state(held)
+    if os.name != "nt":
+        return left == right
+    # Windows pathname stat exposes birthtime as ctime while fstat exposes
+    # ChangeTime. Compare birthtime across APIs; retain each raw POST below.
+    comparable = list(left[:8] + left[9:])
+    if path.lower().endswith((".exe", ".bat", ".cmd", ".com")):
+        comparable[2] &= ~0o111  # Only the documented pathname decoration.
+    return tuple(comparable) == right[:8] + right[9:]
+
+
+def _zip_catalog_bytes(raw: Any, archive_size: int, name: str) -> bytes:
+    """Only our fixed public JSON members, not a project/archive importer."""
+    # Bound the central-directory allocation before constructing ZipFile.
+    # The core producer emits a conventional single-disk, comment-free ZIP.
+    raw.seek(-42, os.SEEK_END)
+    tail = raw.read(43)
+    _require(len(tail) == 42 and tail[:4] != b"PK\x06\x07", "catalog_unavailable")
+    signature, disk, directory_disk, disk_count, count, size, offset, comment = struct.unpack(
+        "<4s4H2IH", tail[-22:])
+    _require(signature == b"PK\x05\x06" and disk == directory_disk == 0
+             and disk_count == count and 0 < count <= _PUBLIC_CATALOG_MEMBERS
+             and comment == 0 and 0 < size <= _PUBLIC_CATALOG_DIRECTORY_BYTES
+             and offset + size == archive_size - 22, "catalog_unavailable")
+    with ZipFile(raw, "r") as archive:
+        entries = archive.infolist()
+        _require(len(entries) == count, "catalog_unavailable")
+        matches = [entry for entry in entries
+                   if entry.filename == "mobile_release/api/data/" + name]
+        _require(len(matches) == 1, "catalog_unavailable")
+        entry = matches[0]
+        _require(0 < entry.file_size <= MAX_CATALOG_BYTES
+                 and entry.compress_type in (ZIP_STORED, ZIP_DEFLATED)
+                 and not entry.flag_bits & 1, "catalog_unavailable")
+        with archive.open(entry, "r") as member:
+            # At most128KiB+1; consume the declared EOF and its CRC check.
+            content = member.read(entry.file_size + 1)
+            _require(type(content) is bytes and len(content) == entry.file_size,
+                     "catalog_unavailable")
+    return content
+
+
+def _catalog_resource(name: str) -> bytes:
+    """Read current bundled DATA through its real loader, without extraction.
+
+    The installed-runtime owner authenticates the protected complete core. This
+    only supplies bounded resource access; it grants no project file authority.
+    """
+    _require(name in _PUBLIC_CATALOG_NAMES, "catalog_unavailable")
+    spec = __spec__
+    loader = getattr(spec, "loader", None)
+    _require(type(spec) is ModuleSpec and spec.name == "mobile_release.metadata_images"
+             and spec.origin == __file__ and __loader__ is loader, "catalog_unavailable")
+    packed = type(loader) is zipimporter
+    if packed:
+        _require(loader.prefix == "mobile_release" + os.sep
+                 and __file__ == str(Path(loader.archive) / "mobile_release/metadata_images.py"),
+                 "catalog_unavailable")
+        path, minimum, maximum = loader.archive, 42, _PUBLIC_CATALOG_ARCHIVE_BYTES
+    else:
+        _require(type(loader) is SourceFileLoader and loader.name == spec.name
+                 and loader.path == __file__, "catalog_unavailable")
+        path = str(Path(__file__).parent / "api" / "data" / name)
+        minimum, maximum = 1, MAX_CATALOG_BYTES
+
+    def opener(path: str, flags: int) -> int:
+        # These POSIX flags are absent on Windows; its regular/reparse and
+        # same-held/named identity checks remain mandatory, without fallback.
+        return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0)
+                       | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+
+    try:
+        named = os.lstat(path)
+        _require(stat.S_ISREG(named.st_mode) and named.st_nlink == 1
+                 and not getattr(named, "st_file_attributes", 0) & 0x400
+                 and minimum <= named.st_size <= maximum, "catalog_unavailable")
+        original = _resource_state(named)
+        # FileIO owns one original descriptor. ZipFile and its member use that
+        # same stream; neither reopens the archive or extracts a resource.
+        with open(path, "rb", buffering=0, opener=opener) as raw:
+            held = os.fstat(raw.fileno())
+            _require(_resource_same_file(named, held, path), "catalog_unavailable")
+            if packed:
+                content = _zip_catalog_bytes(raw, named.st_size, name)
+            else:
+                content = raw.read(named.st_size + 1)
+                _require(type(content) is bytes and len(content) == named.st_size,
+                         "catalog_unavailable")
+            _require(_resource_state(os.fstat(raw.fileno())) == _resource_state(held)
+                     and _resource_state(os.lstat(path)) == original, "catalog_unavailable")
+        _require(_resource_state(os.lstat(path)) == original, "catalog_unavailable")
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError,
+            EOFError, BadZipFile, LargeZipFile, struct.error, ZlibError):
+        raise MetadataImagesInputError("catalog_unavailable") from None
+    # JSON validation/caching cannot accept data until every close returned.
+    return content
+
+
 @lru_cache(maxsize=1)
 def _types() -> tuple[ImageType, ...]:
     """Trusted packaged DATA only, never a file from the selected project."""
     try:
-        with (Path(__file__).parent / "api" / "data" / "metadata-images-v1.json").open("rb") as handle:
-            raw = handle.read(MAX_CATALOG_BYTES + 1)
+        raw = _catalog_resource("metadata-images-v1.json")
         _require(len(raw) <= MAX_CATALOG_BYTES, "catalog_unavailable")
         value = json.loads(raw)
         _require(type(value) is dict and value["schemaVersion"] == 1
@@ -163,8 +283,7 @@ def catalog() -> dict[str, Any]:
     """Static guidance, never a runtime qualification or image inspection."""
     types = _types()
     try:
-        with (Path(__file__).parent / "api" / "data" / "metadata-image-help-v1.json").open("rb") as handle:
-            raw = handle.read(MAX_CATALOG_BYTES + 1)
+        raw = _catalog_resource("metadata-image-help-v1.json")
         _require(len(raw) <= MAX_CATALOG_BYTES, "catalog_unavailable")
         parsed = json.loads(raw)
         _require(type(parsed) is dict and set(parsed) == {"schemaVersion", "fields"}

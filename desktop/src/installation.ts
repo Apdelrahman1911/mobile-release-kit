@@ -175,3 +175,80 @@ export const INSTALLATION_CHECK_GUIDANCE: Record<InstallationCheckReason, string
   deadline: 'The original check exceeded its fixed work limit. Cleanup is separate; a late result cannot turn this into a pass.',
   'cleanup-unknown': 'Resource cleanup is unconfirmed. Keep the app open to observe the original owner; no new check or maintenance is authorized.',
 };
+
+export const PREPARE_QUIT_CONFIRMATION = 'Stop the installed Android helper and prepare this application to quit';
+export type InstallationPreparationPhase = 'not-started' | 'preparing' | 'unregistering' | 'settling' | 'prepared' | 'refused' | 'unknown';
+export type InstallationPreparationReason = 'none' | 'unavailable-profile' | 'busy' | 'document-unavailable'
+  | 'context-changed' | 'cancelled' | 'deadline' | 'native' | 'cleanup-unknown';
+export interface InstallationPreparationStatus {
+  schemaVersion: 1; available: boolean; canStart: boolean; operationId: string | null; generation: number | null;
+  phase: InstallationPreparationPhase; reason: InstallationPreparationReason; newWorkClosed: boolean;
+  assurance: 'preparation-status-only';
+}
+const PREPARATION_PHASES: readonly InstallationPreparationPhase[] = ['not-started', 'preparing', 'unregistering', 'settling', 'prepared', 'refused', 'unknown'];
+const PREPARATION_REASONS: readonly InstallationPreparationReason[] = ['none', 'unavailable-profile', 'busy', 'document-unavailable', 'context-changed', 'cancelled', 'deadline', 'native', 'cleanup-unknown'];
+export function parseInstallationPreparationRequest(value: unknown): { confirmation: typeof PREPARE_QUIT_CONFIRMATION } | null {
+  const row = record(value, ['confirmation']);
+  return row?.confirmation === PREPARE_QUIT_CONFIRMATION ? { confirmation: PREPARE_QUIT_CONFIRMATION } : null;
+}
+export function parseInstallationPreparationStatus(value: unknown): InstallationPreparationStatus | null {
+  const row = record(value, ['schemaVersion', 'available', 'canStart', 'operationId', 'generation', 'phase', 'reason', 'newWorkClosed', 'assurance']);
+  if (!row || row.schemaVersion !== 1 || typeof row.available !== 'boolean' || typeof row.canStart !== 'boolean'
+    || typeof row.newWorkClosed !== 'boolean' || row.assurance !== 'preparation-status-only'
+    || typeof row.phase !== 'string' || !PREPARATION_PHASES.includes(row.phase as InstallationPreparationPhase)
+    || typeof row.reason !== 'string' || !PREPARATION_REASONS.includes(row.reason as InstallationPreparationReason)
+    || row.operationId !== null && (typeof row.operationId !== 'string' || !/^[0-9a-f]{32}$/.test(row.operationId) || /^0+$/.test(row.operationId))
+    || row.generation !== null && (!counter(row.generation, true) || row.generation === 0xffffffff)
+    || (row.operationId === null) !== (row.generation === null)
+    || (row.phase === 'not-started') !== (row.operationId === null)
+    || row.canStart && (!row.available || row.newWorkClosed)
+    || row.phase === 'not-started' && (row.newWorkClosed || row.canStart && row.reason !== 'none')
+    || row.phase !== 'not-started' && row.phase !== 'refused' && (!row.newWorkClosed || row.canStart)
+    || row.phase === 'refused' && row.reason === 'none'
+    || row.phase === 'prepared' && row.reason !== 'none'
+    || row.phase === 'unknown' && row.reason !== 'cleanup-unknown') return null;
+  return { schemaVersion: 1, available: row.available, canStart: row.canStart, operationId: row.operationId as string | null,
+    generation: row.generation as number | null, phase: row.phase as InstallationPreparationPhase,
+    reason: row.reason as InstallationPreparationReason, newWorkClosed: row.newWorkClosed, assurance: 'preparation-status-only' };
+}
+export function installationPreparationActive(status: InstallationPreparationStatus | null): boolean {
+  return status !== null && ['preparing', 'unregistering', 'settling'].includes(status.phase);
+}
+export function installationPreparationError(error: unknown): ApiError {
+  let code: unknown;
+  try {
+    const descriptor = typeof error === 'object' && error !== null ? Object.getOwnPropertyDescriptor(error, 'code') : undefined;
+    if (descriptor && 'value' in descriptor) code = descriptor.value;
+  } catch { /* Raw native/provider rejection data is never retained. */ }
+  if (code === 'macos_maintenance_unavailable') return { code,
+    message: 'Preparation requires the normal installed app, its configured Android helper and settled work. Refresh status before trying again. Project signing settings cannot enable an unavailable app profile.', retryable: false };
+  if (code === 'busy' || code === 'quit_pending' || code === 'macos_maintenance_busy') return { code: 'macos_maintenance_busy',
+    message: 'Finish or cancel the existing operation or quit question, then refresh. No replacement preparation was started automatically.', retryable: false };
+  if (code === 'cleanup_unknown') return { code,
+    message: 'An original operation has unconfirmed cleanup. Keep the app open; do not delete installed files, terminate other processes or start another preparation.', retryable: false };
+  if (code === 'shutting_down' || code === 'installation_document_unavailable') return { code: 'installation_document_unavailable',
+    message: 'The original app window is closing or unavailable. Preserve the original status; no replacement preparation was started.', retryable: false };
+  if (code === 'invalid_request' || code === 'installation_preparation_invalid') return { code: 'installation_preparation_invalid',
+    message: 'Preparation needs the explicit confirmation shown here. No paths, commands or Installer choices are accepted.', retryable: false };
+  return { code: 'installation_preparation_unconfirmed',
+    message: 'The preparation reply could not be confirmed. Refresh the original status; the app does not retry preparation or treat a lost reply as completion.', retryable: false };
+}
+export const installationPreparationHelp: HelpContent = {
+  label: 'Prepare app to quit', requiredness: 'optional', requiredWhen: 'Use only when you want to stop the installed Android helper and close this app.',
+  what: 'An explicit request to stop new work, settle the original helper operation and then use the app’s normal Quit flow.',
+  why: 'Closing a window alone does not establish that the installed helper and its original work have settled.',
+  where: 'Use the normal app in the protected location above. Finish active work, review the explanation, and select the confirmation checkbox.',
+  format: 'No paths, passwords, project signing inputs or terminal commands. The checkbox applies to one explicit preparation request.',
+  failure: 'A failure or unconfirmed cleanup is not safe completion. Keep the app and evidence intact; do not kill unrelated processes or delete installed files. This does not install, repair, update or uninstall the app and makes no Store changes.',
+};
+export const INSTALLATION_PREPARATION_GUIDANCE: Record<InstallationPreparationReason, string> = {
+  none: 'Preparation is separate from installation checking. This status does not authorize an Installer operation or prove the app has exited.',
+  'unavailable-profile': 'This build does not currently expose the required installed helper for this original window. Project signing credentials cannot enable it.',
+  busy: 'Finish or cancel the current native work and dismiss any quit question, then refresh before confirming preparation.',
+  'document-unavailable': 'The original app window is closing or unavailable. Do not use an old status as permission to replace files.',
+  'context-changed': 'The original context changed. Keep the retained result and refresh; no automatic replacement request is made.',
+  cancelled: 'The original request was cancelled. A cancelled result is not successful preparation.',
+  deadline: 'The original operation reached its fixed deadline. A later reply cannot turn this into successful preparation.',
+  native: 'The original native helper operation was refused or failed. Retain its result and refresh status; do not bypass it by changing installed files.',
+  'cleanup-unknown': 'The original cleanup is unconfirmed. Keep the app open and retain evidence. New preparation, automatic helper registration and file removal are not authorized.',
+};

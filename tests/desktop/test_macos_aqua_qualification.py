@@ -405,9 +405,22 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(label), 1)
         position = workflow.index(label)
         self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
+        # The reviewed fresh supplier route is DATA-only and precedes the
+        # native owner preflight; it does not reuse the removed M-download step.
+        previous = workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n")
+        for earlier in ("Admit only a fresh independently pinned Python transport destination",
+                        "Download the independently accepted fresh Python transport",
+                        "Project the pinned fresh Python transport without executing it",
+                        "Prepare the current payload from the independently accepted fresh Python supplier"):
+            supplier_label = "      - name: " + earlier + "\n"
+            self.assertEqual(workflow.count(supplier_label), 1)
+            current = workflow.index(supplier_label)
+            self.assertLess(previous, current)
+            self.assertLess(current, position)
+            previous = current
+        self.assertNotIn("      - name: Download only the exact accepted M archive (no rebuild or fallback)\n", workflow)
         for later in ("Compile headless Mac libraries and run the exact selected DATA regressions first",
                       "Fail fast on native Scripts ownership and package format (never Installer)",
-                      "Download only the exact accepted M archive (no rebuild or fallback)",
                       "Compile the fixed debug actual-main observer and normal embedded frontend once",
                       "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
             self.assertLess(position, workflow.index("      - name: " + later + "\n"))
@@ -489,7 +502,7 @@ class AquaDataTests(unittest.TestCase):
             '               ["default", "installed-observation"] if shipping_gate else ["default"], native_names, native_count, "headless-native"),\n')
         for required in ("if len(targets) != 2:", "for role, directory, package, library, features, test_names, count, prefix in libraries:",
                          'r.get("target", {}).get("name") == library', "if len(matches) != 1:",
-                         'package_id = "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"',
+                         'package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")',
                          'target.get("package_id") != package_id',
                          'target.get("manifest_path") != str(checkout / directory / "Cargo.toml")',
                          'target["target"].get("kind") != ["lib"]', 'target["target"].get("crate_types") != ["lib"]',
@@ -4144,38 +4157,42 @@ class IOSAquaDataTests(unittest.TestCase):
                      "second_supervisor.claim_supervisor()", "drop(original); first.bind_document(&replacement);"):
             self.assertIn(fact, shared)
         shared_cfg = runtime.split("pub(crate) fn assert_installed_session_selection_contract()", 1)[0].rsplit("#[cfg(", 1)[1]
-        self.assertIn('all(target_os = "macos", target_arch = "aarch64")', shared_cfg)
+        self.assertIn('all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))', shared_cfg)
         early = observer.split("fn observer_data_checks()", 1)[1].split("fn observe(q:", 1)[0]
         self.assertIn("crate::runtime::assert_installed_session_selection_contract();", early)
         platform_gate = document.split("fn ordinary_asset_platform_gate()", 1)[1].split("fn session_kind_gate(", 1)[0]
         project_contract = document.split("pub(crate) fn assert_project_selection_gate_contract()", 1)[1].split("\n}", 1)[0]
-        supported = 'cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),\n        all(target_os = "macos", target_arch = "aarch64"),\n        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))'
+        supported = 'cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),\n        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),\n        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))'
         self.assertIn("if !" + supported, platform_gate)
         self.assertIn("let platform = if " + supported, project_contract)
         self.assertIn("assert_eq!(ordinary_asset_platform_gate().err().map(|error| error.reason), platform);", project_contract)
         self.assertIn("crate::asset_session::assert_project_selection_gate_contract();", early)
 
-        normal = owner.split("fn ios_unsigned_installed_selected(", 1)[1].split("fn qualified(", 1)[0]
+        normal = owner.split("fn ios_installed_selected(", 1)[1].split("fn android_original_document_matches(", 1)[0]
         for term in ('self.domain == SavedCommandDomain::IOSArchive', 'feature = "desktop-shell"',
                      'feature = "custom-protocol"', 'not(feature = "development-runtime")',
                      'not(feature = "ubuntu-runtime-publisher")', 'not(feature = "windows-runtime-publisher")',
-                     'not(feature = "macos-installed-installer")', 'target_os = "macos", target_arch = "aarch64"',
+                     'not(feature = "macos-installed-installer")', 'not(feature = "macos-android-registration-helper")',
+                     'target_os = "macos"', '&& ios_wire::Profile::current().is_some()',
                      '&& self.runtime.ios_archive_installed_profile_available()'):
             self.assertIn(term, normal)
         for forbidden in ("ios_observation", "IOS_ARCHIVE_NATIVE_QUALIFIED"):
             self.assertNotIn(forbidden, normal)
         for name in ("IOS_SIGNED_NATIVE_QUALIFIED", "IOS_RECOVERY_NATIVE_QUALIFIED"):
-            self.assertIn(f"const {name}: bool = false;", owner)
+            self.assertNotIn(f"const {name}:", owner)
+        selection = owner.split("fn ios_mode_selection(", 1)[1].split("const IOS_WORK", 1)[0]
+        self.assertIn("if !installed { return ios_wire::ModeCapabilities::NONE; }", selection)
+        self.assertIn("observed.unwrap_or(ios_wire::ModeCapabilities { unsigned: true, signed: true, recovery: true })", selection)
         qualified = owner.split("fn qualified(", 1)[1].split("fn lock(&self)", 1)[0]
         self.assertIn("if let Some(observation) = book.as_ref()", qualified)
-        self.assertIn("return self.runtime.ios_archive_installed_profile_available()", qualified)
-        self.assertIn("[ios_wire::Operation::IOSSignedExport, ios_wire::Operation::IOSLocalRecovery]", qualified)
-        self.assertIn("|| self.ios_unsigned_installed_selected()\n                            && observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive)", qualified)
-        self.assertIn("SavedCommandDomain::IOSArchive => self.ios_unsigned_installed_selected()", qualified)
+        self.assertIn("let modes = self.ios_observed_mode_capabilities(observation);", qualified)
+        self.assertIn("return modes.unsigned || modes.signed || modes.recovery;", qualified)
+        self.assertNotIn("observation.control.permits_mode(", qualified)
+        self.assertIn("SavedCommandDomain::IOSArchive => self.ios_installed_selected()", qualified)
         mode = owner.split("fn ios_mode_qualified(", 1)[1].split("fn start_clocks(", 1)[0]
         self.assertIn("(Some(owner), Some(bound)) => std::ptr::eq(bound.original.as_ref(), owner)", mode)
-        self.assertIn("return same_original && observation.control.permits_mode(selected.operation)", mode)
-        self.assertIn("selected.operation != ios_wire::Operation::IOSUnsignedArchive || self.ios_unsigned_installed_selected()", mode)
+        self.assertIn("return same_original && self.ios_observed_mode_capabilities(observation).supports(selected.operation)", mode)
+        self.assertIn("ios_mode_selection(self.ios_installed_selected(), None).supports(selected.operation)", mode)
 
         sample = document.split("pub(crate) fn observe_installed_macos_normal_selection(", 1)[1].split("pub(crate) fn register_installed_macos_session(", 1)[0]
         self.assertIn("if observation.is_some()", sample)
@@ -4183,7 +4200,7 @@ class IOSAquaDataTests(unittest.TestCase):
         self.assertIn("self.inner.bridge.ios_archive.observe_installed_unsigned_selection()", sample)
         owner_sample = owner.split("pub(crate) fn observe_installed_unsigned_selection(", 1)[1].split("pub(crate) fn admit_installed_ios_observation(", 1)[0]
         for gate in ("r.revision != 0", "r.active.is_some()", "r.prepared.is_some()", "r.last.is_some()",
-                     "r.document_lost", "r.exhausted", "self.inner.poisoned.load", "!self.inner.ios_unsigned_installed_selected()", "if slot.is_some()"):
+                     "r.document_lost", "r.exhausted", "self.inner.poisoned.load", "!self.inner.ios_installed_selected()", "if slot.is_some()"):
             self.assertIn(gate, owner_sample)
         wrapper = supervisor.split("pub(crate) fn assert_installed_session_available(", 1)[1].split("pub fn disabled(", 1)[0]
         self.assertIn("!owners.is_empty() || self.inner.next.load(Ordering::SeqCst) != 1 || self.stopping() || self.disabled()", wrapper)
@@ -4319,7 +4336,7 @@ class IOSAquaDataTests(unittest.TestCase):
             with self.assertRaises(M.Refused):
                 M.case_timeout(case)
         source = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        self.assertIn("Duration::from_secs(if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 })", source)
+        self.assertIn("Duration::from_secs(if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 })", source)
         self.assertIn("!ios::data_checks()", source)
         child = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos_ios.rs").read_text()
         data_check = child.split("pub(super) fn data_checks()", 1)[1].split("pub(super) fn snapshot_failure", 1)[0]
@@ -5200,7 +5217,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         fields = good["projectFields"]
         self.assertEqual(fields["schemaVersion"], 2)
         self.assertEqual(fields["previewValidation"], "invalid-retained-ios-fields")
-        self.assertIs(fields["normalProfileAvailable"], False)
+        self.assertIs(fields["normalProfileAvailable"], True)
         self.assertIs(fields["shippingProfileEnabledByThisReceipt"], False)
         # Literal independent journey roster. The helper's own table is not
         # used as the oracle for IDs, purpose, source entry, masks or results.
@@ -5272,7 +5289,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         for mutation in (
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(mechanism="accessibility-version-source-selection-press-v6"),
             lambda v: v.update(schemaVersion=1),
-            lambda v: v.update(normalProfileAvailable=True),
+            lambda v: v.update(normalProfileAvailable=False),
             lambda v: v.update(shippingProfileEnabledByThisReceipt=True),
             lambda v: v.update(oneUseOriginalDocumentRegistration=False),
             lambda v: v.update(allOriginalsSettled=False),
@@ -6883,9 +6900,11 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
         fields = (root / "src-tauri/src/installed_shell_observation_macos_project_fields.rs").read_text()
         owner = (root / "src-tauri/src/saved_command_owner.rs").read_text()
-        self.assertIn("const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = false;", runtime)
-        for name in ("IOS_SIGNED_NATIVE_QUALIFIED", "IOS_RECOVERY_NATIVE_QUALIFIED"):
-            self.assertIn(f"const {name}: bool = false;", owner)
+        self.assertIn("const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = true;", runtime)
+        ios_selection = owner.split("fn ios_installed_selected(", 1)[1].split("fn android_original_document_matches(", 1)[0]
+        self.assertNotIn("PROJECT_FIELDS", ios_selection)
+        self.assertNotIn("ios_observation", ios_selection)
+        self.assertIn("&& self.runtime.ios_archive_installed_profile_available()", ios_selection)
         registration = document.split("pub(crate) fn register_installed_macos_project_fields(", 1)[1].split("pub(super) fn installed_macos_record_original(", 1)[0]
         for guard in ("state.next_operation != 0", "state.slot.is_some()", "state.unknown", "if observation.is_some()",
                       "token.consume(&self.inner.session_identity", "project_fields: Some(control)"):
@@ -7039,21 +7058,23 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Check current owner pins before native preparation",
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Acquire and verify the two fixed Android support archives as DATA",
-            "Download only the exact accepted M archive (no rebuild or fallback)",
-            "Reuse accepted Mac supplier and prepare only the current source payload",
-            "Build and sign the separate fixed Android registration helper",
+            "Admit only a fresh independently pinned Python transport destination",
+            "Download the independently accepted fresh Python transport",
+            "Project the pinned fresh Python transport without executing it",
+            "Prepare the current payload from the independently accepted fresh Python supplier",
+            "Require the fixed SOURCE producer identity and release before ordinary signing",
+            "Build and sign the fixed resident image and C facades",
             "Build and sign the separate fixed vault helper before binding the app",
             "Compile the fixed debug actual-main observer and normal embedded frontend once",
-            "Assemble the instrumented engineering app; ad-hoc sign only the app",
+            "Assemble the instrumented observation app with SOURCE-selected signing",
             "Bind this signed app and current-source runtime into fresh Installer DATA",
             "Build the fixed one-shot root Installer and scripts-only package",
             "Application installation uses only standard privileged Installer; app and Python stay nonroot",
-            "Nonroot byte/mode readback, not a headless GUI substitute",
             "Verify source stayed unchanged; retire only disposable owned build output",
         }
         toolchain = {
-            "Prepare the pinned Apple Instant clock toolchain":
-                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending')",
+            "Admit the fixed image Rust tools without installing a distribution":
+                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')",
         }
         classifiers = {
             "Classify installed Xcode originals without preparing or selecting a toolchain":
@@ -7082,12 +7103,14 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Check pending account SOURCE and DATA contracts before native preparation": "ios-recovery-pending",
             "One real pending account recovery through ordinary Inspect and exact Recover": "ios-recovery-pending",
             "Nine serial current-iOS Aqua cases through the reviewed original invocation owner": "ios-current-synthetic",
+            "Two serial doctor and saved offline Aqua journeys through the reviewed original invocation owner": "doctor-preflight2",
+            "Three serial local-edit Aqua journeys through the reviewed original invocation owner": "local-edits3",
         }
         lifecycle = {
             "Compile headless Mac libraries and run the exact selected DATA regressions first":
-                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending')",
+                "success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')",
             "Export bounded diagnostics without altering original command evidence":
-                "always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending')",
+                "always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')",
             "Preserve bounded Android lifecycle results and original workflow exit evidence":
                 "always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success'",
         }
@@ -7116,13 +7139,41 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                 expected = ["if: success() && " + selection]
             else:
                 prefix = "always() && steps.work.outputs.root != ''" if name in legacy_exports else "success()"
-                expected = ["if: " + prefix + " && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending')"]
+                expected = ["if: " + prefix + " && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')"]
             with self.subTest(step=name):
                 self.assertEqual(gates, expected)
-        clock = steps["Prepare the pinned Apple Instant clock toolchain"]
+        clock = steps["Admit the fixed image Rust tools without installing a distribution"]
         self.assertNotIn("xcode-installed-classification", clock)
         self.assertIn("timeout-minutes: 4", clock)
-        self.assertIn("rustup toolchain install 1.98.1 --profile minimal --target aarch64-apple-darwin --no-self-update", clock)
+        self.assertNotIn("rustup toolchain install", workflow)
+        self.assertNotIn("rustup update", workflow)
+        self.assertNotIn("rustup override", workflow)
+        self.assertLess(workflow.index("Bind the complete reviewed first-party checkout before compilation"), workflow.index("Admit the fixed image Rust tools without installing a distribution"))
+        self.assertLess(workflow.index("Admit the fixed image Rust tools without installing a distribution"), workflow.index("Compile headless Mac libraries"))
+        for required in ("stable-aarch64-apple-darwin/bin", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985",
+                         "release: 1.98.1", "host: aarch64-apple-darwin", "RUSTUP_AUTO_INSTALL='0'",
+                         "owner = qualification.load_owner(checkout)", "pending_call = True",
+                         "pending_call = False", "if not pending_call:", "no_configuration(); check_originals()",
+                         "('config', 'config.toml', 'credentials', 'credentials.toml')",
+                         "timeout=15, capture=True, text=False, output_limit=4096"):
+            self.assertIn(required, clock)
+        self.assertEqual(clock.count("result = owner.run_owned("), 1)
+        self.assertEqual(clock.count("for tool in ('rustc', 'cargo'):"), 1)
+        self.assertLess(clock.index("no_configuration(); check_originals()"), clock.index("result = owner.run_owned("))
+        self.assertLess(clock.index("row['closed'] = True"), clock.index("print('Fixed direct Rust1.98.1"))
+        for forbidden in ("shutil.which", ".resolve(", "CARGO_NET_OFFLINE=", "cargo fetch", "os.chmod", "os.unlink", "os.mkdir"):
+            self.assertNotIn(forbidden, clock)
+        direct = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
+        for name in ("Compile headless Mac libraries and run the exact selected DATA regressions first",
+                     "Compile native wrapping variants once and run fixed cohorts and creator-reader pair",
+                     "Build and sign the separate fixed vault helper before binding the app",
+                     "Compile the fixed debug actual-main observer and normal embedded frontend once",
+                     "Build the fixed one-shot root Installer and scripts-only package"):
+            self.assertIn(direct, steps[name])
+            self.assertNotIn('["cargo",', steps[name])
+        mixed = steps["Compile the fixed debug actual-main observer and normal embedded frontend once"]
+        self.assertLess(mixed.index("npm run build"), mixed.index("PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin"))
+        self.assertIn('RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"', steps["Compile native wrapping variants once and run fixed cohorts and creator-reader pair"])
         classify = steps["Classify installed Xcode originals without preparing or selecting a toolchain"]
         self.assertIn("timeout-minutes: 2", classify)
         self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", classify)
@@ -7166,7 +7217,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "          - project-recovery-pending\n"
             "          - ios-recovery-pending\n"
             "    runs-on: macos-26\n"
-            "    timeout-minutes: 75\n"
+            "    timeout-minutes: ${{ matrix.scope == 'doctor-preflight2' && 150 || 75 }}\n"
         )
         self.assertEqual(header.split("jobs:\n", 1)[1].split("    env:\n", 1)[0], expected_job)
         self.assertIn("on:\n  push:\n    branches:\n      - verify/desktop-macos-aqua\n", header)
@@ -7192,7 +7243,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             '                                            ("qualification", ["installed-observation"], "--cfg mrk_wrapping_keychain_qualification")):',
             'target = work / ("wrapping-" + role + "-target")',
             'environment = dict(build_env, CARGO_TARGET_DIR=str(target), RUSTFLAGS=flags)',
-            'argv = ["cargo", "test", "--locked", "--no-default-features", "--jobs", "2",',
+            'argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features", "--jobs", "2",',
             '"--manifest-path", str(native / "Cargo.toml"),',
             '"--lib", "--no-run", "--message-format=json"]',
             'owner = qualification.load_owner(checkout)',
@@ -7502,7 +7553,7 @@ class BeforeItemStopWorkflowTests(unittest.TestCase):
         self.assertEqual(len({row[3] for row in cohorts}), 3)
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
         private = workflow.split("      - name: Compile native wrapping variants once and run fixed cohorts and creator-reader pair\n", 1)[1].split("      - name: ", 1)[0]
-        self.assertEqual(private.count('argv = ["cargo", "test", "--locked"'), 1)
+        self.assertEqual(private.count('argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked"'), 1)
         self.assertIn('owner = qualification.load_owner(checkout)', private)
         self.assertIn('for cohort in receipt["nativeCohorts"]:', private)
         self.assertIn('result, row = invoke(cohort["reportPrefix"], [str(cohort_binary["path"]), entry],', private)
@@ -9118,7 +9169,7 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
     def test_codec_compiler_requires_exact_app_empty_features_debug_libtest_and_one_artifact(self):
         f = self.functions(); app, work = f["app"], f["work"]
         binary = work / "wrapping-codec-target/aarch64-apple-darwin/debug/deps/mobile_release_desktop-0123456789abcdef"
-        artifact = {"reason": "compiler-artifact", "package_id": "path+" + app.as_uri() + "#mobile-release-kit-desktop@0.1.0",
+        artifact = {"reason": "compiler-artifact", "package_id": "path+" + app.as_uri() + "#mobile-release-kit-desktop@0.1.1",
                     "manifest_path": str(app / "Cargo.toml"), "features": [], "executable": str(binary), "filenames": [str(binary)],
                     "target": {"name": "mobile_release_desktop", "kind": ["lib"], "crate_types": ["lib"], "src_path": str(app / "src/lib.rs")},
                     "profile": {"test": True, "debug_assertions": True, "overflow_checks": True, "opt_level": "0"}}
@@ -9127,7 +9178,7 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
         finish = {"reason": "build-finished", "success": True}
         check = f["admit_codec_compiler"]
         self.assertEqual(check(captured([artifact, finish])), binary)
-        mutations = [lambda a: a.__setitem__("package_id", "path+file:///different#mobile-release-kit-desktop@0.1.0"),
+        mutations = [lambda a: a.__setitem__("package_id", "path+file:///different#mobile-release-kit-desktop@0.1.1"),
                      lambda a: a.__setitem__("manifest_path", str(app.parent / "Cargo.toml")),
                      lambda a: a.__setitem__("features", ["macos-installed-observation"]),
                      lambda a: a["target"].__setitem__("name", "mrk_macos_installed_native"),
@@ -9785,7 +9836,7 @@ def shipping_gate_headless_data():
          ["default", "installed-observation"], M.SHIPPING_GATE_NATIVE_TESTS, "headless-native"))
     for index, (role, directory, package, library, features, names, prefix) in enumerate(selected):
         path = str(work / "cargo-target/aarch64-apple-darwin/debug/deps" / (library + "-123abc"))
-        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"
+        package_id = "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.1" if package == "mobile-release-kit-desktop" else "@0.1.0")
         # Deliberately beyond binary64 exact precision; only integers/strings.
         identity = (7, 2**60 + index + 1, stat.S_IFREG | 0o700, UID, GID, 1, 3, 2**60 + 3, 2**60 + 4)
         artifact = {"path": path, "sha256": M.digest(b"abc"), "full9": [str(v) for v in identity],
@@ -9955,7 +10006,10 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
         actual, native = M._gate_headless(bodies, BINDING, checkout, work)
         self.assertEqual(actual, receipt)
         self.assertEqual(native, receipt['targets'][1]['artifact'])
+        self.assertEqual(receipt["compilerArgv"][0], "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo")
         changes = (
+            lambda value: value["compilerArgv"].__setitem__(0, "cargo"),
+            lambda value: value["compilerArgv"].__setitem__(0, "/Users/runner/.cargo/bin/cargo"),
             lambda value: value.update(ownerCallsReturned=2),
             lambda value: value.update(compilerOriginalReturned=1),
             lambda value: value.update(cargoTargetRetired=True),
@@ -11463,6 +11517,506 @@ class CatalogueHeadlessControlDataTests(unittest.TestCase):
                 self.assertFalse(run.record["deadlineMetAfterFinalCloses"])
                 if options.get("close_error"):
                     self.assertFalse(run.record["artifactOriginalClosed"])
+
+
+
+class LocalEditsAquaDataTests(unittest.TestCase):
+    """Pure DATA/SOURCE regressions. No native owner or target process is run."""
+
+    @staticmethod
+    def changed_snapshot(case, original):
+        files, directories = M.fixture_data(case, True)
+        current = dict(original)
+        for name, (_mode, entries) in directories.items():
+            current[name] = replace(current[name], entries=entries)
+        for index, (name, body) in enumerate(files.items(), 1):
+            before = original.get(name)
+            if before is not None and before.sha256 == M.digest(body):
+                continue
+            current[name] = M.Node((7, 1000 + index, stat.S_IFREG | 0o600, UID, GID, 1, len(body), 200, 200),
+                                   M.digest(body), None)
+        return current
+
+    def test_local_edits_scope_and_original_call_limits(self):
+        cases = ("local-metadata-text", "local-release-version", "local-github-apply")
+        self.assertEqual(M.LOCAL_EDIT_CASES, cases)
+        self.assertEqual(M.selected_cases(M.LOCAL_EDITS_SCOPE), cases)
+        self.assertEqual(M.argument_scope(["--scope", "local-edits3"]), M.LOCAL_EDITS_SCOPE)
+        self.assertEqual(M.selected_cases(), M.CASES)
+        self.assertEqual([M.case_timeout(case) for case in cases], [135, 105, 195])
+        self.assertEqual(sum(M.case_timeout(case) for case in cases), 435)
+        for argv in (["--scope", cases[0]], ["--scope", "local-edits3", "--timeout", "900"], ["--scope", "LOCAL-EDITS3"]):
+            with self.subTest(argv=argv), self.assertRaises(M.Refused):
+                M.argument_scope(argv)
+        local_root = BINDING.root(local_edits=True)
+        self.assertTrue(local_root.name.endswith("-local-edits"))
+        self.assertNotEqual(local_root, BINDING.root())
+        with self.assertRaises(M.Refused):
+            BINDING.root(local_edits=True, project_fields=True)
+        with self.assertRaises(M.Refused):
+            BINDING.root(local_edits=1)
+        fixtures = InertFixtures()
+        fixtures.cases = cases
+        def readback(case):
+            if fixtures.inflight or not fixtures.last_returned:
+                raise AssertionError("no original return")
+            fixtures.reads.append(case)
+            original = initial_snapshot(case)
+            return M.validate_snapshot(original, self.changed_snapshot(case, original), case, True, UID, GID)
+        fixtures.readback = readback
+        calls, emitted = [], []
+        def returned(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return CompletedProcess(argv, 0, captured(M.expected_result(BINDING, argv[1])), b"")
+        self.assertEqual(M.run_cases(BINDING, fixtures, returned, UID, "runner", emitted.append, M.LOCAL_EDITS_SCOPE), ())
+        self.assertEqual(fixtures.before, list(cases)); self.assertEqual(fixtures.reads, list(cases))
+        self.assertEqual(len(calls), 3); self.assertEqual(len(emitted), 3)
+        for (argv, options), case in zip(calls, cases):
+            self.assertEqual(argv, [M.EXECUTABLE, case])
+            self.assertEqual(options["cwd"], local_root / "state" / case)
+            self.assertEqual(options["timeout"], M.case_timeout(case))
+            self.assertEqual(options["output_limit"], 2 * 1024 * 1024)
+            self.assertIs(options["capture"], True); self.assertIs(options["text"], False)
+            self.assertNotIn("MOBILE_RELEASE_TOOLING_ROOT", options["environ"])
+        for case in cases:
+            expected = M.expected_result(BINDING, case)
+            self.assertFalse(expected["shippingBinaryQualified"])
+            self.assertFalse(expected["localEdits"]["physicalDropdownGestureQualified"])
+            self.assertEqual(M.parse_result(captured(expected), b"", BINDING, case), expected)
+            for field, value in (("originalFinalities", False), ("sameOriginalSessions", True),
+                                 ("physicalDropdownGestureQualified", True), ("imagesDoctorVaultRestartQualified", True)):
+                changed = deepcopy(expected); changed["localEdits"][field] = value
+                with self.subTest(case=case, field=field), self.assertRaises(M.Refused):
+                    M.parse_result(captured(changed), b"", BINDING, case)
+        unknown = InertFixtures(); unknown.cases = cases
+        original_error = RuntimeError("inert unreturned original")
+        def unreturned(*_args, **_kwargs):
+            raise original_error
+        with self.assertRaises(RuntimeError) as caught:
+            M.run_cases(BINDING, unknown, unreturned, UID, "runner", lambda _value: self.fail("no record"), M.LOCAL_EDITS_SCOPE)
+        self.assertIs(caught.exception, original_error)
+        self.assertTrue(unknown.inflight); self.assertFalse(unknown.last_returned)
+        self.assertEqual(unknown.before, [cases[0]]); self.assertEqual(unknown.reads, [])
+
+    def test_local_edits_exact_readback_and_stale_file_preservation(self):
+        self.assertEqual(M.LOCAL_VERSION_AFTER, M.LOCAL_VERSION_BEFORE.replace(b"1.2.3", b"2.3.4").replace(b"BUILD_NUMBER=7", b"BUILD_NUMBER=8"))
+        self.assertIn(b"  VERSION_NAME = 2.3.4  \n", M.LOCAL_VERSION_AFTER)
+        self.assertIn(b"UNRELATED = keep-this-value\n", M.LOCAL_VERSION_AFTER)
+        resource = (PATH.parents[2] / "src/mobile_release/api/data/github-setup-v1.json").read_bytes()
+        self.assertEqual(M.digest(resource), M.LOCAL_WORKFLOW_RESOURCE_SHA256)
+        templates = json.loads(resource)["workflows"]
+        for identity, size in zip(("preflight", "candidate", "external-testing", "production-submit"), (1479, 2303, 3079, 3816)):
+            path = f".github/workflows/mobile-{identity}.yml"
+            generated = templates[identity].replace("__MOBILE_RELEASE_KIT_SHA__", "a" * 40).replace("__MOBILE_RELEASE_KIT_REPOSITORY__", "example/toolkit").encode()
+            self.assertEqual(M.LOCAL_WORKFLOWS[path], generated); self.assertEqual(len(generated), size)
+        metadata_config = json.loads(M.local_edit_config(M.LOCAL_EDIT_CASES[0]))
+        self.assertTrue(metadata_config["ios"]["enabled"])
+        self.assertEqual(metadata_config["metadata"]["iosLocales"], ["en-US"])
+        self.assertEqual(metadata_config["ios"]["identityStatus"], "unverified")
+        for case, count in zip(M.LOCAL_EDIT_CASES, ((14, 8), (5, 3), (10, 5))):
+            before = initial_snapshot(case); after = self.changed_snapshot(case, before)
+            files, directories = M.fixture_data(case, True)
+            self.assertEqual((len(files), len(directories)), count)
+            self.assertLessEqual(sum(map(len, files.values())), 1024 * 1024)
+            self.assertTrue(all(mode == 0o700 for mode, _entries in directories.values()))
+            data = M.validate_snapshot(before, after, case, True, UID, GID)
+            self.assertEqual(data["localEdits"]["sha256"], M._expected_local_edits(case)["fixture"]["sha256"])
+            self.assertTrue(data["transactionResidueAbsent"])
+            for kind in ("sentinel-content", "sentinel-identity", "journal", "mode", "directory-link"):
+                changed = dict(after)
+                if kind == "sentinel-content":
+                    changed["keep.txt"] = replace(changed["keep.txt"], sha256="0" * 64)
+                elif kind == "sentinel-identity":
+                    node = changed["keep.txt"]; changed["keep.txt"] = replace(node, identity=(node.identity[0], 9999, *node.identity[2:]))
+                elif kind == "journal":
+                    changed[".mobile-release-version"] = changed["."]
+                elif kind == "mode":
+                    node = changed["keep.txt"]; changed["keep.txt"] = replace(node, identity=(*node.identity[:2], stat.S_IFREG | 0o644, *node.identity[3:]))
+                else:
+                    node = changed["."]; changed["."] = replace(node, identity=(*node.identity[:5], node.identity[5]+1, *node.identity[6:]))
+                with self.subTest(case=case, kind=kind), self.assertRaises(M.Refused):
+                    M.validate_snapshot(before, changed, case, True, UID, GID)
+            if case == "local-github-apply":
+                name = ".github/workflows/mobile-preflight.yml"
+                self.assertEqual(files[name], M.LOCAL_WORKFLOWS[name] + M.LOCAL_STALE)
+                changed = dict(after); node = changed[name]; body = M.LOCAL_WORKFLOWS[name]
+                changed[name] = replace(node, identity=(*node.identity[:6], len(body), *node.identity[7:]), sha256=M.digest(body))
+                with self.assertRaises(M.Refused):
+                    M.validate_snapshot(before, changed, case, True, UID, GID)
+            else:
+                name = "version.properties" if case == "local-release-version" else "release/store/android/en-US/short_description.txt"
+                changed = dict(after); node = changed[name]
+                changed[name] = replace(node, identity=(*before[name].identity[:2], *node.identity[2:]))
+                with self.assertRaisesRegex(M.Refused, "^fixture-local-replacement$"):
+                    M.validate_snapshot(before, changed, case, True, UID, GID)
+
+    def test_local_edit_callbacks_and_finality_are_same_domain_source_bound(self):
+        rust = PATH.parents[1] / "src-tauri/src"
+        child = (rust / "installed_shell_observation_macos_local_edits.rs").read_text()
+        parent = (rust / "installed_shell_observation_macos.rs").read_text()
+        shell = (rust / "shell.rs").read_text()
+        owner = (rust / "edit_owner.rs").read_text()
+        for domain, prefix in (("Workflow", "workflow"), ("Metadata", "metadata"), ("Version", "version")):
+            self.assertIn(f"Installed{domain}Finality", child)
+            self.assertIn(f"installed_{prefix}_observation_final(id)", child)
+            self.assertIn(f"pub(crate) struct Installed{domain}Finality", owner)
+            self.assertIn(f"pub(crate) fn installed_{prefix}_observation_final", owner)
+        for fact in ("inspection_joined", "acquisition_joined", "child_waited_success", "stdin_closed", "stdout_eof_closed",
+                     "stderr_eof_closed", "io_joined", "driver_joined", "watchdog_joined", "manager_joined",
+                     "runtime_ledger_settled", "runtime_settlement_joined"):
+            self.assertIn("f." + fact, child)
+        for token in ('["domain","projectId","sessionId","ownerGeneration"]', 'p["sessionId"]==f.session_id',
+                      's.finality.as_ref().is_some_and(|f|f.matches(&s.projection))', 'r.local_edits.as_ref().is_some_and(local_edits::Record::stale_ready)',
+                      'f.after(&root,uid,index,proposal)', 'r.fixture.verify(true)', '!local_edits::data_checks()'):
+            self.assertIn(token, child + parent)
+        for hook in ("workflow_open_request", "workflow_prepare_request", "workflow_apply_request", "workflow_close_request",
+                     "metadata_open_request", "metadata_prepare_request", "metadata_apply_request",
+                     "version_open_request", "version_prepare_request", "version_apply_request",
+                     "local_release_version_request", "local_release_version"):
+            self.assertIn(hook, shell)
+        component = (PATH.parents[1] / "src/components/MetadataTextEditor.tsx").read_text()
+        self.assertIn('<option value="" disabled>No enabled configured locale</option>', component)
+        self.assertIn('<optgroup label="Current saved configuration">{state.choices.map', component)
+        for token in ("options.length!==3", "options[0].value!==''", "!options[0].disabled",
+                      "text(options[0])!=='No enabled configured locale'", "options[0].parentElement!==s",
+                      "options.slice(1).some", "options[1].value===options[2].value",
+                      "s.selectedIndex!==1", "s.value!==options[1].value"):
+            self.assertIn(token, child)
+        self.assertIn('s.selectedIndex=2;s.dispatchEvent(new Event(\'change\',{bubbles:true}))', child)
+        self.assertNotIn("options.length!==2||options.some", child)
+        self.assertIn("Current saved configuration", child)
+        self.assertIn("s.finality.is_none()", child)
+        self.assertIn("self.sessions[..2].iter().all(Session::complete)", child)
+        self.assertIn("held[..6]!=original.identity[..6]", child)
+        self.assertIn("file.sync_all()", child)
+        self.assertIn("nix::unistd::close(std::os::fd::OwnedFd::from(file))", child)
+        self.assertIn('"physicalDropdownGestureQualified":false', child)
+        for name in ("mismatched_or_out_of_order_original_is_refused", "incomplete_finality_cannot_finish_or_authorize_stale_append"):
+            self.assertIn("fn " + name + "()", child)
+        # New paths observe the ordinary wrappers, never call IPC directly or
+        # create new process/native owners or writer grants.
+        for forbidden in ("__TAURI__", "__TAURI_INTERNALS__", "invoke(", "std::process::Command", "thread::spawn", "tokio::spawn",
+                          "INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED = true"):
+            self.assertNotIn(forbidden, child)
+        self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol"', owner)
+        self.assertIn('target_os = "macos", target_arch = "aarch64"', owner)
+
+    def test_local_edits_workflow_scope_is_opt_in(self):
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        matrix = workflow.split("      matrix:\n", 1)[1].split("    runs-on:", 1)[0]
+        self.assertEqual(matrix, "        scope:\n          - project-fields\n          - project-recovery-pending\n          - ios-recovery-pending\n")
+        self.assertNotIn("local-edits3", matrix)
+        self.assertNotIn("workflow_dispatch:", workflow.split("permissions:", 1)[0])
+        self.assertIn('"local-edits3": ("three-local-edit-Aqua-engineering-cases", ["local-metadata-text", "local-release-version", "local-github-apply"])', workflow)
+        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')"), 22)
+        runner = workflow.split("      - name: Three serial local-edit Aqua journeys", 1)[1].split("      - name:", 1)[0]
+        for required in ("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'local-edits3'", "timeout-minutes: 9", "set -o noclobber", "umask 077",
+                         "RUNNER_ENVIRONMENT: ${{ runner.environment }}", "git -c core.fsmonitor=false diff --exit-code HEAD",
+                         "macos_aqua_qualification.py --scope local-edits3", "status=$?", '[[ $status == 0 ]] || exit "$status"'):
+            self.assertIn(required, runner)
+        for suffix in ("results.jsonl", "failure.jsonl", "status"):
+            self.assertIn("${{ steps.work.outputs.root }}/aqua-local-edits3-" + suffix if suffix != "status"
+                          else "${{ steps.work.outputs.root }}/aqua-local-edits3.status", workflow)
+        accepted_data_pins = (
+            ("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "d1c97b3efae1a5260f5269764686b43c4f054cb59b45615984e65ab1b85747e8", False),
+            ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108", False),
+            ("MRK_MACOS_PYTHON_SUPPLIER_SHA256", "2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d", True),
+            ("MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256", "ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695", True),
+            ("MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT", "158cdff422e3837f7ab5e6192af76a578faf6fab", True),
+            ("MRK_MACOS_PYTHON_SUPPLIER_RUN_ID", "37467019389", True),
+            ("MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT", "1", True),
+            ("MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID", "11415902210", True),
+        )
+        admission = workflow.split("      - name: Admit only this exact disposable-hosted source route\n", 1)[1].split("      - name:", 1)[0]
+        for variable, value, quoted in accepted_data_pins:
+            literal = "'" + value + "'" if quoted else value
+            self.assertEqual(workflow.count("      " + variable + ": " + literal + "\n"), 1)
+            self.assertEqual(admission.count('"$' + variable + '" == ' + value), 1)
+        self.assertNotIn("pending-independent-current-", workflow)
+        self.assertNotIn("pending-independent-supplier-", workflow)
+        source = PATH.read_text()
+        run = source.split("def run_cases(", 1)[1].split("def recovery_supplier_route", 1)[0]
+        self.assertEqual(run.count("result = run_owned(argv,"), 1)
+        for required in ('type(result) is subprocess.CompletedProcess', 'need(result.returncode == 0, "app-return")',
+                         'report = parse_result', 'readback = fixtures.readback_ios', '"fixture-local-readback"'):
+            self.assertIn(required, run)
+        self.assertLess(run.index('need(result.returncode == 0, "app-return")'), run.index('report = parse_result'))
+        self.assertLess(run.index('report = parse_result'), run.index('"fixture-local-readback"'))
+        self.assertLess(run.index('"fixture-local-readback"'), run.index('emit({"schemaVersion": 1'))
+
+
+class LocalChecksAquaDataTests(unittest.TestCase):
+    """Inert returned DATA/SOURCE and one private file fixture, never native work."""
+
+    @staticmethod
+    def returned_data(case):
+        # Explicit test DATA, not synthetic native authority in production.
+        value = M.expected_result(BINDING, case)
+        checks = value["localChecks"]
+        context = {"projectId": "public-project", "draftRevision": 0, "baselineGeneration": 1,
+                   "platform": "android", "operation": "build"}
+        if case == "local-tool-observations":
+            for index, roles in enumerate((("developer-selection", "git", "java", "javac"), ("developer-selection", "git", "xcode"))):
+                rows = []
+                for role in roles:
+                    baseline = {"kind": "no-local-policy", "version": None, "build": None}
+                    if role in ("java", "javac"):
+                        baseline = {"kind": "workflow-reference", "version": "21", "build": None}
+                    if role == "xcode":
+                        baseline = {"kind": "exact-pin", "version": "26.0", "build": "17A324"}
+                    row = {"id": role, "state": "completed", "reason": "observed", "version": None,
+                           "build": None, "returnCode": 0, "baseline": baseline, "assessment": "not-assessed"}
+                    if role in ("git", "java"):
+                        row.update(version="2.49.0" if role == "git" else "21.0.2", assessment="no-local-policy")
+                    elif role in ("javac", "xcode"):
+                        row.update(state="not-run", reason="missing-in-supported-lookup" if role == "javac" else "full-xcode-not-selected", returnCode=None)
+                    rows.append(row)
+                checks["tools"].append({"runId": str(index+1)*32, "ownerGeneration": ("a", "c")[index]*32,
+                    "context": {**context, "platform": ("android", "ios")[index]}, "statusRevision": (4, 8)[index],
+                    "phase": "settled", "finality": "settled", "outcome": "complete", "commandsAttempted": (3, 2)[index],
+                    "checks": rows, "sameOriginal": True, "rendered": True, "staleAfterContextChange": index == 0})
+        else:
+            context.update(draftRevision=1, operation="offline-preflight", savedConfig={"bytes": len(M.CONFIG), "sha256": M.digest(M.CONFIG)})
+            findings = [{"ordinal": index, "check": name, "status": status, "message": name, "projectCheckIndex": None}
+                        for index, (name, status) in enumerate((("version-source", "PASS"), ("android-gradle-wrapper", "MISSING"), ("workspace-private-output", "PASS")))]
+            counts = dict.fromkeys(M.LOCAL_CHECK_STATUSES, 0); counts.update(PASS=2, MISSING=1)
+            checks["offline"] = {"operationId": "3"*32, "ownerGeneration": "b"*32, "context": context,
+                "statusRevision": 6, "phase": "terminal", "outcome": "complete", "sameOriginal": True,
+                "dirtyDraftObserved": True, "explicitConsent": True, "startArrivalObserved": True, "startArrivalLate": False,
+                "rendered": True, "draftDiscardedThroughUi": True, "result": {"schemaVersion": 1,
+                    "scope": "saved-offline-android-no-core-build", "usedConfig": deepcopy(context["savedConfig"]),
+                    "findings": findings, "summary": {"total": 3, "shown": 3, "omitted": 0, "counts": counts},
+                    "limitations": list(M.LOCAL_CHECK_LIMITATIONS)}}
+        return value
+
+    def test_local_checks_scope_uses_original_rosters_and_deadlines(self):
+        cases = ("local-tool-observations", "local-saved-offline")
+        self.assertEqual(M.LOCAL_CHECK_CASES, cases)
+        self.assertEqual(M.selected_cases("doctor-preflight2"), cases)
+        self.assertEqual(M.argument_scope(["--scope", "doctor-preflight2"]), "doctor-preflight2")
+        self.assertEqual(M.selected_cases(), M.CASES)
+        self.assertEqual([M.case_timeout(c) for c in cases], [105, 1875])
+        self.assertEqual(sum(M.case_timeout(c) for c in cases), 1980)
+        self.assertEqual(M.LOCAL_CHECK_IDS, (("developer-selection", "git", "java", "javac"), ("developer-selection", "git", "xcode")))
+        self.assertTrue(BINDING.root(local_checks=True).name.endswith("-doctor-preflight"))
+        for kwargs in ({"local_checks": 1}, {"local_checks": True, "local_edits": True}):
+            with self.assertRaises(M.Refused): BINDING.root(**kwargs)
+        for argv in (["--scope", cases[0]], ["--scope", "doctor-preflight2", "--timeout", "9999"]):
+            with self.assertRaises(M.Refused): M.argument_scope(argv)
+        for case in cases:
+            files, dirs = M.fixture_data(case, False)
+            self.assertEqual((len(files), len(dirs)), (5, 3))
+            self.assertEqual(M.fixture_data(case, True), (files, dirs))
+            self.assertLess(sum(map(len, files.values())), 65536)
+            self.assertEqual(set(files), {".gitignore", "app/build.gradle.kts", "keep.txt", "release/mobile-release.json", "version.properties"})
+            self.assertNotIn("gradlew", files)
+            # Real private regular files and held original descriptors. No core
+            # import, tool invocation, fixture hook or native finality is faked.
+            with tempfile.TemporaryDirectory(prefix="mrk-doctor-data-") as temporary:
+                root = Path(temporary)
+                for name, (mode, _entries) in dirs.items():
+                    if name != ".": (root / name).mkdir()
+                    (root / name).chmod(mode)
+                for name, body in files.items():
+                    (root / name).write_bytes(body); (root / name).chmod(0o600)
+                fixture = M.Fixtures(BINDING, M.os.getuid(), M.os.getgid(), M.LOCAL_CHECK_SCOPE)
+                fixture.projects[case] = fixture._open(str(root), directory=True)
+                try:
+                    original = fixture._capture(case, False)
+                    fixture.originals[case] = original
+                    fixture.last_returned = True  # Only this file-reader test's inert precondition.
+                    with patch.object(fixture, "_namespace") as namespace:
+                        observed = fixture.readback(case)
+                        namespace.assert_called_once_with()
+                    self.assertEqual(observed["localChecks"], self.returned_data(case)["localChecks"]["fixture"])
+                    self.assertEqual(fixture._capture(case, True), original)
+                    self.assertEqual(len(fixture.fds), 1)
+                    # Changed bytes are not repaired or accepted by readback.
+                    (root / "keep.txt").write_bytes(b"changed-public-sentinel")
+                    with patch.object(fixture, "_namespace"), self.assertRaises(M.Refused): fixture.readback(case)
+                finally:
+                    fixture.close()
+                self.assertEqual(fixture.fds, set()); self.assertEqual(fixture.close_errors, 0)
+        fixtures = InertFixtures(); fixtures.cases = cases
+        def readback(case):
+            if fixtures.inflight or not fixtures.last_returned: raise AssertionError("original must return")
+            fixtures.reads.append(case)
+            return M.validate_snapshot(initial_snapshot(case), initial_snapshot(case), case, True, UID, GID)
+        fixtures.readback = readback
+        calls, emitted = [], []
+        def returned(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return CompletedProcess(argv, 0, captured(self.returned_data(argv[1])), b"")
+        self.assertEqual(M.run_cases(BINDING, fixtures, returned, UID, "runner", emitted.append, M.LOCAL_CHECK_SCOPE), ())
+        self.assertEqual(fixtures.before, list(cases)); self.assertEqual(fixtures.reads, list(cases))
+        self.assertEqual(len(emitted), 2)
+        for (argv, opts), case in zip(calls, cases):
+            self.assertEqual(argv, [M.EXECUTABLE, case])
+            self.assertEqual(opts["timeout"], M.case_timeout(case))
+            self.assertEqual(opts["cwd"], BINDING.root(local_checks=True) / "state" / case)
+            self.assertEqual(opts["output_limit"], 2*1024*1024)
+            self.assertIs(opts["capture"], True); self.assertIs(opts["text"], False)
+        unknown = InertFixtures(); unknown.cases = cases
+        original_error = RuntimeError("inert original has no returned result")
+        def unreturned(*_args, **_kwargs): raise original_error
+        with self.assertRaises(RuntimeError) as caught:
+            M.run_cases(BINDING, unknown, unreturned, UID, "runner", lambda _: self.fail("no publication"), M.LOCAL_CHECK_SCOPE)
+        self.assertIs(caught.exception, original_error)
+        self.assertTrue(unknown.inflight); self.assertFalse(unknown.last_returned)
+        self.assertEqual(unknown.before, [cases[0]]); self.assertEqual(unknown.reads, [])
+
+    def test_local_checks_reject_mismatched_partial_and_false_positive_results(self):
+        for case in M.LOCAL_CHECK_CASES:
+            good = self.returned_data(case)
+            self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+            self.assertEqual(good["localChecks"]["releaseReadiness"], "not-assessed")
+            self.assertFalse(good["shippingBinaryQualified"])
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(M.expected_result(BINDING, case)), b"", BINDING, case)
+            mutations = [(('releaseReadiness',), 'ready'), (('physicalDropdownGestureTested',), True),
+                         (('sameOriginalNativeTerminals',), 1), (('exactFixtureReadback',), False),
+                         (('fixture', 'sha256', 'keep.txt'), '0'*64)]
+            if case == M.LOCAL_CHECK_CASES[0]:
+                mutations += [(('tools', 0, 'runId'), 'wrong'), (('tools', 1, 'runId'), '1'*32),
+                    (('tools', 1, 'ownerGeneration'), 'a'*32), (('tools', 1, 'statusRevision'), 4),
+                    (('tools', 1, 'context', 'draftRevision'), 1), (('tools', 0, 'phase'), 'checking'),
+                    (('tools', 0, 'finality'), 'pending'), (('tools', 0, 'outcome'), 'failed'),
+                    (('tools', 0, 'staleAfterContextChange'), False), (('tools', 1, 'staleAfterContextChange'), True),
+                    (('tools', 1, 'rendered'), False), (('tools', 0, 'commandsAttempted'), 4),
+                    (('tools', 0, 'checks', 0, 'id'), 'xcode'), (('tools', 0, 'checks', 1, 'returnCode'), 3),
+                    (('tools', 0, 'checks', 1, 'assessment'), 'match'), (('tools', 0, 'checks', 3, 'state'), 'completed'),
+                    (('tools', 1, 'checks', 2, 'assessment'), 'match')]
+            else:
+                mutations += [(('offline', 'operationId'), 'wrong'), (('offline', 'phase'), 'running'),
+                    (('offline', 'outcome'), 'failed'), (('offline', 'startArrivalObserved'), False),
+                    (('offline', 'startArrivalLate'), True), (('offline', 'startArrivalLate'), 0),
+                    (('offline', 'dirtyDraftObserved'), False), (('offline', 'explicitConsent'), False),
+                    (('offline', 'draftDiscardedThroughUi'), False), (('offline', 'rendered'), False),
+                    (('offline', 'context', 'savedConfig', 'sha256'), '0'*64), (('offline', 'result', 'usedConfig', 'bytes'), len(M.CONFIG)+1),
+                    (('offline', 'result', 'limitations'), []), (('offline', 'result', 'summary', 'omitted'), 1),
+                    (('offline', 'result', 'summary', 'counts', 'PASS'), 3), (('offline', 'result', 'findings', 1, 'status'), 'PASS'),
+                    (('offline', 'result', 'findings', 1, 'ordinal'), 2), (('offline', 'result', 'findings', 1, 'projectCheckIndex'), 0)]
+            for path, replacement in mutations:
+                changed = deepcopy(good); slot = changed['localChecks']
+                for part in path[:-1]: slot = slot[part]
+                slot[path[-1]] = replacement
+                with self.subTest(case=case, path=path), self.assertRaises(M.Refused):
+                    M.parse_result(captured(changed), b"", BINDING, case)
+        good = self.returned_data("local-tool-observations")
+        self.assertEqual(good['localChecks']['tools'][1]['checks'][2]['reason'], 'full-xcode-not-selected')
+        for run in good['localChecks']['tools']:
+            for row in run['checks']:
+                if row['id'] != 'developer-selection':
+                    row.update(state='not-run', reason='missing-in-supported-lookup', version=None, build=None, returnCode=None, assessment='not-assessed')
+            run['commandsAttempted'] = 1
+        with self.assertRaises(M.Refused): M.parse_result(captured(good), b'', BINDING, 'local-tool-observations')
+        # Mismatch is an actual negative observation, not a fabricated PASS.
+        mismatch = self.returned_data('local-tool-observations')
+        xcode = mismatch['localChecks']['tools'][1]['checks'][2]
+        xcode.update(state='completed', reason='observed', version='25.0', build='16A100', returnCode=0, assessment='mismatch')
+        mismatch['localChecks']['tools'][1]['commandsAttempted'] = 3
+        self.assertEqual(M.parse_result(captured(mismatch), b'', BINDING, 'local-tool-observations'), mismatch)
+        offline = self.returned_data('local-saved-offline')['localChecks']['offline']
+        self.assertEqual(offline['result']['summary']['counts']['MISSING'], 1)
+        # A replacement original or changed fixed file is not an exact readback.
+        case = 'local-saved-offline'; before = initial_snapshot(case)
+        for name, field in (('keep.txt', 1), ('.', 5), ('release/mobile-release.json', 8)):
+            changed = dict(before); node = changed[name]; identity = list(node.identity); identity[field] += 1
+            changed[name] = replace(node, identity=tuple(identity))
+            with self.assertRaises(M.Refused): M.validate_snapshot(before, changed, case, True, UID, GID)
+
+    def test_local_checks_ui_workflow_and_same_original_source_bindings(self):
+        root = PATH.parents[2]; rust = root / 'desktop/src-tauri/src'
+        child = (rust / 'installed_shell_observation_macos_checks.rs').read_text()
+        parent = (rust / 'installed_shell_observation_macos.rs').read_text()
+        shell = (rust / 'shell.rs').read_text()
+        environment = (root / 'desktop/src/pages/Environment.tsx').read_text()
+        controller = (root / 'desktop/src/environment.ts').read_text()
+        tool_ui = (root / 'desktop/src/components/EnvironmentDiagnostics.tsx').read_text()
+        offline_ui = (root / 'desktop/src/components/OfflinePreflight.tsx').read_text()
+        fields = (root / 'desktop/src/components/Fields.tsx').read_text()
+        help_data = json.loads((root / 'src/mobile_release/api/data/field-help.json').read_text())
+        # Bind the real two-option Environment control, not the three-option
+        # Metadata editor's disabled placeholder or a reducer shortcut.
+        self.assertIn('<option value="android">Android</option><option value="ios">iOS</option>', environment)
+        self.assertIn("s.options.length!==2", child)
+        self.assertIn("s.selectedIndex=1;s.dispatchEvent(new Event('change',{bubbles:true}))", child)
+        self.assertIn('diagnosticsController.setContext(platform, operation)', environment)
+        context_body = controller.split('  setContext(', 1)[1].split('  private current(', 1)[0]
+        self.assertIn('this.invalidate({ platform, operation', context_body)
+        self.assertNotIn('refresh()', context_body)
+        self.assertIn('controller.start()', tool_ui)
+        self.assertIn('Complete means the finite check roster finished, not that every tool matched.', tool_ui)
+        self.assertIn('acknowledged original Start', child)
+        self.assertIn('Earlier / stale tool observations', child)
+        self.assertIn('Core resource observations — provisional, not native finality', tool_ui)
+        self.assertIn('controller.prepare()', offline_ui)
+        self.assertIn('controller.start(consent.operationId, consent.ownerGeneration)', offline_ui)
+        self.assertIn('Unsaved draft changes are NOT used.', child + offline_ui)
+        self.assertIn('Complete is not PASS or release readiness.', child + offline_ui)
+        self.assertIn("document.execCommand('insertText',false,'public-offline-draft')", child)
+        self.assertIn('onChange', fields)
+        # The actual catalogue, not a guessed display-name selector.
+        self.assertIn('Candidate branch', json.dumps(help_data))
+        for text in ('Discard draft changes', 'Discard this in-memory draft?', 'Discard draft', "draft('main',false)"):
+            self.assertIn(text, child)
+        for action, actual in (('checks_tools_request(value);', 'state.document.start_environment_diagnostics(args)'),
+                              ('checks_prepare_request(&value);', 'state.document.prepare_offline_preflight(args)'),
+                              ('checks_start_request(&value);', 'state.document.start_offline_preflight(args)')):
+            start = shell.index(action); end = shell.index(actual, start)
+            self.assertGreater(end, start)
+            self.assertNotIn('return', shell[start:end]); self.assertNotIn('?', shell[start:end])
+        late = child.split('fn observe(&mut self,elapsed:Duration)', 1)[1].split('struct ToolRun', 1)[0]
+        self.assertLess(late.index('self.observed=true'), late.index('if self.late'))
+        self.assertIn('self.late=elapsed>Duration::from_secs(30)', late)
+        self.assertIn('assert!(late.observed&&late.late)', child)
+        self.assertIn('checks::Record::new(c,started)', parent)
+        self.assertIn('let end = started + Duration::from_secs', parent)
+        self.assertIn('if record.waiting(wait){return;}', parent)
+        self.assertIn('r.fixture.verify(true)', parent)
+        self.assertIn('r.native_actions_returned==[false,true,false,true]', parent)
+        self.assertIn('record.readback().is_err()', parent)
+        self.assertIn('p["finality"]=="settled"', child)
+        self.assertIn('p["phase"]=="terminal"', child)
+        self.assertIn('same(old,p,"operationId")', child)
+        self.assertIn('same(&run.projection,p,"runId")', child)
+        for name in ('environment_diagnostics_owner.rs', 'saved_command_owner.rs'):
+            owner = (rust / name).read_text()
+            self.assertIn('let Poll::Ready(result) = Pin::new(handle).poll', owner)
+            self.assertIn('record_join(&owner.watchdog_return, result)', owner)
+            self.assertIn('final_clock_clear(', owner)
+            self.assertIn('Arc::ptr_eq(&active.owner, &owner)', owner)
+            if name == 'environment_diagnostics_owner.rs':
+                self.assertIn('id: nonce()?, generation: nonce()?', owner)
+                self.assertIn('last.run_id == ticket.id || last.owner_generation == ticket.generation', owner)
+                self.assertIn('r.projection["ownerGeneration"]==p["ownerGeneration"]', child)
+        for forbidden in ('__TAURI__', '__TAURI_INTERNALS__', 'invoke(', 'std::process::Command', 'thread::spawn', 'tokio::spawn',
+                          '.start_offline_preflight(', '.start_environment_diagnostics(', '.cancel_offline_preflight(', '.cancel_environment_diagnostics('):
+            self.assertNotIn(forbidden, child)
+        workflow = (root / '.github/workflows/desktop-macos-aqua.yml').read_text()
+        matrix = workflow.split('      matrix:\n', 1)[1].split('    runs-on:', 1)[0]
+        self.assertNotIn('doctor-preflight2', matrix)
+        self.assertEqual(matrix, '        scope:\n          - project-fields\n          - project-recovery-pending\n          - ios-recovery-pending\n')
+        self.assertIn("timeout-minutes: ${{ matrix.scope == 'doctor-preflight2' && 150 || 75 }}", workflow)
+        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' ||"), 22)
+        step = workflow.split('      - name: Two serial doctor and saved offline Aqua journeys', 1)[1].split('      - name:', 1)[0]
+        for required in ("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2'", 'timeout-minutes: 35',
+                         'set -o noclobber', 'umask 077', 'RUNNER_ENVIRONMENT: ${{ runner.environment }}',
+                         'macos_aqua_qualification.py --scope doctor-preflight2', '[[ $status == 0 ]] || exit "$status"'):
+            self.assertIn(required, step)
+        self.assertIn('"doctor-preflight2": ("two-doctor-preflight-Aqua-engineering-cases", ["local-tool-observations", "local-saved-offline"])', workflow)
+        for name in ('results.jsonl', 'failure.jsonl'):
+            self.assertIn('${{ steps.work.outputs.root }}/aqua-doctor-preflight2-' + name, workflow)
+        self.assertIn('${{ steps.work.outputs.root }}/aqua-doctor-preflight2.status', workflow)
+        self.assertNotIn('workflow_dispatch:', workflow.split('permissions:', 1)[0])
+        source = PATH.read_text()
+        run = source.split('def run_cases(', 1)[1].split('def recovery_supplier_route', 1)[0]
+        self.assertEqual(run.count('result = run_owned(argv,'), 1)
+        self.assertLess(run.index('need(result.returncode == 0, "app-return")'), run.index('report = parse_result'))
+        self.assertLess(run.index('report = parse_result'), run.index('readback["localChecks"]'))
+        self.assertLess(run.index('readback["localChecks"]'), run.index('emit({"schemaVersion": 1'))
+        for name in ('actual_context_and_terminal_are_required', 'complete_report_never_promotes_readiness'):
+            self.assertIn('fn ' + name + '()', child)
 
 if __name__ == "__main__":
     unittest.main()

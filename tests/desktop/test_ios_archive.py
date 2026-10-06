@@ -249,6 +249,48 @@ class IOSSelectionTests(unittest.TestCase):
 
 
 class IOSWireTests(unittest.TestCase):
+    def test_exact_mac_native_toolchain_pair_preserves_sdk_identity_and_signing_checks(self):
+        for native, toolchain, opposite, machine in (
+            ("macos-arm64", "ios-full-xcode-macos-arm64-v1", "ios-full-xcode-macos-x86_64-v1", "arm64"),
+            ("macos-x86_64", "ios-full-xcode-macos-x86_64-v1", "ios-full-xcode-macos-arm64-v1", "x86_64"),
+        ):
+            with self.subTest(native=native):
+                good = request_data()
+                good["native"]["profile"] = native
+                good["native"]["toolchain"]["profile"] = toolchain
+                parsed = wire.parse_request(encode(good) + b"\n")
+                self.assertEqual(parsed.native["profile"], native)
+                self.assertEqual(parsed.native["toolchain"]["profile"], toolchain)
+                self.assertEqual(wire.PROFILES[native], ("macos", machine))
+                for change in (
+                    lambda value: value["native"]["toolchain"].update(profile=opposite),
+                    lambda value: value["native"]["toolchain"].update(profile="ios-full-xcode-macos-unknown-v1"),
+                    lambda value: value["native"]["toolchain"].update(developerDir="/Library/Developer/CommandLineTools"),
+                    lambda value: value["native"]["toolchain"].update(sdk="/inert/foreign.sdk"),
+                    lambda value: value["native"]["toolchain"]["sdkIdentity"].update(mode=stat.S_IFREG | 0o444),
+                    lambda value: value["native"].update(profile="linux-gnu-x86_64"),
+                    lambda value: value["native"].update(signingTools={}),
+                ):
+                    changed = copy.deepcopy(good)
+                    change(changed)
+                    with self.assertRaises(wire.ProtocolError):
+                        wire.parse_request(encode(changed) + b"\n")
+                signed = copy.deepcopy(good)
+                signed["protocol"] = wire.SIGNED_PROTOCOL
+                signed["context"].update(operation="ios-signed-export", signing={
+                    "teamId": "A1B2C3D4E5", "distributionCertificateSha256": "e" * 64,
+                    "assignments": [
+                        {"kind": kind, "recordId": digit * 32, "recordRevision": 1, "contextRevision": 3}
+                        for kind, digit in (("apple-p12", "1"), ("apple-profile", "2"))]})
+                signed["native"]["signingContext"] = copy.deepcopy(good["context"]["savedConfig"])
+                signed["native"]["signingTools"] = {
+                    name: copy.deepcopy(good["native"]["toolchain"]["xcodebuildIdentity"])
+                    for name in ("security", "codesign", "openssl")}
+                wire.parse_request(encode(signed) + b"\n")
+                signed["native"]["signingTools"]["security"]["uid"] = 501
+                with self.assertRaises(wire.ProtocolError):
+                    wire.parse_request(encode(signed) + b"\n")
+
     def test_closed_third_domain_cannot_adopt_another_domain_or_subclass(self):
         source = IOSArchiveInput(100)
         self.assertIs(source_domain(source), SavedCommandDomain.IOSArchive)

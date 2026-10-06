@@ -1774,7 +1774,7 @@ def linux_local_cargo_sources(packages, nodes, root, source):
     # The Linux-filtered graph includes the two maintained SDK sources, not
     # additional native platforms or arbitrary path/registry replacements.
     local_paths = {
-        "mobile-release-kit-desktop": ("0.1.0", source / "desktop/src-tauri/Cargo.toml"),
+        "mobile-release-kit-desktop": ("0.1.1", source / "desktop/src-tauri/Cargo.toml"),
         "mrk-linux-mount-observation": ("0.1.0", source / "desktop/native/linux-mount-observation/Cargo.toml"),
         "secret-service": ("5.2.0", source / "desktop/vendor/secret-service-5.2.0/Cargo.toml"),
         "zbus": ("5.19.0", source / "desktop/vendor/zbus-5.19.0/Cargo.toml"),
@@ -1869,7 +1869,7 @@ def native_cargo_metadata(raw, source, target, notice_crates, locked, *, candida
     D.need(len(by_id) == len(packages) and len(nodes) == len(node_rows) and set(nodes) <= set(by_id),
            "Native Cargo metadata IDs differ/duplicate")
     roots = [row for row in packages if row["manifest_path"] == str(source / "desktop/src-tauri/Cargo.toml")]
-    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.0"
+    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.1"
            and resolve.get("root") == roots[0]["id"] and roots[0]["id"] in nodes
            and metadata.get("workspace_members") == [roots[0]["id"]]
            and metadata.get("workspace_default_members") == [roots[0]["id"]]
@@ -3299,7 +3299,7 @@ def shell_cargo_metadata(raw, source, target):
     D.need(len(by_id) == len(packages) and len(nodes) == len(resolve["nodes"])
            and set(nodes) <= set(by_id), "Shell Cargo metadata IDs differ/duplicate")
     roots = [row for row in packages if row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")]
-    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.0"
+    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.1"
            and resolve.get("root") == roots[0]["id"] and roots[0]["id"] in nodes
            and nodes[roots[0]["id"]]["features"] == SHELL_FEATURES,
            "Shell root feature graph is not the fixed production graph")

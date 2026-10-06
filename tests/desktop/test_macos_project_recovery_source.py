@@ -80,8 +80,10 @@ class MacProjectRecoverySourceTests(unittest.TestCase):
 
     def test_ordinary_original_selection_precedes_admission_and_no_new_ipc_or_mode(self):
         saved = (MAC / "saved_command_owner.rs").read_text()
-        for name in ('IOS_SIGNED_NATIVE_QUALIFIED', 'IOS_RECOVERY_NATIVE_QUALIFIED'):
-            self.assertIn(f'const {name}: bool = false;', saved)
+        ios_selection = saved.split('fn ios_installed_selected(', 1)[1].split('fn android_original_document_matches(', 1)[0]
+        self.assertIn('self.domain == SavedCommandDomain::IOSArchive', ios_selection)
+        self.assertIn('&& self.runtime.ios_archive_installed_profile_available()', ios_selection)
+        self.assertNotIn('recovery_installed_selected', ios_selection)
         ios = (MAC / "installed_shell_observation_macos_ios.rs").read_text()
         self.assertIn('claimed: AtomicU8', ios)
         self.assertIn('claimed.compare_exchange(before, after, Ordering::SeqCst, Ordering::SeqCst)', ios)

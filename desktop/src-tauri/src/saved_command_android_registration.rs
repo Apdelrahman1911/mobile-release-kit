@@ -10,10 +10,10 @@ use android_sources::SourceSnapshot;
 pub(super) mod service_setup;
 #[path = "saved_command_android_maintenance.rs"]
 pub(super) mod maintenance;
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[path = "saved_command_android_registration_client.rs"]
 mod client;
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 use crate::installed_runtime::{AndroidRegistrationSourceSlots, AndroidRegistrationSourceReview, AdmissionFailure, CloseOutcome};
 const WORK:Duration=Duration::from_secs(wire::WORK_SECONDS);
 const HARD:Duration=Duration::from_secs(wire::FINALITY_SECONDS);
@@ -520,21 +520,21 @@ impl WorkGate {
             && now < self.control.work && self.slot.matches_epoch(self.control.epoch)
     }
     pub(crate) fn retained_bytes(&self) -> usize { std::mem::size_of::<Self>() }
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn source_work(&self)->Result<(),AdmissionFailure>{self.work().map_err(|(reason,_)|match reason{
         wire::Reason::TimedOut=>AdmissionFailure::Deadline,wire::Reason::CleanupUnknown=>AdmissionFailure::Unknown,
         wire::Reason::InputLimit|wire::Reason::ResultLimit=>AdmissionFailure::Bounds,_=>AdmissionFailure::Stopped,
     })}
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn source_first(&self)->Option<(AdmissionFailure,Instant)>{self.first().map(|(reason,at)|(match reason{
         wire::Reason::TimedOut=>AdmissionFailure::Deadline,wire::Reason::CleanupUnknown=>AdmissionFailure::Unknown,
         wire::Reason::InputLimit|wire::Reason::ResultLimit=>AdmissionFailure::Bounds,_=>AdmissionFailure::Stopped,
     },at))}
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn source_note(&self,failure:AdmissionFailure,at:Instant){
         source_failure(&self.control,failure,at);self.slot.wake.notify_all();
     }
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn source_cleanup_expired(&self,first:Option<(AdmissionFailure,Instant)>)->bool{
         if let Some((failure,at))=first{self.source_note(failure,at);}
         self.cleanup_expired(None)
@@ -608,7 +608,7 @@ impl Checked {
 }
 struct SourceReturn {
     known:bool,entered:bool,first:Option<(wire::Reason,Instant)>,retained_bytes:Option<usize>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     review:Option<AndroidRegistrationSourceReview>,
 }
 struct Reservation {whole:usize,source:usize}
@@ -621,9 +621,9 @@ struct Operation {
     source_return:Mutex<Option<Result<SourceReturn,tokio::task::JoinError>>>,source_join_seen:AtomicBool,
     coordinator:Mutex<Option<JoinHandle<bool>>>,
     coordinator_return:Mutex<Option<Result<bool,tokio::task::JoinError>>>,final_seen:AtomicBool,joined_at:std::sync::OnceLock<Instant>,accepted:AtomicBool,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     sources:Mutex<AndroidRegistrationSourceSlots>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     client:Option<client::ClientOriginal>,
 }
 /// A borrow of the actual joined original, not a current-input authority.
@@ -634,7 +634,7 @@ impl Finalization {
 }
 struct Review {
     original:Arc<Operation>,public:wire::Review,accepted_at:Instant,expires:Instant,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     source:AndroidRegistrationSourceReview,
 }
 struct Last {data:wire::Operation,phase:wire::Phase,reason:wire::Reason,report:Option<wire::Report>}
@@ -646,13 +646,13 @@ pub(super) struct Registration {
 }
 enum InvokeEntry {
     Inspection(oneshot::Sender<()>),
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     Registration(oneshot::Sender<client::BeginPreparation>),
 }
 impl InvokeEntry {
     fn release(self)->bool { match self {
         Self::Inspection(sender)=>sender.send(()).is_ok(),
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         Self::Registration(sender)=>sender.send(client::BeginPreparation).is_ok(),
     } }
 }
@@ -705,12 +705,13 @@ fn prerequisite_reason(value:wire::Prerequisite)->wire::Reason{match value{
     wire::Prerequisite::FreshServiceUnavailable=>wire::Reason::FreshServiceUnavailable,
 }}
 fn prerequisite(service:&service_setup::State)->wire::Prerequisite{
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     {
-        if !crate::android_supplier_macos::available(){return wire::Prerequisite::SupplierUnavailable;}
+        let Some(profile)=crate::android_build_protocol::Profile::current()else{return wire::Prerequisite::SupplierUnavailable;};
+        if !crate::android_supplier_macos::available_for(profile){return wire::Prerequisite::SupplierUnavailable;}
         return service.prerequisite();
     }
-    #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+    #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
     {let _=service;wire::Prerequisite::ServiceUnavailable}
 }
 impl Operation {
@@ -726,7 +727,7 @@ impl Operation {
     }
     fn known_return(&self)->bool {
         if !self.known_source_return(){return false;}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if let Some(client)=&self.client{return client.known_return();}
         self.data.kind==wire::Kind::Inspection
     }
@@ -740,7 +741,7 @@ impl Operation {
         if source_handle.is_some() || coordinator.is_some() || !matches!(final_return.as_ref(),Some(Ok(true))){return None;}
         let Some(Ok(returned))=returned.as_ref()else{return None;};
         if !returned.known{return None;}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if returned.review.is_some(){return None;} // The final Review owns it now.
         retained_operation_allocation_bytes(&self.data,&self.review_id,&self.instance,&self.control,&self.source,returned.retained_bytes?)
     }
@@ -840,14 +841,14 @@ impl Registration {
             // known prior failure retains only Last DATA, never hidden pickers.
             if !review.original.source.picker_originals().iter().zip(source.picker_originals()).all(|(old,new)|Arc::ptr_eq(old,new)){return None;}
             bytes=bytes.checked_add(retained_review_projection_bytes(review.original.retained_bytes()?,&review.public)?)?;
-            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             {bytes=bytes.checked_add(review.source.retained_bytes()?.checked_sub(std::mem::size_of::<AndroidRegistrationSourceReview>())?)?;}
         }
         Some(bytes)
     }
 }
 
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn source_failure(control:&Control,failure:AdmissionFailure,at:Instant){
     let reason=match failure{
         AdmissionFailure::Deadline=>wire::Reason::TimedOut,AdmissionFailure::Stopped=>wire::Reason::Cancelled,
@@ -856,11 +857,11 @@ fn source_failure(control:&Control,failure:AdmissionFailure,at:Instant){
     };
     control.stop_at(reason,at);
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn inspection_source_task(original:Arc<Operation>,enter:oneshot::Receiver<()>)->impl FnOnce()->SourceReturn{
     move||inspect_source(original,enter)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn inspect_source(original:Arc<Operation>,enter:oneshot::Receiver<()>)->SourceReturn{
     // The source book remains on the SAME Operation; even a panic/lost return
     // cannot drop an unresolved native/FD book with a detached worker closure.
@@ -940,7 +941,7 @@ fn poll_source_cells(control:&Control,joined:&AtomicBool,
     if !known{control.mark_unknown(at);}
     Poll::Ready(known)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 async fn coordinate_inspection(original:Arc<Operation>,enter:oneshot::Receiver<()>,source_release:oneshot::Sender<()>)->bool{
     let mut stopped=original.control.stop.subscribe();let mut changed=original.control.audit.subscribe();
     let go=tokio::select!{
@@ -1014,7 +1015,7 @@ impl Registration {
                     }
                 }
             }
-            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             if let Some(client)=&original.client{client.observe_late(&original);}
             return changed;
         }
@@ -1095,7 +1096,7 @@ impl Registration {
             if gate!=android_wire::Availability::Available
                 || !current.is_some_and(|current|original.saved.same_binding(current)){return false;}
         }
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {
             if let Some(client)=&original.client {
                 let Some((phase,reason,report))=client.report(original) else {
@@ -1145,7 +1146,7 @@ impl Registration {
             book.original=None;book.cohort=None;self.active=None;
             drop(book);inner.android_registration_control.wake.notify_all();true
         }
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {drop(book);original.control.mark_unknown(at);true}
     }
     fn status(&self,revision:u32,availability:Availability,setup:wire::Prerequisite)->Result<wire::Status,BridgeError>{
@@ -1154,9 +1155,9 @@ impl Registration {
             let failure=original.control.failure();
             (if unknown{wire::Phase::Unknown}else if failure.is_some(){wire::Phase::Stopping}
                 else if original.settling.load(Ordering::SeqCst){wire::Phase::Settling}else{
-                    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+                    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
                     if let Some(client)=&original.client{client.phase()}else{wire::Phase::Inspecting}
-                    #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+                    #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
                     {wire::Phase::Inspecting}
                 },
             if unknown{wire::Reason::CleanupUnknown}else{failure.map_or(wire::Reason::None,|(reason,_)|reason)},
@@ -1198,7 +1199,7 @@ impl SavedCommandOwner {
         if registry.stopping || gate==Availability::Shutdown{return Availability::Shutdown;}
         if registry.document_lost || gate==Availability::DocumentLost{return Availability::DocumentLost;}
         if self.inner.domain!=SavedCommandDomain::AndroidBuild
-            || !cfg!(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))){
+            || !cfg!(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))){
             return Availability::UnsupportedPlatform;
         }
         if !self.inner.android_runtime_selected(None){return Availability::RuntimeUnqualified;}
@@ -1282,14 +1283,14 @@ impl SavedCommandOwner {
             let checked_at=Instant::now();
             let current_review=registry.android_registration.same_review(input,&snapshot.source,checked_at).ok_or_else(wire::invalid)?;
             if !snapshot.reviewed.as_ref().is_some_and(|before|Arc::ptr_eq(before,&current_review)){return Err(wire::invalid());}
-            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             return client::admit(self,document,&mut registry,checked,current,census,gate,current_review);
-            #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+            #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
             return Err(wire::unavailable());
         }
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {let _=(census,checked);Err(wire::unavailable())}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {
             let source_budget=AndroidRegistrationSourceSlots::reservation(crate::android_supplier_macos_source::SourcePhase::Inspection)
                 .ok_or_else(wire::unavailable)?;
@@ -1398,14 +1399,14 @@ fn operation_allocation_bytes(data:&wire::Operation,review_id:&String,instance:&
 fn bounded_operation_sum(previous:usize,added:usize)->Option<usize>{
     previous.checked_add(added).filter(|bytes|*bytes<=OWNED_LIMIT)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn inspection_task_bytes(source:usize,coordinator:usize)->Option<usize>{
     source.checked_add(coordinator)?
         .checked_add(2usize.checked_mul(std::mem::size_of::<SourceReturn>())?)?
         .checked_add(std::mem::size_of::<Finalization>())?
         .checked_add(2usize.checked_mul(SIGNAL_STORAGE)?)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn inspection_admission_bytes(base:usize,source:usize,coordinator:usize)->Option<usize>{
     bounded_operation_sum(base,inspection_task_bytes(source,coordinator)?)
 }
@@ -1441,7 +1442,7 @@ fn retained_review_projection_bytes(original_bytes:usize,public:&wire::Review)->
         .checked_add(public.review_id.capacity())?.checked_add(public.context.retained_heap_bytes()?)?
         .checked_add(source_projection_bytes(&public.sources)?)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn registration_base_retained_bytes(document_bytes:usize,control_bytes:usize,runtime_heap:usize,sources_bytes:usize,
     catalog_bytes:usize,registration_bytes:usize,checked_bytes:usize)->Option<usize>{
     document_bytes.checked_add(arc_bytes::<Inner>()?)?.checked_add(SIGNAL_STORAGE)?
@@ -1452,7 +1453,7 @@ fn registration_base_retained_bytes(document_bytes:usize,control_bytes:usize,run
         .checked_add(checked_bytes)
 }
 
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn registration_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>,checked:&Checked,
     census:&crate::asset_session::AndroidRegistrationCensus<'_>)->Option<usize>{
     // No hidden source/Review/native disposal or reconciliation in a census.
@@ -1492,14 +1493,14 @@ fn registration_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>
     (bytes<=OWNED_LIMIT).then_some(bytes)
 }
 
-#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl SavedCommandOwner {
     pub(crate) fn assert_android_catalogue_whole_owner_data_contract(){
         catalogue_budget_tests::genuine_catalogue_fits_fresh_inspect_retained_review_and_register_data();
     }
 }
 
-#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 mod catalogue_budget_tests {
     use super::*;
     use crate::android_supplier_macos_source::SourcePhase;

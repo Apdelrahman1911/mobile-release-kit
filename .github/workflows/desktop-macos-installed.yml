@@ -24,9 +24,17 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: ordinary-image
-      # Exact accepted current-payload DATA; ordinary installation is not Aqua qualification.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0
+      # Exact current-payload ad-hoc DATA pins, not shipping-signature authority.
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d1c97b3efae1a5260f5269764686b43c4f054cb59b45615984e65ab1b85747e8
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108
+      # Independently accepted ARM supplier six pins; signing requires a new final M.
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: '158cdff422e3837f7ab5e6192af76a578faf6fab'
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: '37467019389'
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: '1'
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: '11415902210'
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       # Independent immutable publisher bindings; caller hashes come from build.rs.
       MRK_GITHUB_PREFLIGHT_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
@@ -44,9 +52,17 @@ jobs:
           [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ) ]] || exit 1
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
-          # Historical archive reuse supplies the interpreter, not the current core.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == d377fd497d8ef2ec1c42fa8112ec0ab1b0a134becacf4c1f3e8070b631b9dbf5 ]] || exit 1
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == aeae18cb734028c51791af7408b2fc036fa491db93a914032db70308a7c19ea0 ]] || exit 1
+          # Fresh supplier pins never replace the separate current-core source binding.
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == d1c97b3efae1a5260f5269764686b43c4f054cb59b45615984e65ab1b85747e8 ]] || exit 1
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == 2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" == ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695 ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" == 158cdff422e3837f7ab5e6192af76a578faf6fab ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" == 37467019389 ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" == 1 ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" == 11415902210 ]] || exit 1
           [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
           [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
           [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == b4cb582837a244f67e4c926f2ce2bb42ad8cfe37 ]] || exit 1
@@ -61,13 +77,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Prepare the pinned Apple Instant clock toolchain
-        timeout-minutes: 4
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install 1.98.1 --profile minimal --target aarch64-apple-darwin --no-self-update
-          rustc --version --verbose
       - name: Select DATA stager Python, not the packaged interpreter
         id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -117,8 +126,18 @@ jobs:
                    "protocolSha256": os.environ["MRK_BUNDLED_PROTOCOL_SHA256"],
                    "githubPreflightToolingSha": os.environ["MRK_GITHUB_PREFLIGHT_TOOLING_SHA"],
                    "githubReleaseToolingSha": os.environ["MRK_GITHUB_RELEASE_TOOLING_SHA"],
-                   "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
-                   "reusedSupplierOnly": True,
+                   "freshPythonSupplier": {
+                       "origin": os.environ["MRK_MACOS_RUNTIME_SUPPLIER"],
+                       "repository": "Apdelrahman1911/mobile-release-kit",
+                       "workflow": ".github/workflows/desktop-macos-cpython-source-build.yml",
+                       "ref": "refs/heads/verify/desktop-macos-cpython-source-build",
+                       "source": os.environ["MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT"],
+                       "runId": os.environ["MRK_MACOS_PYTHON_SUPPLIER_RUN_ID"],
+                       "runAttempt": os.environ["MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT"],
+                       "artifactId": os.environ["MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID"],
+                       "receiptSha256": os.environ["MRK_MACOS_PYTHON_SUPPLIER_SHA256"],
+                       "tarSha256": os.environ["MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256"],
+                   },
                    "scope": "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 8,
                    "aclPrimitiveCases": 6,
                    "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
@@ -186,6 +205,211 @@ jobs:
               stream.flush()
               os.fsync(stream.fileno())
           PY_SOURCE
+      - name: Admit the fixed image Rust tools without installing a distribution
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_DIRECT_RUST'
+          import importlib.util, os, re, stat, subprocess, sys, tomllib
+          from pathlib import Path
+          
+          checkout = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+          home = Path('/Users/runner')
+          cargo_home, rustup_home = home / '.cargo', home / '.rustup'
+          bin_directory = rustup_home / 'toolchains/stable-aarch64-apple-darwin/bin'
+          compiler_path = str(bin_directory) + ':/usr/bin:/bin:/usr/sbin:/sbin'
+          def need(value, reason):
+              if not value: raise ValueError(reason)
+          need(sys.platform == 'darwin' and sys.maxsize == 2**63-1 and os.uname().machine == 'arm64'
+               and os.getuid() != 0 and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), 'direct-rust-host')
+          need(os.environ.get('HOME') == str(home) and os.environ.get('GITHUB_WORKSPACE') == str(checkout)
+               and os.environ.get('RUSTUP_TOOLCHAIN') == '1.98.1'
+               and os.environ.get('CARGO_HOME', str(cargo_home)) == str(cargo_home)
+               and os.environ.get('RUSTUP_HOME', str(rustup_home)) == str(rustup_home)
+               and os.environ.get('RUSTC', str(bin_directory / 'rustc')) == str(bin_directory / 'rustc')
+               and os.environ.get('RUSTUP_AUTO_INSTALL', '0') == '0', 'direct-rust-source-route')
+          allowed_cargo = {'CARGO_HOME', 'CARGO_TARGET_DIR', 'CARGO_INCREMENTAL'}
+          allowed_rust = {'RUSTC', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN', 'RUSTUP_AUTO_INSTALL'}
+          need(not any((key.startswith('CARGO_') and key not in allowed_cargo)
+                       or (key.startswith('RUST') and key not in allowed_rust) for key in os.environ), 'direct-rust-ambient-selector')
+          need(os.environ.get('CARGO_INCREMENTAL', '0') == '0'
+               and os.environ.get('CARGO_TARGET_DIR') == str(Path(os.environ['MRK_MACOS_WORK']) / 'cargo-target'), 'direct-rust-target-route')
+          cwd_names = ('desktop/src-tauri', 'desktop/native/macos-installed-native',
+                       'desktop/helpers/macos-android-register', 'desktop/helpers/macos-desktop-image',
+                       'desktop/helpers/macos-vault-helper')
+          flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+          originals, directories, absent, close_errors = [], {}, set(), []
+          pending_call = False
+          failure = None
+          def signature(s):
+              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                      s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+          def current(row):
+              need(row['fd'] is not None and row['identity'] is not None, 'direct-rust-original-unbound')
+              parent = row['parent']
+              named = os.stat(str(row['path']) if parent is None else row['path'].name,
+                              dir_fd=None if parent is None else parent['fd'], follow_symlinks=False)
+              width = len(row['identity'])
+              need(signature(os.fstat(row['fd']))[:width] == row['identity']
+                   == signature(named)[:width], 'direct-rust-original-changed')
+          def directory(path):
+              if path in directories:
+                  current(directories[path]); return directories[path]
+              need(path.is_absolute() and str(path) == os.path.normpath(path) and len(path.parts) <= 24
+                   and len(originals) < 96, 'direct-rust-fixed-directory-bound')
+              parent = None if path == Path('/') else directory(path.parent)
+              need(len(originals) < 96, 'direct-rust-original-bound')
+              fd = os.open(str(path) if parent is None else path.name, flags | os.O_DIRECTORY,
+                           dir_fd=None if parent is None else parent['fd'])
+              row = {'fd': fd, 'path': path, 'parent': parent, 'identity': None, 'closed': False}
+              originals.append(row)
+              info = os.fstat(fd)
+              need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid())
+                   and not info.st_mode & 0o022, 'direct-rust-directory-policy')
+              row['identity'] = signature(info)[:5]
+              directories[path] = row
+              current(row)
+              return row
+          def original_file(path, *, executable=False):
+              parent = directory(path.parent)
+              need(len(originals) < 96, 'direct-rust-original-bound')
+              fd = os.open(path.name, flags, dir_fd=parent['fd'])
+              row = {'fd': fd, 'path': path, 'parent': parent, 'identity': None, 'closed': False}
+              originals.append(row)
+              info = os.fstat(fd)
+              need(stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid())
+                   and not info.st_mode & 0o022 and info.st_nlink > 0
+                   and (not executable or info.st_mode & 0o111), 'direct-rust-file-policy')
+              row['identity'] = signature(info)
+              current(row)
+              return row
+          def no_configuration():
+              searched = {cargo_home}
+              for name in cwd_names:
+                  cwd = checkout / name
+                  searched.update(parent / '.cargo' for parent in (cwd, *cwd.parents))
+              need(len(searched) <= 32, 'direct-rust-configuration-bound')
+              for path in sorted(searched):
+                  parent = directory(path.parent)
+                  try: info = os.stat(path.name, dir_fd=parent['fd'], follow_symlinks=False)
+                  except FileNotFoundError:
+                      need(path not in directories, 'direct-rust-configuration-disappeared')
+                      absent.add(path); continue
+                  need(path not in absent and stat.S_ISDIR(info.st_mode), 'direct-rust-configuration-directory')
+                  held = directory(path)
+                  for name in ('config', 'config.toml', 'credentials', 'credentials.toml'):
+                      try: os.stat(name, dir_fd=held['fd'], follow_symlinks=False)
+                      except FileNotFoundError: pass
+                      else: raise ValueError('direct-rust-ambient-configuration')
+          def check_originals():
+              for row in originals: current(row)
+          
+          try:
+              directory(cargo_home); directory(rustup_home); directory(bin_directory)
+              selected = original_file(checkout / 'desktop/rust-toolchain.toml')
+              size = selected['identity'][6]
+              need(0 < size <= 4096, 'direct-rust-repository-default-bound')
+              raw = os.pread(selected['fd'], size + 1, 0)
+              need(len(raw) == size and os.pread(selected['fd'], 1, size) == b'', 'direct-rust-repository-default-read')
+              current(selected)
+              need(tomllib.loads(raw.decode('utf-8'))['toolchain']['channel'] == '1.98.0', 'direct-rust-repository-default')
+              for tool in ('cargo', 'rustc'): original_file(bin_directory / tool, executable=True)
+              no_configuration(); check_originals()
+              spec = importlib.util.spec_from_file_location('_mrk_direct_rust_existing_owner_loader', checkout / 'desktop/tools/macos_aqua_qualification.py')
+              qualification = importlib.util.module_from_spec(spec)
+              sys.modules[spec.name] = qualification
+              spec.loader.exec_module(qualification)
+              owner = qualification.load_owner(checkout)
+              environment = dict(PATH=compiler_path, HOME=str(home), CARGO_HOME=str(cargo_home), RUSTUP_HOME=str(rustup_home),
+                                 RUSTC=str(bin_directory / 'rustc'), RUSTUP_TOOLCHAIN='1.98.1', RUSTUP_AUTO_INSTALL='0',
+                                 LANG='C', LC_ALL='C', TZ='UTC', DEVELOPER_DIR=os.environ['DEVELOPER_DIR'],
+                                 MACOSX_DEPLOYMENT_TARGET=os.environ['MACOSX_DEPLOYMENT_TARGET'])
+              for tool in ('rustc', 'cargo'):
+                  no_configuration(); check_originals()
+                  argv = [str(bin_directory / tool), '--version', '--verbose']
+                  pending_call = True
+                  result = owner.run_owned(argv, environ=environment, cwd=checkout / 'desktop/src-tauri',
+                                           timeout=15, capture=True, text=False, output_limit=4096)
+                  need(type(result) is subprocess.CompletedProcess and type(result.args) is list and result.args == argv
+                       and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
+                       and len(result.stdout) + len(result.stderr) <= 4096, 'direct-rust-original-return')
+                  pending_call = False  # Only this original complete return settles the command.
+                  need(result.returncode == 0 and not result.stderr and result.stdout, 'direct-rust-version-return')
+                  lines = result.stdout.decode('utf-8', 'strict').strip().splitlines()
+                  need(lines[0].startswith(tool + ' ') and lines.count('release: 1.98.1') == 1
+                       and lines.count('host: aarch64-apple-darwin') == 1, 'direct-rust-version-host')
+                  if tool == 'rustc':
+                      need(lines.count('commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985') == 1, 'direct-rust-clock-commit')
+                  no_configuration(); check_originals()
+          except BaseException as error:
+              failure = error
+          finally:
+              # No second query or manual retirement after an unreturned original. The
+              # original Python process's kernel exit releases retained read-only FDs.
+              if not pending_call:
+                  for row in reversed(originals):
+                      fd, row['fd'] = row['fd'], None  # One consuming close, never retry.
+                      if fd is None: continue
+                      try: os.close(fd); row['closed'] = True
+                      except OSError: close_errors.append('direct-rust-close-unknown')
+          if failure is not None or pending_call or close_errors or not all(row['closed'] for row in originals):
+              raise SystemExit('Fixed direct Rust admission refused; no toolchain install or fallback.')
+          print('Fixed direct Rust1.98.1 compiler and Cargo admitted; no distribution install performed.')
+          PY_DIRECT_RUST
+      - name: Admit only a fresh independently pinned Python transport destination
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/fresh-python-transport" && ! -L "$MRK_MACOS_WORK/fresh-python-transport" ]] || exit 1
+      - name: Download the independently accepted fresh Python transport
+        timeout-minutes: 3
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ env.MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID }}
+          run-id: ${{ env.MRK_MACOS_PYTHON_SUPPLIER_RUN_ID }}
+          repository: Apdelrahman1911/mobile-release-kit
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/fresh-python-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Project the pinned fresh Python transport without executing it
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_python_supplier_transport.py \
+            --target aarch64-apple-darwin \
+            --transport-root "$MRK_MACOS_WORK/fresh-python-transport" \
+            --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
+            --expected-tar "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" \
+            --python-output "$MRK_MACOS_WORK/fresh-python-supplier" \
+            --receipt-root "$MRK_MACOS_WORK/fresh-python-receipt" \
+            > "$MRK_MACOS_WORK/fresh-python-transport-result.json"
+      - name: Prepare the current payload from the independently accepted fresh Python supplier
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
+            --target aarch64-apple-darwin \
+            --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
+            --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
+            --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
+            --work "$MRK_MACOS_WORK/current-runtime-preparation" \
+            --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
+            --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
         if: github.ref == 'refs/heads/verify/desktop-macos-preview'
@@ -297,7 +521,7 @@ jobs:
             --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
           [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
-            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
+            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.1 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
@@ -526,28 +750,39 @@ jobs:
             '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/stage_macos_installed.py android-support \
             --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \
             > "$work/android-support-result.json"
-      - name: Download only the exact accepted interpreter supplier archive (no rebuild or fallback)
-        timeout-minutes: 3
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10639324707/zip" > "$MRK_MACOS_WORK/accepted-native-evidence.zip"
-      - name: Reuse accepted Mac supplier and prepare only the current ordinary payload
-        timeout-minutes: 3
+      - name: Require the fixed SOURCE producer identity and release before ordinary signing
+        timeout-minutes: 1
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
           umask 077
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
-            --archive "$MRK_MACOS_WORK/accepted-native-evidence.zip" \
-            --work "$MRK_MACOS_WORK/current-runtime-preparation" \
-            --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
-            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
-            --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
+          # Public SOURCE DATA only. This is not a signature/purpose verdict or
+          # a credential source; the native producer/parent verify independently.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
+            --target aarch64-apple-darwin > "$MRK_MACOS_WORK/packaging-selection.json"
+          "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
+          import json, os, re
+          from pathlib import Path
+          body = (Path(os.environ["MRK_MACOS_WORK"]) / "packaging-selection.json").read_bytes()
+          if not 0 < len(body) <= 4096: raise ValueError("SOURCE selection bound")
+          row = json.loads(body)
+          if (type(row) is not dict or row.get("schemaVersion") != 1
+                  or row.get("kind") != "source-packaging-selection-data"
+                  or row.get("target") != "aarch64-apple-darwin" or row.get("nativeAuthority") is not False
+                  or not isinstance(row.get("leafCertificateSha1"), str)
+                  or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
+                  or row["leafCertificateSha1"] == "0" * 40
+                  or not isinstance(row.get("packageVersion"), str)
+                  or len(row["packageVersion"]) > 32
+                  or re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", row["packageVersion"]) is None
+                  or any(int(part) > 0xffffffff for part in row["packageVersion"].split("."))
+                  or row["packageVersion"] == "0.1.0"):
+              raise ValueError("fixed SOURCE selection")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as output:
+              output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
+              output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
+          PY_PACKAGING_SELECTION
       - name: Build and sign the fixed resident image and C facades
         id: android_helper
         timeout-minutes: 10
@@ -569,7 +804,7 @@ jobs:
           set -o noclobber
           umask 077
           set +e
-          CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" cargo build \
+          PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build \
             --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --release \
             --target aarch64-apple-darwin --message-format=json \
             > "$MRK_MACOS_WORK/vault-helper-build.jsonl" 2> "$MRK_MACOS_WORK/vault-helper-build.stderr"
@@ -582,8 +817,8 @@ jobs:
             exit "$status"
           fi
           helper="$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
-          /usr/bin/codesign --force --sign - --options runtime \
-            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$helper"
+          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --options runtime \
+            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp "$helper"
           /usr/bin/codesign --verify --strict "$helper"
           "$MRK_PYTHON" -I -S -B - <<'PY_HELPER'
           import hashlib, json, os, pathlib, stat
@@ -602,7 +837,7 @@ jobs:
                     "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
                     "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "toolchain": "1.98.1",
                     "helperSha256": hashlib.sha256(body).hexdigest(), "helperBytes": len(body),
-                    "signing": "ad-hoc-runtime-empty-entitlements-strictly-verified",
+                    "signing": "source-selected-leaf-runtime-empty-entitlements-strictly-verified",
                     "nativeCallerAndKeychainQualified": False, "developerIdOrNotarizationQualified": False}
           with (path.parents[3] / "vault-helper-signing.json").open("x", encoding="utf-8") as output:
               json.dump(record, output, sort_keys=True); output.write("\n")
@@ -623,7 +858,7 @@ jobs:
           cd src-tauri
           set -o noclobber
           set +e
-          cargo build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
+          PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
             --target aarch64-apple-darwin --message-format=json-render-diagnostics \
             > "$MRK_MACOS_WORK/normal-build.jsonl" 2> "$MRK_MACOS_WORK/normal-build.stderr"
           cargo_status=$?
@@ -654,22 +889,24 @@ jobs:
           selected_toolchain = os.environ.get("RUSTUP_TOOLCHAIN")
           if repository_default != "1.98.0" or selected_toolchain != "1.98.1":
               raise ValueError("review the changed repository default or Mac clock toolchain before this gate")
-          # Rustup documents RUSTUP_AUTO_INSTALL=0: version queries cannot install.
-          environment = dict(os.environ, RUSTUP_AUTO_INSTALL="0")
+          # Query only the same admitted direct tools; no shim or installation.
+          environment = dict(os.environ, PATH="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc", RUSTUP_AUTO_INSTALL="0")
           versions = {}
           for tool in ("rustc", "cargo"):
-              command = [tool, "--version", "--verbose"]
+              command = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/" + tool, "--version", "--verbose"]
               result = subprocess.run(command, cwd=cwd, env=environment, check=True,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
               if result.stderr or not result.stdout or len(result.stdout) > 4096:
                   raise ValueError("effective version output refused")
               output = result.stdout.decode("utf-8", "strict").strip()
-              if not output.startswith(tool + " "):
+              if (not output.startswith(tool + " ") or output.splitlines().count("release: 1.98.1") != 1
+                      or output.splitlines().count("host: aarch64-apple-darwin") != 1):
                   raise ValueError("effective tool version output refused")
               if tool == "rustc" and ("release: 1.98.1" not in output.splitlines()
                       or "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985" not in output.splitlines()):
                   raise ValueError("effective compiler differs from reviewed Apple clock binding")
-              versions[tool] = {"command": command, "output": output}
+              # Existing schema names the logical role; actual argv above is absolute.
+              versions[tool] = {"command": [tool, "--version", "--verbose"], "output": output}
           value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"],
                    "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
@@ -1047,10 +1284,11 @@ jobs:
                       argv = ["/usr/sbin/diskutil", "info", "-plist", receipt["filesystemSelection"]["device"]]
                       cwd, environment, seconds, limit = temporary, clean, 15, 65536
                   elif phase == "build":
-                      argv = ["cargo", "test", "--locked", "--no-default-features",
+                      argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked", "--no-default-features",
                               "--features", "desktop-shell,custom-protocol,macos-installed-observation",
                               "--target", "aarch64-apple-darwin", "--test", "installed-shell-observation", "--no-run", "--message-format=json"]
-                      cwd, environment, seconds, limit = checkout / "desktop/src-tauri", os.environ.copy(), 1440, 4 * 1024 * 1024
+                      environment = dict(os.environ, PATH="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc", RUSTUP_AUTO_INSTALL="0")
+                      cwd, seconds, limit = checkout / "desktop/src-tauri", 1440, 4 * 1024 * 1024
                   elif phase == "rust":
                       argv = [str(artifact), "data-contracts"]
                       cwd, environment, seconds, limit = temporary, clean, 30, 65536
@@ -1229,20 +1467,20 @@ jobs:
           # Resident image/facade and vault helper are already signed. Sign
           # the copied desktop dylib before its C facade bundle and outer entry.
           desktop_image="$payload/Contents/Frameworks/libmrk_desktop_image.dylib"
-          /usr/bin/codesign --force --sign - --options runtime \
-            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$desktop_image"
+          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --options runtime \
+            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp "$desktop_image"
           /usr/bin/codesign --verify --strict "$desktop_image"
           desktop_image_sha=$(/usr/bin/shasum -a 256 "$desktop_image")
           desktop_image_sha=${desktop_image_sha%% *}
           [[ "$desktop_image_sha" =~ ^[0-9a-f]{64}$ ]]
-          /usr/bin/codesign --force --sign - --options runtime \
-            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$payload"
+          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --options runtime \
+            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp "$payload"
           /usr/bin/codesign --verify --strict "$payload"
           payload_sha=$(/usr/bin/shasum -a 256 "$payload/Contents/MacOS/mobile-release-kit-desktop")
           payload_sha=${payload_sha%% *}
           [[ "$payload_sha" =~ ^[0-9a-f]{64}$ ]]
-          /usr/bin/codesign --force --sign - --options runtime \
-            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --options runtime \
+            --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after
           # verify-after independently rebinds the unchanged signed resident image.
           /usr/bin/codesign --verify --strict "$desktop_image"
@@ -1321,16 +1559,16 @@ jobs:
             (( statuses[1] == 0 && statuses[2] == 0 )) || return 1
           }
           # Multiple FULL names belong after Cargo's --; libtest --exact is not a prefix filter.
-          run_focused dialog-regressions cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+          PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused dialog-regressions /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --no-default-features --features desktop-shell,custom-protocol \
             --target aarch64-apple-darwin --lib -- --exact --test-threads=1 --color=never --format=pretty \
             shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal \
             shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch
-          run_focused installer-finalizer-regression cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+          PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused installer-finalizer-regression /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --no-default-features --features macos-installed-installer \
             --target aarch64-apple-darwin --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty \
             installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
-          run_focused native-abi-regression cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+          PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused native-abi-regression /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --target aarch64-apple-darwin \
             --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
             tests::only_explicit_user_appkit_responses_can_be_accept_or_decline \
@@ -1387,7 +1625,7 @@ jobs:
           set -o noclobber
           (
             cd desktop/src-tauri
-            cargo build --locked --release --no-default-features --features macos-installed-installer-fixture \
+            PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --locked --release --no-default-features --features macos-installed-installer-fixture \
               --target aarch64-apple-darwin --bin mrk-macos-install
           )
           installer="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mrk-macos-install"
@@ -1399,7 +1637,7 @@ jobs:
             --output "$MRK_MACOS_WORK/scripts-fixture" > "$MRK_MACOS_WORK/scripts-fixture-result.json"
           [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \
-            --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.0 \
+            --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.1 \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --fixture \
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" \
@@ -1494,11 +1732,11 @@ jobs:
           set -o noclobber
           (
             cd desktop/src-tauri
-            cargo build --locked --release --no-default-features --features macos-installed-installer \
+            PATH=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTC=/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup /Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo build --locked --release --no-default-features --features macos-installed-installer \
               --target aarch64-apple-darwin --bin mrk-macos-install
           )
           installer="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mrk-macos-install"
-          /usr/bin/codesign --force --sign - --timestamp=none "$installer"
+          /usr/bin/codesign --force --sign "$MRK_MACOS_SOURCE_SIGNER_SHA1" --timestamp "$installer"
           /usr/bin/codesign --verify --strict "$installer"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts \
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
@@ -1506,7 +1744,7 @@ jobs:
             --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
           [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]] || exit 1
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \
-            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
+            --identifier dev.mobile-release-kit.desktop.installed --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" \
@@ -1540,58 +1778,32 @@ jobs:
           set -e
           printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
           [[ $xar_status == 0 ]] || exit "$xar_status"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
-            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
-            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
+          # Final original archive audit is the first action of package-install below.
       - name: Standard Installer only is privileged; never execute the app or Python as root
-        timeout-minutes: 5
+        timeout-minutes: 18
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
           umask 077
-          diagnostic=(--package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg"
-            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
-            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py check-installer-result-absent \
-            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
-            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"
+          # One original existing owner: final archive audit, explicit producer,
+          # two fixed signed images, readonly mount, standard Installer and V2
+          # nonroot readback. Its one990s group includes known mount retirement.
+          # Previous pkgbuild/tar/xar construction is not relabeled as owned.
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
-            > "$MRK_MACOS_WORK/installer-log-cursor.json"
-          cursor_status=$?
-          printf '%s\n' "$cursor_status" > "$MRK_MACOS_WORK/installer-log-cursor.status"
-          cursor_status_saved=$?
-          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" -target / -dumplog -verboseR \
-            > "$MRK_MACOS_WORK/installer-output.txt" 2>&1
-          installer_status=$?
-          printf '%s\n' "$installer_status" > "$MRK_MACOS_WORK/installer-output.status"
-          installer_status_saved=$?
-          # Read only the fixed bounded log interval, also after Installer failure.
-          # The selected raw lines are unbound diagnostics, never readback input.
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-capture "${diagnostic[@]}" \
-            --cursor "$MRK_MACOS_WORK/installer-log-cursor.json" \
-            --selected-output "$MRK_MACOS_WORK/installer-log-selected.txt" > "$MRK_MACOS_WORK/installer-log-capture.json"
-          capture_status=$?
-          printf '%s\n' "$capture_status" > "$MRK_MACOS_WORK/installer-log-capture.status"
-          capture_status_saved=$?
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py package-install \
+            > "$MRK_MACOS_WORK/package-install.stdout" 2> "$MRK_MACOS_WORK/package-install.stderr"
+          package_status=$?
+          printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-install.status"
+          package_status_saved=$?
           set -e
-          if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
-          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]] || exit 1
-          # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
-          # A collision, partial publication, unknown close or timeout fails
-          # here. Keep originals; no uninstall, rollback, retries or repair.
-      - name: Nonroot byte/mode readback, not a headless GUI substitute
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py observe-installation \
-            --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
-            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
-            --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
-          printf '%s\n' 'Engineering installation only. Actual installed runtime, Aqua project/Quit, and Save gates remain unverified.'
+          if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi
+          [[ "$package_status_saved" == 0 ]] || exit 1
+          # The receipt is not its own exit proof: only this original0, the
+          # saved Installer0, same-request readback and known detach permit use.
+          # Unknown resources remain retained; no forced detach or root Python.
       - name: Stage only the audited normal early-preview deliverables
         id: preview
         if: github.ref == 'refs/heads/verify/desktop-macos-preview'
@@ -1611,7 +1823,7 @@ jobs:
         with:
           name: mobile-release-kit-macos26-arm64-preview-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ steps.work.outputs.root }}/preview/MobileReleaseKit.pkg
+            ${{ steps.work.outputs.root }}/preview/MobileReleaseKit.dmg
             ${{ steps.work.outputs.root }}/preview/README.md
             ${{ steps.work.outputs.root }}/preview/PREVIEW.json
           if-no-files-found: error
@@ -1861,10 +2073,10 @@ jobs:
           finally: os.close(fd)
           print("One normal-app launch/Cancel/navigation/Quit UI scenario passed; POSIX exit and all-worker finality remain unavailable.")
           PY_UI_RESULT
-      - name: Use the normal app to select a project and persist reviewed local edits and images
+      - name: Exercise normal project edits, images and four draft-only Browse fields
         id: normal_project_ui_test
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
-        timeout-minutes: 11
+        timeout-minutes: 16
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -1918,7 +2130,7 @@ jobs:
               "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
           }
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # One 300s journey, original command cap420s; shared phase includes admission/close.
+          # Two separate 300s cases, one720s original command; fixed885s phase includes admission/close.
           set +e
           clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
@@ -1926,6 +2138,7 @@ jobs:
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
             -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
             -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields \
             -parallel-testing-enabled NO -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
             -disableAutomaticPackageResolution \
@@ -1934,7 +2147,7 @@ jobs:
           set -e
           printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
           [[ "$test_status" == 0 ]] || exit "$test_status"
-      - name: Verify the one selected project journey against its original XCTest result
+      - name: Verify both selected project journeys against their original XCTest result
         id: normal_project_ui_result
         if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
         timeout-minutes: 3
@@ -2004,9 +2217,9 @@ jobs:
                   raise ValueError("original native command did not pass")
           summary_bytes = read(root / "normal-ui/project-summary.raw.json", 262144)
           summary = json.loads(summary_bytes, object_pairs_hook=unique)
-          expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          expected = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
           if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
-              raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+              raise ValueError("exact two-pass, zero-failure/skip/expected-failure XCTest result required")
           # A persisted receipt is not finality: the original helper zero status above
           # also gates its consuming receipt close and final nonrenewable clock check.
           def checked_admission(name, phase, bundle, seconds, roles):
@@ -2057,12 +2270,14 @@ jobs:
               [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
                ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
                ("normal-ui-build", 240, 1048576), roster])
-          runner, runner_bytes = checked_admission("project-test.runner-admission.json", "test", "project-test.xcresult", 585,
+          runner, runner_bytes = checked_admission("project-test.runner-admission.json", "test", "project-test.xcresult", 885,
               [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
-               ("one-admitted-ui-test", 420, 1048576), roster])
+               ("one-admitted-ui-test", 720, 1048576), roster])
           summary_admission, summary_admission_bytes = checked_admission("project-summary.command-admission.json", "summary", "project-test.xcresult", 90,
               [roster, ("normal-ui-summary", 30, 262144), roster])
-          if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+          if (runner.get("projectFieldAndEditMarkersObserved") is not True
+                  or runner.get("androidToolSourceBrowseMarkerObserved") is not True
+                  or runner.get("appSandboxEntitlement") not in ("absent", "false")
                   or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
                   or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
                   or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
@@ -2091,6 +2306,13 @@ jobs:
                     "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
                     "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
                     "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
+                    "testIdentifiers": ["MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
+                                        "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields"],
+                    "projectRelativeFieldBrowseUI": "passed", "fieldBrowseSavedConfiguration": False,
+                    "androidToolSourceBrowseUI": "passed",
+                    "androidToolSourceBrowseTestIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields",
+                    "androidToolSourceBrowseScope": "selection-only-three-roles-native-cancel-reselect-backend-source-refused",
+                    "supplierInspectionQualified": False, "protectedToolCopyQualified": False, "androidBuildQualified": False,
                     "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
                     "localProjectEditsAndImagesUI": "passed", "applicationStateAfterNormalQuit": "notRunning",
                     "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
@@ -2101,7 +2323,7 @@ jobs:
               with os.fdopen(fd, "wb", closefd=False) as stream:
                   stream.write(data); stream.flush(); os.fsync(fd)
           finally: os.close(fd)
-          print("One normal-app project/config/workflows/text/version/images UI journey passed; POSIX exit and all-worker finality remain unavailable.")
+          print("Both normal-app project UI cases passed, including four-field draft-only and Android source-only Browse; POSIX exit and all-worker finality remain unavailable.")
           PY_UI_RESULT
       - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
         id: normal_persistence_ui_test
@@ -2614,6 +2836,8 @@ jobs:
                   ("result.json", "normal-app-launch-cancel-navigation-quit-ui-only", "testLaunchCancelAndQuit", "launchRenderCancelNavigationQuitUI"),
                   ("project-result.json", "normal-app-project-config-workflows-text-version-images-ui", "testSyntheticProjectLocalEditsAndImages", "localProjectEditsAndImagesUI"),
                   ("persistence-result.json", "normal-app-synthetic-persistent-credentials-ui", "testSyntheticPersistentCredentials", "syntheticPersistenceCRUDUI")):
+              prior_expected_counts = (dict(expected, totalTestCount=2, passedTests=2)
+                                       if name == "project-result.json" else expected)
               raw = read(root / "normal-ui" / name, 65536)
               prior = json.loads(raw, object_pairs_hook=unique)
               if (prior["scope"] != scope or prior["applicationSourceCommit"] != source or prior["harnessSourceCommit"] != source
@@ -2621,7 +2845,7 @@ jobs:
                       or prior["packageSha256"] != preview["packageSha256"] or prior["signedAppBinarySha256"] != preview["signedAppBinarySha256"]
                       or prior["runtimeManifestSha256"] != preview["runtimeManifestSha256"] or prior[passed] != "passed"
                       or prior["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/" + test
-                      or any(type(prior["testCounts"].get(key)) is not int or prior["testCounts"][key] != value for key, value in expected.items())):
+                      or any(type(prior["testCounts"].get(key)) is not int or prior["testCounts"][key] != value for key, value in prior_expected_counts.items())):
                   raise ValueError("diagnostics journey requires the same original accepted basic/project/persistence gates")
               prior_hashes[name] = hashlib.sha256(raw).hexdigest()
           for name in ("build", "diagnostics-test-file-limit", "diagnostics-test-file-budget", "diagnostics-test", "diagnostics-summary"):
@@ -2943,6 +3167,8 @@ jobs:
                   ("project-result.json", "normal-app-project-config-workflows-text-version-images-ui", "testSyntheticProjectLocalEditsAndImages", "localProjectEditsAndImagesUI"),
                   ("persistence-result.json", "normal-app-synthetic-persistent-credentials-ui", "testSyntheticPersistentCredentials", "syntheticPersistenceCRUDUI"),
                   ("diagnostics-result.json", "ordinary-ui-observed-original-diagnostics-report-and-settled-projection", "testSyntheticProjectBuildToolDiagnostics", "diagnosticsReportAndSettledProjectionUI")):
+              prior_expected_counts = (dict(prior_expected, totalTestCount=2, passedTests=2)
+                                       if name == "project-result.json" else prior_expected)
               raw = read(root / "normal-ui" / name, 65536)
               prior = json.loads(raw, object_pairs_hook=unique)
               if (prior["scope"] != scope or prior["applicationSourceCommit"] != source or prior["harnessSourceCommit"] != source
@@ -2955,8 +3181,8 @@ jobs:
                       or prior[passed] != "passed" or prior["applicationStateAfterNormalQuit"] != "notRunning"
                       or prior["cleanExitStatus"] is not None or prior["allWorkerFinality"] != "not-established-by-XCTest-UI-state"
                       or prior["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/" + test
-                      or type(prior["testCounts"]) is not dict or set(prior["testCounts"]) != set(prior_expected)
-                      or any(type(prior["testCounts"][key]) is not int or prior["testCounts"][key] != value for key, value in prior_expected.items())):
+                      or type(prior["testCounts"]) is not dict or set(prior["testCounts"]) != set(prior_expected_counts)
+                      or any(type(prior["testCounts"][key]) is not int or prior["testCounts"][key] != value for key, value in prior_expected_counts.items())):
                   raise ValueError("saved-check journeys require the same original accepted basic/project/persistence/diagnostics and normal-Quit gates")
               prior_hashes[name] = hashlib.sha256(raw).hexdigest()
           for name in ("build", "saved-checks-test-file-limit", "saved-checks-test-file-budget", "saved-checks-test", "saved-checks-summary"):
@@ -3212,6 +3438,7 @@ jobs:
             ${{ steps.work.outputs.root }}/native-acl-cleanup.status
             ${{ steps.work.outputs.root }}/native-acl-probe-result.json
             ${{ steps.work.outputs.root }}/runtime-result.json
+            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json
             ${{ steps.work.outputs.root }}/android-support-result.json
             ${{ steps.work.outputs.root }}/vault-helper-build.status
             ${{ steps.work.outputs.root }}/vault-helper-build.jsonl
@@ -3295,6 +3522,62 @@ jobs:
             ${{ steps.work.outputs.root }}/package-tar.status
             ${{ steps.work.outputs.root }}/package-xar.status
             ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg
+            ${{ steps.work.outputs.root }}/packaging-selection.json
+            ${{ steps.work.outputs.root }}/producer-root/Install.pkg
+            ${{ steps.work.outputs.root }}/producer-root/producer.json
+            ${{ steps.work.outputs.root }}/producer-root/producer.sig
+            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit.dmg
+            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit-Observation.dmg
+            ${{ steps.work.outputs.root }}/package-request-id.txt
+            ${{ steps.work.outputs.root }}/android-helper-package-install.json
+            ${{ steps.work.outputs.root }}/package-install.stdout
+            ${{ steps.work.outputs.root }}/package-install.stderr
+            ${{ steps.work.outputs.root }}/package-install.status
+            ${{ steps.work.outputs.root }}/android-helper-producer-build.stdout
+            ${{ steps.work.outputs.root }}/android-helper-producer-build.stderr
+            ${{ steps.work.outputs.root }}/android-helper-producer-build.status
+            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stdout
+            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stderr
+            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-create.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.status
+            ${{ steps.work.outputs.root }}/android-helper-observation-create.stdout
+            ${{ steps.work.outputs.root }}/android-helper-observation-create.stderr
+            ${{ steps.work.outputs.root }}/android-helper-observation-create.status
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stdout
+            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stderr
+            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.status
+            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stdout
+            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stderr
+            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.status
+            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stdout
+            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stderr
+            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.status
+            ${{ steps.work.outputs.root }}/android-helper-installer.stdout
+            ${{ steps.work.outputs.root }}/android-helper-installer.stderr
+            ${{ steps.work.outputs.root }}/android-helper-installer.status
+            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stdout
+            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stderr
+            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

@@ -189,11 +189,23 @@ acceptance. Original runtime, document, input and owner admission still applies.
 - GitHub read-only and publisher-bound preflight/release profiles have separate
   selectors. A local workflow proposal grants no network or Store operation;
   profile selection is not live-service success or general network authority.
-- The project-relative P2 field picker remains closed in the normal Mac profile:
-  `INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED` is false. Browse for `version.source`,
-  `ios.project`, `ios.workspace`, and `metadata.root` is unavailable; manual text
-  entry remains. Project registration and the other selection profiles do not
-  qualify this separate gate.
+- The undelivered candidate selects the separate project-relative P2 profile:
+  `INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED` is true for ordinary-app validation.
+  Browse for `version.source`, `ios.project`, `ios.workspace`, and `metadata.root`
+  chooses existing descendants into the draft, without copying or Save; manual
+  text entry remains. Both Xcode fields are retained even when they conflict.
+  This availability is not qualification: exact-source AppKit/APFS refusal/owner
+  evidence and the ordinary two-case UI batch must pass before delivery.
+- The separate undelivered Android source-folder flag is true for ordinary-app
+  validation. Status refines only an otherwise-available Document/publisher gate
+  with the same cached selector already required by Choose; original Cancel and
+  the seven denial states are unchanged. The same two-case batch must genuinely
+  Browse JDK, SDK and Gradle, Cancel while retaining the selected JDK, replace it
+  with another inert directory, then observe backend SourceRefused after a real
+  native directory Open while retaining all prior selections. This does not
+  qualify supplier inspection, registration/protected copying, builds or native
+  link/wrong-kind handling. Exact enabled-source ordinary native evidence is
+  still required before delivery; no additional selection profile is enabled.
 
 The existing frontend/capability intersection is still used. None of these
 selectors, source tests or a successful build establishes the outstanding native
@@ -204,8 +216,11 @@ or product readiness. The separate evidence and signing limitations below remain
 
 The installed app is
 `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`.
-The runtime is
-`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-entry-m2a-01/runtime`.
+The candidate ARM64 runtime path is
+`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-desktop-01/runtime`
+(x86_64 selects `macos26-x86_64-desktop-01` instead). Both candidates use
+package version `0.1.1`; these names are not public release or native
+installation qualification.
 The historical supplier archive keeps its original label; it does not select the
 current installed release.
 
@@ -571,10 +586,10 @@ with historical protocol
 Those facts remain supplier provenance, not current-core or native acceptance.
 The unchanged historical `runtime` subcommand still enforces that old profile.
 
-The ordinary installed and Aqua product workflows both bind the independently
-reviewed current-payload DATA:
-- M (manifest): `2903a7576902c5a4a76d9ef7360c432421da68b55fea97149eae376200ca70f3`.
-- S (source inputs): `13da9bec462c6430e78521f76e26cd552bee6be17f5b2828a1e9dcc1c8b2b659`.
+An earlier current-payload DATA snapshot (historical, not today's fresh
+supplier workflow nomination) bound the following independently reviewed values:
+- M (manifest): `854740a4ef63a127d8884008a8f031b00961b81419ae2228376f2bb579399721`.
+- S (source inputs): `0abf9451b69602d6b3c03e631bedee18362461178bc985f5f5baf2c632ce69df`.
 - Q (protocol): `083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5`.
 
 Their existing `current-runtime` actions reuse only the accepted interpreter
@@ -586,7 +601,7 @@ requires explicit S/M before publishing the fresh final runtime. The subsequent
 historical default. Both packages use that one completed app/runtime inventory.
 
 The captured current-source roster is 151 inputs (139 core files, ten bootstraps,
-the committed CA and the preparation tool), totaling 3,764,765 bytes. The reviewed
+the committed CA and the preparation tool), totaling 3,766,874 bytes. The reviewed
 manifest is 82,988 bytes with 590 runtime-file records. The M/S values above bind
 that descriptor; workflow/guide-only consumer pin updates do not alter its payload
 closure. The accepted interpreter supplier is unchanged, so no interpreter source
@@ -603,6 +618,73 @@ standalone Installer; the runtime lives **outside** the app and is never passed
 to codesign. A complete signed-app/runtime inventory is then passed explicitly
 into the installer build. That per-build inventory binds this build's completed
 output, not an arbitrary adjacent file, and grants no runtime/GUI qualification.
+
+## Python signature derivation before the final runtime manifest
+
+The fresh public CPython suppliers for both targets are already built, probed,
+and ad-hoc signed. Their six fixed receipt/TAR/source/run/attempt/artifact pins
+remain original supplier authority, not Developer ID or notarization evidence.
+The isolated `desktop-macos-python-runtime-signing.yml` workflow reuses those
+originals; it does not rebuild Python or modify either supplier artifact.
+
+Its two fixed refs select **engineering** or **configured shipping** explicitly.
+Both use the existing original-process owner, one private task, and an empty
+entitlements plist. Engineering signs ad-hoc with hardened runtime enabled,
+then runs the existing modules (including real libffi callbacks), loader, TLS,
+and cancellation probes on the exact signed bytes. Intel is tested first; a
+failure is not a reason to retry with broader entitlements. Neither
+`allow-jit`, `disable-library-validation`, nor
+`allow-unsigned-executable-memory` is automatically enabled. This credential-free
+behavior check publishes only bounded facts, never a shipping capsule or M.
+
+Configured shipping requires the existing SOURCE signing profiles and the exact
+configured Developer ID identity. It signs the one executable in a standalone
+owned slot with `--options runtime` and a timestamp, verifies the exact code
+requirement with `codesign --verify --strict --all-architectures`, and runs the
+same four native probes. There is no `--deep`, keychain discovery, ad-hoc
+fallback, or signer-selected entitlement exception. Missing credentials remain
+an external requirement; the path is implemented but no configured-signature,
+notarization, installation, or UI result is implied by its presence.
+
+Only `python/bin/python3` may differ. The complete original TAR/header/content
+inventory is checked before copying; every other resource byte is preserved.
+Inputs, SOURCE, copied files, and their held directory identities are checked
+again after the original calls. Only known originals authorize the bounded
+read-only-to-cleanup directory transition and task retirement; uncertain
+operation/close/retirement outcomes withhold all capsule authority. No command
+can start after retirement begins. Successful shipping exports exactly
+`python3` and a <=16KiB `python-signed-receipt.json`, and the outer original zero
+exit is required before the workflow uploads that capsule.
+
+The existing `describe-current-runtime` and `current-runtime` commands optionally
+accept this **complete** additional input group:
+
+```
+--signed-python FILE --signing-receipt FILE
+--expected-signed-python SHA256 --expected-signing-receipt SHA256
+--expected-signing-source COMMIT --expected-signing-run RUN_ID
+--expected-signing-attempt ATTEMPT
+```
+
+The original fresh `--python-root`, `--supplier-receipt`, and
+`--expected-supplier` inputs remain mandatory. The group cannot be mixed with
+the historical archive route or partially supplied. It binds the fixed original
+supplier6, independently nominated derivation source/run/hashes, configured
+profiles, one-file correspondence, and exact native-evidence/finality roster;
+receipt booleans alone never authorize a signature. DATA staging does not invoke
+the signed executable or treat the capsule as installation authority.
+
+The substituted bytes enter the unchanged current-runtime preparer **before**
+it computes M. The original supplier inventory and receipt retain their own
+identities; the derived signature has separate provenance. S still covers the
+same current-core/bootstrap/CA preparation inputs. A signed executable changes
+M, so existing ARM/Intel ad-hoc S/M observations cannot be reused as the signed
+M. Both inputs and signatures are rechecked after final publication; partial
+outputs after a failed POST are inadmissible, not a retry candidate. The ordinary
+installed/Aqua callers must separately bind the actual configured capsule and
+new M when available. They must never sign a runtime after freezing M or claim
+shipping readiness from the engineering workflow.
+
 
 ## Existing owners and native originals
 

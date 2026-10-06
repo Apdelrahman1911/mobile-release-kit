@@ -1,5 +1,6 @@
 //! Fixed synthetic lookup-only peer; never an installed application or CLI.
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64", debug_assertions,
+#[cfg(not(all(target_os = "macos", target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64"), debug_assertions,
     feature = "installed-observation", mrk_wrapping_keychain_qualification,
     mrk_wrapping_keychain_qualification_native)))]
 compile_error!("private helper requires the exact nonshipping native qualification handshake");

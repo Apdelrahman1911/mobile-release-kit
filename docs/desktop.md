@@ -78,10 +78,21 @@ stay in memory until a separately reviewed and confirmed native Save.
 
 Normal Mac profile selection is implemented, but does not replace per-operation
 runtime/input/owner admission or the still-required native acceptance. The
-separate project-field Browse gate remains closed for `version.source`,
-`ios.project`, `ios.workspace`, and `metadata.root`; text entry remains available.
-That gate does not stand in for project-folder, signing-file, evidence-folder or
-image-selection profiles. See the [normal Mac surface](../desktop/packaging/macos-installed.md#deliberately-small-product-surface).
+undelivered candidate selects the separate project-field Browse profile for
+`version.source`, `ios.project`, `ios.workspace`, and `metadata.root`. It chooses
+existing project descendants into the draft only: no copying, saving or automatic
+removal of the other Xcode field. Manual text entry remains available. Exact-source
+AppKit/refusal and ordinary-app UI acceptance are still required before delivery.
+This profile does not stand in for project-folder, signing-file, evidence-folder or
+image-selection profiles. The separate undelivered Android source-folder candidate
+enables ordinary Browse for JDK, Android SDK and Gradle directories. Its Status
+uses the same cached native selector as Choose, without promoting an existing
+denial or restricting original Cancel. The ordinary two-case UI batch must also
+show all three roles, Cancel retaining the selected JDK, a distinct JDK reselection,
+and a genuine native Open followed by backend source refusal retaining the prior
+selections. This is directory-selection-only evidence, not supplier inspection,
+protected copying, a build, or link/wrong-kind coverage. Exact enabled-source native
+acceptance remains required before delivery. See the [normal Mac surface](../desktop/packaging/macos-installed.md#deliberately-small-product-surface).
 
 Windows can use the portable passive services. Its original-parent static reader
 is staged in source but **disabled pending independent ABI/native W1–W6

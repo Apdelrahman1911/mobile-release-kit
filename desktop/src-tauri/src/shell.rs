@@ -181,6 +181,20 @@ fn cancel_installation(webview: Webview, request: tauri::ipc::Request<'_>, state
     state.document.cancel_installation(id)
 }
 #[tauri::command]
+fn installation_preparation_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::PreparationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    crate::installation::inspect_request(request_body(&request)?)?;
+    state.document.installation_preparation_status()
+}
+#[tauri::command]
+fn prepare_installation_quit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::PreparationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let confirmation = crate::installation::preparation_request(request_body(&request)?)?;
+    state.document.prepare_installation_quit(confirmation)
+}
+#[tauri::command]
 async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=catalog-enter\n");
     fixture_command!(state, Catalog, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -212,7 +226,11 @@ async fn start_environment_diagnostics(webview: Webview, request: tauri::ipc::Re
     let value = request_body(&request)?;
     let args = crate::environment_diagnostics_protocol::start(value)?;
     installed_command_request!(state, ToolsStart, value);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_tools_request(value); }
     let result = state.document.start_environment_diagnostics(args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_tools_result(&result, true); }
     installed_command_result!(state, ToolsStart, &result);
     result
 }
@@ -221,6 +239,8 @@ async fn environment_diagnostics_status(webview: Webview, request: tauri::ipc::R
     fixture_command!(state, EnvironmentStatus, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; crate::environment_diagnostics_protocol::status_request(request_body(&request)?)?;
     let result = state.document.environment_diagnostics_status();
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_tools_result(&result, false); }
     fixture_result!(observed, environment_status_returned, &result);
     result
 }
@@ -231,6 +251,8 @@ async fn cancel_environment_diagnostics(webview: Webview, request: tauri::ipc::R
     let value = request_body(&request)?;
     let args = crate::environment_diagnostics_protocol::cancel(value)?;
     installed_command_request!(state, ToolsCancel, value);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_cancel_request(); }
     let result = state.document.cancel_environment_diagnostics(args);
     installed_command_result!(state, ToolsCancel, &result);
     result
@@ -242,7 +264,11 @@ async fn prepare_offline_preflight(webview: Webview, request: tauri::ipc::Reques
     let value = preflight_request_body(request.body())?;
     let args = crate::offline_preflight_protocol::prepare(&value)?;
     installed_command_request!(state, OfflinePrepare, &value);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_prepare_request(&value); }
     let result = state.document.prepare_offline_preflight(args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_offline_result(&result, Some("prepare")); }
     installed_command_result!(state, OfflinePrepare, &result);
     result
 }
@@ -253,7 +279,11 @@ async fn start_offline_preflight(webview: Webview, request: tauri::ipc::Request<
     let value = preflight_request_body(request.body())?;
     let args = crate::offline_preflight_protocol::start(&value)?;
     installed_command_request!(state, OfflineStart, &value);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_start_request(&value); }
     let result = state.document.start_offline_preflight(args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_offline_result(&result, Some("start")); }
     installed_command_result!(state, OfflineStart, &result);
     result
 }
@@ -263,7 +293,10 @@ async fn offline_preflight_status(webview: Webview, request: tauri::ipc::Request
     edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
     let value = preflight_request_body(request.body())?;
     crate::offline_preflight_protocol::status_request(&value)?;
-    state.document.offline_preflight_status()
+    let result = state.document.offline_preflight_status();
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_offline_result(&result, None); }
+    result
 }
 #[tauri::command]
 async fn cancel_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
@@ -272,6 +305,8 @@ async fn cancel_offline_preflight(webview: Webview, request: tauri::ipc::Request
     let value = preflight_request_body(request.body())?;
     let args = crate::offline_preflight_protocol::cancel(&value)?;
     installed_command_request!(state, OfflineCancel, &value);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
+    if let Some(q) = &state.observation { q.checks_cancel_request(); }
     let result = state.document.cancel_offline_preflight(args);
     installed_command_result!(state, OfflineCancel, &result);
     result
@@ -812,13 +847,13 @@ async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Reques
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::workflow_open(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_open_request(args.project_id()); }
     let result = match args {
         edit_commands::WorkflowOpen::Edit(args) => state.bridge.open_workflow_edit(&state.document, window, args.project_id),
         edit_commands::WorkflowOpen::Recover(args) => state.bridge.open_workflow_recovery(&state.document, window, args),
     };
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_open_result(&result, &state.bridge.edits); }
     result
 }
@@ -827,13 +862,13 @@ async fn github_workflow_edit_prepare(webview: Webview, request: tauri::ipc::Req
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::workflow_prepare_request(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let (Some(q), edit_commands::WorkflowPrepare::Edit(args)) = (&state.observation, &args) { q.workflow_prepare_request(args); }
     let result = match args {
         edit_commands::WorkflowPrepare::Edit(args) => state.bridge.prepare_workflow_edit(&state.document, window, args),
         edit_commands::WorkflowPrepare::Recover(args) => state.bridge.prepare_workflow_recovery(&state.document, window, args),
     };
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_prepare_result(&result, &state.bridge.edits); }
     result
 }
@@ -842,13 +877,13 @@ async fn github_workflow_edit_apply(webview: Webview, request: tauri::ipc::Reque
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::workflow_apply(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_apply_request(args.session_id(), args.plan_token()); }
     let result = match args {
         edit_commands::WorkflowApply::Edit(args) => state.bridge.apply_workflow_edit(&state.document, window, &args.session_id, &args.plan_token),
         edit_commands::WorkflowApply::Recover(args) => state.bridge.apply_workflow_recovery(&state.document, window, args),
     };
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_apply_result(&result, &state.bridge.edits); }
     result
 }
@@ -857,7 +892,7 @@ async fn github_workflow_edit_close(webview: Webview, request: tauri::ipc::Reque
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.workflow_close_request(); }
     // STOP remains available to the original document during quit; loss has
     // already stopped this same owner. No new root lookup/claim is involved.
@@ -869,7 +904,7 @@ async fn github_workflow_edit_status(webview: Webview, request: tauri::ipc::Requ
     edit_window(&webview)?;
     edit_commands::status(request_body(&request)?)?;
     let result = state.bridge.edits.workflow_status();
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let (Some(q), Ok(status)) = (&state.observation, &result) { q.workflow_status(status, &state.bridge.edits); }
     result
 }
@@ -882,10 +917,12 @@ async fn release_version_observe(webview: Webview, request: tauri::ipc::Request<
     let args = crate::release_version_protocol::request(body)?;
     not_closing(&state).map_err(crate::release_version_protocol::public_error)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
-    if let Some(q) = &state.observation { q.release_version_request(body); }
+    if let Some(q) = &state.observation { #[cfg(target_os="linux")] q.release_version_request(body);
+        #[cfg(target_os="macos")] if q.local_case(){q.local_release_version_request(body);}else{q.release_version_request(body);} }
     let result = state.bridge.observe_release_version(&state.document, args).await;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
-    if let Some(q) = &state.observation { q.release_version(&result); }
+    if let Some(q) = &state.observation { #[cfg(target_os="linux")] q.release_version(&result);
+        #[cfg(target_os="macos")] if q.local_case(){q.local_release_version(&result);}else{q.release_version(&result);} }
     result
 }
 #[tauri::command]
@@ -895,10 +932,10 @@ async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_
     let body = request_body(&request)?;
     let args = metadata_text_commands::open(body)?;
     not_closing(&state)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_request(body); }
     let result = state.bridge.observe_metadata_text(&state.document, args).await;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_observation(&result); }
     result
 }
@@ -909,10 +946,10 @@ async fn metadata_text_validate(webview: Webview, request: tauri::ipc::Request<'
     let body = request_body(&request)?;
     let args = metadata_text_commands::validate(body)?;
     not_closing(&state)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_validation_request(body); }
     let result = state.bridge.validate_metadata_text(&state.document, args).await;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_validation(&result); }
     result
 }
@@ -921,10 +958,10 @@ async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = metadata_text_commands::open(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_open_request(&args); }
     let result = state.bridge.open_metadata_text_edit(&state.document, window, args);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_open_result(&result, &state.bridge.edits); }
     result
 }
@@ -933,10 +970,10 @@ async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Reque
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = metadata_text_commands::prepare(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_prepare_request(&args); }
     let result = state.bridge.prepare_metadata_text_edit(&state.document, window, args);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_prepare_result(&result, &state.bridge.edits); }
     result
 }
@@ -945,10 +982,10 @@ async fn metadata_text_edit_apply(webview: Webview, request: tauri::ipc::Request
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::apply(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_apply_request(&args.session_id, &args.plan_token); }
     let result = state.bridge.apply_metadata_text_edit(&state.document, window, &args.session_id, &args.plan_token);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_apply_result(&result, &state.bridge.edits); }
     result
 }
@@ -957,11 +994,11 @@ async fn metadata_text_edit_close(webview: Webview, request: tauri::ipc::Request
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_close_request(&args.session_id); }
     // Original STOP remains available during quit without a new root lookup.
     let result = state.bridge.edits.close_metadata_text(window, &args.session_id);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_close_result(&result, &state.bridge.edits); }
     result
 }
@@ -971,7 +1008,7 @@ async fn metadata_text_edit_status(webview: Webview, request: tauri::ipc::Reques
     edit_window(&webview)?;
     edit_commands::status(request_body(&request)?)?;
     let result = state.bridge.edits.metadata_text_status();
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let (Some(q), Ok(status)) = (&state.observation, &result) { q.metadata_edit_status(status, &state.bridge.edits); }
     result
 }
@@ -1067,10 +1104,10 @@ async fn release_version_edit_open(webview: Webview, request: tauri::ipc::Reques
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = release_version_edit_commands::open(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.version_open_request(&args); }
     let result = state.bridge.open_release_version_edit(&state.document, window, args);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.version_open_result(&result, &state.bridge.edits); }
     result
 }
@@ -1080,12 +1117,12 @@ async fn release_version_edit_prepare(webview: Webview, request: tauri::ipc::Req
     let window = edit_window(&webview)?;
     let result = request_body(&request).and_then(release_version_edit_commands::prepare)
         .and_then(|args| {
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if let Some(q) = &state.observation { q.version_prepare_request(&args); }
         state.bridge.prepare_release_version_edit(&state.document, window, args)
     });
     if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.version_prepare_result(&result, &state.bridge.edits); }
     result
 }
@@ -1095,12 +1132,12 @@ async fn release_version_edit_apply(webview: Webview, request: tauri::ipc::Reque
     let window = edit_window(&webview)?;
     let result = request_body(&request).and_then(edit_commands::apply)
         .and_then(|args| {
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if let Some(q) = &state.observation { q.version_apply_request(&args.session_id, &args.plan_token); }
         state.bridge.apply_release_version_edit(&state.document, window, &args.session_id, &args.plan_token)
     });
     if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.version_apply_result(&result, &state.bridge.edits); }
     result
 }
@@ -1109,11 +1146,11 @@ async fn release_version_edit_close(webview: Webview, request: tauri::ipc::Reque
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.version_close_request(&args.session_id); }
     // Original STOP stays available during quit without another root lookup.
     let result = state.bridge.edits.close_release_version(window, &args.session_id);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.version_close_result(&result, &state.bridge.edits); }
     result
 }
@@ -1123,7 +1160,7 @@ async fn release_version_edit_status(webview: Webview, request: tauri::ipc::Requ
     edit_window(&webview)?;
     edit_commands::status(request_body(&request)?)?;
     let result = state.bridge.edits.release_version_status();
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let (Some(q), Ok(status)) = (&state.observation, &result) { q.version_edit_status(status, &state.bridge.edits); }
     result
 }
@@ -1352,14 +1389,14 @@ async fn vault_open(webview: Webview, app: tauri::AppHandle, request: tauri::ipc
         match asset_commands::open(asset_body(&request)?)? {
             asset_commands::OpenMode::Session => state.document.open_session(),
             asset_commands::OpenMode::Encrypted => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 {
                     // Native application-data resolution only. No renderer
                     // filename/path or project location chooses the vault root.
                     let location = app.path().app_local_data_dir().map_err(|_| AssetError::new(Reason::ExclusionUnconfirmed))?;
                     state.document.open_encrypted(&location)
                 }
-                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
                 { let _ = &app; Err(AssetError::new(Reason::UnsupportedPlatform)) }
             },
         }
@@ -1371,17 +1408,17 @@ async fn vault_open(webview: Webview, app: tauri::AppHandle, request: tauri::ipc
 #[tauri::command]
 async fn vault_prepare_initialize(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { state.document.prepare_vault_initialize() }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = &state; Err(AssetError::new(Reason::UnsupportedPlatform)) }
 }
 #[tauri::command]
 async fn vault_unlock(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { state.document.unlock_vault() }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = &state; Err(AssetError::new(Reason::UnsupportedPlatform)) }
 }
 #[tauri::command]
@@ -1615,7 +1652,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut ios_archive_relay_failed = false;
         loop {
             if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; return; }
-            #[cfg(all(target_os="macos",target_arch="aarch64",feature="macos-installed-desktop-image"))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
@@ -1628,7 +1665,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.tick(&app); }
             if let Ok(status) = edits.workflow_status() {
-                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
                 if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.workflow_status(&status, &edits); }
                 let _ = app.emit_to(MAIN_WINDOW, WORKFLOW_EDIT_EVENT, &status);
             }
@@ -1639,7 +1676,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             let revision = *revisions.borrow();
             if metadata_revision != Some(revision) {
                 if let Ok(status) = edits.metadata_text_status() {
-                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
                     if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.metadata_edit_status(&status, &edits); }
                     metadata_revision = Some(status.status_revision);
                     let _ = app.emit_to(MAIN_WINDOW, metadata_text_wire::EVENT, &status);
@@ -1647,7 +1684,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             }
             if release_version_revision != Some(revision) {
                 if let Ok(status) = edits.release_version_status() {
-                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
                     if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.version_edit_status(&status, &edits); }
                     release_version_revision = Some(status.status_revision);
                     let _ = app.emit_to(MAIN_WINDOW, release_version_wire::EVENT, &status);
@@ -1867,10 +1904,10 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
     (handle, start)
 }
 
-/// Native-owned callable seam only. It is intentionally absent from
-/// generate_handler/public IPC and from observer/bin layouts. Public maintenance
-/// remains unavailable pending integrated review and actual native qualification.
-#[cfg(all(target_os="macos",target_arch="aarch64",feature="macos-installed-desktop-image"))]
+/// Existing native-owned callable seam. The UI delegates through the same
+/// Document path, which independently refuses observer/non-image profiles.
+/// Preparation status does not authorize Installer changes or claim qualification.
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
 pub(crate) fn begin_installed_macos_maintenance(app:&tauri::AppHandle,confirmation:&str)
     ->Result<crate::saved_command_owner::MacosMaintenanceStatus,BridgeError>{
     let state=app.try_state::<ShellState>().ok_or_else(||BridgeError::new(
@@ -1931,7 +1968,7 @@ fn request_shutdown(app: &tauri::AppHandle) {
 
 #[derive(Clone, Copy)]
 pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit,
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     AndroidToolSource(crate::android_tool_sources::Role),
 }
 
@@ -1942,20 +1979,20 @@ fn requires_recent_files_suppression(choice: DialogChoice) -> bool {
 
 // Public-image selection is separately qualified. The existing private-file
 // or project chooser capability is never an image adapter receipt.
-#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) async fn run_owned_images_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<std::path::PathBuf>>, Reason> {
     owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
 
-#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) async fn run_owned_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>, _: DialogChoice, _: Option<std::path::PathBuf>) -> Result<Option<std::path::PathBuf>, Reason> {
     owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "shell_macos_dialog.rs"]
 mod owned_macos;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use owned_macos::{run_owned_dialog, run_owned_images_dialog};
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
@@ -2979,12 +3016,12 @@ pub struct InitializationFailed;
 pub fn run() -> Result<(), InitializationFailed> {
     // Installer is the only privileged entry. Do not even construct a native
     // window/document/project picker in a root or incompatible Mac process.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if mrk_macos_installed_native::real_user().is_err() { return Err(InitializationFailed); }
     // Only the exact ordinary installed role consumes the C/exec handoff. The
     // explicitly instrumented Aqua main keeps its original case/environment
     // route and makes no M2/shared-gate claim. No runtime environment bypass.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "desktop-shell", feature = "custom-protocol",
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "desktop-shell", feature = "custom-protocol",
         not(test), not(feature = "development-runtime"), not(feature = "macos-installed-observation"),
         not(feature = "windows-installed-observation"), not(feature = "macos-installed-installer"),
         not(feature = "macos-installed-installer-fixture"), not(feature = "macos-android-registration-helper"),
@@ -2996,7 +3033,7 @@ pub fn run() -> Result<(), InitializationFailed> {
 /// The separate fixed image facade already consumed argv admission and owns its
 /// actual pre-dlopen SH. Never rerun the duplicate linked gate static here.
 /// No renderer/CLI/env selector reaches this compile-time role.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-desktop-image"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-desktop-image"))]
 pub fn run_installed_image() -> Result<(), InitializationFailed> {
     if mrk_macos_installed_native::real_user().is_err() { return Err(InitializationFailed); }
     run_builder(builder()).map(|_| ())
@@ -3182,7 +3219,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             owned_windows::before_webview(&startup)?;
             let window = window.build()?;
-            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             if let Some(dispatcher)=crate::saved_command_owner::AndroidServiceDispatcher::original_main(window.clone()){
                 let _=document.bind_android_service_dispatcher(dispatcher);
             }
@@ -3259,7 +3296,9 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
                 tauri::generate_handler![
-            app_info, reveal_installation, installation_status, inspect_installation, cancel_installation, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
+            app_info, reveal_installation, installation_status, inspect_installation, cancel_installation,
+            installation_preparation_status, prepare_installation_quit,
+            choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             release_evidence_choose, release_evidence_status, release_evidence_observe, release_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,

@@ -59,6 +59,31 @@ class Pin:
     size: int
     sha256: str
 
+@dataclass(frozen=True, slots=True)
+class OpaqueZipPin:
+    """An inert inner ZIP, never a seventh supplier/profile nomination."""
+    size: int
+    sha256: str
+
+class MemberObserver(Protocol):
+    """Bounded synchronous DATA callbacks; no callback grants publication.
+
+    Rows are immutable scalar tuples in COLUMNS order, not mutable Members.
+    begin/block/end are called for every file, including empty files. end is
+    reached only after the original length/CRC/hash checks. An exception in any
+    callback poisons the entire pass, including already-observed members.
+    """
+    def begin(self, row: tuple) -> None: ...
+    def block(self, name: str, offset: int, data: bytes) -> None: ...
+    def end(self, row: tuple) -> None: ...
+
+class InspectionWorkspace(Protocol):
+    """One inspector's aggregate charges; not interpreter-memory telemetry."""
+    def reserve_rows(self, count: int) -> None: ...
+    def release_rows(self, count: int) -> None: ...
+    def charge_read(self, count: int) -> None: ...
+    def charge_expanded(self, count: int) -> None: ...
+
 @dataclass(slots=True)
 class Member:
     name: str
@@ -107,6 +132,27 @@ def _name(raw: bytes, directory=False):
         _fail("archive_name_grammar")
     return raw.decode("ascii")
 
+def _opaque_name(raw: bytes, directory=False):
+    # Java resources stay inside the original ZIP as exact case-sensitive DATA.
+    # They are never converted to installed/APFS names, normalized or extracted.
+    if directory and raw.endswith(b"/"):
+        raw = raw[:-1]
+    if not raw or len(raw) > 512 or b"\0" in raw or b"\\" in raw:
+        _fail("opaque_zip_name_bytes")
+    try:
+        name = raw.decode("utf-8", "strict")
+    except UnicodeError:
+        _fail("opaque_zip_name_utf8")
+    parts = name.split("/")
+    # An opaque directory may have one extra terminal marker (raw ends "//").
+    # Validate that component only; preserve name, including its remaining
+    # slash, for exact duplicate and non-directory-parent checks. Never rstrip.
+    validation_parts = parts[:-1] if directory and parts[-1] == "" else parts
+    if len(parts) > 16 or any(not p or p in (".", "..") or
+                             len(p.encode("utf-8")) > 255 for p in validation_parts):
+        _fail("opaque_zip_name_structure")
+    return name
+
 def _target(name: str, raw: bytes):
     if not raw or len(raw) > 512 or raw.startswith(b"/"):
         _fail("archive_alias_target")
@@ -147,12 +193,19 @@ def _hint(prefix: bytes):
     return None
 
 class _Pass:
-    def __init__(self, original: Original, pin: Pin):
-        if type(pin) is not Pin or pin.label not in LABELS or not _integer(pin.size) \
-            or not 0 < pin.size <= ARCHIVE_LIMIT or not _sha(pin.sha256):
+    def __init__(self, original: Original, pin: Pin | OpaqueZipPin,
+                 observer: MemberObserver | None = None,
+                 workspace: InspectionWorkspace | None = None):
+        self.opaque = type(pin) is OpaqueZipPin
+        if (type(pin) is not Pin and not self.opaque) \
+            or type(pin) is Pin and pin.label not in LABELS or not _integer(pin.size) \
+            or not 0 < pin.size <= (64 * 1024 * 1024 if self.opaque else ARCHIVE_LIMIT) \
+            or not _sha(pin.sha256):
             _fail("archive_pin")
         self.original = original
         self.pin = pin
+        self.observer = observer
+        self.workspace = workspace
         self.issued = 0
         self.roster = 0
         self.expanded = 0
@@ -162,6 +215,33 @@ class _Pass:
         self.rows: list[Member] = []
         self.names: set[str] = set()
         self.failed = False
+    def notify(self, operation, *values):
+        if self.observer is None:
+            return
+        self.check()
+        try:
+            getattr(self.observer, operation)(*values)
+            self.check()
+        except BaseException:
+            self.failed = True
+            raise
+    def discard_rows(self):
+        # Release only this pass's heap reservation after dropping its row/set
+        # references. This does NOT close an original or recover a failed pass.
+        self.rows.clear()
+        self.names.clear()
+        held = self.roster
+        self.roster = 0
+        if self.workspace is not None:
+            self.workspace.release_rows(held)
+    def discard_failed_rows(self):
+        # Keep the first original failure even if heap-accounting cleanup also
+        # refuses. The pass remains irreversibly failed; no report is returned.
+        self.failed = True
+        try:
+            self.discard_rows()
+        except BaseException:
+            pass
     def check(self):
         if self.failed:
             _fail("capture_already_failed")
@@ -186,6 +266,8 @@ class _Pass:
             _fail("issued_read_bound")
         self.issued += count  # Requested bytes are charged BEFORE a possible failure.
         try:
+            if self.workspace is not None:
+                self.workspace.charge_read(count)
             data = self.original.read_at(at, count)
             self.check()
             if type(data) is not bytes or len(data) != count:
@@ -217,7 +299,9 @@ class _Pass:
     def name_key(self, name: str):
         # This one sealed JAR stays ONE file. Its Java member names are not
         # projected onto a case-insensitive installed filesystem.
-        return name if self.pin.label == "bundletool" else name.lower()
+        return name if self.opaque or self.pin.label == "bundletool" else name.lower()
+    def member_name(self, raw, directory=False):
+        return (_opaque_name if self.opaque else _name)(raw, directory=directory)
     def append(self, member: Member):
         self.check()
         # Charged before set/list/row retention, includes allocator headroom,
@@ -228,11 +312,15 @@ class _Pass:
         key = self.name_key(member.name)
         if key in self.names:
             _fail("duplicate_or_case_colliding_member")
+        if self.workspace is not None:
+            self.workspace.reserve_rows(charge)
         self.roster += charge
         self.names.add(key)
         if member.kind == "file":
             self.files += 1
             self.expanded += member.size
+            if self.opaque and self.workspace is not None:
+                self.workspace.charge_expanded(member.size)
         elif member.kind == "alias":
             self.aliases += 1
         if self.files > FILE_COUNT or self.aliases > ALIAS_COUNT or self.expanded > EXPANDED_LIMIT:
@@ -246,7 +334,7 @@ class _Pass:
         previous = []
         for row in self.rows:
             self.check()
-            if self.pin.label != "bundletool":
+            if not self.opaque and self.pin.label != "bundletool":
                 # Implicit parents need the same spelling too. Equal folded
                 # prefixes are contiguous after sorting; adjacent rows witness
                 # every spelling change without retaining a directory tree.
@@ -284,11 +372,66 @@ class Correspondence:
     def __init__(self, capture: _Pass):
         self._capture = capture
         self._published = False
+    def consume_rows(self, sink: Callable[[tuple], None]):
+        """One terminal, source-bound DATA visit without a second row book.
+
+        The verified Member book is drained in its original sorted order.
+        Heap-reference handoff is not file/original finality; the same binding
+        and endpoint remain required through the last callback and POST.
+        """
+        p = self._capture
+        if self._published or p.failed:
+            _fail("report_finality")
+        # Claim terminal consumption before binding or callback reentry. This
+        # flag does not assert successful external publication or authority.
+        self._published = True
+        originally_failed = False
+        try:
+            p.binding()
+            summary = {"entryHeaders": p.headers, "members": len(p.rows),
+                       "files": p.files, "aliases": p.aliases,
+                       "expandedBytes": p.expanded, "issuedReadBytes": p.issued,
+                       "rosterReservationBytes": p.roster}
+            # Complete raw/CD/local, payload and namespace validation already
+            # finished. No namespace index or second list is needed to drain.
+            p.names.clear()
+            p.rows.reverse()
+            while p.rows:
+                p.check()
+                member = p.rows.pop()
+                charge = 1536 + 8 * len(member.name) + 8 * len(member.target or "")
+                row = member.row()
+                del member
+                if charge > p.roster:
+                    _fail("terminal_row_reservation")
+                p.roster -= charge
+                if p.workspace is not None:
+                    p.workspace.release_rows(charge)
+                # Only this one converted tuple and residual container
+                # capacity use the existing8MiB scratch allowance here. The
+                # sink must charge any retained copy before retaining it.
+                sink(row)
+                del row
+                p.check()
+            if p.roster != 0:
+                _fail("terminal_row_reservation")
+            p.binding()
+            return summary
+        except BaseException:
+            p.failed = True
+            originally_failed = True
+            raise
+        finally:
+            if originally_failed:
+                p.discard_failed_rows()
+            else:
+                p.discard_rows()
     def _chunks(self):
         p = self._capture
         encoder = json.JSONEncoder(ensure_ascii=True, separators=(",", ":"), allow_nan=False)
-        head = {"schemaVersion": 1, "kind": "offline-official-archive-correspondence-data",
-                "label": p.pin.label, "archiveBytes": p.pin.size,
+        head = {"schemaVersion": 1, "kind": "offline-opaque-zip-correspondence-data" if p.opaque
+                else "offline-official-archive-correspondence-data",
+                "label": None if p.opaque else p.pin.label, "archiveBytes": p.pin.size,
                 "archiveSha256": p.pin.sha256, "completeMemberHashes": True,
                 "supplierAuthority": False, "nativeClosure": False,
                 "entryHeaders": p.headers, "members": len(p.rows),
@@ -419,9 +562,9 @@ def _zip_directory(p: _Pass):
         if file_type not in (0, 0o040000, 0o100000) \
             or file_type == 0o040000 and not directory \
             or file_type == 0o100000 and directory or external & 0x10 and not directory \
-            or directory and (size != 0 or flags & 8):
+            or directory and size != 0:
             _fail("zip_non_regular_member")
-        name = _name(raw_name, directory=directory)
+        name = p.member_name(raw_name, directory=directory)
         row = Member(name, "directory" if directory else "file", mode, size,
                      local=local, compressed=compressed, method=method,
                      flags=flags, crc=crc, creator=creator, raw_name=raw_name,
@@ -439,15 +582,20 @@ def _zip_payload(p: _Pass, row: Member):
     crc = 0
     expanded = 0
     prefix = bytearray()
+    if row.kind == "file":
+        p.notify("begin", row.row())
     def consume(block):
         nonlocal crc, expanded
         if len(block) > WINDOW or expanded + len(block) > row.size:
             _fail("zip_expansion_size")
+        start = expanded
         expanded += len(block)
         hash_.update(block)
         crc = zlib.crc32(block, crc)
         if len(prefix) < 16:
             prefix.extend(block[:16 - len(prefix)])
+        if row.kind == "file":
+            p.notify("block", row.name, start, block)
     if row.method == 0:
         for at in range(0, row.compressed, WINDOW):
             consume(p.read(row.data + at, min(WINDOW, row.compressed - at)))
@@ -480,6 +628,7 @@ def _zip_payload(p: _Pass, row: Member):
     if row.kind == "file":
         row.sha256 = hash_.hexdigest()
         row.hint = _hint(prefix)
+        p.notify("end", row.row())
 
 def _zip(p: _Pass):
     cd_at = _zip_directory(p)
@@ -753,18 +902,25 @@ def _tar(p: _Pass):
         if kind == "file":
             digest = hashlib.sha256()
             prefix = bytearray()
+            p.notify("begin", row.row())
+            position = 0
             for block in stream.payload(size):
                 p.check()
                 digest.update(block)
                 if len(prefix) < 16:
                     prefix.extend(block[:16 - len(prefix)])
+                p.notify("block", row.name, position, block)
+                position += len(block)
             row.sha256 = digest.hexdigest()
             row.hint = _hint(prefix)
+            p.notify("end", row.row())
         stream.padding(size)
     if not p.rows:
         _fail("empty_tar")
 
-def compile_archive(original: Original, pin: Pin) -> Correspondence:
+def compile_archive(original: Original, pin: Pin, *,
+                    observer: MemberObserver | None = None,
+                    workspace: InspectionWorkspace | None = None) -> Correspondence:
     """Compare one complete, already-nominated original, without extracting it.
 
     The JDK is one gzip/POSIX-USTAR or observed unextended GNU-tar stream.
@@ -772,7 +928,9 @@ def compile_archive(original: Original, pin: Pin) -> Correspondence:
     components are classic nonencrypted Stored/Deflate ZIPs. Unknown encodings
     refuse explicitly rather than being guessed or silently truncated.
     """
-    p = _Pass(original, pin)
+    if type(pin) is not Pin:
+        _fail("archive_pin")
+    p = _Pass(original, pin, observer, workspace)
     try:
         p.authenticate()
         if pin.label == "jdk":
@@ -781,8 +939,31 @@ def compile_archive(original: Original, pin: Pin) -> Correspondence:
             _zip(p)
         return p.finish()
     except (zlib.error, struct.error) as error:
-        p.failed = True
+        p.discard_failed_rows()
         raise Refused("archive_codec_or_structure") from error
     except BaseException:
-        p.failed = True
+        p.discard_failed_rows()
+        raise
+
+def compile_opaque_zip(original: Original, pin: OpaqueZipPin, *,
+                       observer: MemberObserver | None = None,
+                       workspace: InspectionWorkspace | None = None) -> Correspondence:
+    """Inspect one already-bounded JVM ZIP view as DATA, never a supplier.
+
+    The caller authenticates a JMOD's complete preamble/member and supplies the
+    exact ZIP view, if applicable. This parser never searches for a guessed
+    prefix or weakens local/central/CRC/Deflate completeness requirements.
+    """
+    if type(pin) is not OpaqueZipPin:
+        _fail("opaque_zip_pin")
+    p = _Pass(original, pin, observer, workspace)
+    try:
+        p.authenticate()
+        _zip(p)
+        return p.finish()
+    except (zlib.error, struct.error) as error:
+        p.discard_failed_rows()
+        raise Refused("archive_codec_or_structure") from error
+    except BaseException:
+        p.discard_failed_rows()
         raise

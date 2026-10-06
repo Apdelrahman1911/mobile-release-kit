@@ -15,6 +15,7 @@ import ssl
 import stat
 import sys
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +36,9 @@ FD_LIMIT = 64
 OUTPUT_LIMIT = 256 * 1024
 ROSTER_LIMIT = 32768
 STOCK_CA = "/private/etc/ssl/cert.pem"
+CORRESPONDENCE_MODULE = "_mrk_intel_jdk_correspondence_data"
+CORRESPONDENCE_BYTES = 40097
+CORRESPONDENCE_SHA256 = "55f6f223e00d7da255da83843dcf7f57572096efbd226b1d9ef220bcbd55c754"
 INPUTS = ("jdkHome", "sdkPlatform", "sdkBuildTools", "gradleRoot", "gradleLauncher", "agpAapt2", "bundletool")
 AGP_BASE = "https://dl.google.com/dl/android/maven2/com/android/tools/build/"
 AAPT2_URL = AGP_BASE + "aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar"
@@ -51,6 +55,8 @@ SOURCES = {
     "bundletool": ("https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar",
                    32520401, "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29", 32520401),
     "sdk-repository": ("https://dl.google.com/android/repository/repository2-3.xml", 4 * 1024 * 1024, None, None),
+    "intel-jdk": ("https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz",
+                  180578248, "c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a", 180578248),
 }
 
 
@@ -477,23 +483,93 @@ def response_headers(response):
     return out
 
 
+def system_ca(system=None):
+    # The default remains the original Mac route. Passive correspondence has
+    # just two fixed trust inputs; an environment/path override is not accepted.
+    if system is None or type(system) is str and system == "Darwin":
+        return STOCK_CA
+    if type(system) is str and system == "Linux":
+        return "/etc/ssl/certs/ca-certificates.crt"
+    raise Refused("fixed_system_ca_required")
+
+
+def _bound_linux_ca_readonly(budget, original):
+    # These are actual namespace originals, NOT proof of host-root ownership.
+    # The external owner separately admits the host chain and exact readonly
+    # bind. In particular 65534 can also denote an unmapped/overflow owner.
+    if (original.path != "/etc/ssl/certs/ca-certificates.crt" or len(original.items) != 5
+            or any(before[3] not in (0, 65534) or before[4] not in (0, 65534)
+                   or before[2] & 0o022 for _, _, _, before, _ in original.items)):
+        raise Refused("root_bound_linux_ca_readonly")
+    for fd, _, _, _, _ in original.items:
+        budget.point()
+        if not os.fstatvfs(fd).f_flag & os.ST_RDONLY:
+            raise Refused("root_bound_linux_ca_readonly")
+        budget.point()
+
+
+def _admit_root_bound_linux_ca(budget, original, system, nomination):
+    # Only the separately reviewed fixed acquisition entry supplies this pair.
+    # There is deliberately no public CLI/environment CA/owner/path override.
+    if (type(nomination) is not tuple or len(nomination) != 2
+            or type(nomination[0]) is not int or not 0 < nomination[0] <= 1024 * 1024
+            or type(nomination[1]) is not str or not re.fullmatch(r"[0-9a-f]{64}", nomination[1])
+            or type(system) is not str or system != "Linux" or sys.platform != "linux"
+            or (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (65534,) * 4):
+        raise Refused("root_bound_linux_ca_required")
+    _bound_linux_ca_readonly(budget, original)
+    pid = os.getpid()
+    if type(pid) is not int or pid <= 0:
+        raise Refused("root_bound_linux_ca_namespace")
+    for leaf in ("uid_map", "gid_map"):
+        mapping = InputPath(budget, "/proc/" + str(pid) + "/" + leaf)
+        try:
+            # procfs maps report st_size0: bounded stream/EOF, not read(size0).
+            raw = bytearray()
+            while True:
+                count = 257 - len(raw)
+                budget.charge_read(count)
+                part = os.read(mapping.fd, count)
+                budget.point()
+                if type(part) is not bytes or len(part) > count:
+                    raise Refused("root_bound_linux_ca_namespace")
+                if not part:
+                    break
+                raw.extend(part)
+                if len(raw) > 256:
+                    raise Refused("root_bound_linux_ca_namespace")
+        finally:
+            mapping.close()
+        budget.point()  # A failed original map close forbids TLS/network.
+        if len(raw.splitlines()) != 1 or raw.split() != [b"65534", b"0", b"1"]:
+            raise Refused("root_bound_linux_ca_namespace")
+
+
 class Downloads:
-    def __init__(self, budget, files):
+    def __init__(self, budget, files, *, system=None, _root_bound_linux_ca=None):
         self.budget, self.files = budget, files
         self.records = []
         # No ambient proxy, netrc, credentials, user CA, SSL environment or
         # platform Keychain configuration is consulted by this context.
-        original = InputPath(budget, STOCK_CA)
+        original = InputPath(budget, system_ca(system))
         try:
-            if any(before[3] != 0 or before[2] & 0o022 for _, _, _, before, _ in original.items):
-                raise Refused("stock_ca_authority_unavailable")
+            if _root_bound_linux_ca is None:
+                if any(before[3] != 0 or before[2] & 0o022 for _, _, _, before, _ in original.items):
+                    raise Refused("stock_ca_authority_unavailable")
+            else:
+                _admit_root_bound_linux_ca(budget, original, system, _root_bound_linux_ca)
             ca = original.read(1024 * 1024)
+            if _root_bound_linux_ca is not None:
+                _bound_linux_ca_readonly(budget, original)
         finally:
             original.close()
         budget.point()
         if b"-----BEGIN CERTIFICATE-----" not in ca:
             raise Refused("stock_ca_unavailable")
         self.ca_sha256 = hashlib.sha256(ca).hexdigest()
+        if (_root_bound_linux_ca is not None
+                and (len(ca), self.ca_sha256) != _root_bound_linux_ca):
+            raise Refused("root_bound_linux_ca_pin")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = True
@@ -896,7 +972,7 @@ def failure_reason(error):
 
 
 def process_descriptor_bound():
-    # Entered only AFTER main's actual Darwin/nonroot admission. This lowers
+    # Entered only AFTER the selected route's actual nonroot admission. This lowers
     # only this process's soft limit, never its hard limit or an existing tighter
     # bound. It is not a transport census or a second process owner.
     import resource
@@ -941,7 +1017,218 @@ def emit_report(budget, report, code):
         return 79
 
 
+def correspondence_host():
+    # DATA parsing does not require a native Intel JVM or execute supplier code.
+    # The original ARM-only metadata route is deliberately separate below.
+    if (sys.platform not in ("linux", "darwin") or sys.version_info < (3, 11)
+            or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode):
+        raise Refused("actual_nonroot_isolated_data_host_required")
+    uid = os.getuid()
+    host = os.uname()  # One actual observation, not a target/qualification claim.
+    if (uid == 0 or os.geteuid() != uid
+            or host.sysname != ("Linux" if sys.platform == "linux" else "Darwin")):
+        raise Refused("actual_nonroot_isolated_data_host_required")
+    return {"system": host.sysname, "release": host.release, "machine": host.machine}
+
+
+class CorrespondenceSource:
+    """One pinned sibling definition namespace; no discovery or plugin input."""
+    def __init__(self, budget):
+        self.budget, self.module = budget, None
+        self.started = False
+
+    def load(self):
+        self.budget.point()
+        if self.started or CORRESPONDENCE_MODULE in sys.modules:
+            raise Refused("correspondence_module_collision")
+        self.started = True
+        path = os.path.dirname(__file__) + "/macos_android_supplier_correspondence.py"
+        raw = original_bytes(self.budget, path, CORRESPONDENCE_BYTES)
+        self.budget.point()  # A failed original source close forbids execution.
+        if len(raw) != CORRESPONDENCE_BYTES or hashlib.sha256(raw).hexdigest() != CORRESPONDENCE_SHA256:
+            raise Refused("correspondence_source_pin")
+        if CORRESPONDENCE_MODULE in sys.modules:
+            raise Refused("correspondence_module_collision")
+        self.module = types.ModuleType(CORRESPONDENCE_MODULE)
+        self.module.__file__ = path
+        # Retain the original object before registration/definition evaluation.
+        # Dataclasses need its real module slot, not an unregistered substitute.
+        sys.modules[CORRESPONDENCE_MODULE] = self.module
+        exec(compile(raw, path, "exec", dont_inherit=True), self.module.__dict__)
+        if sys.modules.get(CORRESPONDENCE_MODULE) is not self.module:
+            raise Refused("correspondence_module_identity")
+        self.budget.point()
+
+    def close(self):
+        module, self.module = self.module, None
+        if module is not None:
+            if sys.modules.get(CORRESPONDENCE_MODULE) is not module:
+                self.budget.errors.append("correspondence_module_identity")
+            else:
+                try:
+                    del sys.modules[CORRESPONDENCE_MODULE]
+                except BaseException:
+                    self.budget.errors.append("correspondence_module_close_unknown")
+
+
+class CorrespondenceOriginal:
+    """Existing parser's small endpoint adapter, retaining ONE private archive."""
+    def __init__(self, budget, files, row):
+        self.budget, self.original = budget, None
+        self.started = False
+        if (type(row) is not dict or not any(item is row for item in files.rows)
+                or row.get("path") != "bodies/intel-jdk" or row.get("kind") != "file"
+                or row.get("complete") is not True or row.get("privateMode") != 0o600
+                or type(row.get("bytes")) is not int or not 0 < row["bytes"] <= DOWNLOAD_LIMIT
+                or type(row.get("identity")) is not list or len(row["identity"]) != 9
+                or any(type(value) is not int for value in row["identity"])):
+            raise Refused("correspondence_private_archive_required")
+        self.path = files.path + "/bodies/intel-jdk"
+        self.identity = tuple(row["identity"])  # Download's original, not a later self-observation.
+        self.size = row["bytes"]
+        if self.identity[6] != self.size:
+            raise Refused("correspondence_private_archive_required")
+
+    def open(self):
+        self.budget.point()
+        if self.started:
+            raise Refused("correspondence_original_already_entered")
+        self.started = True
+        self.original = InputPath(self.budget, self.path)
+        self.verify_binding()
+
+    def checkpoint(self):
+        self.budget.point()
+        if self.original is None or self.original.fd is None:
+            raise Refused("correspondence_original_unavailable")
+
+    def verify_binding(self):
+        self.checkpoint()
+        for fd, parent, name, before, shared in self.original.items:
+            held = nine(os.fstat(fd))
+            named = nine(os.stat(name, dir_fd=parent, follow_symlinks=False))
+            if not (held[:5] == before[:5] == named[:5] if shared else
+                    held == before == named == self.identity):
+                raise Refused("correspondence_original_binding")
+        self.budget.point()
+
+    def read_at(self, offset, count):
+        self.checkpoint()
+        if (type(offset) is not int or type(count) is not int or offset < 0 or count < 0
+                or count > CHUNK or offset + count > self.size):
+            raise Refused("correspondence_original_read_bound")
+        self.verify_binding()
+        self.budget.charge_read(count)  # Retained even if the read fails/returns short.
+        raw = os.pread(self.original.fd, count, offset)
+        self.verify_binding()
+        if type(raw) is not bytes or len(raw) != count:
+            raise Refused("correspondence_original_short_read")
+        return raw
+
+    def close(self):
+        original, self.original = self.original, None
+        if original is not None:
+            original.close()
+
+
+def publish_jdk_correspondence(budget, files, row, module, pin):
+    # The sole command caller supplies the fixed Intel nomination. Tiny tests
+    # use an explicit synthetic Pin here, never a configurable production URL.
+    if (type(pin) is not module.Pin or pin.label != "jdk"
+            or pin.size != row.get("bytes") or pin.sha256 != row.get("sha256")):
+        raise Refused("correspondence_archive_pin")
+    original = CorrespondenceOriginal(budget, files, row)
+    try:
+        original.open()
+        capture = module.compile_archive(original, pin)
+        receipt = capture.publish(lambda raw: files.put("intel-jdk-correspondence.json", raw))
+        files.check()
+    finally:
+        budget.close_object(original, "correspondence_archive")
+    budget.point()  # No successful return after uncertain archive/source closure.
+    return receipt
+
+
+def correspondence_failure(error, module):
+    # Only the authenticated parser's own fixed public reason grammar, never
+    # arbitrary exception text or archive member/path values, enters this field.
+    if (module is not None and type(error) is module.Refused and len(error.args) == 1
+            and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", error.args[0])):
+        return "correspondence_" + error.args[0]
+    return failure_reason(error)
+
+
+def intel_jdk_correspondence_main(*, _root_bound_linux_ca=None):
+    budget = Budget()  # Same aggregate endpoint starts before admission or IO.
+    source = files = download = module = None
+    url, _, archive_sha, archive_size = fixed_source("intel-jdk")
+    report = {"schemaVersion": 1, "qualification": "offline-official-archive-correspondence-only",
+              "status": "preparation-refused", "correspondencePublished": False,
+              "target": "macos-x86_64", "jdkVersion": "17.0.20.1+1", "assetId": 521280558,
+              "archive": {"url": url, "bytes": archive_size, "sha256": archive_sha},
+              "parserSourceSha256": CORRESPONDENCE_SHA256,
+              "nativeExecution": False, "nativeClosure": False, "supplierAuthority": False,
+              "rootOperations": False, "licenseAcceptance": False,
+              "limits": {"seconds": PREPARATION_SECONDS, "downloadBytes": DOWNLOAD_LIMIT,
+                         "writeBytes": WRITE_LIMIT, "readBytes": READ_LIMIT, "descriptors": FD_LIMIT,
+                         "outputBytes": OUTPUT_LIMIT}}
+    code = 78
+    try:
+        if len(sys.argv) != 3 or sys.argv[1] != "--intel-jdk-correspondence":
+            raise Refused("fixed_intel_correspondence_arguments_required")
+        host = correspondence_host()
+        report["dataHost"] = host
+        report["processDescriptorLimit"] = process_descriptor_bound()
+        source = CorrespondenceSource(budget)
+        source.load()  # Complete source/slot/close admission precedes any network.
+        module = source.module
+        files = PrivateFiles(budget, sys.argv[2])
+        if _root_bound_linux_ca is None:
+            download = Downloads(budget, files, system=host["system"])
+        else:
+            download = Downloads(budget, files, system=host["system"],
+                                 _root_bound_linux_ca=_root_bound_linux_ca)
+        report["systemCaSha256"] = download.ca_sha256
+        row = download.get("intel-jdk")
+        budget.point()  # Includes get's original response close.
+        report["correspondence"] = publish_jdk_correspondence(
+            budget, files, row, module, module.Pin("jdk", archive_size, archive_sha))
+        report.update(status="prepared", correspondencePublished=True)
+        code = 0
+    except BaseException as error:
+        report["failure"] = correspondence_failure(error, module)
+        report["status"] = "preparation-refused"
+    finally:
+        if source is not None:
+            budget.close_object(source, "correspondence_source")
+        if files is not None:
+            budget.close_object(files, "private_files")
+            report["outputs"] = [{key: value for key, value in row.items() if key != "identity"} for row in files.rows]
+        if download is not None:
+            report["supplierResponses"] = download.records
+    budget.expired = budget.expired or time.monotonic() >= budget.end
+    if budget.expired:
+        report.update(status="preparation-refused", failure="preparation_wall_bound", correspondencePublished=False)
+        code = 78
+    report["cleanup"] = "known-originals-closed" if not budget.errors and budget.fds == 0 else "unknown"
+    report["cleanupErrors"] = budget.errors[:64]
+    report["accounting"] = {"readBytes": budget.read_bytes, "writtenBytes": budget.written_bytes,
+                            "downloadBytes": budget.download_bytes, "downloadObservedBytes": budget.download_observed_bytes,
+                            "downloadUnknownReadCount": budget.download_unknown_reads,
+                            "downloadByteAccounting": "returned-body-exact-plus-reserved-allowance-for-unknown-reads",
+                            "entries": budget.entries, "files": budget.files, "peakDescriptors": budget.peak_fds,
+                            "remainingDescriptors": budget.fds,
+                            "descriptorScope": "returned-filesystem-originals; at-most-one-stdlib-http-response",
+                            "nativeTransportDescriptorCensus": False}
+    if budget.errors or budget.fds:
+        report.update(status="preparation-refused", correspondencePublished=False)
+        code = 79
+    return emit_report(budget, report, code)
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--intel-jdk-correspondence":
+        return intel_jdk_correspondence_main()
     budget = Budget()
     files = None
     download = None

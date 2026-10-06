@@ -1087,13 +1087,23 @@ class OriginalLifetimeDataTests(unittest.TestCase):
 
 # Mac cases reuse inert operation/slot DATA above; they never run an installed
 # tool, native directory iterator, real descriptor or system-provider probe.
-def mac_documents():
+MAC_DATA_PAIRS = {
+    "android-registered-macos-arm64-v1": (
+        "macos-arm64", "gradle-macos-private-jvm-arm64-v1", "macos26-arm64-sealed-system-v1", "arm64"),
+    "android-registered-macos-x86_64-v1": (
+        "macos-x86_64", "gradle-macos-private-jvm-x86_64-v1", "macos26-x86_64-sealed-system-v1", "x86_64"),
+}
+
+
+def mac_documents(*, profile="android-registered-macos-arm64-v1"):
     from mobile_release import android_build_tools_macos as mac
+    # Independent literals, not the production profile table as a test oracle.
+    target, launch, os_profile, _ = MAC_DATA_PAIRS[profile]
     home = "jdk/Inert Vendor.jdk/Contents/Home"
     data = manifest_data(signature=True)
     del data["osProfile"]
-    data.update(profile=mac.PROFILE, target="macos-arm64", instance="ab" * 16,
-                launchContract="gradle-macos-private-jvm-arm64-v1", aliases=[])
+    data.update(profile=profile, target=target, instance="ab" * 16,
+                launchContract=launch, aliases=[])
     data["versions"]["jdkVersion"] = "17.0-inert"
     data["roles"].update(java=f"{home}/bin/java", javac=f"{home}/bin/javac")
     for leaf in data["files"]:
@@ -1101,16 +1111,16 @@ def mac_documents():
             leaf["path"] = home + leaf["path"][3:]
         leaf["mode"] = 0o555 if leaf["mode"] & 0o111 else 0o444
     data["files"].sort(key=lambda row: row["path"])
-    provider = {"schemaVersion": 1, "profile": mac.OS_PROFILE, "target": "macos-arm64",
+    provider = {"schemaVersion": 1, "profile": os_profile, "target": target,
                 "shell": "/bin/sh", "executablePath": ["/usr/bin", "/bin"], "roots": list(mac.OS_ROOTS),
                 "files": [file_data(path, mode=0o644 if path.endswith(".plist") else 0o755)
                           for path in mac.OS_FILES]}
     return data, provider
 
 
-def mac_encoded(data=None, provider=None, *, record_changes=None):
+def mac_encoded(data=None, provider=None, *, record_changes=None, profile="android-registered-macos-arm64-v1"):
     from mobile_release import android_build_tools_macos as mac
-    default_data, default_provider = mac_documents()
+    default_data, default_provider = mac_documents(profile=profile)
     data = default_data if data is None else data
     provider = default_provider if provider is None else provider
     encode = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -1119,22 +1129,22 @@ def mac_encoded(data=None, provider=None, *, record_changes=None):
     data = {**data, "osProviderSha256": provider_hash}
     raw = encode(data)
     inventory_hash = hashlib.sha256(raw).hexdigest()
-    record = {"schemaVersion": 1, "profile": mac.PROFILE, "target": "macos-arm64", "instance": "ab" * 16,
+    record = {"schemaVersion": 1, "profile": profile, "target": MAC_DATA_PAIRS[profile][0], "instance": "ab" * 16,
               "ownerUid": 501, "inventorySha256": inventory_hash, "osProviderSha256": provider_hash,
               "licenseAcknowledged": True, **(record_changes or {})}
     record_raw = encode(record)
     selected = {"instance": "ab" * 16, "ownerUid": 501, "catalogGeneration": 3,
                 "recordSha256": hashlib.sha256(record_raw).hexdigest(),
                 "inventorySha256": inventory_hash, "osProviderSha256": provider_hash}
-    native = {"schemaVersion": 2, "profile": mac.PROFILE, "root": f"{mac.PREFIX}/501/{'ab' * 16}",
+    native = {"schemaVersion": 2, "profile": profile, "root": f"{mac.PREFIX}/501/{'ab' * 16}",
               "rootIdentity": {"device": "1", "inode": "50", "mode": stat.S_IFDIR | 0o555, "uid": 0, "gid": 0},
               "inventorySha256": inventory_hash, "selection": selected}
     return raw, provider_raw, record_raw, native
 
 
-def mac_inert_tools():
+def mac_inert_tools(*, profile="android-registered-macos-arm64-v1"):
     from mobile_release import android_build_tools_macos as mac
-    raw, provider, record, native = mac_encoded()
+    raw, provider, record, native = mac_encoded(profile=profile)
     operation = inert_operation(signature=True)
     operation.request.native["toolchain"] = native
     tools = subject.AndroidValidationTools(operation, native)
@@ -1149,29 +1159,193 @@ def mac_inert_tools():
 class MacToolAdmissionDataTests(unittest.TestCase):
     def test_selection_binds_three_raw_headers_and_preserves_linux_shape(self):
         from mobile_release import android_build_tools_macos as mac
-        raw, provider, record, native = mac_encoded()
-        selected = subject._binding(native)
-        profile = mac.parse_profile(raw, provider, record, selected)
-        self.assertEqual(profile.java_home, "jdk/Inert Vendor.jdk/Contents/Home")
-        self.assertEqual(tuple(file.path for file in profile.native_files), mac.OS_FILES)
-        self.assertEqual(len(profile.native_files), 11)
-        self.assertTrue({"/bin/bash", "/bin/ls", "/usr/bin/expr"}.issubset(mac.OS_FILES))
-        self.assertEqual(dict(profile.roles)["java"], f"{profile.java_home}/bin/java")
-        self.assertEqual(dict(selected.selection)["catalogGeneration"], 3)
+        for name, (_, _, os_profile, _) in MAC_DATA_PAIRS.items():
+            with self.subTest(profile=name):
+                raw, provider, record, native = mac_encoded(profile=name)
+                selected = subject._binding(native)
+                profile = mac.parse_profile(raw, provider, record, selected)
+                self.assertEqual(selected.profile, name)
+                self.assertEqual(profile.binding, selected)
+                self.assertEqual(profile.os_identity, os_profile)
+                self.assertEqual(profile.java_home, "jdk/Inert Vendor.jdk/Contents/Home")
+                self.assertEqual(tuple(file.path for file in profile.native_files), mac.OS_FILES)
+                self.assertEqual(len(profile.native_files), 11)
+                self.assertTrue({"/bin/bash", "/bin/ls", "/usr/bin/expr"}.issubset(mac.OS_FILES))
+                self.assertEqual(dict(profile.roles)["java"], f"{profile.java_home}/bin/java")
+                self.assertEqual(dict(selected.selection)["catalogGeneration"], 3)
+                for changed in ((raw + b"\n", provider, record), (raw, provider + b"\n", record),
+                                (raw, provider, record + b"\n")):
+                    with self.subTest(header=changed), self.assertRaises(subject.AndroidToolError):
+                        mac.parse_profile(*changed, selected)
+                for mutation in ({"root": native["root"] + "/"}, {"schemaVersion": 1}, {"qualified": True},
+                                 {"rootIdentity": {**native["rootIdentity"], "uid": 501}},
+                                 {"rootIdentity": {**native["rootIdentity"], "mode": stat.S_IFDIR | 0o755}},
+                                 {"selection": {**native["selection"], "catalogGeneration": 0}},
+                                 {"selection": {**native["selection"], "ownerUid": True}}):
+                    with self.subTest(mutation=mutation), self.assertRaises(subject.AndroidToolError):
+                        subject._binding({**native, **mutation})
         linux = subject._binding(encoded()[1])
         self.assertEqual((linux.profile, linux.selection), (subject.PROFILE, ()))
         self.assertEqual(profile_data().java_home, "jdk")
-        for changed in ((raw + b"\n", provider, record), (raw, provider + b"\n", record),
-                        (raw, provider, record + b"\n")):
-            with self.subTest(header=changed), self.assertRaises(subject.AndroidToolError):
-                mac.parse_profile(*changed, selected)
-        for mutation in ({"root": native["root"] + "/"}, {"schemaVersion": 1}, {"qualified": True},
-                         {"rootIdentity": {**native["rootIdentity"], "uid": 501}},
-                         {"rootIdentity": {**native["rootIdentity"], "mode": stat.S_IFDIR | 0o755}},
-                         {"selection": {**native["selection"], "catalogGeneration": 0}},
-                         {"selection": {**native["selection"], "ownerUid": True}}):
-            with self.subTest(mutation=mutation), self.assertRaises(subject.AndroidToolError):
-                subject._binding({**native, **mutation})
+
+    def test_profile_pairing_rejects_rehashed_opposite_and_unknown_documents(self):
+        from mobile_release import android_build_tools_macos as mac
+        for name in MAC_DATA_PAIRS:
+            opposite = next(key for key in MAC_DATA_PAIRS if key != name)
+            opposite_target, opposite_launch, opposite_os, _ = MAC_DATA_PAIRS[opposite]
+            changes = (("record", "profile", opposite), ("record", "target", opposite_target),
+                       ("inventory", "profile", opposite), ("inventory", "target", opposite_target),
+                       ("inventory", "launchContract", opposite_launch),
+                       ("provider", "profile", opposite_os), ("provider", "target", opposite_target))
+            for document, field, other in changes:
+                for replacement in (other, "unknown-profile-data"):
+                    data, provider = mac_documents(profile=name)
+                    record_change = {}
+                    {"inventory": data, "provider": provider, "record": record_change}[document][field] = replacement
+                    raw, os_raw, record, native = mac_encoded(
+                        data, provider, profile=name, record_changes=record_change)
+                    with self.subTest(profile=name, document=document, field=field, value=replacement):
+                        selected = subject._binding(native)
+                        anchors = dict(selected.selection)
+                        # All three raw anchors match: this must refuse the pairing itself.
+                        self.assertEqual(hashlib.sha256(raw).hexdigest(), selected.sha256)
+                        self.assertEqual(hashlib.sha256(os_raw).hexdigest(), anchors["osProviderSha256"])
+                        self.assertEqual(hashlib.sha256(record).hexdigest(), anchors["recordSha256"])
+                        with self.assertRaises(subject.AndroidToolError):
+                            mac.parse_profile(raw, os_raw, record, selected)
+            raw, provider, record, native = mac_encoded(profile=opposite)
+            with self.subTest(profile=name, all_documents="opposite"), self.assertRaises(subject.AndroidToolError):
+                mac.parse_profile(raw, provider, record, subject._binding({**native, "profile": name}))
+
+    def test_unknown_profile_data_never_uses_hashability_or_string_fallback(self):
+        from mobile_release import android_build_tools_macos as mac
+
+        class StringSubclass(str):
+            pass
+
+        for name in MAC_DATA_PAIRS:
+            raw, provider, record, native = mac_encoded(profile=name)
+            original = subject._binding(native)
+            for value in ([], {}, None, True, 17, "", name + " ", StringSubclass(name)):
+                with self.subTest(profile=name, value=value):
+                    for binder in (subject._binding, mac.binding):
+                        with self.assertRaises(subject.AndroidToolError):
+                            binder({**native, "profile": value})
+                    changed = subject._Binding(original.root, original.instance, original.identity,
+                                               original.sha256, value, original.selection)
+                    with self.assertRaises(subject.AndroidToolError):
+                        mac.parse_profile(raw, provider, record, changed)
+
+    def test_mac_owner_keeps_original_request_and_never_relabels_architecture(self):
+        from mobile_release import android_build_tools_macos as mac
+        for name in MAC_DATA_PAIRS:
+            tools = mac_inert_tools(profile=name)
+            self.assertIs(type(tools._mac), mac.MacAdmission)
+            self.assertIs(tools._mac.tools, tools)
+            self.assertIs(tools.operation.tools, tools)
+            self.assertIs(tools.source.operation, tools.operation)
+            self.assertEqual(tools.binding.profile, name)
+            with patch.object(tools, "_owner", wraps=tools._owner) as owner:
+                tools._mac.owner()
+                owner.assert_called_once_with(active=True)
+                tools._cleanup_mode = True
+                tools._mac.owner()
+                self.assertEqual(owner.call_args.kwargs, {"active": False})
+            opposite = next(key for key in MAC_DATA_PAIRS if key != name)
+            native = mac_encoded(profile=name)[3]
+            mismatched = {**native, "profile": opposite}
+            operation = inert_operation(signature=True)
+            operation.request.native["toolchain"] = native
+            with self.subTest(profile=name, mismatch="constructor"), patch.object(mac.MacAdmission, "platform") as platform:
+                with self.assertRaises(subject.AndroidToolError):
+                    subject.AndroidValidationTools(operation, mismatched)
+                platform.assert_not_called()
+                self.assertIsNone(operation.tools)
+            for change in ("request", "binding", "original-admission", "malformed-profile"):
+                tools = mac_inert_tools(profile=name)
+                original_mac = tools._mac
+                if change == "request":
+                    tools.request.native["toolchain"] = mismatched
+                elif change == "binding":
+                    tools.binding = subject._binding(mismatched)
+                elif change == "original-admission":
+                    tools._mac = object()
+                else:
+                    b = tools.binding
+                    tools.binding = subject._Binding(b.root, b.instance, b.identity, b.sha256, [], b.selection)
+                with self.subTest(profile=name, mismatch=change), self.assertRaises(subject.AndroidToolError):
+                    original_mac.owner()
+
+    def test_mac_platform_pairs_machine_and_lp64_before_credentials(self):
+        from mobile_release import android_build_tools_macos as mac
+        # Standard-library observations below are fabricated DATA, never a native probe.
+        for name, (_, _, _, expected_machine) in MAC_DATA_PAIRS.items():
+            opposite = "x86_64" if expected_machine == "arm64" else "arm64"
+            cases = [("matching", "darwin", expected_machine, 2**63 - 1, True, True, True),
+                     ("opposite", "darwin", opposite, 2**63 - 1, True, True, False),
+                     ("spelling", "darwin", "aarch64", 2**63 - 1, True, True, False),
+                     ("non-Darwin", "linux", expected_machine, 2**63 - 1, True, True, False),
+                     ("missing-flags", "darwin", expected_machine, 2**63 - 1, False, True, False),
+                     ("missing-xattr", "darwin", expected_machine, 2**63 - 1, True, False, False)]
+            if expected_machine == "x86_64":
+                cases.append(("non-LP64", "darwin", expected_machine, 2**31 - 1, True, True, False))
+            for label, platform, machine, maxsize, flags, xattr, accepted in cases:
+                tools = mac_inert_tools(profile=name)
+                events = []
+                original_point = tools._point
+
+                def point():
+                    events.append("checkpoint")
+                    original_point()
+
+                def uname():
+                    events.append("uname")
+                    return types.SimpleNamespace(machine=machine)
+
+                model_os = types.SimpleNamespace(uname=Mock(side_effect=uname),
+                    stat_result=types.SimpleNamespace(**({"st_flags": 0} if flags else {})),
+                    getuid=Mock(return_value=501), geteuid=Mock(return_value=501),
+                    getgid=Mock(return_value=20), getegid=Mock(return_value=20),
+                    getgroups=Mock(return_value=[20]))
+                if xattr:
+                    model_os.listxattr = Mock()
+                with self.subTest(profile=name, condition=label), \
+                     patch.object(mac, "os", model_os), \
+                     patch.object(mac, "sys", types.SimpleNamespace(platform=platform, maxsize=maxsize)), \
+                     patch("resource.getrlimit", return_value=(256, 256)) as limits, \
+                     patch.object(tools, "_point", side_effect=point) as checkpoint:
+                    if accepted:
+                        tools._mac.platform()
+                        self.assertEqual(tools._mac.credentials, (501, 501, 20, 20, (20,)))
+                        limits.assert_called_once()
+                        for method in (model_os.getuid, model_os.geteuid, model_os.getgid,
+                                       model_os.getegid, model_os.getgroups):
+                            method.assert_called_once_with()
+                    else:
+                        with self.assertRaises(subject.AndroidToolError):
+                            tools._mac.platform()
+                        self.assertIsNone(tools._mac.credentials)
+                        limits.assert_not_called()
+                        for method in (model_os.getuid, model_os.geteuid, model_os.getgid,
+                                       model_os.getegid, model_os.getgroups):
+                            method.assert_not_called()
+                    checkpoint.assert_called_once_with()
+                    self.assertEqual(events, ["checkpoint", "uname"] if platform == "darwin" else ["checkpoint"])
+                    self.assertEqual(model_os.uname.call_count, int(platform == "darwin"))
+
+    def test_intel_commands_share_the_original_mac_private_jvm_environment(self):
+        outputs = []
+        snapshot = WORK / "artifact.aab"
+        for name in MAC_DATA_PAIRS:
+            tools = mac_inert_tools(profile=name)
+            with patch.object(tools, "_work", return_value=WORK), \
+                 patch.object(tools, "_inspection_input", return_value=(WORK, snapshot)):
+                outputs.append((tools.gradle_command(tools.task, WORK), tools.command_environment(WORK, tools.release),
+                                tools.bundletool_command(snapshot), tools.jarsigner_command(snapshot),
+                                tools.keytool_command(snapshot)))
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[1][0][0], "/bin/sh")
+        self.assertTrue(outputs[1][1]["PATH"].endswith("/bin:/usr/bin:/bin"))
 
     def test_layout_alias_membership_license_and_provider_are_not_optional(self):
         from mobile_release import android_build_tools_macos as mac

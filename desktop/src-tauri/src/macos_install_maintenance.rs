@@ -2,15 +2,23 @@
 //! Expected releases come from the release producer, never from the installation
 //! being classified. Supplied check labels cannot establish signature trust,
 //! current invocation, native finality, live-use exclusion or permission to act.
-//! No production caller/Installer branch is enabled by this module.
+//! Native callers must retain their own admitted producer and original handles;
+//! the accessors and encoders here do not turn DATA into authority.
 #![forbid(unsafe_code)]
 
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+// The separate Installer binary may select this same closed SOURCE type. A
+// target declaration is not native qualification or execution authority.
+pub use crate::macos_build_profile::MacBuildTarget as MaintenanceTargetData;
 use crate::{macos_install_paths as paths, protocol::strict_json};
 
 pub const INPUT_LIMIT: usize = 16 * 1024;
 pub const PREDECESSOR_LIMIT: usize = 8;
 const PROFILE: &str = "fixed-macos26-arm64-maintenance-v2";
+fn profile(target: MaintenanceTargetData) -> &'static str {
+    match target { MaintenanceTargetData::Arm64 => PROFILE,
+        MaintenanceTargetData::Intel => "fixed-macos26-x86_64-maintenance-v2" }
+}
 // These are the published engineering-v1 identities, not the next release.
 const LEGACY_RELEASE: &str = "macos26-arm64-project-draft-01";
 const ENTRY_ENGINEERING_RELEASE: &str = "macos26-arm64-entry-m2a-01";
@@ -37,14 +45,15 @@ fn version(value: &str) -> Option<[u32; 3]> {
 }
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     require(!bytes.is_empty() && bytes.len() <= INPUT_LIMIT, DataError::Limit)?;
-    serde_json::from_value(strict_json(bytes).map_err(|_| DataError::Shape)?)
-        .map_err(|_| DataError::Shape)
+    let value = strict_json(bytes).map_err(|_| DataError::Shape)?;
+    require(value.is_object(), DataError::Shape)?;
+    serde_json::from_value(value).map_err(|_| DataError::Shape)
 }
 
 /// Detached producer DATA. packageSha256 is the completed package's digest;
 /// never embed that digest in the package whose bytes it hashes. Release/source
 /// selection remains build-bound. This parser neither reads nor selects code.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReleaseData {
     profile: String, package_identifier: String, bundle_identifier: String,
@@ -52,14 +61,36 @@ pub struct ReleaseData {
     protocol_sha256: String, runtime_manifest_sha256: String, inventory_sha256: String,
     signing_policy_sha256: String, package_sha256: String,
 }
+/// Read-only tuple fields for the separate Installer binary and its original
+/// readers. This is not an independently authenticated producer selection.
+#[derive(Clone, Copy)]
+pub struct ReleaseBindingData<'a> {
+    pub profile: &'a str, pub package_identifier: &'a str, pub bundle_identifier: &'a str,
+    pub package_version: &'a str, pub release: &'a str, pub source_commit: &'a str,
+    pub protocol_sha256: &'a str, pub runtime_manifest_sha256: &'a str,
+    pub inventory_sha256: &'a str, pub signing_policy_sha256: &'a str, pub package_sha256: &'a str,
+}
 impl ReleaseData {
-    fn validate(&self) -> Result<()> {
-        require(self.profile == PROFILE && self.package_identifier == paths::PACKAGE_ID
+    pub fn binding_data(&self) -> ReleaseBindingData<'_> {
+        ReleaseBindingData { profile: &self.profile, package_identifier: &self.package_identifier,
+            bundle_identifier: &self.bundle_identifier, package_version: &self.package_version,
+            release: &self.release, source_commit: &self.source_commit, protocol_sha256: &self.protocol_sha256,
+            runtime_manifest_sha256: &self.runtime_manifest_sha256, inventory_sha256: &self.inventory_sha256,
+            signing_policy_sha256: &self.signing_policy_sha256, package_sha256: &self.package_sha256 }
+    }
+    /// Ordering DATA shared by live and recorded updates; tuples still require
+    /// independent membership/target validation before this comparison.
+    pub(crate) fn is_strictly_newer_data(&self, previous: &Self) -> bool {
+        matches!((version(&self.package_version), version(&previous.package_version)),
+            (Some(new), Some(old)) if old < new)
+    }
+    fn validate(&self, target: MaintenanceTargetData) -> Result<()> {
+        require(self.profile == profile(target) && self.package_identifier == paths::PACKAGE_ID
             && self.bundle_identifier == paths::BUNDLE_ID, DataError::Binding)?;
         require(self.release != LEGACY_RELEASE && self.release != ENTRY_ENGINEERING_RELEASE
             && self.package_version != LEGACY_VERSION, DataError::Legacy)?;
         require(version(&self.package_version).is_some() && self.release.len() <= 128
-            && self.release.starts_with("macos26-arm64-") && self.release.len() > "macos26-arm64-".len()
+            && self.release.starts_with(target.release_prefix()) && self.release.len() > target.release_prefix().len()
             && self.release.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
             && self.release.as_bytes().last().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
             && hex(&self.source_commit, 40)
@@ -73,34 +104,59 @@ impl ReleaseData {
 }
 
 /// An explicit finite allow-list, not a destination-derived upgrade policy.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReleaseSetData {
+    target: MaintenanceTargetData,
     current: ReleaseData, accepted_predecessors: Vec<ReleaseData>,
 }
 // The validated wrapper does not implement Deserialize: callers cannot bypass
 // parse_data's size/identity/predecessor checks through serde_json::from_value.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReleaseSetWireData {
     schema_version: u32, current: ReleaseData, accepted_predecessors: Vec<ReleaseData>,
 }
 impl ReleaseSetData {
+    /// Compatibility for the original ARM-only preparation DATA, not a native
+    /// platform default. New Installer callers must select their compiled target
+    /// and use parse_for_target_data instead.
     pub fn parse_data(bytes: &[u8]) -> Result<Self> {
-        let value: ReleaseSetWireData = parse(bytes)?;
+        Self::parse_for_target_data(bytes, MaintenanceTargetData::Arm64)
+    }
+    pub fn parse_for_target_data(bytes: &[u8], target: MaintenanceTargetData) -> Result<Self> {
+        let raw: serde_json::Value = parse(bytes)?;
+        require(raw.get("current").is_some_and(serde_json::Value::is_object)
+            && raw.get("acceptedPredecessors").and_then(serde_json::Value::as_array)
+                .is_some_and(|items| items.iter().all(serde_json::Value::is_object)), DataError::Shape)?;
+        let value: ReleaseSetWireData = serde_json::from_value(raw).map_err(|_| DataError::Shape)?;
         require(value.schema_version == 2, DataError::Binding)?;
         require(value.accepted_predecessors.len() <= PREDECESSOR_LIMIT, DataError::Limit)?;
-        value.current.validate()?;
+        value.current.validate(target)?;
         for (i, predecessor) in value.accepted_predecessors.iter().enumerate() {
-            predecessor.validate()?;
+            predecessor.validate(target)?;
             require(!predecessor.reuses_identity(&value.current)
                 && !value.accepted_predecessors[..i].iter().any(|old| predecessor.reuses_identity(old)),
                 DataError::ReusedIdentity)?;
             require(version(&predecessor.package_version) < version(&value.current.package_version), DataError::Binding)?;
         }
-        Ok(Self { current: value.current, accepted_predecessors: value.accepted_predecessors })
+        Ok(Self { target, current: value.current, accepted_predecessors: value.accepted_predecessors })
     }
+    pub fn target_data(&self) -> MaintenanceTargetData { self.target }
     pub fn current_data(&self) -> &ReleaseData { &self.current }
+    pub fn contains_data(&self, release: &ReleaseData) -> bool {
+        release.validate(self.target).is_ok()
+            && (release == &self.current || self.accepted_predecessors.contains(release))
+    }
     pub fn predecessor_data(&self) -> &[ReleaseData] { &self.accepted_predecessors }
+    /// Canonical bounded DATA for an already selected set. A private channel
+    /// may carry these bytes, but channel/producer authentication remains native.
+    pub fn encode_data(&self) -> Result<Vec<u8>> {
+        let wire = ReleaseSetWireData { schema_version: 2, current: self.current.clone(),
+            accepted_predecessors: self.accepted_predecessors.clone() };
+        let bytes = serde_json::to_vec(&wire).map_err(|_| DataError::Shape)?;
+        Self::parse_for_target_data(&bytes, self.target)?;
+        Ok(bytes)
+    }
     fn tuple_class(&self, value: &ReleaseData) -> ClassificationData {
         if value == &self.current { ClassificationData::ExactCurrentTuple }
         else if self.accepted_predecessors.contains(value) { ClassificationData::AcceptedPredecessorTuple }
@@ -147,7 +203,7 @@ fn check_data(value: CheckData) -> std::result::Result<(), ClassificationData> {
         CheckData::Differs => Err(ClassificationData::Mismatch), CheckData::Unknown => Err(ClassificationData::Indeterminate),
     }
 }
-fn object_data(value: ObjectData<'_>) -> std::result::Result<(), ClassificationData> {
+fn object_data(value: ObjectData<'_>, target: MaintenanceTargetData) -> std::result::Result<(), ClassificationData> {
     match value {
         ObjectData::Unobserved => Err(ClassificationData::Unobserved),
         ObjectData::Unrelated => Err(ClassificationData::Occupied),
@@ -156,7 +212,7 @@ fn object_data(value: ObjectData<'_>) -> std::result::Result<(), ClassificationD
         ObjectData::Unknown => Err(ClassificationData::Indeterminate),
         ObjectData::Absent => Ok(()),
         ObjectData::Present { release, checks } => {
-            if let Err(why) = release.validate() {
+            if let Err(why) = release.validate(target) {
                 return Err(if why == DataError::Legacy { ClassificationData::LegacyUnsupported }
                     else { ClassificationData::UnsupportedTuple });
             }
@@ -170,7 +226,7 @@ pub fn classify_data(expected: &ReleaseSetData, supplied: ObservationData<'_>) -
         if let Err(why) = check_data(check) { return why; }
     }
     for object in [supplied.app, supplied.runtime] {
-        if let Err(why) = object_data(object) { return why; }
+        if let Err(why) = object_data(object, expected.target) { return why; }
     }
     match (supplied.app, supplied.runtime) {
         // Absence alone does not say "uninstalled", "fresh install allowed" or
@@ -193,7 +249,7 @@ pub fn classify_data(expected: &ReleaseSetData, supplied: ObservationData<'_>) -
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ActionData { FreshInstall, SamePackageNoop, RestoreFixedApp, Update, Uninstall }
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -285,6 +341,35 @@ mod tests {
         assert!(ReleaseSetData::parse_data(&vec![b' '; INPUT_LIMIT + 1]).is_err());
         let mut many = plan(); many["acceptedPredecessors"] = json!(vec![release(2); PREDECESSOR_LIMIT + 1]);
         assert!(ReleaseSetData::parse_data(&bytes(&many)).is_err());
+        // Actual expected target, not receipt-selected architecture. Existing
+        // validation remains common to both selected SOURCE profiles.
+        let mut intel = plan();
+        for item in ["current", "acceptedPredecessors"] {
+            let values: Vec<&mut Value> = if item == "current" { vec![&mut intel[item]] }
+                else { intel[item].as_array_mut().unwrap().iter_mut().collect() };
+            for value in values {
+                value["profile"] = json!(profile(MaintenanceTargetData::Intel));
+                value["release"] = json!(value["release"].as_str().unwrap().replace("arm64", "x86_64"));
+            }
+        }
+        let selected = ReleaseSetData::parse_for_target_data(&bytes(&intel), MaintenanceTargetData::Intel).unwrap();
+        assert_eq!(selected.target_data(), MaintenanceTargetData::Intel);
+        assert!(ReleaseSetData::parse_data(&bytes(&intel)).is_err());
+        assert!(ReleaseSetData::parse_for_target_data(&bytes(&plan()), MaintenanceTargetData::Intel).is_err());
+        let mut mixed = intel.clone(); mixed["acceptedPredecessors"][0] = release(2);
+        assert!(ReleaseSetData::parse_for_target_data(&bytes(&mixed), MaintenanceTargetData::Intel).is_err());
+        for location in ["current", "predecessor", "root"] {
+            let mut positional = plan();
+            let sequence = json!([PROFILE, paths::PACKAGE_ID, paths::BUNDLE_ID, "0.3.0", "macos26-arm64-data-3",
+                format!("{:040x}", 3), "a".repeat(64), format!("{:064x}", 3), format!("{:064x}", 23),
+                "b".repeat(64), format!("{:064x}", 43)]);
+            match location {
+                "current" => positional["current"] = sequence,
+                "predecessor" => positional["acceptedPredecessors"][0] = sequence,
+                _ => positional = json!([2, positional["current"], positional["acceptedPredecessors"]]),
+            }
+            assert!(ReleaseSetData::parse_data(&bytes(&positional)).is_err(), "{location}");
+        }
     }
     #[test]
     fn release_ids_versions_and_complete_package_bytes_cannot_be_reused() {

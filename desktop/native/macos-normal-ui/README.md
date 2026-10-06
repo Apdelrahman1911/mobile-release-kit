@@ -131,6 +131,61 @@ observations. Raw results and possibly-live state stay task-local. This SOURCE
 correction neither explains the prior XCTest failure nor claims a native pass,
 same-build qualification, POSIX/all-worker finality, full UI/M2 or product readiness.
 
+## Ordinary project-field Browse candidate
+
+The undelivered candidate enables the existing normal Mac four-field gate and
+the separate Android source-folder gate. This is availability for validation,
+**not native qualification or delivery**.
+The same project-test batch explicitly adds
+`MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields` beside
+`testSyntheticProjectLocalEditsAndImages`. It reuses the same admitted runner,
+ordinary app launch, original owner and native sheet/quit helpers. The basic
+normal launch/Cancel/navigation/Quit gate still runs first.
+
+The new case uses normal-project DATA, not credential/persistence DATA. Four
+literal selection-only files join its existing complete bounded fixture inventory;
+no extra resource, valid Xcode build, signing input or Store content is implied.
+The real Browse sheets select version source, Xcode project, Xcode workspace and
+metadata folder. A real file Cancel and folder Cancel preserve the selected values.
+Navigation retains all four relative draft values, including both conflicting
+Xcode fields. **Review draft changes** must show the retained baseline and invalid
+format result. The case never prepares Save, copies files or clears the conflict.
+Complete saved fixture bytes/roster must remain unchanged through normal Quit and
+consuming fixture closes before its supplementary result markers can be emitted.
+
+Immediately after project registration and before any draft edit, that same case
+uses the three public named role groups in Releases for exactly six native actions:
+JDK, SDK, Gradle, Cancel on the already-selected JDK, a distinct JDK reselection,
+then genuine Open on an owned deep directory followed by backend SourceRefused.
+Cancel and refusal must retain the previous role selections. AppKit exclusion,
+Cancel, Unknown, timeout or another refusal reason cannot satisfy that last step.
+The five extra literal README markers contain no supplier/tool payload and belong
+to the same fixture owner, separate from the unchanged four project-field files.
+Precreation and postcreation censuses bind22 files and143 directories (root included).
+Three anchors yield146 retained fixture FDs,147 with one transient read/enumeration
+FD; the test's original gate is separate. The refusal directory has125 relative /
+128 absolute normal components and305 path bytes. This is a finite census, not an
+OS descriptor-headroom or native timing claim. Existing64-child,32-KiB-leaf and
+256-KiB-total DATA limits remain unchanged; the complete DATA total is13,885 bytes.
+
+The runner compares its captured original command output for exactly two selected
+starts/passes, two original owner/gate markers, three distinct result markers and
+no failure cleanup. The extra Android marker is emitted only after the same final
+owner/fixture checks, and admitted only on the same original zero return. The
+workflow requires its separate comparison flag plus the original command/receipt closes,
+matching720/885-second deadlines and two-pass native summary. Marker text alone
+cannot replace original native execution or prove POSIX/all-worker finality.
+
+Exact-source finite-ten AppKit/APFS field acceptance (four selections, two Cancels,
+outside/link/kind/root-change refusals) remains separately required before this
+profile may be delivered. That fixture's receipt still cannot enable shipping.
+Manual relative text entry remains available. The Android ordinary native pass is
+also separately mandatory on these exact enabled bytes. Its selection-only scope
+does not qualify supplier inspection, protected copying, builds, link/wrong-kind
+handling or all-worker finality. The existing300-second case, two-method720-second
+command and885-second phase remain unchanged; there is no third case or retry.
+No current native pass is claimed.
+
 ## Synthetic local-project journey (separate second gate)
 
 Keep the basic launch/Cancel/navigation/Quit method above as the **first gate**.
@@ -192,9 +247,11 @@ or evidence that the native image test has already executed**.
 The journey has one nonrenewable300-second XCTest allowance. Every ordinary
 affordance wait is at most5seconds; an active native wait is at most48seconds
 (the product's30+8+10 lifecycle window), bounded by the same overall deadline.
-Known terminal refusal/Unknown headings end the wait early. The workflow must
-also enforce a seven-minute outer original-command ceiling. It must verify
-the original exit result plus exactly one selected passed test and zero skips.
+Known terminal refusal/Unknown headings end the wait early. The current workflow
+batches the image-inclusive journey with the separate draft-only field case below:
+300seconds each, one720-second original-command cap and one885-second admission/
+close phase. It requires the original zero, both exact selected passes and zero
+failures/skips/expected failures; neither case replaces the other.
 
 Native sheet/menu/Go to Folder accessibility is intentionally an **actual
 runner obligation**. Missing/ambiguous controls fail with bounded stage/role

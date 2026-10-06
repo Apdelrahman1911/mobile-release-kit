@@ -2,7 +2,7 @@
 """Fixed generated Mac UI-runner admission; no application launch or repair here.
 
 Import is inert. The diagnostic uses its existing original-command owner; the
-normal workflow CLI admits fixed build/summary phases and five exact test selections.
+normal workflow CLI admits fixed build/summary phases and six exact test selections.
 Only XCTest/NSWorkspace in the reviewed Swift source may request the outer app.
 """
 from __future__ import annotations
@@ -22,9 +22,11 @@ import sys
 import time
 
 DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
+ARM_TARGET = "aarch64-apple-darwin"
+INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "6a46ad67e58c4428b9564d00eccc71ba3ea805591f9d5ee6cabf25ae9f31b698"
+LOADER_SHA = "1b1672b16943697a8e53808768051401e3f0dc0330b6bb5048b36f8a3cff91f2"
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -37,11 +39,13 @@ RUNNER_INFO = RUNNER + "/Contents/Info.plist"
 TEST_INFO = TEST_BUNDLE + "/Contents/Info.plist"
 NORMAL_SELECTIONS = {
     "test.xcresult": (("testLaunchCancelAndQuit",), 60, 180),
-    "project-test.xcresult": (("testSyntheticProjectLocalEditsAndImages",), 300, 420),
+    "project-test.xcresult": (("testSyntheticProjectLocalEditsAndImages",
+                              "testSyntheticProjectPathFields"), 300, 720),
     "persistence-test.xcresult": (("testSyntheticPersistentCredentials",), 300, 420),
     "diagnostics-test.xcresult": (("testSyntheticProjectBuildToolDiagnostics",), 300, 420),
     "saved-checks-test.xcresult": (("testSyntheticProjectSavedOfflineChecks",
                                   "testSyntheticProjectEmptyBuildInputInspection"), 300, 720),
+    "workflow-refusal-test.xcresult": (("testSyntheticProjectManagedWorkflowRefusal",), 300, 420),
 }
 ORIGINAL_MARKER = ("MRK_MACOS_UI_ORIGINAL=outerRequest=1;completion=1;body=1;handoff=1;"
     "payloadIdentity=1;originalTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
@@ -58,6 +62,13 @@ class Refused(Exception):
 def need(value, reason):
     if not value:
         raise Refused(reason)
+
+
+def normal_target_data(target=ARM_TARGET):
+    """Closed requested target DATA; native context must independently match."""
+    need(type(target) is str and target in (ARM_TARGET, INTEL_TARGET), "normal-fixed-target")
+    return (("arm64", "github-hosted-macos26-arm64") if target == ARM_TARGET else
+            ("x86_64", "github-hosted-macos26-x86_64"))
 
 
 def sha(body):
@@ -359,25 +370,29 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET):
+    machine, _ = normal_target_data(target)
+    need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
     need(allowance in (60, 300) and (tuple(methods) != (PACKAGED_METHOD,) or allowance == 60), "test-allowance")
     return ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifest),
-        "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+        "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
         "-resultBundlePath", str(result), *["-only-testing:" + method for method in methods],
         "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
         "-default-test-execution-time-allowance", str(allowance),
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET):
+    normal_target_data(target)
+    need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
-        command = xcode_test_arguments(products.products / products.manifest, result, methods, allowance)
+        command = xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target)
         products.check()
         original = call("one-admitted-ui-test", command, timeout)
         products.check()
@@ -432,7 +447,55 @@ def packaged_ui_result(stdout, summary_body, tests_body):
         "fullUIQualified": False, "fullM2Qualified": False, "productReady": False}
 
 
-def normal_cli_arguments(arguments):
+def normal_project_markers(stdout):
+    """Closed returned-output comparison; not independent native or shipping proof."""
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1024 * 1024, "normal-project-output-bound")
+    text = stdout.decode("utf-8", "strict")
+    lines = text.splitlines()
+    methods = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
+    markers = (
+        "MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version-images;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
+        "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
+        "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
+    )
+    need(lines.count(ORIGINAL_MARKER) == 2 and all(lines.count(marker) == 1 for marker in markers)
+         and "MRK_MACOS_UI_FAILURE_CLEANUP=" not in text, "normal-project-terminal-markers")
+    selected = {"-[MRKNormalAppUITests.NormalAppUITests " + method + "]" for method in methods}
+    starts = re.findall(r"^Test Case '([^'\r\n]{1,240})' started\.$", text, re.M)
+    passes = re.findall(r"^Test Case '([^'\r\n]{1,240})' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.$", text, re.M)
+    need(len(starts) == 2 and set(starts) == selected, "normal-project-exact-attempts")
+    need(len(passes) == 2 and set(passes) == selected
+         and re.search(r"^Test Case '[^'\r\n]{1,240}' failed", text, re.M) is None,
+         "normal-project-exact-passes")
+    return True
+
+
+def normal_workflow_refusal_markers(stdout):
+    """One closed returned-output check; not independent native or shipping proof."""
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1024 * 1024
+         and stdout.endswith(b"\n"), "normal-workflow-refusal-output-bound")
+    text = stdout.decode("utf-8", "strict")
+    lines = text.splitlines()
+    marker = ("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI="
+        "ordinary-preview-customized-candidate-whole-bundle-refused-originals-preserved;"
+        "cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    need(lines.count(ORIGINAL_MARKER) == lines.count(marker) == 1
+         and sum(line.startswith("MRK_MACOS_UI_ORIGINAL=") for line in lines) == 1
+         and sum(line.startswith("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=") for line in lines) == 1
+         and "MRK_MACOS_UI_FAILURE_CLEANUP=" not in text, "normal-workflow-refusal-terminal-markers")
+    selected = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectManagedWorkflowRefusal]"
+    attempts = [line for line in lines if line.startswith("Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == "Test Case '" + selected + "' started."
+         and re.fullmatch(r"Test Case '" + re.escape(selected)
+                          + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1]) is not None,
+         "normal-workflow-refusal-exact-attempt-and-pass")
+    need(lines.index(attempts[0]) < lines.index(ORIGINAL_MARKER) < lines.index(marker) < lines.index(attempts[1]),
+         "normal-workflow-refusal-original-terminal-order")
+    return True
+
+
+def normal_cli_arguments(arguments, *, target=ARM_TARGET):
+    machine, _ = normal_target_data(target)
     need(len(arguments) in (25, 26) and arguments[0] == "test-without-building", "normal-fixed-command")
     # Reconstruct the complete old argv; no extra xcodebuild switch may escape.
     need(arguments[11] == "-derivedDataPath" and arguments[13] == "-resultBundlePath", "normal-product-arguments")
@@ -440,7 +503,7 @@ def normal_cli_arguments(arguments):
     need(result.name in NORMAL_SELECTIONS, "normal-existing-selection")
     methods, allowance, timeout = NORMAL_SELECTIONS[result.name]
     expected = ["test-without-building", "-project", PROJECT, "-scheme", "MRKNormalAppUI",
-        "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64",
+        "-configuration", "Debug", "-destination", "platform=macOS,arch=" + machine,
         "-destination-timeout", "15", "-derivedDataPath", str(derived),
         "-resultBundlePath", str(result), *["-only-testing:" + CLASS + method for method in methods],
         "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
@@ -454,7 +517,8 @@ def normal_cli_arguments(arguments):
 
 SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-summary",
     "persistence-test.xcresult": "persistence-summary", "diagnostics-test.xcresult": "diagnostics-summary",
-    "saved-checks-test.xcresult": "saved-checks-summary"}
+    "saved-checks-test.xcresult": "saved-checks-summary",
+    "workflow-refusal-test.xcresult": "workflow-refusal-summary"}
 TOOLCHAIN_QUERIES = (
     ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
     ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
@@ -464,7 +528,14 @@ TOOLCHAIN_QUERIES = (
 
 
 def normal_request(arguments, temporary):
-    """Two fixed added modes; the original entire test argv remains unchanged."""
+    """Fixed modes with one optional leading target; ARM remains the default."""
+    need(type(arguments) is list and all(type(value) is str for value in arguments), "normal-fixed-command")
+    target = ARM_TARGET
+    if arguments[:1] == ["--target"]:
+        need(len(arguments) >= 3, "normal-target-arguments")
+        target, arguments = arguments[1], arguments[2:]
+    normal_target_data(target)
+    need("--target" not in arguments, "normal-target-arguments")
     need(type(temporary) is str, "normal-fixed-tmpdir")
     normal = Path(temporary).parent
     if arguments == ["--normal-build"]:
@@ -475,12 +546,13 @@ def normal_request(arguments, temporary):
         value = dict(phase="summary", derived=normal / "DerivedData", result=normal / arguments[1],
                      methods=(), allowance=None, timeout=30, phaseSeconds=90)
     else:
-        derived, result, methods, allowance, timeout = normal_cli_arguments(arguments)
+        derived, result, methods, allowance, timeout = normal_cli_arguments(arguments, target=target)
         value = dict(phase="test", derived=derived, result=result, methods=methods,
                      allowance=allowance, timeout=timeout,
                      phaseSeconds=345 if timeout == 180 else 885 if timeout == 720 else 585)
     need(value["derived"].is_absolute() and value["derived"].parent.name == "normal-ui"
          and temporary == str(value["derived"].parent / "tmp") + "/", "normal-fixed-tmpdir")
+    value["target"] = target
     return value
 
 
@@ -603,11 +675,12 @@ def normal_toolchain(values):
     return text
 
 
-def normal_build_arguments(derived):
+def normal_build_arguments(derived, *, target=ARM_TARGET):
+    machine, _ = normal_target_data(target)
     return ["/usr/bin/xcodebuild", "build-for-testing", "-project", PROJECT, "-scheme", "MRKNormalAppUI",
-        "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+        "-configuration", "Debug", "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
         "-derivedDataPath", str(derived), "-jobs", "2", "-disableAutomaticPackageResolution",
-        "COMPILER_INDEX_STORE_ENABLE=NO"]
+        "COMPILER_INDEX_STORE_ENABLE=NO"] + (["ARCHS=x86_64"] if target == INTEL_TARGET else [])
 
 
 def normal_source_state(phase, source):
@@ -650,6 +723,8 @@ class NativeQueryFailure(Exception):
 
 def execute_normal_phase(phase, request, source, file_limit):
     """Original owner/source checks shared by fixed build, test and summary."""
+    target = request["target"]
+    normal_target_data(target)
     mode, derived, result = request["phase"], request["derived"], request["result"]
     before = normal_source_state(phase, source)
     if mode == "build":
@@ -664,7 +739,7 @@ def execute_normal_phase(phase, request, source, file_limit):
         for key, name, _ in TOOLCHAIN_QUERIES:
             phase.clock.check()
             exclusive_output(derived.parent / name, values[key], 4096)
-        original = phase.call("normal-ui-build", normal_build_arguments(derived), 240)
+        original = phase.call("normal-ui-build", normal_build_arguments(derived, target=target), 240)
         facts = {"schemaVersion": 1, "scope": "normal-ui-original-command-admission-only", "phase": "build",
                  "resultBundle": None, "originalCommandRole": "normal-ui-build", "originalReturncode": original.returncode}
         receipt = derived.parent / "build.command-admission.json"
@@ -680,11 +755,17 @@ def execute_normal_phase(phase, request, source, file_limit):
     else:
         need(mode == "test", "normal-phase-selection")
         original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
-                                            request["allowance"], request["timeout"])
+                                            request["allowance"], request["timeout"], target=target)
         facts.update(originalTestReturncode=original.returncode, normalPhase="test", resultBundle=result.name)
+        if original.returncode == 0 and result.name == "project-test.xcresult":
+            project_markers = normal_project_markers(original.stdout)
+            facts["projectFieldAndEditMarkersObserved"] = project_markers
+            facts["androidToolSourceBrowseMarkerObserved"] = project_markers
+        if original.returncode == 0 and result.name == "workflow-refusal-test.xcresult":
+            facts["managedWorkflowRefusalMarkerObserved"] = normal_workflow_refusal_markers(original.stdout)
         receipt = result.with_suffix(".runner-admission.json")
     need(normal_source_state(phase, source) == before, "normal-ui-source-pre-post")
-    facts.update(sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,
+    facts.update(target=target, sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,
                  originalCommandReturned=True, commands=phase.records, fileLimitBytes=list(file_limit),
                  phaseClock=phase.clock.before_publication(), receiptPolicy="exclusive0600-readback-consuming-close")
     exclusive_output(receipt, encoded(facts) + b"\n", 32768)
@@ -991,13 +1072,14 @@ def classify_normal_admission_failure(body):
 
 
 def normal_context(request):
+    machine, hosted_job = normal_target_data(request["target"])
     source = os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
     need(re.fullmatch(r"[0-9a-f]{40}", source)
          and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source
-         and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == "github-hosted-macos26-arm64",
+         and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == hosted_job,
          "normal-same-build-only")
     import resource  # Native CLI only; inert helper import stays portable.
-    need(sys.platform == "darwin" and platform.machine() == "arm64" and platform.mac_ver()[0].startswith("26.")
+    need(sys.platform == "darwin" and platform.machine() == machine and platform.mac_ver()[0].startswith("26.")
          and os.environ.get("DEVELOPER_DIR") == DEVELOPER, "normal-host-developer-file-budget")
     file_limit = normal_file_limit(request["phase"], resource.getrlimit(resource.RLIMIT_FSIZE))
     import pwd

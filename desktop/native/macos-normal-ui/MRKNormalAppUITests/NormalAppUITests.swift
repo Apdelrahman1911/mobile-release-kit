@@ -4,8 +4,8 @@ import Darwin
 import Foundation
 import XCTest
 
-#if !os(macOS) || !arch(arm64)
-#error("This external UI scenario requires a fresh hosted ARM64 macOS 26 job.")
+#if !os(macOS) || !(arch(arm64) || arch(x86_64))
+#error("This external UI scenario requires a fresh hosted native64 macOS 26 job.")
 #endif
 
 // Tests the unchanged ordinary app, never the in-process engineering observer.
@@ -716,7 +716,12 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor private func admitHostedAccount(_ profile: SourceProfile = .sameBuild) throws -> HostedAccount {
         let context = ProcessInfo.processInfo.environment
-        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
+        #if arch(arm64)
+        let hostedJob = "github-hosted-macos26-arm64"
+        #elseif arch(x86_64)
+        let hostedJob = "github-hosted-macos26-x86_64"
+        #endif
+        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == hostedJob,
                     "this scenario is not admitted on a shared or personal desktop")
         let nonroot = getuid() != 0
         let sameUid = getuid() == geteuid()
@@ -872,7 +877,7 @@ final class NormalAppUITests: XCTestCase {
         }
     }
     private final class LocalFixture {
-        enum Profile: Equatable { case projectEdits, persistentCredentials }
+        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal }
         enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
@@ -898,6 +903,24 @@ final class NormalAppUITests: XCTestCase {
             }
             return result
         }
+        // Extra selection-only DATA belongs only to the ordinary project-field case.
+        // The same originals/current/ancestor inventory owns and verifies every leaf.
+        static let projectFieldAdditions: [String: Data] = [
+            "project/inputs/VERSION": Data("VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n".utf8),
+            "project/ios/Example.xcodeproj/project.pbxproj": Data("// Selection-only fixture; not an Xcode build.\n".utf8),
+            "project/ios/Example.xcworkspace/contents.xcworkspacedata": Data("<Workspace version=\"1.0\"></Workspace>\n".utf8),
+            "project/metadata/README.txt": Data("Selection-only metadata folder; no Store content.\n".utf8)
+        ]
+        // Inert folder-selection DATA only, separate from the unchanged four
+        // project-field additions. No SDK/JDK/Gradle executable or supplier data.
+        static let androidSourceAdditions: [String: Data] = [
+            "sources/tool-jdk.jdk/README.txt": Data("MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n".utf8),
+            "sources/tool-sdk/README.txt": Data("MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n".utf8),
+            "sources/tool-gradle/README.txt": Data("MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n".utf8),
+            "sources/tool-jdk-replacement.jdk/README.txt": Data("MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n".utf8),
+            "sources/tool-refused/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/README.txt": Data("MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n".utf8)
+        ]
+        static let androidRefusedDirectory = "sources/tool-refused/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d"
         static let persistenceOriginals: Set<String> = [config, version, "project/.gitignore", "project/README-user.txt",
             "project/ios/MRKObserved.xcodeproj/project.pbxproj",
             "project/ios/MRKObserved.xcodeproj/xcshareddata/xcschemes/MRKObserved.xcscheme",
@@ -1064,7 +1087,8 @@ final class NormalAppUITests: XCTestCase {
         }
         func prepare(_ profile: Profile = .projectEdits) throws {
             try Self.need(rootPath.isEmpty && current.isEmpty, "fixture preparation was repeated")
-            let resourceName = profile == .projectEdits ? "normal-project-v1" : "normal-persistence-v1"
+            let projectData = profile != .persistentCredentials
+            let resourceName = projectData ? "normal-project-v1" : "normal-persistence-v1"
             guard let url = Bundle(for: NormalAppUITests.self).url(forResource: resourceName, withExtension: "json") else {
                 throw Refusal.condition("fixture: bundled fixed DATA absent")
             }
@@ -1092,14 +1116,14 @@ final class NormalAppUITests: XCTestCase {
             if Darwin.close(resource) != 0 { closeErrors.append("resource-close") }
             try Self.need(closeErrors.isEmpty, "bundled DATA close failed")
             let spec = try JSONDecoder().decode(FixtureSpec.self, from: data)
-            let stagePaths: [String: Set<String>] = profile == .projectEdits ? [
+            let stagePaths: [String: Set<String>] = projectData ? [
                 "config": [Self.config, "project/.gitignore"], "workflows": Set(Self.callers),
                 "text": [Self.title], "version": [Self.version], "images": Set(Self.imageTargets)
             ] : [:]
-            let expectedOriginals = profile == .projectEdits ? Self.originals : Self.persistenceOriginals
+            let expectedOriginals = projectData ? Self.originals : Self.persistenceOriginals
             try Self.need(spec.schemaVersion == 1 && Set(spec.files.keys) == expectedOriginals
                 && Set(spec.stages.keys) == Set(stagePaths.keys)
-                && (profile == .projectEdits ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),
+                && (projectData ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),
                 "fixed DATA inventory mismatch")
             func decode(_ values: [String: String]) throws -> [String: Data] {
                 var decoded: [String: Data] = [:]
@@ -1112,11 +1136,68 @@ final class NormalAppUITests: XCTestCase {
                 return decoded
             }
             originals = try decode(spec.files)
+            if profile == .projectFields {
+                try Self.need(Set(originals.keys).isDisjoint(with: Self.projectFieldAdditions.keys),
+                              "fixed project-field DATA collides with an original")
+                for (path, bytes) in Self.projectFieldAdditions { originals[path] = bytes }
+                try Self.need(Self.androidSourceAdditions.count == 5
+                    && Self.androidSourceAdditions.values.allSatisfy({
+                        $0.count == 41 && $0 == Data("MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n".utf8)
+                    }), "fixed Android source DATA count/bytes differ")
+                try Self.need(Set(originals.keys).isDisjoint(with: Self.androidSourceAdditions.keys),
+                              "fixed Android source DATA collides with an original")
+                for (path, bytes) in Self.androidSourceAdditions { originals[path] = bytes }
+                // Before creating anything: 22 leaves, 143 retained directory
+                // originals plus 3 anchors = 146 fixture FDs, 147 with one
+                // temporary read/enumeration FD. The case's original gate is
+                // separate; this is a census, never an OS-headroom claim.
+                try Self.need(originals.count == 22 && Self.ancestors(Set(originals.keys)).count == 143,
+                              "fixed Android source fixture census differs")
+                let refusedPath = "/private/tmp/mrk-normal-project-XXXXXX/" + Self.androidRefusedDirectory
+                try Self.need(Self.androidRefusedDirectory.split(separator: "/").count == 125
+                    && refusedPath.split(separator: "/").count == 128 && refusedPath.utf8.count == 305
+                    && Self.androidSourceAdditions[Self.androidRefusedDirectory + "/README.txt"]
+                        == Data("MRK_NORMAL_ANDROID_SOURCE_SELECTION_ONLY\n".utf8),
+                    "fixed Android source refusal path differs")
+            }
             for (stage, paths) in stagePaths {
                 guard let values = spec.stages[stage], Set(values.keys) == paths else {
                     throw Refusal.condition("fixture: stage path inventory mismatch")
                 }
                 changes[stage] = try decode(values)
+            }
+            if profile == .workflowRefusal {
+                // Derive both managed originals only from unchanged bundled DATA,
+                // before any filesystem creation. No rendered/current bytes are trusted.
+                let preflight = "project/.github/workflows/mobile-preflight.yml"
+                let candidate = "project/.github/workflows/mobile-candidate.yml"
+                guard let canonical = changes["workflows"]?[preflight],
+                      let candidateTemplate = changes["workflows"]?[candidate] else {
+                    throw Refusal.condition("fixture: fixed workflow stage DATA absent")
+                }
+                let suffix = Data("# MRK synthetic user customization; preserve exactly.\n".utf8)
+                func digest(_ bytes: Data) -> String {
+                    SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                }
+                let customized = candidateTemplate + suffix
+                try Self.need(originals[preflight] == nil && originals[candidate] == nil
+                    && canonical.count == 1490
+                    && digest(canonical) == "9abe5b0e3eb048c4256b781cc4f62bd2247631a876cf704d0a384b4b03eda1fb"
+                    && suffix.count == 54
+                    && digest(suffix) == "86aecf8c848119fbfd7f097fb9d942cab6ea29ea5abe284004b074b855ee655c"
+                    && customized.count == 2368
+                    && digest(customized) == "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933",
+                    "fixed managed workflow originals differ")
+                originals[preflight] = canonical
+                originals[candidate] = customized
+                let originalBytes = originals.values.reduce(0) { $0 + $1.count }
+                let stageBytes = changes.values.flatMap { $0.values }.reduce(0) { $0 + $1.count }
+                // 10 fixture directories + 3 anchors = 13 retained FDs; 14
+                // with one transient leaf/roster reader. The app gate is separate.
+                try Self.need(originals.count == 15 && Self.ancestors(Set(originals.keys)).count == 10
+                    && originalBytes == 5232 && stageBytes == 12137 && originalBytes + stageBytes == 17369
+                    && originals.values.allSatisfy { $0.count <= 32 * 1024 },
+                    "fixed managed workflow fixture census differs")
             }
             try Self.need(originals.values.reduce(0) { $0 + $1.count }
                 + changes.values.flatMap { $0.values }.reduce(0) { $0 + $1.count } <= 256 * 1024,
@@ -1135,6 +1216,11 @@ final class NormalAppUITests: XCTestCase {
             rootPath = String(cString: template)
             let name = String(rootPath.dropFirst("/private/tmp/".count))
             try Self.need(name.hasPrefix("mrk-normal-project-") && !name.contains("/"), "unexpected temporary parent name")
+            if profile == .projectFields {
+                let refusedPath = rootPath + "/" + Self.androidRefusedDirectory
+                try Self.need(refusedPath.split(separator: "/").count == 128 && refusedPath.utf8.count == 305,
+                              "actual Android source refusal path census differs")
+            }
             let root = try adoptDirectory(openat(temporary.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
                 parent: temporary.fd, name: name)
             directories[""] = root
@@ -1151,7 +1237,7 @@ final class NormalAppUITests: XCTestCase {
             }
             for path in originals.keys.sorted() {
                 let bytes = originals[path]!, (parent, name) = Self.parts(path), original = directories[parent]!
-                let mode: mode_t = profile == .projectEdits && path.hasPrefix("sources/") ? 0o644 : 0o600
+                let mode: mode_t = projectData && path.hasPrefix("sources/") ? 0o644 : 0o600
                 let fd = openat(original.fd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
                 try Self.need(fd >= 0, "exclusive file creation failed")
                 do {
@@ -1175,6 +1261,14 @@ final class NormalAppUITests: XCTestCase {
                 current[path] = saved
             }
             try checkRoster()
+            if profile == .projectFields {
+                try Self.need(current.count == 22 && directories.count == 143 && anchors.count == 3
+                    && descriptors.count == 146, "created Android source fixture census differs")
+            }
+            if profile == .workflowRefusal {
+                try Self.need(current.count == 15 && directories.count == 10 && anchors.count == 3
+                    && descriptors.count == 13, "created managed workflow fixture census differs")
+            }
             print("MRK_NORMAL_PROJECT_FIXTURE=retained-for-disposable-job-retirement;path=\(rootPath);bytes=\(current.values.reduce(0) { $0 + $1.bytes.count })")
         }
         // Read-only admission BEFORE app launch. This does not adopt an existing
@@ -1979,6 +2073,225 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete-restart-unlock-reassess-rebind;appRestart=passed;ordinaryLifetimes=2;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
     }
 
+    @MainActor func testSyntheticProjectPathFields() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("fixture") { try fixture.prepare(.projectFields) }
+        try stage("project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath)
+            try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+
+        // Six ordinary native source actions precede every project draft edit.
+        // Public named role groups, not duplicate-button ordinals or test hooks.
+        let androidRoleLabels = ["jdk": "Java development kit (JDK)",
+                                 "sdk": "Android SDK", "gradle": "Gradle distribution"]
+        var androidSelections: [String: String] = [:]
+        @MainActor func androidGroup(_ role: String) throws -> XCUIElement {
+            guard let label = androidRoleLabels[role] else {
+                throw Refusal.condition("fixed Android source role is unknown")
+            }
+            return try waitElement(controls(renderer, [.group], label: label + " source folder"), in: renderer)
+        }
+        @MainActor func androidRetained() throws {
+            for role in ["jdk", "sdk", "gradle"] {
+                let group = try androidGroup(role)
+                let chosen = androidSelections[role]
+                if let name = chosen {
+                    // WebKit may expose the strong text separately or coalesce
+                    // that one paragraph. Both comparisons name the exact leaf.
+                    let selected = group.staticTexts.matching(NSPredicate(
+                        format: "label == %@ OR label CONTAINS %@", name,
+                        "Selected folder: " + name + " · folder selection only."))
+                    _ = try waitElement(selected, in: group, timeout: 48)
+                } else {
+                    _ = try waitElement(group.staticTexts.matching(NSPredicate(
+                        format: "label CONTAINS %@", "No folder selected for this project.")), in: group)
+                }
+                _ = try waitElement(group.buttons.matching(identifier: chosen == nil
+                    ? "Browse for folder" : "Choose a different folder"), in: group, enabled: true, timeout: 48)
+            }
+        }
+        @MainActor func androidStatus(_ phase: String, reason: String) throws {
+            let failures = ["No new folder-selection outcome was confirmed",
+                            "Original folder cleanup could not be confirmed."]
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", phase)),
+                                in: renderer, timeout: 48, failures: failures)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", reason)),
+                                in: renderer, timeout: 48, failures: failures)
+        }
+        @MainActor func androidBrowse(_ role: String, title: String, relative: String,
+                                      cancel: Bool = false, refused: Bool = false) throws {
+            try require(!(cancel && refused), "fixed Android source outcome is ambiguous")
+            let group = try androidGroup(role)
+            try press(group, androidSelections[role] == nil ? "Browse for folder" : "Choose a different folder",
+                      renderer: renderer, timeout: 48)
+            let sheet = try nativeSheet(window, title: title)
+            if cancel {
+                try click(sheet.buttons.matching(identifier: "Cancel"), "owned Android source Cancel unavailable")
+                try waitGone(sheet)
+                try androidStatus("Folder selection cancelled.",
+                                  reason: "The native folder dialog was closed without selecting a folder.")
+            } else {
+                try goToFolder(sheet, path: fixture.rootPath + "/" + relative)
+                try nativeOpen(sheet) // Genuine enabled Open, never file exclusion or Cancel.
+                if refused {
+                    // Mac source parts rejects the 128th normal component
+                    // before SourceBook.begin. Other outcomes must fail.
+                    try androidStatus("Folder selection could not be used.",
+                        reason: "Choose a real, readable local folder, not an alias or archive. This check does not inspect the tools inside it.")
+                } else {
+                    try androidStatus("Original folder selection retained.",
+                        reason: "Folder selection alone is not supplier inspection or a protected copy. Check the separate original registration Status.")
+                    guard let name = relative.split(separator: "/").last else {
+                        throw Refusal.condition("fixed Android source leaf is absent")
+                    }
+                    androidSelections[role] = String(name)
+                }
+            }
+            // Cancel/refusal never replace the prior three role selections.
+            // Enabled Browse also waits for the original Status gate to settle.
+            try androidRetained()
+            try fixture.assertUnchanged()
+        }
+        try stage("android-source-jdk") {
+            try press(renderer, "Releases", renderer: renderer)
+            try androidRetained()
+            try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk.jdk")
+        }
+        try stage("android-source-sdk") {
+            try androidBrowse("sdk", title: "Choose the Android SDK folder", relative: "sources/tool-sdk")
+        }
+        try stage("android-source-gradle") {
+            try androidBrowse("gradle", title: "Choose an extracted Gradle distribution folder", relative: "sources/tool-gradle")
+        }
+        try stage("android-source-cancel") {
+            try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk.jdk", cancel: true)
+        }
+        try stage("android-source-reselect") {
+            try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder", relative: "sources/tool-jdk-replacement.jdk")
+        }
+        try stage("android-source-refused") {
+            try androidBrowse("jdk", title: "Choose an installed Java 17 JDK folder",
+                              relative: LocalFixture.androidRefusedDirectory, refused: true)
+        }
+
+        @MainActor func settings(_ tab: String) throws {
+            try press(renderer, "Project settings", renderer: renderer)
+            let tabs = try waitElement(named(renderer, "Settings section"), in: renderer)
+            try press(tabs, tab, renderer: renderer)
+        }
+        @MainActor func selected(_ label: String, relative: String) throws {
+            _ = try waitElement(controls(renderer, [.textField], label: label, prefix: true)
+                .matching(NSPredicate(format: "value == %@", relative)), in: renderer, timeout: 48)
+            _ = try waitElement(renderer.buttons.matching(identifier: "Browse existing " + label),
+                                in: renderer, enabled: true, timeout: 48)
+        }
+        @MainActor func browse(_ label: String, title: String, relative: String, file: Bool = false, cancel: Bool = false) throws {
+            try press(renderer, "Browse existing " + label, renderer: renderer)
+            let sheet = try nativeSheet(window, title: title)
+            if cancel {
+                try click(sheet.buttons.matching(identifier: "Cancel"), "owned project-field Cancel unavailable")
+                try waitGone(sheet)
+            } else {
+                let path = fixture.projectPath + "/" + relative
+                if file {
+                    guard let separator = path.lastIndex(of: "/") else {
+                        throw Refusal.condition("fixed project-field path has no parent")
+                    }
+                    let parent = String(path[..<separator])
+                    let name = String(path[path.index(after: separator)...])
+                    try goToFolder(sheet, path: parent)
+                    let item = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: name),
+                                              in: sheet, enabled: true)
+                    try require(item.isHittable, "owned project-field file is not actionable")
+                    item.click()
+                    try require(item.isSelected, "native project-field file selection was not observed")
+                } else {
+                    try goToFolder(sheet, path: path)
+                }
+                try nativeOpen(sheet)
+            }
+            // Native sheet dismissal is not by itself the asynchronous draft result.
+            try selected(label, relative: relative)
+            if cancel {
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "Selection cancelled. No draft or baseline was changed."),
+                                    in: renderer)
+            }
+            try fixture.assertUnchanged()
+        }
+        try stage("field-version") {
+            try settings("General")
+            try browse("Committed version file", title: "Choose an existing version source inside the project",
+                       relative: "inputs/VERSION", file: true)
+        }
+        try stage("field-project") {
+            try settings("iOS")
+            try browse("Xcode project", title: "Choose an existing Xcode project directory",
+                       relative: "ios/Example.xcodeproj")
+        }
+        try stage("field-workspace") {
+            try browse("Xcode workspace", title: "Choose an existing Xcode workspace directory",
+                       relative: "ios/Example.xcworkspace")
+            try selected("Xcode project", relative: "ios/Example.xcodeproj")
+        }
+        try stage("field-metadata") {
+            try press(renderer, "Metadata", renderer: renderer)
+            try browse("Store metadata folder", title: "Choose an existing metadata directory inside the project",
+                       relative: "metadata")
+        }
+        try stage("field-file-cancel") {
+            try settings("General")
+            try browse("Committed version file", title: "Choose an existing version source inside the project",
+                       relative: "inputs/VERSION", file: true, cancel: true)
+        }
+        try stage("field-directory-cancel") {
+            try press(renderer, "Metadata", renderer: renderer)
+            try browse("Store metadata folder", title: "Choose an existing metadata directory inside the project",
+                       relative: "metadata", cancel: true)
+        }
+        try stage("field-review") {
+            try press(renderer, "Metadata", renderer: renderer)
+            try selected("Store metadata folder", relative: "metadata")
+            try settings("General")
+            try selected("Committed version file", relative: "inputs/VERSION")
+            try settings("iOS")
+            try selected("Xcode project", relative: "ios/Example.xcodeproj")
+            try selected("Xcode workspace", relative: "ios/Example.xcworkspace")
+            try press(renderer, "Review draft changes", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Current draft · retained baseline"), in: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation needs attention")),
+                                in: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "invalid"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        try stage("quit") {
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
+            try completeNormalQuit(app)
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        // Draft-only selection is not Save, release readiness, or all-worker finality.
+        try acceptFinalScenario()
+        print("MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        print("MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
     @MainActor func testSyntheticProjectLocalEdits() throws {
         try syntheticProjectJourney(includeImages: false)
     }
@@ -2245,6 +2558,127 @@ final class NormalAppUITests: XCTestCase {
         // exactly one selected passing test and the independent native owners.
         try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version\(includeImages ? "-images" : "");cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
+    // Standalone opt-in preservation/refusal case; not an added project-batch case.
+    @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("workflow-refusal-launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("workflow-refusal-fixture") { try fixture.prepare(.workflowRefusal) }
+
+        @MainActor func noApplyControls() throws {
+            let actions = ["Confirm reviewed local files", "Review unchanged confirmation",
+                           "Apply already requested", "Apply reviewed local files", "Confirm unchanged plan"]
+            try require(renderer.buttons.matching(NSPredicate(format: "label IN %@", actions)).count == 0,
+                        "a refused workflow bundle exposed Apply authority")
+            for title in ["Apply this four-caller bundle?", "Confirm four unchanged callers?"] {
+                try require(renderer.dialogs.matching(identifier: title).count == 0,
+                            "a refused workflow bundle exposed a confirmation dialog")
+            }
+            try require(renderer.checkBoxes.matching(NSPredicate(
+                format: "label BEGINSWITH %@", "I reviewed all four paths and complete before/after text.")).count == 0,
+                "a refused workflow bundle exposed a confirmation checkbox")
+        }
+
+        try stage("workflow-refusal-project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath)
+            try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        try stage("workflow-refusal-preview") {
+            try press(renderer, "GitHub", renderer: renderer)
+            try replace(field(renderer, "Toolkit repository"), with: "Example/mobile-release-kit", renderer: renderer)
+            try replace(field(renderer, "Full toolkit commit"), with: String(repeating: "a", count: 40), renderer: renderer)
+            let comparison = try unique(renderer.checkBoxes.matching(identifier: "Use a caller-supplied summary — no files are read"),
+                                        "optional comparison control is unavailable")
+            try require((comparison.value as? String) == "0" || (comparison.value as? NSNumber)?.intValue == 0,
+                        "passive supplied comparison unexpectedly enabled")
+            try press(renderer, "Preview GitHub setup", renderer: renderer)
+            let proposal = try waitElement(named(renderer, "Read-only GitHub setup proposal"), in: renderer,
+                                          failures: Self.workflowFailures)
+            _ = try waitElement(proposal.staticTexts.matching(NSPredicate(format: "title == %@", "Four read-only workflow previews")), in: proposal)
+            for path in LocalFixture.callers {
+                let shownPath = String(path.dropFirst("project/".count))
+                try expand(proposal, prefix: shownPath, renderer: renderer)
+                try displayed(proposal, label: "Read-only proposed content for " + shownPath,
+                              equals: fixture.text(path, stage: "workflows"))
+            }
+            try noApplyControls()
+            try fixture.assertUnchanged()
+        }
+        let review = try waitElement(named(renderer, "Local GitHub workflow files"), in: renderer)
+        // Only this exact final conflict is expected here. The shared failure
+        // list and every other workflow journey retain their refusal behavior.
+        let refusalFailures = Self.workflowFailures.filter { $0 != "Local workflow bundle refused" }
+        @MainActor func refusedOutcome() throws {
+            try require(review.staticTexts.matching(NSPredicate(format: "label IN %@", refusalFailures)).count == 0,
+                        "another workflow failure accompanied the expected refusal")
+            _ = try unique(review.staticTexts.matching(NSPredicate(format: "title == %@", "Local workflow bundle refused")),
+                           "the final original workflow refusal is missing or ambiguous")
+            _ = try unique(review.staticTexts.matching(identifier: "existing_workflow_differs"),
+                           "the final refusal is not the exact customized-caller conflict")
+            let texts = review.staticTexts.allElementsBoundByIndex
+            try require(!texts.isEmpty && texts.count <= 128
+                && texts.allSatisfy { $0.label.utf8.count <= 4096 }, "workflow refusal presentation exceeds its bound")
+            let labels = texts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+            let headings = labels.indices.filter { labels[$0] == "Observed differing callers · no Apply token" }
+            let endings = labels.indices.filter {
+                labels[$0] == "Only summaries actually obtained by the original capture are shown. Existing YAML is not exposed; no subset, force or overwrite option is available."
+            }
+            try require(headings.count == 1 && endings.count == 1 && headings[0] < endings[0],
+                        "the original no-token conflict summary is missing or ambiguous")
+            // The shipped number uses toLocaleString(): bind the hosted grouped
+            // presentation, not the unformatted integer or unrelated byte labels.
+            try require(Array(labels[(headings[0] + 1)..<endings[0]]) == [
+                "candidate", "2,368 observed bytes",
+                "cb50a58a62167a9e25da9eeb42a2c2d448f47445515e9fc291d3a23543762933"
+            ], "the refused bundle did not report exactly the customized candidate")
+            try require(!labels.contains { $0.contains("# MRK synthetic user customization; preserve exactly.") },
+                        "the refusal exposed customized original YAML")
+            let facts = try waitElement(named(review, "Independent native workflow outcome facts"), in: review,
+                                        failures: refusalFailures)
+            let factTexts = facts.staticTexts.allElementsBoundByIndex
+            try require(factTexts.count == 8 && factTexts.allSatisfy { $0.label.utf8.count <= 64 },
+                        "the four named native workflow outcome pairs are missing")
+            let pairs = factTexts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+            try require(pairs == ["Transaction effect", "not_started", "Journal", "not_created",
+                                  "Core resources", "settled", "Native finality", "settled"],
+                        "the named original effect/journal/resource/finality facts are not settled refusal")
+            try noApplyControls()
+        }
+        try stage("workflow-refusal-native-review") {
+            try press(review, "Review local workflow files", renderer: renderer, failures: Self.workflowFailures)
+            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Local workflow bundle refused")),
+                                in: review, timeout: 48, failures: refusalFailures)
+            try refusedOutcome()
+            // All 15 original leaves retain exact bytes AND full StatFacts.
+            // Closed child rosters also prove both other managed paths/control names absent.
+            try fixture.assertUnchanged()
+        }
+        try stage("workflow-refusal-readback-and-quit") {
+            try refusedOutcome()
+            try fixture.assertUnchanged()
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
+            try completeNormalQuit(app)
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        try acceptFinalScenario()
+        print("MRK_MACOS_NORMAL_WORKFLOW_REFUSAL_UI=ordinary-preview-customized-candidate-whole-bundle-refused-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
     // Ordinary saved offline checks and empty project-recovery inspection only.

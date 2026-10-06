@@ -9,13 +9,13 @@ use serde_json::{json, Value};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStderr, ChildStdin, ChildStdout},
     sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch}, task::JoinHandle};
 #[cfg(any(all(unix, feature = "development-runtime", debug_assertions),
-    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell",
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))), feature = "desktop-shell",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
 use {std::process::Stdio, tokio::process::Command};
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots, GitHubWorkflowRuntimeSlots,
     MetadataTextRuntimeSlots, ReleaseVersionRuntimeSlots};
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use crate::installed_runtime::MetadataImagesRuntimeSlots;
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
@@ -37,7 +37,7 @@ const REVIEW: Duration = Duration::from_secs(15 * 60);
 const SOFT_STOP: Duration = Duration::from_secs(8);
 const FINALIZATION: Duration = Duration::from_secs(10);
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn publish_macos_returned_failure(
     returned: Option<crate::installed_runtime::AdmissionFailure>,
     original_first: impl FnOnce() -> Option<(crate::installed_runtime::AdmissionFailure, Instant)>,
@@ -109,31 +109,31 @@ fn installed_domains_match(session: EditDomain, projection: EditDomain, slots: E
 // One closed adapter in Resources, not another owner/ledger/closer. Mac has
 // distinct Configuration, Workflow, MetadataText and ReleaseVersion arms. Every borrow
 // checks exact session/slot equality; an installed edit domain is not interchangeable.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 enum InstalledEditSlots {
     Configuration(ConfigurationRuntimeSlots),
     GitHubWorkflows(GitHubWorkflowRuntimeSlots),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     MetadataText(MetadataTextRuntimeSlots),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     ReleaseVersion(ReleaseVersionRuntimeSlots),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     MetadataImages(MetadataImagesRuntimeSlots),
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 enum InstalledPrepareFailure { CapabilityUnknown, Unavailable }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 impl InstalledEditSlots {
     fn new(domain: EditDomain, runtime: &RuntimeConfig) -> Option<Self> {
         if !installed_edit_selected(domain, runtime) { return None; }
         match domain {
             EditDomain::Configuration => Some(Self::Configuration(ConfigurationRuntimeSlots::new())),
             EditDomain::GitHubWorkflows => Some(Self::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new())),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             EditDomain::MetadataText => Some(Self::MetadataText(MetadataTextRuntimeSlots::new())),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             EditDomain::ReleaseVersion => Some(Self::ReleaseVersion(ReleaseVersionRuntimeSlots::new())),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             EditDomain::MetadataImages => Some(Self::MetadataImages(MetadataImagesRuntimeSlots::new())),
             _ => None,
         }
@@ -141,11 +141,11 @@ impl InstalledEditSlots {
     fn domain(&self) -> EditDomain { match self {
         Self::Configuration(_) => EditDomain::Configuration,
         Self::GitHubWorkflows(_) => EditDomain::GitHubWorkflows,
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Self::MetadataText(_) => EditDomain::MetadataText,
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Self::ReleaseVersion(_) => EditDomain::ReleaseVersion,
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Self::MetadataImages(_) => EditDomain::MetadataImages,
     } }
     fn require_domain(&self, domain: EditDomain) -> Result<(), BridgeError> {
@@ -157,7 +157,7 @@ impl InstalledEditSlots {
         self.require_domain(domain)?;
         match self {
             Self::Configuration(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
                     publish_macos_returned_failure(armed.as_ref().err().copied(),
@@ -165,13 +165,13 @@ impl InstalledEditSlots {
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_configuration_installed(slots, end, stop);
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
                     || slots.first_failure(), _publish);
                 result
             },
             Self::GitHubWorkflows(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
                     publish_macos_returned_failure(armed.as_ref().err().copied(),
@@ -179,14 +179,14 @@ impl InstalledEditSlots {
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_github_workflow_installed(slots, end, stop);
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
                     || slots.first_failure(), _publish);
                 result
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataText(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
                     publish_macos_returned_failure(armed.as_ref().err().copied(),
@@ -194,14 +194,14 @@ impl InstalledEditSlots {
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_metadata_text_installed(slots, end, stop);
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
                     || slots.first_failure(), _publish);
                 result
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::ReleaseVersion(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
                     publish_macos_returned_failure(armed.as_ref().err().copied(),
@@ -209,14 +209,14 @@ impl InstalledEditSlots {
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_release_version_installed(slots, end, stop);
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
                     || slots.first_failure(), _publish);
                 result
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataImages(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 {
                     let armed = slots.arm_acl_once(end, stop);
                     publish_macos_returned_failure(armed.as_ref().err().copied(),
@@ -224,7 +224,7 @@ impl InstalledEditSlots {
                     armed.map_err(|_| edit_unknown())?;
                 }
                 let result = runtime.resolve_metadata_images_installed(slots, end, stop);
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
                     || slots.first_failure(), _publish);
                 result
@@ -236,11 +236,11 @@ impl InstalledEditSlots {
         match self {
             Self::Configuration(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             Self::GitHubWorkflows(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataText(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::ReleaseVersion(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataImages(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
         }
     }
@@ -251,40 +251,40 @@ impl InstalledEditSlots {
         match self {
             Self::Configuration(slots) => {
                 let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
             },
             Self::GitHubWorkflows(slots) => {
                 let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataText(slots) => {
                 let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::ReleaseVersion(slots) => {
                 let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataImages(slots) => {
                 let capability = slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { capability.prepare_once_observed(end, stop, _publish).map_err(|_| InstalledPrepareFailure::Unavailable) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { capability.prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable) }
             },
         }
@@ -294,11 +294,11 @@ impl InstalledEditSlots {
         match self {
             Self::Configuration(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
             Self::GitHubWorkflows(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataText(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::ReleaseVersion(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataImages(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
         }
     }
@@ -306,22 +306,22 @@ impl InstalledEditSlots {
         self.domain() == domain && match self {
             Self::Configuration(slots) => slots.no_child_effect(),
             Self::GitHubWorkflows(slots) => slots.no_child_effect(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataText(slots) => slots.no_child_effect(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::ReleaseVersion(slots) => slots.no_child_effect(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataImages(slots) => slots.no_child_effect(),
         }
     }
     fn mark_interrupted(&mut self) { match self {
         Self::Configuration(slots) => slots.mark_interrupted(),
         Self::GitHubWorkflows(slots) => slots.mark_interrupted(),
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Self::MetadataText(slots) => slots.mark_interrupted(),
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Self::ReleaseVersion(slots) => slots.mark_interrupted(),
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Self::MetadataImages(slots) => slots.mark_interrupted(),
     } }
     fn settle_originals(&mut self, domain: EditDomain,
@@ -329,36 +329,36 @@ impl InstalledEditSlots {
         if self.domain() != domain { self.mark_interrupted(); return CloseOutcome::Unknown; }
         match self {
             Self::Configuration(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { slots.settle_originals(_expired) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { slots.settle_originals() }
             },
             Self::GitHubWorkflows(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { slots.settle_originals(_expired) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { slots.settle_originals() }
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataText(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { slots.settle_originals(_expired) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { slots.settle_originals() }
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::ReleaseVersion(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { slots.settle_originals(_expired) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { slots.settle_originals() }
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataImages(slots) => {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { slots.settle_originals(_expired) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { slots.settle_originals() }
             },
         }
@@ -367,11 +367,11 @@ impl InstalledEditSlots {
         self.domain() == domain && match self {
             Self::Configuration(slots) => slots.settled(),
             Self::GitHubWorkflows(slots) => slots.settled(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataText(slots) => slots.settled(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::ReleaseVersion(slots) => slots.settled(),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::MetadataImages(slots) => slots.settled(),
         }
     }
@@ -385,10 +385,10 @@ fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: b
     else if disabled { EditAvailability::CleanupUnknown }
     else if match domain {
         EditDomain::Configuration => !(cfg!(target_os = "linux") || cfg!(target_os = "macos")),
-        EditDomain::GitHubWorkflows => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
-        EditDomain::MetadataText => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
-        EditDomain::ReleaseVersion => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
-        EditDomain::MetadataImages => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))),
+        EditDomain::GitHubWorkflows => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))),
+        EditDomain::MetadataText => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))),
+        EditDomain::ReleaseVersion => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))),
+        EditDomain::MetadataImages => !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))),
     } { EditAvailability::UnsupportedPlatform }
     else if !domain_qualified || !document_live { EditAvailability::RuntimeUnqualified }
     else { EditAvailability::Available }
@@ -755,7 +755,7 @@ struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Ch
 impl Default for Startup { fn default() -> Self { Self { attempted: false, returned: false, failed: false, child: None } } }
 struct Session {
     domain: EditDomain, registration: Option<WorkflowRegistration>,
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture_workflow: Option<Arc<WorkflowFixturePermit>>,
@@ -787,7 +787,7 @@ struct Session {
     watchdog: AsyncMutex<Option<JoinHandle<()>>>, manager: AsyncMutex<Option<JoinHandle<()>>>,
     observer: AsyncMutex<Option<JoinHandle<()>>>,
 }
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl Session {
     fn observe_native_failure(&self, first: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) {
         use crate::installed_runtime::AdmissionFailure;
@@ -819,17 +819,17 @@ struct Resources {
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, child: Option<Child>,
     inspection_started: bool, acquisition_started: bool,
     inspection_join_failed: bool, acquisition_join_failed: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed: Option<Arc<Mutex<InstalledEditSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed_settlement_started: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed_settlement_joined: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed_settlement_failed: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     installed_settlement_outcome: Option<CloseOutcome>,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
@@ -860,7 +860,7 @@ pub(crate) struct InstalledConfigFinality {
 }
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledWorkflowFinality {
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
@@ -871,7 +871,7 @@ pub(crate) struct InstalledWorkflowFinality {
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledMetadataFinality {
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
@@ -882,7 +882,7 @@ pub(crate) struct InstalledMetadataFinality {
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledVersionFinality {
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
@@ -909,11 +909,11 @@ pub(crate) struct InstalledImagesFinality {
         all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 enum InstalledEditFinality {
     Configuration(InstalledConfigFinality),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
     GitHubWorkflows(InstalledWorkflowFinality),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
     MetadataText(InstalledMetadataFinality),
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
     ReleaseVersion(InstalledVersionFinality),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     MetadataImages(InstalledImagesFinality),
@@ -930,17 +930,17 @@ impl InstalledEditFinality {
                 if projection.domain != EditDomain::Configuration || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             Self::GitHubWorkflows(facts) => {
                 if projection.domain != EditDomain::GitHubWorkflows || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             Self::MetadataText(facts) => {
                 if projection.domain != EditDomain::MetadataText || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             Self::ReleaseVersion(facts) => {
                 if projection.domain != EditDomain::ReleaseVersion || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
@@ -1378,7 +1378,7 @@ impl Inner {
         publication.finish();
         result
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn installed_claim_clear(&self, r: &Registry, owner: &Arc<Session>, slots: &InstalledEditSlots, now: Instant) -> bool {
         let Some(a) = r.active.as_ref() else { return false; };
         InstalledEditClaim {
@@ -1401,7 +1401,7 @@ impl Inner {
             expired_phase(a.review_end, a.phase_end, a.projection.apply_submitted, now)
         });
         if let Some((end, reason)) = expired { self.trigger_locked(publication,r, id, reason, end); }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let first = r.active.as_ref().filter(|a| a.session.id == id).and_then(|a| {
                 let first = match a.session.native_failure.lock() {
@@ -1503,8 +1503,10 @@ impl EditOwner {
         let last = r.last.as_ref()?;
         let facts = match r.installed_final.as_ref()? {
             InstalledEditFinality::Configuration(facts) => facts,
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+            InstalledEditFinality::GitHubWorkflows(_) | InstalledEditFinality::MetadataText(_) | InstalledEditFinality::ReleaseVersion(_) => return None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            InstalledEditFinality::GitHubWorkflows(_) | InstalledEditFinality::MetadataText(_) | InstalledEditFinality::ReleaseVersion(_) | InstalledEditFinality::MetadataImages(_) => return None,
+            InstalledEditFinality::MetadataImages(_) => return None,
         };
         (last.domain == EditDomain::Configuration && last.session_id == session_id && facts.session_id == session_id
             && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
@@ -1512,7 +1514,7 @@ impl EditOwner {
             .then(|| facts.clone())
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_workflow_observation_final(&self, session_id: &str) -> Option<InstalledWorkflowFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
@@ -1523,7 +1525,7 @@ impl EditOwner {
             .then(|| facts.clone())
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_metadata_observation_final(&self, session_id: &str) -> Option<InstalledMetadataFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
@@ -1534,7 +1536,7 @@ impl EditOwner {
             .then(|| facts.clone())
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_version_observation_final(&self, session_id: &str) -> Option<InstalledVersionFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
@@ -1569,7 +1571,7 @@ impl EditOwner {
     // Only the sealed PG01 registration can install/remove this one inert
     // recovery-attention datum. It never enables editing or clears real work.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn offline_fixture_attention(&self, permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
         owner: &crate::offline_preflight_owner::OfflinePreflightOwner, present: bool) -> Result<(), BridgeError> {
         let mut publication = self.inner.publication(None, false)?;
@@ -1800,7 +1802,7 @@ impl EditOwner {
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
         let session = Arc::new(Session { domain, registration, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture_workflow,
@@ -1827,7 +1829,7 @@ impl EditOwner {
             startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx),
                 // Pure allocation BEFORE this Session is admitted or any
                 // original worker is registered/released. No passive custody.
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 installed: InstalledEditSlots::new(domain, &self.inner.runtime).map(|slots| Arc::new(Mutex::new(slots))),
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
@@ -2771,7 +2773,7 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>) {
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn installed_worker_lost(book: &Resources) {
     // ONLY after this original worker returned JoinError. A watchdog endpoint
     // never borrows/closes the ledger out from under inspection/acquisition.
@@ -2783,7 +2785,7 @@ fn installed_worker_lost(book: &Resources) {
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>) -> Result<(), BridgeError> {
     let mut publication = inner.publication(None, true)?;
     let result = (|| {
@@ -2805,7 +2807,7 @@ fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>
     result
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
     let mut publication = inner.mandatory_publication();
     let result = (|| {
@@ -2828,7 +2830,7 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
         let bootstrap_argument = installed_bootstrap_argument(slots.domain());
         let stop = owner.stop.subscribe();
         let selected = match slots.prepare_once(owner.domain, end, &stop, &mut |_first| {
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             owner.observe_native_failure(_first);
         }) {
             Ok(selected) => selected,
@@ -2844,7 +2846,7 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
             .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
         if let Some(argument) = bootstrap_argument { command.arg(argument); } // Allocate BEFORE the final serialized claim.
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if crate::runtime::macos_installed_environment(&mut command).is_err() {
             inner.trigger_published(&mut publication, &owner.id, Reason::RuntimeUnavailable, Instant::now()); return;
         }
@@ -3019,7 +3021,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     }
     let endpoint = match endpoint { Some(end) => end, None => return };
     let runtime = inner.runtime.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let installed = {
         let selected = installed_edit_selected(owner.domain, &runtime);
         if selected != book.installed.is_some() {
@@ -3036,29 +3038,29 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() {
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             inspection_owner.observe_native_failure(Some((crate::installed_runtime::AdmissionFailure::Native, Instant::now())));
             return Err(edit_unknown());
         }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let result = if let Some(native) = installed {
             match native.lock() {
                 Ok(mut originals) => originals.inspect_once(domain, &runtime, endpoint, &stop, &mut |_first| {
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     inspection_owner.observe_native_failure(_first);
-                    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                     let _ = &inspection_owner;
                 }),
                 Err(_) => {
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     inspection_owner.observe_native_failure(Some((crate::installed_runtime::AdmissionFailure::Unknown, Instant::now())));
                     Err(edit_unknown())
                 },
             }
         } else { runtime.resolve_edit(endpoint) };
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let result = { let _ = stop; runtime.resolve_edit(endpoint) };
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         publish_macos_returned_failure(result.as_ref().err().map(|_| crate::installed_runtime::AdmissionFailure::Native),
             || None, &mut |first| inspection_owner.observe_native_failure(first));
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
@@ -3076,7 +3078,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         }
         Err(_) => {
             book.inspection_join_failed = true;
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             installed_worker_lost(&book);
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
         }
@@ -3094,9 +3096,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     // The caller supplies the original registry Arc; there is only this one
     // acquisition site. Survivors never call start_original or resolve/spawn.
     let startup_inner = inner.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let installed = book.installed.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if installed.is_some() && transfer_installed_edit(&book, inner, owner).is_err() {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
@@ -3105,7 +3107,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() { return; }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if let Some(native) = installed {
             // The worker's inspection return is DATA only. The original slots,
             // not these paths, supply the separately prepared one-use claim.
@@ -3129,9 +3131,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
 
 fn installed_edit_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
     let selected = installed_edit_selected(owner.domain, &inner.runtime);
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = book; !selected }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         if !selected {
             return book.installed.is_none() && !book.installed_settlement_started
@@ -3146,9 +3148,9 @@ fn installed_edit_settled(book: &Resources, inner: &Inner, owner: &Session) -> b
 }
 
 async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, owner: &Arc<Session>) {
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = (book, inner, owner); }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let selected = installed_edit_selected(owner.domain, &inner.runtime);
         let Some(native) = book.installed.clone() else {
@@ -3183,7 +3185,7 @@ async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, ow
                 // an unreturned borrower/consumer or create a replacement cleanup.
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
             }
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             let cleanup_end = {
                 let mut publication = inner.mandatory_publication();
                 let mut r = inner.lock(); inner.expire_locked(&mut publication,&mut r, &owner.id, Instant::now());
@@ -3201,9 +3203,9 @@ async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, ow
             book.installed_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
                 let mut expired = |_first| {
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     { closing_owner.native_cleanup_expired(cleanup_end, _first) }
-                    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                     { let _ = &closing_owner; false }
                 };
                 match closing.lock() {
@@ -3254,7 +3256,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); },
             Err(_) => {
                 book.inspection_join_failed = true;
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
             },
@@ -3266,7 +3268,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
             Err(_) => {
                 book.acquisition_join_failed = true;
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
@@ -3597,7 +3599,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
                         runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
                     })),
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
                     EditDomain::GitHubWorkflows => Some(InstalledEditFinality::GitHubWorkflows(InstalledWorkflowFinality {
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
@@ -3607,7 +3609,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
                         runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
                     })),
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
                     EditDomain::MetadataText => Some(InstalledEditFinality::MetadataText(InstalledMetadataFinality {
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
@@ -3617,7 +3619,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
                         runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
                     })),
-                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
                     EditDomain::ReleaseVersion => Some(InstalledEditFinality::ReleaseVersion(InstalledVersionFinality {
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
@@ -3716,7 +3718,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
 #[path = "edit_hosted_tests.rs"]
 mod hosted_tests;
 
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn macos_inspection_return_data_check() -> bool {
     use crate::installed_runtime::AdmissionFailure;
     use std::cell::Cell;
@@ -3789,7 +3791,7 @@ fn macos_inspection_return_data_check() -> bool {
 // must invoke this contract rather than count merely compiled #[test] bodies.
 #[cfg(test)]
 pub(crate) fn assert_installed_configuration_owner_contract() {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         assert!(crate::installed_runtime::common_acl_data_check());
         assert!(crate::supervisor::common_acl_owner_data_check());
@@ -3841,7 +3843,7 @@ mod installed_configuration_data_tests {
         only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies();
         no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
         installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         workflow_adapter_cannot_borrow_or_close_another_domain();
     }
     pub(super) fn metadata_contract() {
@@ -3852,7 +3854,7 @@ mod installed_configuration_data_tests {
         only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies();
         no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
         installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         metadata_adapter_cannot_borrow_or_close_another_domain();
     }
     pub(super) fn version_contract() {
@@ -3862,7 +3864,7 @@ mod installed_configuration_data_tests {
         only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies();
         no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
         installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         version_adapter_cannot_borrow_or_close_another_domain();
     }
 
@@ -3870,7 +3872,7 @@ mod installed_configuration_data_tests {
         saved_text_version_capability_requires_supported_platform_profile_and_document_data_check();
         registered_edit_claim_and_bootstrap_domains_cannot_fall_back_to_configuration();
         installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         images_adapter_cannot_borrow_or_close_another_domain();
     }
 
@@ -3878,7 +3880,7 @@ mod installed_configuration_data_tests {
     fn saved_text_version_capability_requires_supported_platform_profile_and_document() { saved_text_version_capability_requires_supported_platform_profile_and_document_data_check(); }
 
     fn saved_text_version_capability_requires_supported_platform_profile_and_document_data_check() {
-        let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")));
+        let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))));
         let domains = [EditDomain::MetadataText, EditDomain::ReleaseVersion, EditDomain::MetadataImages];
         for domain in domains {
             assert_eq!(capability_reason(domain, None, false, false, true, true),
@@ -3932,7 +3934,7 @@ mod installed_configuration_data_tests {
         // Production predicate with supplied facts only, never an owner or a
         // fabricated installed capability. Earlier closures remain stronger.
         let domain = EditDomain::GitHubWorkflows;
-        let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")));
+        let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))));
         for active in [None, Some(domain), Some(EditDomain::Configuration), Some(EditDomain::MetadataText),
             Some(EditDomain::ReleaseVersion), Some(EditDomain::MetadataImages)] {
             for stopping in [false, true] { for disabled in [false, true] {
@@ -3948,7 +3950,7 @@ mod installed_configuration_data_tests {
             } }
         }
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn workflow_adapter_cannot_borrow_or_close_another_domain() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-wrong-domain-must-not-be-opened"));
         let (_sender, stop) = watch::channel(false);
@@ -4010,7 +4012,7 @@ mod installed_configuration_data_tests {
             assert_eq!(installed_registration_matches(domain, false), domain == EditDomain::Configuration);
         }
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn metadata_adapter_cannot_borrow_or_close_another_domain() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-metadata-domain-must-not-be-opened"));
         let (_sender, stop) = watch::channel(false);
@@ -4033,7 +4035,7 @@ mod installed_configuration_data_tests {
         assert!(!config.settled(EditDomain::Configuration));
     }
 
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn version_adapter_cannot_borrow_or_close_another_domain() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-domain-must-not-be-opened"));
         let (_sender, stop) = watch::channel(false);
@@ -4064,7 +4066,7 @@ mod installed_configuration_data_tests {
         }
     }
 
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn images_adapter_cannot_borrow_or_close_another_domain() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-images-domain-must-not-be-opened"));
         let (_sender, stop) = watch::channel(false);
@@ -4565,7 +4567,7 @@ mod workflow_domain_tests {
         assert_eq!(installed_edit_selected(EditDomain::MetadataImages,&runtime), selected);
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         assert!(!selected); // Linux's independent image source binding stays closed.
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         assert_eq!(InstalledEditSlots::new(EditDomain::MetadataImages,&runtime).is_some(), selected);
         assert_eq!(installed_bootstrap_argument(EditDomain::MetadataImages),Some("metadata_images"));
         assert!(request_bytes(EditDomain::MetadataImages,SESSION,0,"open",json!({"root":"/inert/project"})).is_err());
@@ -4658,7 +4660,7 @@ mod workflow_domain_tests {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-version-selector-data-only"));
         let selected = runtime.release_version_edit_profile_available();
         assert_eq!(installed_edit_selected(EditDomain::ReleaseVersion,&runtime),selected);
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         {
             let slots = InstalledEditSlots::new(EditDomain::ReleaseVersion,&runtime);
             assert_eq!(slots.is_some(),selected);

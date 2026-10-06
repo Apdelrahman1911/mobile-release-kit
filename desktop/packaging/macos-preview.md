@@ -14,24 +14,37 @@ Rust, Node.js or the CLI to try the application.
   not qualified by this package.
 - Use a disposable/synthetic mobile project. Do not provide production signing
   material, live Store credentials or private release data for this early test.
-- This package and app are **not Developer ID signed/notarized**. The app has
-  an ad-hoc integrity signature only. Gatekeeper may refuse installation/open.
+- **Ordinary V2 installation requires the configured, SOURCE-selected producer
+  identity:** its genuine Developer ID Application certificate/key, completed
+  package signature and the native app-purpose checks. The shipping profiles
+  are currently unconfigured, so no qualified ordinary installed preview is
+  available from them. Credential-free engineering fixtures do **not** satisfy
+  this requirement; an unsigned/ad-hoc fixture is not an ordinary V2 package.
+- Notarization and Gatekeeper qualification are separate, still-required
+  distribution evidence; a producer signature alone does not establish them.
   Do not disable Gatekeeper, strip quarantine or change security settings to
-  force it to run. Report a refusal; it is a distribution limitation, not a pass.
+  force installation/open. Report a refusal rather than treating it as a pass.
 - Installer requires normal macOS administrator approval to place protected
   application/runtime files. The app itself must run as your normal user.
-- Existing occupied installation destinations are refused without overwriting
-  or removing their contents. Do not delete an existing installation just to
-  make this preview install. Update/uninstall support is a separate obligation.
+- The V2 installer checks existing linked installation records before a
+  same-package no-op, missing-app restore or explicitly SOURCE-authorized
+  update. Missing/unknown records, unlisted predecessors or retained failures
+  are refused, not repaired by deleting files. These paths still need genuine
+  native qualification; no old-version pruning or uninstall is provided.
 
 The adjacent **PREVIEW.json** identifies the exact source commit/tree,
-GitHub workflow/run/attempt, package SHA-256, installed inventory and runtime
-SHA-256. Its results distinguish normal build, package audit and installation
-readback from UI or distribution acceptance.
+GitHub workflow/run/attempt, DMG/package/producer-sidecar SHA-256 values,
+request-correlated installed inventory and runtime SHA-256. Its results
+distinguish normal build, original Installer status and V2 readback from UI,
+signing-account, notarization or distribution acceptance.
 
 ## Install and open without a terminal
 
-1. Open **MobileReleaseKit.pkg** in Finder and follow the macOS Installer.
+1. Once an exact build has the required genuine qualification, open
+   **MobileReleaseKit.dmg** in Finder. Inside that read-only image, open
+   **Install.pkg** and follow macOS Installer. Keep the adjacent **producer.json**
+   and **producer.sig** in place: do not rename, move or separate the three files.
+   An arbitrary standalone package copied to writable Downloads is unsupported.
 2. In Finder choose **Go → Go to Folder…** and enter:
    `/Library/Application Support/MobileReleaseKit`
 3. Double-click **Mobile Release Kit.app**.
@@ -54,8 +67,9 @@ A missing, failed or skipped check is not a pass.
 This check does not prove POSIX exit status or every worker's finality, direct
 payload pre-main exclusion, Finder/Installer interaction, Gatekeeper or full
 feature journeys. The root maintenance gate is permanent; never remove or replace
-it as troubleshooting. Update/uninstall remains unavailable. Physical/manual
-observations of this exact package and the checklist below remain separate.
+it as troubleshooting. Update/restore evidence and any future uninstall
+remain separate obligations. Physical/manual observations of this exact
+distribution and the checklist below remain separate.
 
 ## What this source currently exposes on macOS
 
@@ -105,8 +119,11 @@ files, private project contents or raw local logs with a report.
 ## Verification scope
 
 The hosted preview keeps the ordinary native package-format audit, exact normal
-Cargo target gate, ad-hoc signature verification, one-shot Installer and
-independent nonroot byte/mode readback. The same completed app/runtime input is
+Cargo target gate, SOURCE-selected signing and separate producer verification,
+the original standard Installer and request-correlated nonroot V2 readback.
+Only known original returns, current readback and clean detachment can complete
+the owned package group; unknown mounts/writers are retained, never forced away.
+The same completed app/runtime input is
 also used for the fixed eight-case Installer fixture before ordinary install.
 Its isolated fixture roots are not user installations; only actual successful
 fixture execution/readback establishes those outcomes. It does **not** repeat

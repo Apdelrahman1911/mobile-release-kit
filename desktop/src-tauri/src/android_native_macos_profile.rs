@@ -2,6 +2,7 @@
 //! Pins below were projected from complete authenticated vendor-member DATA.
 //! They do not enable REFERENCES or replace original native reads/finality.
 use serde::Serialize;
+use crate::android_build_protocol::Profile;
 use crate::android_toolchain_macos_policy::{self as policy, FileSpec, Inventory, MachArchitecture, MachCommands};
 
 pub(crate) const JDK_ARCHIVE_BYTES: u64 = 185851019;
@@ -16,7 +17,10 @@ pub(crate) struct MachPin {
 }
 impl MachPin {
     pub(crate) fn matches(&self, commands: &MachCommands) -> bool {
-        commands.architecture == MachArchitecture::Arm64 && commands.file_type == self.file_type
+        self.matches_architecture(commands, MachArchitecture::Arm64)
+    }
+    fn matches_architecture(&self, commands: &MachCommands, architecture: MachArchitecture) -> bool {
+        commands.architecture == architecture && commands.file_type == self.file_type
             && commands.header_sha256 == self.commands_sha256
             && commands.install_name.as_deref() == self.install_name
             && commands.loads.iter().map(String::as_str).eq(self.loads.iter().copied())
@@ -34,7 +38,7 @@ impl MachPin {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
-pub(crate) enum JdkPhase { Bootstrap, ExplicitJvmProvider, PostJli }
+pub(crate) enum JdkPhase { Bootstrap, ExplicitJvmProvider, PostJli, ObservationOnly }
 #[derive(Clone, Copy, Serialize)]
 pub(crate) struct JdkNativePin {
     pub(crate) relative: &'static str, pub(crate) bytes: u64, pub(crate) sha256: &'static str,
@@ -678,4 +682,569 @@ pub(crate) fn jdk_post_jli_provider<'a>(
 pub(crate) fn record_authority() -> impl Serialize {
     (JDK_ARCHIVE_BYTES, JDK_ARCHIVE_SHA256, GRADLE_ARCHIVE_SHA256,
         JDK_NATIVE, JDK_JVM_ARCHIVES, JPACKAGE_TEMPLATE, SDK_TARGET_ELFS, GRADLE_BAT)
+}
+
+// The Intel companion is complete JDK comparison DATA from the fixed inspected
+// archive, not a complete Android supplier and not a native/JLI phase grant.
+#[path = "android_native_macos_intel_jdk.rs"]
+mod intel_jdk;
+
+#[derive(Clone, Copy)]
+struct JdkTemplateComparison {
+    archive: &'static str,
+    member: &'static str,
+    bytes: u64,
+    sha256: &'static str,
+    header: &'static MachPin,
+}
+
+/// Closed, borrowed byte-comparison DATA. It neither opens originals nor lends
+/// the existing ARM post-JLI/provider rule to the Intel observation table.
+#[derive(Clone, Copy)]
+pub(crate) struct JdkComparisonProfile {
+    profile: Profile,
+    architecture: MachArchitecture,
+    archive: (u64, &'static str),
+    release: (u64, &'static str),
+    jvm_cfg: (u64, &'static str),
+    native: &'static [JdkNativePin],
+    archives: &'static [JdkJvmArchivePin],
+    template: JdkTemplateComparison,
+}
+
+/// Original inner ZIP/JMOD fields, not installed-file permission bits. Its
+/// strings are borrowed; parsing or constructing this value supplies no custody.
+pub(crate) struct JdkMemberComparison<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: &'a str,
+    pub(crate) mode: u32,
+}
+
+pub(crate) fn jdk_comparison_profile(profile: Profile) -> Option<JdkComparisonProfile> {
+    match profile {
+        Profile::MacArm64 => Some(JdkComparisonProfile {
+            profile, architecture: MachArchitecture::Arm64,
+            archive: (JDK_ARCHIVE_BYTES, JDK_ARCHIVE_SHA256),
+            release: (1638, "cb6064fe4d7b87d9fbb8b8c7702047044d1bbeac38e0c5217f595579b6cc764b"),
+            jvm_cfg: (29, "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0"),
+            native: JDK_NATIVE, archives: JDK_JVM_ARCHIVES,
+            template: JdkTemplateComparison {
+                archive: "Contents/Home/jmods/jdk.jpackage.jmod",
+                member: "classes/jdk/jpackage/internal/resources/jpackageapplauncher",
+                bytes: 185600, sha256: "73403782287c715055d9f58cca4571add26f01817d710186bf6e52fa5ac1b442",
+                header: &JPACKAGE_TEMPLATE,
+            },
+        }),
+        Profile::MacX64 => Some(JdkComparisonProfile {
+            profile, architecture: MachArchitecture::X86_64,
+            archive: (intel_jdk::ARCHIVE_BYTES, intel_jdk::ARCHIVE_SHA256),
+            release: intel_jdk::RELEASE, jvm_cfg: intel_jdk::JVM_CFG,
+            native: intel_jdk::NATIVE, archives: intel_jdk::JVM_ARCHIVES,
+            template: JdkTemplateComparison {
+                archive: "Contents/Home/jmods/jdk.jpackage.jmod",
+                member: "classes/jdk/jpackage/internal/resources/jpackageapplauncher",
+                bytes: intel_jdk::TEMPLATE_BYTES, sha256: intel_jdk::TEMPLATE_SHA256,
+                header: &intel_jdk::TEMPLATE_HEADER,
+            },
+        }),
+        Profile::LinuxX64 => None,
+    }
+}
+
+impl JdkComparisonProfile {
+    pub(crate) fn profile(&self) -> Profile { self.profile }
+    pub(crate) fn architecture(&self) -> MachArchitecture { self.architecture }
+    pub(crate) fn original_archive(&self) -> (u64, &'static str) { self.archive }
+    pub(crate) fn native_members(&self) -> &'static [JdkNativePin] { self.native }
+    pub(crate) fn jvm_archives(&self) -> &'static [JdkJvmArchivePin] { self.archives }
+    pub(crate) fn native(&self, relative: &str) -> Option<&'static JdkNativePin> {
+        self.native.iter().find(|pin| pin.relative == relative)
+    }
+    pub(crate) fn jvm_archive(&self, path: &str) -> Option<&'static JdkJvmArchivePin> {
+        let relative = jdk_relative(path)?;
+        self.archives.iter().find(|pin| pin.relative == relative)
+    }
+    /// Full original regular-file type/mode here, deliberately not an installed
+    /// FileSpec's read-only permission bits. No declaration substitutes for readback.
+    pub(crate) fn metadata_original_matches(&self, relative: &str, bytes: u64, sha256: &str, mode: u32) -> bool {
+        let expected = match relative {
+            "Contents/Home/release" => self.release,
+            "Contents/Home/lib/jvm.cfg" => self.jvm_cfg,
+            _ => return false,
+        };
+        mode == 0o100644 && (bytes, sha256) == expected
+    }
+    fn header_matches(&self, pin: &MachPin, prefix: &[u8], commands: &MachCommands) -> bool {
+        prefix.len() == pin.prefix_bytes && policy::digest_matches(prefix, pin.prefix_sha256)
+            && pin.matches_architecture(commands, self.architecture)
+    }
+    /// Same existing canonical installed tuple and expected read-only mode; only
+    /// the selected profile's exact CPU/header pins participate in comparison.
+    pub(crate) fn native_matches(&self, file: &FileSpec, prefix: &[u8], commands: &MachCommands) -> bool {
+        let Some(relative) = jdk_relative(&file.path) else { return false; };
+        self.native(relative).is_some_and(|pin|
+            pin.matches(&file.path, file.size, &file.sha256, file.mode)
+                && self.header_matches(&pin.header, prefix, commands))
+    }
+    pub(crate) fn member_header(&self, archive_path: &str, member: &str) -> Option<&'static MachPin> {
+        let archive = self.jvm_archive(archive_path)?;
+        let row = archive.members.iter().find(|row| row.member == member)?;
+        match row.counterpart {
+            Some(relative) => {
+                let pin = self.native(relative)?;
+                ((row.bytes, row.sha256) == (pin.bytes, pin.sha256)).then_some(&pin.header)
+            }
+            None => ((archive.relative, row.member, row.bytes, row.sha256)
+                == (self.template.archive, self.template.member, self.template.bytes, self.template.sha256))
+                .then_some(self.template.header),
+        }
+    }
+    /// A counterpart is in the SAME selected bundle as this exact original
+    /// archive. The separately pinned template cannot acquire a provider by a
+    /// missing-counterpart fallback. This never calls local_loads or grants JLI.
+    pub(crate) fn member_matches(&self, archive_file: &FileSpec, observed: &JdkMemberComparison<'_>,
+        counterpart: Option<&FileSpec>, prefix: &[u8], commands: &MachCommands) -> bool {
+        let Some(archive) = self.jvm_archive(&archive_file.path) else { return false; };
+        if (archive_file.size, archive_file.sha256.as_str(), archive_file.mode)
+            != (archive.bytes, archive.sha256, 0o444) { return false; }
+        let Some(row) = archive.members.iter().find(|row| row.member == observed.name) else { return false; };
+        if (observed.bytes, observed.sha256, observed.mode) != (row.bytes, row.sha256, row.mode) { return false; }
+        let Some(header) = self.member_header(&archive_file.path, observed.name) else { return false; };
+        if !self.header_matches(header, prefix, commands) { return false; }
+        match (row.counterpart, counterpart) {
+            (Some(relative), Some(file)) => {
+                let Some(bundle) = archive_file.path.strip_suffix(archive.relative) else { return false; };
+                file.path.strip_prefix(bundle) == Some(relative)
+                    && self.native(relative).is_some_and(|pin|
+                        (pin.bytes, pin.sha256) == (row.bytes, row.sha256)
+                            && pin.matches(&file.path, file.size, &file.sha256, file.mode))
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+#[path = "android_native_macos_intel_tools.rs"]
+mod intel_tools;
+
+/// Fixed, non-JDK SOURCE scopes; neither a search path nor a runnable tool role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolComparisonScope {
+    AgpAapt2, GradleFileEvents, GradleJansi, GradleNativePlatform, Bundletool,
+}
+/// This companion has no bootstrap/provider/post-JLI phase to lend to a caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolComparisonPhase { ObservationOnly }
+
+/// Exact archive metadata, not installed-file permission bits or original custody.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ToolMemberComparison<'a> {
+    pub(crate) name: &'a str, pub(crate) bytes: u64,
+    pub(crate) sha256: &'a str, pub(crate) mode: u32,
+}
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ToolArchiveComparison<'a> {
+    pub(crate) component: &'a str, pub(crate) bytes: u64, pub(crate) sha256: &'a str,
+    pub(crate) containing_jar: Option<ToolMemberComparison<'a>>,
+}
+struct ToolNativePin {
+    member: ToolMemberComparison<'static>, slice: policy::MachSlice,
+    command_bytes: usize, header: MachPin,
+}
+struct ToolScopePin {
+    scope: ToolComparisonScope, component: &'static str,
+    archive_bytes: u64, archive_sha256: &'static str,
+    containing_jar: Option<ToolMemberComparison<'static>>,
+    native: &'static [ToolNativePin],
+}
+/// Borrowed DATA only. No IO, mutable catalogue, permission change or native grant.
+#[derive(Clone, Copy)]
+pub(crate) struct ToolComparisonProfile { pin: &'static ToolScopePin }
+
+pub(crate) fn tool_comparison_profile(profile: Profile, scope: ToolComparisonScope)
+    -> Option<ToolComparisonProfile> {
+    match profile {
+        Profile::MacX64 => {
+            let index = match scope {
+                ToolComparisonScope::AgpAapt2 => 0,
+                ToolComparisonScope::GradleFileEvents => 1,
+                ToolComparisonScope::GradleJansi => 2,
+                ToolComparisonScope::GradleNativePlatform => 3,
+                ToolComparisonScope::Bundletool => 4,
+            };
+            Some(ToolComparisonProfile { pin: &intel_tools::SCOPES[index] })
+        }
+        Profile::MacArm64 | Profile::LinuxX64 => None,
+    }
+}
+impl ToolComparisonProfile {
+    pub(crate) fn profile(&self) -> Profile { Profile::MacX64 }
+    pub(crate) fn scope(&self) -> ToolComparisonScope { self.pin.scope }
+    pub(crate) fn phase(&self) -> ToolComparisonPhase { ToolComparisonPhase::ObservationOnly }
+
+    /// Compare one exact captured snapshot, not a complete source or native closure.
+    /// The caller's already parsed commands remain DATA. Future native work must
+    /// reserve/read its own originals and satisfy the independent loader policy.
+    /// In particular this DOES NOT call/relax native_slice: the recorded JNA i386
+    /// sibling still refuses there. ZIP mode0 is not an installed0444 permission.
+    pub(crate) fn snapshot_matches(&self, archive: &ToolArchiveComparison<'_>,
+        member: &ToolMemberComparison<'_>, slice: policy::MachSlice,
+        prefix: &[u8], raw_commands: &[u8], commands: &MachCommands) -> bool {
+        let expected = self.pin;
+        if (archive.component, archive.bytes, archive.sha256)
+            != (expected.component, expected.archive_bytes, expected.archive_sha256) { return false; }
+        match (&expected.containing_jar, &archive.containing_jar) {
+            (Some(pin), Some(row)) if (row.name, row.bytes, row.sha256, row.mode)
+                == (pin.name, pin.bytes, pin.sha256, pin.mode) => {},
+            (None, None) => {},
+            _ => return false,
+        }
+        let Some(pin) = expected.native.iter().find(|pin| pin.member.name == member.name)
+            else { return false; };
+        if (member.bytes, member.sha256, member.mode)
+            != (pin.member.bytes, pin.member.sha256, pin.member.mode)
+            || slice != pin.slice || slice.size < 32
+            || prefix.len() != pin.header.prefix_bytes || raw_commands.len() != pin.command_bytes {
+            return false;
+        }
+        let Some(end) = slice.offset.checked_add(slice.size) else { return false; };
+        end <= member.bytes && prefix.len() as u64 <= member.bytes
+            && raw_commands.len() as u64 <= slice.size
+            && pin.header.snapshot_bytes(prefix, raw_commands)
+            && pin.header.matches_architecture(commands, MachArchitecture::X86_64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn native_file(profile: &JdkComparisonProfile, relative: &str) -> FileSpec {
+        let pin = profile.native(relative).unwrap();
+        FileSpec { path: format!("jdk/Test.jdk/{relative}"), size: pin.bytes,
+            sha256: pin.sha256.into(), mode: pin.original_mode & !0o222 }
+    }
+    fn archive_file(profile: &JdkComparisonProfile, relative: &str) -> FileSpec {
+        let path = format!("jdk/Test.jdk/{relative}");
+        let pin = profile.jvm_archive(&path).unwrap();
+        FileSpec { path, size: pin.bytes, sha256: pin.sha256.into(), mode: 0o444 }
+    }
+    fn intel_commands(prefix: &[u8], commands: &[u8], bytes: u64) -> MachCommands {
+        let slice = policy::native_slice(prefix, bytes, MachArchitecture::X86_64).unwrap();
+        assert_eq!(slice.offset, 0);
+        policy::native_commands(commands, slice, MachArchitecture::X86_64).unwrap()
+    }
+
+    #[test]
+    fn paired_jdk_comparison_profiles_bind_cpu_and_original_bytes() {
+        let arm = jdk_comparison_profile(Profile::MacArm64).unwrap();
+        let intel = jdk_comparison_profile(Profile::MacX64).unwrap();
+        assert!(jdk_comparison_profile(Profile::LinuxX64).is_none());
+        assert_eq!(arm.profile(), Profile::MacArm64);
+        assert_eq!(intel.profile(), Profile::MacX64);
+        assert_eq!(arm.architecture(), MachArchitecture::Arm64);
+        assert_eq!(intel.architecture(), MachArchitecture::X86_64);
+        assert_eq!(arm.original_archive(), (JDK_ARCHIVE_BYTES, JDK_ARCHIVE_SHA256));
+        assert_eq!(intel.original_archive(), (180578248,
+            "c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a"));
+        assert!(std::ptr::eq(arm.native_members(), JDK_NATIVE));
+        assert!(std::ptr::eq(arm.jvm_archives(), JDK_JVM_ARCHIVES));
+        assert_eq!(intel.native_members().len(), 71);
+        assert_eq!(intel.native_members().iter().filter(|pin| pin.header.file_type == 2).count(), 29);
+        assert_eq!(intel.native_members().iter().filter(|pin| pin.header.file_type == 6).count(), 42);
+        assert!(intel.native_members().iter().all(|pin| pin.phase == JdkPhase::ObservationOnly));
+        assert!(arm.native_members().iter().all(|pin| pin.phase != JdkPhase::ObservationOnly));
+        assert!(!policy::native_catalog_supports(Profile::MacX64));
+
+        let file = native_file(&intel, "Contents/Home/bin/java");
+        let prefix = intel_jdk::JAVA_PREFIX;
+        let raw = intel_jdk::JAVA_COMMANDS;
+        let commands = intel_commands(prefix, raw, file.size);
+        assert!(intel.native_matches(&file, prefix, &commands));
+        assert!(!arm.native_matches(&file, prefix, &commands));
+        assert!(policy::native_slice(prefix, file.size, MachArchitecture::Arm64).is_none());
+        // The old unqualified MachPin API retains its ARM default, not the
+        // target of the new observation table from which this pin was obtained.
+        assert!(!intel.native("Contents/Home/bin/java").unwrap().header.matches(&commands));
+        assert!(!intel.native_matches(&file, &prefix[..prefix.len() - 1], &commands));
+        let mut changed_prefix = prefix.to_vec(); changed_prefix[4095] ^= 1;
+        assert!(!intel.native_matches(&file, &changed_prefix, &commands));
+        for mutate in 0..6 {
+            let mut changed = commands.clone();
+            match mutate {
+                0 => changed.architecture = MachArchitecture::Arm64,
+                1 => changed.header_sha256 = "0".repeat(64),
+                2 => changed.file_type = 6,
+                3 => changed.loads.swap(0, 1),
+                4 => changed.rpaths.swap(0, 1),
+                _ => changed.install_name = Some("@rpath/other.dylib".into()),
+            }
+            assert!(!intel.native_matches(&file, prefix, &changed));
+        }
+        for changed in [FileSpec { size: file.size + 1, ..file.clone() },
+            FileSpec { sha256: "0".repeat(64), ..file.clone() },
+            FileSpec { mode: 0o755, ..file.clone() },
+            FileSpec { mode: 0o100555, ..file.clone() },
+            FileSpec { path: "jdk/Test.jdk/Contents/Home/bin/../bin/java".into(), ..file.clone() },
+            FileSpec { path: "jdk/Test.jdk/Contents/Home/bin/missing".into(), ..file.clone() }] {
+            assert!(!intel.native_matches(&changed, prefix, &commands));
+        }
+        let release = "edbe3a2e6b6a3186010a3b75257685d943a8baa013a92174c9a48b8c1a73886b";
+        assert!(intel.metadata_original_matches("Contents/Home/release", 1637, release, 0o100644));
+        assert!(!arm.metadata_original_matches("Contents/Home/release", 1637, release, 0o100644));
+        for (relative, bytes, sha256, mode) in [
+            ("Contents/Home/release", 1638, release, 0o100644),
+            ("Contents/Home/release", 1637, "cb6064fe4d7b87d9fbb8b8c7702047044d1bbeac38e0c5217f595579b6cc764b", 0o100644),
+            ("Contents/Home/release", 1637, release, 0o644),
+            ("Contents/Home/release", 1637, release, 0o120644),
+            ("Contents/Home/./release", 1637, release, 0o100644),
+        ] {
+            assert!(!intel.metadata_original_matches(relative, bytes, sha256, mode));
+        }
+        let cfg = "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0";
+        assert!(arm.metadata_original_matches("Contents/Home/lib/jvm.cfg", 29, cfg, 0o100644));
+        assert!(intel.metadata_original_matches("Contents/Home/lib/jvm.cfg", 29, cfg, 0o100644));
+    }
+
+    #[test]
+    fn intel_jvm_counterparts_and_template_never_borrow_arm_pins() {
+        let intel = jdk_comparison_profile(Profile::MacX64).unwrap();
+        let arm = jdk_comparison_profile(Profile::MacArm64).unwrap();
+        assert_eq!(intel.jvm_archives().len(), 74);
+        assert_eq!(intel.jvm_archives().iter().map(|archive| archive.members.len()).sum::<usize>(), 71);
+        let mut linked = 0;
+        for archive in intel.jvm_archives() {
+            let path = format!("jdk/Test.jdk/{}", archive.relative);
+            for row in archive.members {
+                assert!(intel.member_header(&path, row.member).is_some());
+                if let Some(relative) = row.counterpart {
+                    linked += 1;
+                    let pin = intel.native(relative).unwrap();
+                    assert_eq!((row.bytes, row.sha256), (pin.bytes, pin.sha256));
+                    assert!(std::ptr::eq(intel.member_header(&path, row.member).unwrap(), &pin.header));
+                } else {
+                    assert_eq!((archive.relative, row.member, row.bytes, row.sha256, row.mode),
+                        ("Contents/Home/jmods/jdk.jpackage.jmod",
+                         "classes/jdk/jpackage/internal/resources/jpackageapplauncher", 188160,
+                         "2fc0206e6e6fb80c90d2b1893d2e145e1b9a6162fa1ce5b0349307566b75d7fd", 0));
+                }
+            }
+        }
+        assert_eq!(linked, 70);
+        let home_jli = intel.native("Contents/Home/lib/libjli.dylib").unwrap();
+        let app_jli = intel.native("Contents/MacOS/libjli.dylib").unwrap();
+        assert_ne!((home_jli.bytes, home_jli.sha256), (app_jli.bytes, app_jli.sha256));
+        assert!(intel.native("Contents/Home/lib/../MacOS/libjli.dylib").is_none());
+
+        let archive = archive_file(&intel, "Contents/Home/jmods/java.base.jmod");
+        let file = native_file(&intel, "Contents/Home/bin/java");
+        let member = JdkMemberComparison { name: "bin/java", bytes: file.size, sha256: &file.sha256, mode: 0 };
+        let commands = intel_commands(intel_jdk::JAVA_PREFIX, intel_jdk::JAVA_COMMANDS, file.size);
+        assert!(intel.member_matches(&archive, &member, Some(&file), intel_jdk::JAVA_PREFIX, &commands));
+        assert!(!arm.member_matches(&archive, &member, Some(&file), intel_jdk::JAVA_PREFIX, &commands));
+        assert!(!intel.member_matches(&archive, &member, None, intel_jdk::JAVA_PREFIX, &commands));
+        for (name, bytes, sha256, mode) in [
+            ("bin/missing", member.bytes, member.sha256, 0),
+            (member.name, member.bytes + 1, member.sha256, 0),
+            (member.name, member.bytes, "0", 0),
+            (member.name, member.bytes, member.sha256, 0o100755),
+        ] {
+            assert!(!intel.member_matches(&archive, &JdkMemberComparison { name, bytes, sha256, mode },
+                Some(&file), intel_jdk::JAVA_PREFIX, &commands));
+        }
+        for changed in [FileSpec { size: archive.size + 1, ..archive.clone() },
+            FileSpec { sha256: "0".repeat(64), ..archive.clone() },
+            FileSpec { mode: 0o555, ..archive.clone() },
+            FileSpec { path: "jdk/Elsewhere.jdk/Contents/Home/jmods/java.base.jmod".into(), ..archive.clone() }] {
+            assert!(!intel.member_matches(&changed, &member, Some(&file), intel_jdk::JAVA_PREFIX, &commands));
+        }
+        for changed in [FileSpec { path: "jdk/Elsewhere.jdk/Contents/Home/bin/java".into(), ..file.clone() },
+            FileSpec { size: file.size + 1, ..file.clone() },
+            FileSpec { sha256: "0".repeat(64), ..file.clone() },
+            FileSpec { mode: 0o755, ..file.clone() }] {
+            assert!(!intel.member_matches(&archive, &member, Some(&changed), intel_jdk::JAVA_PREFIX, &commands));
+        }
+        let template_archive = archive_file(&intel, "Contents/Home/jmods/jdk.jpackage.jmod");
+        let template = JdkMemberComparison {
+            name: "classes/jdk/jpackage/internal/resources/jpackageapplauncher",
+            bytes: intel_jdk::TEMPLATE_BYTES, sha256: intel_jdk::TEMPLATE_SHA256, mode: 0,
+        };
+        let template_commands = intel_commands(intel_jdk::TEMPLATE_PREFIX, intel_jdk::TEMPLATE_COMMANDS, template.bytes);
+        assert!(intel.member_matches(&template_archive, &template, None, intel_jdk::TEMPLATE_PREFIX, &template_commands));
+        assert!(!arm.member_matches(&template_archive, &template, None, intel_jdk::TEMPLATE_PREFIX, &template_commands));
+        assert!(!intel.member_matches(&archive, &template, None, intel_jdk::TEMPLATE_PREFIX, &template_commands));
+        assert!(!intel.member_matches(&template_archive, &template, Some(&file), intel_jdk::TEMPLATE_PREFIX, &template_commands));
+        for (name, bytes, sha256, mode) in [
+            ("classes/other/jpackageapplauncher", template.bytes, template.sha256, 0),
+            (template.name, 185600, template.sha256, 0),
+            (template.name, template.bytes, "73403782287c715055d9f58cca4571add26f01817d710186bf6e52fa5ac1b442", 0),
+            (template.name, template.bytes, template.sha256, 0o755),
+        ] {
+            assert!(!intel.member_matches(&template_archive, &JdkMemberComparison { name, bytes, sha256, mode },
+                None, intel_jdk::TEMPLATE_PREFIX, &template_commands));
+        }
+    }
+
+    fn tool_original(profile: ToolComparisonProfile) -> ToolArchiveComparison<'static> {
+        ToolArchiveComparison { component: profile.pin.component, bytes: profile.pin.archive_bytes,
+            sha256: profile.pin.archive_sha256, containing_jar: profile.pin.containing_jar }
+    }
+
+    #[test]
+    fn intel_non_jdk_snapshots_bind_fixed_archive_scope_and_target() {
+        assert_eq!(intel_tools::SCOPES.len(), 5);
+        assert_eq!(intel_tools::FIXTURES.len(), 7);
+        assert_eq!(intel_tools::SCOPES.iter().map(|pin| pin.native.len()).sum::<usize>(), 7);
+        for pin in &intel_tools::SCOPES {
+            assert!(tool_comparison_profile(Profile::MacArm64, pin.scope).is_none());
+            assert!(tool_comparison_profile(Profile::LinuxX64, pin.scope).is_none());
+            assert_eq!(intel_tools::FIXTURES.iter().filter(|row| row.0 == pin.scope).count(), pin.native.len());
+        }
+        for &(scope, name, prefix, raw) in intel_tools::FIXTURES {
+            let profile = tool_comparison_profile(Profile::MacX64, scope).unwrap();
+            assert_eq!(profile.profile(), Profile::MacX64);
+            assert_eq!(profile.scope(), scope);
+            assert_eq!(profile.phase(), ToolComparisonPhase::ObservationOnly);
+            let original = tool_original(profile);
+            let pin = profile.pin.native.iter().find(|pin| pin.member.name == name).unwrap();
+            let member = pin.member;
+            let slice = pin.slice;
+            // Captured bytes are parsed by the actual existing parser, never a
+            // fabricated native implementation. JNA remains inert slice DATA.
+            let commands = policy::native_commands(raw, slice, MachArchitecture::X86_64).unwrap();
+            assert!(policy::native_commands(raw, slice, MachArchitecture::Arm64).is_none());
+            assert!(profile.snapshot_matches(&original, &member, slice, prefix, raw, &commands));
+            assert!(!pin.header.matches(&commands)); // old default remains ARM
+            for other in &intel_tools::SCOPES {
+                if other.scope != scope {
+                    let wrong = tool_comparison_profile(Profile::MacX64, other.scope).unwrap();
+                    assert!(!wrong.snapshot_matches(&original, &member, slice, prefix, raw, &commands));
+                }
+            }
+            for changed in [ToolArchiveComparison { component: "jdk", ..original },
+                ToolArchiveComparison { bytes: original.bytes + 1, ..original },
+                ToolArchiveComparison { sha256: "0", ..original }] {
+                assert!(!profile.snapshot_matches(&changed, &member, slice, prefix, raw, &commands));
+            }
+            if let Some(parent) = original.containing_jar {
+                let missing = ToolArchiveComparison { containing_jar: None, ..original };
+                assert!(!profile.snapshot_matches(&missing, &member, slice, prefix, raw, &commands));
+                for changed_parent in [ToolMemberComparison { name: "lib/other.jar", ..parent },
+                    ToolMemberComparison { bytes: parent.bytes + 1, ..parent },
+                    ToolMemberComparison { sha256: "0", ..parent },
+                    ToolMemberComparison { mode: parent.mode ^ 0o200, ..parent }] {
+                    let changed = ToolArchiveComparison { containing_jar: Some(changed_parent), ..original };
+                    assert!(!profile.snapshot_matches(&changed, &member, slice, prefix, raw, &commands));
+                }
+            } else {
+                let changed = ToolArchiveComparison { containing_jar: Some(ToolMemberComparison {
+                    name: "invented.jar", bytes: 1, sha256: "0", mode: 0 }), ..original };
+                assert!(!profile.snapshot_matches(&changed, &member, slice, prefix, raw, &commands));
+            }
+            for changed in [ToolMemberComparison { name: "../aapt2", ..member },
+                ToolMemberComparison { name: "unknown-native", ..member },
+                ToolMemberComparison { bytes: member.bytes + 1, ..member },
+                ToolMemberComparison { sha256: "0", ..member },
+                ToolMemberComparison { mode: member.mode ^ 0o200, ..member }] {
+                assert!(!profile.snapshot_matches(&original, &changed, slice, prefix, raw, &commands));
+            }
+            for changed in [policy::MachSlice { offset: slice.offset + 1, ..slice },
+                policy::MachSlice { size: slice.size - 1, ..slice },
+                policy::MachSlice { offset: u64::MAX, ..slice }] {
+                assert!(!profile.snapshot_matches(&original, &member, changed, prefix, raw, &commands));
+            }
+            assert!(!profile.snapshot_matches(&original, &member, slice, &prefix[..prefix.len()-1], raw, &commands));
+            let mut changed_prefix = prefix.to_vec();
+            *changed_prefix.last_mut().unwrap() ^= 1;
+            assert!(!profile.snapshot_matches(&original, &member, slice, &changed_prefix, raw, &commands));
+            let mut changed_raw = raw.to_vec();
+            *changed_raw.last_mut().unwrap() ^= 1;
+            assert!(!profile.snapshot_matches(&original, &member, slice, prefix, &changed_raw, &commands));
+            assert!(!profile.snapshot_matches(&original, &member, slice, prefix, &raw[..raw.len()-1], &commands));
+            let mut extra = raw.to_vec(); extra.extend_from_slice(&[0; 8]);
+            // native_commands hashes its exact declared header, whereas this
+            // comparison requires the complete original snapshot with no suffix.
+            assert!(!profile.snapshot_matches(&original, &member, slice, prefix, &extra, &commands));
+            for change in 0..6 {
+                let mut changed = commands.clone();
+                match change {
+                    0 => changed.architecture = MachArchitecture::Arm64,
+                    1 => changed.header_sha256 = "0".repeat(64),
+                    2 => changed.file_type = if commands.file_type == 6 { 2 } else { 6 },
+                    3 => changed.install_name = Some("@rpath/not-the-original.dylib".into()),
+                    4 => changed.loads.push("/usr/lib/not-the-original.dylib".into()),
+                    _ => changed.rpaths.push("@loader_path/not-the-original".into()),
+                }
+                assert!(!profile.snapshot_matches(&original, &member, slice, prefix, raw, &changed));
+            }
+            if commands.loads.len() > 1 {
+                let mut changed = commands.clone(); changed.loads.swap(0, 1);
+                assert!(!profile.snapshot_matches(&original, &member, slice, prefix, raw, &changed));
+            }
+            if commands.rpaths.len() > 1 {
+                let mut changed = commands.clone(); changed.rpaths.swap(0, 1);
+                assert!(!profile.snapshot_matches(&original, &member, slice, prefix, raw, &changed));
+            }
+        }
+    }
+
+    #[test]
+    fn intel_non_jdk_opaque_siblings_and_loader_labels_never_grant_native_authority() {
+        use crate::android_supplier_macos_source::{JdkLayout, SourceLayouts};
+        assert!(!policy::native_catalog_supports(Profile::MacX64));
+        assert!(policy::native_catalog_supports(Profile::MacArm64));
+        assert!(!crate::android_supplier_macos::available_for(Profile::MacX64));
+        let layout = SourceLayouts { jdk: JdkLayout::Bundle,
+            jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" };
+        assert!(matches!(crate::android_supplier_macos::recipe_for(Profile::MacX64, &layout),
+            Err(crate::android_supplier_macos::Failure::Unavailable)));
+        // No ARM supplier-cache initialization or replacement fixture reference.
+        let arm = jdk_comparison_profile(Profile::MacArm64).unwrap();
+        let intel_jdk = jdk_comparison_profile(Profile::MacX64).unwrap();
+        assert!(std::ptr::eq(arm.native_members(), JDK_NATIVE));
+        assert_eq!(arm.architecture(), MachArchitecture::Arm64);
+        assert_eq!(intel_jdk.architecture(), MachArchitecture::X86_64);
+        assert!(intel_jdk.native_members().iter().all(|pin| pin.phase == JdkPhase::ObservationOnly));
+        for &(scope, name, prefix, raw) in intel_tools::FIXTURES {
+            let profile = tool_comparison_profile(Profile::MacX64, scope).unwrap();
+            let original = tool_original(profile);
+            let pin = profile.pin.native.iter().find(|pin| pin.member.name == name).unwrap();
+            let commands = policy::native_commands(raw, pin.slice, MachArchitecture::X86_64).unwrap();
+            assert_eq!(profile.phase(), ToolComparisonPhase::ObservationOnly);
+            assert!(profile.snapshot_matches(&original, &pin.member, pin.slice, prefix, raw, &commands));
+            for excluded in ["net/rubygrapefruit/platform/aarch64-macos/libgradle-fileevents.dylib",
+                "com/sun/jna/linux-x86-64/libjnidispatch.so", "Contents/Home/lib/libjli.dylib",
+                "unknown-native", "macos/./aapt2"] {
+                let changed = ToolMemberComparison { name: excluded, ..pin.member };
+                assert!(!profile.snapshot_matches(&original, &changed, pin.slice, prefix, raw, &commands));
+            }
+            if name == "com/sun/jna/darwin/libjnidispatch.jnilib" {
+                assert_eq!(pin.member.mode, 0);
+                assert_eq!((pin.slice.offset, pin.slice.size), (94208, 86724));
+                assert_eq!(&prefix[..8], &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]);
+                assert_eq!(u32::from_be_bytes(prefix[8..12].try_into().unwrap()), 7);
+                assert!(policy::native_slice(prefix, pin.member.bytes, MachArchitecture::X86_64).is_none());
+                assert!(policy::native_slice(prefix, pin.member.bytes, MachArchitecture::Arm64).is_none());
+                // Replacing the unsupported sibling is NOT a normalization step.
+                let mut changed = prefix.to_vec();
+                changed[8..12].copy_from_slice(&0x0100000cu32.to_be_bytes());
+                assert!(!profile.snapshot_matches(&original, &pin.member, pin.slice, &changed, raw, &commands));
+                let installed = ToolMemberComparison { mode: 0o444, ..pin.member };
+                assert!(!profile.snapshot_matches(&original, &installed, pin.slice, prefix, raw, &commands));
+            } else {
+                assert_eq!(policy::native_slice(prefix, pin.member.bytes, MachArchitecture::X86_64), Some(pin.slice));
+            }
+            if scope == ToolComparisonScope::GradleJansi {
+                let label = "/Users/gnodet/work/git/jansi-native/target/native-build/target/lib/libjansi-1.8.jnilib";
+                assert_eq!(commands.install_name.as_deref(), Some(label));
+                assert!(!policy::system_load(label));
+                let mut dependency = commands.clone(); dependency.loads.push(label.into());
+                assert!(!profile.snapshot_matches(&original, &pin.member, pin.slice, prefix, raw, &dependency));
+                let mut relabeled = commands.clone(); relabeled.install_name = Some("libjansi.jnilib".into());
+                assert!(!profile.snapshot_matches(&original, &pin.member, pin.slice, prefix, raw, &relabeled));
+            }
+        }
+    }
 }

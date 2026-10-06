@@ -144,10 +144,117 @@ class CorrespondenceDataTests(unittest.TestCase):
         for descriptor in (False, True):
             for method in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                 with self.subTest(descriptor=descriptor, method=method):
-                    raw = zip_bytes([("a", b"payload" * 12000, stat.S_IFREG | 0o644)],
+                    raw = zip_bytes([("a", b"payload" * 12000, stat.S_IFREG | 0o644),
+                                     ("empty/", b"", stat.S_IFDIR | 0o755)],
                                     descriptor=descriptor, method=method)
                     _, _, data, _ = publish(raw)
                     self.assertEqual(data["rows"][0][4], hashlib.sha256(b"payload" * 12000).hexdigest())
+                    directory = dict(zip(data["columns"], data["rows"][1]))
+                    self.assertEqual((directory["kind"], directory["size"], directory["sha256"]),
+                                     ("directory", 0, None))
+                    self.assertEqual(bool(directory["flags"] & 8), descriptor)
+
+        def inspect_inner(raw):
+            report = M.compile_opaque_zip(Original(raw), M.OpaqueZipPin(
+                len(raw), hashlib.sha256(raw).hexdigest()))
+            rows = []
+            summary = report.consume_rows(rows.append)
+            return {**summary, "rows": rows, "columns": M.COLUMNS}
+
+        # Java's empty META-INF directory: DOS creator, no mode, UTF-8 plus
+        # descriptor, and the two-byte empty DEFLATE framing. No vendor code.
+        java = bytearray(zip_bytes([("META-INF/", b"", stat.S_IFDIR | 0o755)], descriptor=True))
+        central = java.index(b"PK\x01\x02")
+        descriptor_at = java.index(b"PK\x07\x08")
+        struct.pack_into("<H", java, 6, 0x0808)
+        struct.pack_into("<H", java, central + 4, 20)
+        struct.pack_into("<H", java, central + 8, 0x0808)
+        struct.pack_into("<I", java, central + 38, 0)
+        for signed in (True, False):
+            body = bytearray(java)
+            if not signed:
+                del body[descriptor_at:descriptor_at + 4]
+                struct.pack_into("<I", body, len(body) - 6, central - 4)
+            data = inspect_inner(bytes(body))
+            row = dict(zip(data["columns"], data["rows"][0]))
+            self.assertEqual((data["files"], row["kind"], row["size"], row["sha256"]),
+                             (0, "directory", 0, None))
+            self.assertEqual((row["flags"], row["compressedSize"], row["creatorSystem"]),
+                             (0x0808, 2, 0))
+
+        bad_descriptor = bytearray(java)
+        struct.pack_into("<I", bad_descriptor, descriptor_at + 4, 1)
+        nonempty = bytearray(java)
+        struct.pack_into("<I", nonempty, central + 24, 1)
+        struct.pack_into("<I", nonempty, descriptor_at + 12, 1)
+        bad_crc = bytearray(java)
+        struct.pack_into("<I", bad_crc, central + 16, 1)
+        struct.pack_into("<I", bad_crc, descriptor_at + 4, 1)
+        trailing = bytearray(java[:descriptor_at] + b"\0" + java[descriptor_at:])
+        struct.pack_into("<I", trailing, descriptor_at + 1 + 8, 3)
+        struct.pack_into("<I", trailing, central + 1 + 20, 3)
+        struct.pack_into("<I", trailing, len(trailing) - 6, central + 1)
+        for body, reason in ((bad_descriptor, "zip_descriptor_disagreement"),
+                             (nonempty, "zip_non_regular_member"),
+                             (bad_crc, "zip_member_crc_or_length"),
+                             (trailing, "zip_deflate_trailing_data")):
+            with self.subTest(reason=reason), self.assertRaisesRegex(M.Refused, reason):
+                inspect_inner(bytes(body))
+
+        # The authenticated ct.sym observation has exactly two terminal slashes.
+        # Opaque names retain the one remaining slash after the existing marker
+        # removal; neither names nor raw local/CD agreement are normalized.
+        for descriptor in (False, True):
+            for method in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                with self.subTest(opaque_directory_descriptor=descriptor, method=method):
+                    doubled = zip_bytes([
+                        ("8/java.base/", b"", stat.S_IFDIR | 0o755),
+                        ("8/java.base//", b"", stat.S_IFDIR | 0o755),
+                        ("8/java.base/lang/Number.sig", b"opaque DATA", stat.S_IFREG | 0o644),
+                    ], descriptor=descriptor, method=method)
+                    data = inspect_inner(doubled)
+                    by_name = {row[0]: dict(zip(data["columns"], row)) for row in data["rows"]}
+                    self.assertEqual(set(by_name), {"8/java.base", "8/java.base/",
+                                                   "8/java.base/lang/Number.sig"})
+                    self.assertEqual((data["members"], data["files"]), (3, 1))
+                    directory = by_name["8/java.base/"]
+                    self.assertEqual((directory["kind"], directory["size"], directory["sha256"]),
+                                     ("directory", 0, None))
+                    self.assertEqual(bool(directory["flags"] & 8), descriptor)
+                    self.assertEqual(by_name["8/java.base/lang/Number.sig"]["sha256"],
+                                     hashlib.sha256(b"opaque DATA").hexdigest())
+        # Ordinary supplier/bundletool path grammar and non-directory calls
+        # must not borrow the inert opaque-directory exception.
+        for label in ("gradle", "bundletool"):
+            with self.subTest(strict_label=label), self.assertRaisesRegex(M.Refused, "archive_name_grammar"):
+                publish(doubled, label)
+        with self.assertRaisesRegex(M.Refused, "opaque_zip_name_structure"):
+            M._opaque_name(b"8/java.base//", directory=False)
+        for name, payload, mode, reason in (
+            ("8/java.base///", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8//java.base/", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("/8/java.base//", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8/../java.base//", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8/./java.base//", b"", stat.S_IFDIR | 0o755, "opaque_zip_name_structure"),
+            ("8/java.base//", b"", stat.S_IFREG | 0o644, "zip_non_regular_member"),
+            ("8/java.base//", b"nonempty", stat.S_IFDIR | 0o755, "zip_non_regular_member"),
+        ):
+            with self.subTest(opaque_name=name, reason=reason), self.assertRaisesRegex(M.Refused, reason):
+                inspect_inner(zip_bytes([(name, payload, mode)], descriptor=True))
+        duplicate = zip_bytes([("8/java.base//", b"", stat.S_IFDIR | 0o755),
+                               ("8/java.basz//", b"", stat.S_IFDIR | 0o755)])
+        self.assertEqual(duplicate.count(b"8/java.basz//"), 2)
+        duplicate = duplicate.replace(b"8/java.basz//", b"8/java.base//")
+        with self.assertRaisesRegex(M.Refused, "duplicate_or_case_colliding_member"):
+            inspect_inner(duplicate)
+        with self.assertRaisesRegex(M.Refused, "non_directory_member_parent"):
+            inspect_inner(zip_bytes([("8/java.base", b"file", stat.S_IFREG | 0o644),
+                                     ("8/java.base//", b"", stat.S_IFDIR | 0o755)]))
+        # A local name cannot disagree even when both spellings would now be
+        # valid DATA: change only the first, fixed-length local name occurrence.
+        mismatch = doubled.replace(b"8/java.base//", b"8/java.basz//", 1)
+        with self.assertRaisesRegex(M.Refused, "zip_local_name_disagreement"):
+            inspect_inner(mismatch)
 
     def test_duplicate_case_traversal_and_alias_zip_members_refuse(self):
         for rows in [
