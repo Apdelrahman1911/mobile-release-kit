@@ -387,6 +387,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             and result["cleanupErrors"] == [] and calls
             and all(call["returned"] and call["returncode"] == 0 for call in calls)
             and native_rust_tests is not None
+            and installer_context is not None and installer_context["completed"]
             and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
         )"""))
         flags = section(publish, "              flags = (", "              fixture.need(all(type(result[key])")
@@ -405,6 +406,27 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                 if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                         and all(call["returned"] for call in calls)):
                     native_rust_tests = unit_record"""))
+        context = section(publish, "              installer_context = None", "              native_rust_tests = None")
+        self.assertIn('context_record = fixture.installer_context_data(result["installerContext"], source)', context)
+        for required in (
+            'context_record["observerSourceSha256"] == rows[fixture.CONTEXT_SOURCE]["sha256"]',
+            'for case in context_record["cases"]:',
+            'for suffix in ("installer", "receipt-query"):',
+            'len(context_calls) == 1 and context_calls[0]["returned"] and context_calls[0]["returncode"] == 0',
+            'for case in context_record["enteredCases"]:',
+            'fixture.need(len(context_calls) == 1, "summary-context-entered-call")',
+            'if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown")) and all(call["returned"] for call in calls)): installer_context = context_record',
+        ):
+            self.assertIn(flat(required), flat(context))
+        self.assertGreater(publish.index(context), publish.index('"summary-returned-call"'))
+        self.assertLess(publish.index(context), publish.index(units))
+        self.assertIn('"installerContext": None,', publish)
+        self.assertIn('installerContext=installer_context,', publish)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["installerContext"] =' in line], ['summary["installerContext"] = None'] * 2)
+        for refused in ('except BaseException: summary["accepted"] = False summary["nativeRustTests"] = None summary["installerContext"] = None',
+                        'if not book.finish(): summary["accepted"] = False summary["nativeRustTests"] = None summary["installerContext"] = None'):
+            self.assertIn(refused, flat(publish))
         self.assertGreater(publish.index(units), publish.index('"summary-returned-call"'))
         self.assertLess(publish.index(units), publish.index("              known_pass = ("))
         self.assertIn('receiptOriginals native nativeRustTests', active(publish))

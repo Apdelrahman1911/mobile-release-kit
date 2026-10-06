@@ -604,6 +604,8 @@ class CargoTests(unittest.TestCase):
                     for key in ("native_entered", "native_returned", "sources_closed", "outputs_closed",
                                 "protected_closed", "scratch_retired", "installer_entered", "installed"):
                         setattr(value, key, True)
+                    self.assertFalse(value.receipt(None)["passed"])  # New context phase cannot be omitted.
+                    value.installer_context = InstallerContextTests.public()
                     self.assertTrue(value.receipt(None)["passed"])
                     self.assertEqual(value.receipt(None)["nativeRustTests"], value.native_rust_tests)
                     value.native_rust_tests = None
@@ -1140,6 +1142,283 @@ class OwnerRetirementAndModeTests(unittest.TestCase):
                     fixture.os.umask(previous)
             finally:
                 self.assertTrue(book.finish())
+
+
+class InstallerContextTests(unittest.TestCase):
+    """Synthetic DATA + one private FS case; none is a Mac Installer receipt."""
+
+    @staticmethod
+    def xar(members, *, directory=False, mutate=None):
+        import xml.etree.ElementTree as ET
+        root = ET.Element("xar")
+        toc = ET.SubElement(root, "toc")
+        check = ET.SubElement(toc, "checksum", style="sha256")
+        ET.SubElement(check, "offset").text = "0"
+        ET.SubElement(check, "size").text = "32"
+        heap, serial = bytearray(), 0
+        parent = toc
+        if directory:
+            serial += 1
+            parent = ET.SubElement(toc, "file", id=str(serial))
+            ET.SubElement(parent, "name").text = fixture.CONTEXT_PACKAGES[1]
+            ET.SubElement(parent, "type").text = "directory"
+        for name, content in members.items():
+            serial += 1
+            element = ET.SubElement(toc if name == "Distribution" else parent, "file", id=str(serial))
+            ET.SubElement(element, "name").text = name
+            ET.SubElement(element, "type").text = "file"
+            data = ET.SubElement(element, "data")
+            for key, value in (("length", len(content)), ("offset", 32 + len(heap)), ("size", len(content))):
+                ET.SubElement(data, key).text = str(value)
+            ET.SubElement(data, "encoding", style="application/octet-stream")
+            ET.SubElement(data, "extracted-checksum", style="sha256").text = fixture.digest(content)
+            heap.extend(content)
+        if mutate is not None:
+            mutate(toc)
+        plain = ET.tostring(root, encoding="utf-8")
+        packed = zlib.compress(plain)
+        return (struct.pack(">IHHQQI", 0x78617221, 28, 1, len(packed), len(plain), 3)
+                + packed + bytes.fromhex(fixture.digest(packed)) + bytes(heap))
+
+    @staticmethod
+    def package_info(index=1):
+        return ('<pkg-info format-version="2" identifier="' + fixture.CONTEXT_IDENTIFIERS[index]
+                + '" version="1" install-location="/" auth="root"><payload numberOfFiles="0" installKBytes="0"/>'
+                '<scripts><postinstall file="./postinstall"/></scripts><relocate/></pkg-info>').encode("ascii")
+
+    @staticmethod
+    def raw(*, case="component", output=(1, 2, 0o100600, 501, 20, 1)):
+        absent = {"kind": "missing", "match": None, "opened": False, "closed": None, "original": None, "sha256": None}
+        return {"schemaVersion": 1, "type": "mrk-e2-installer-context-v1", "sourceCommit": SOURCE,
+                "observerSourceSha256": "b" * 64, "case": case, "clock": "CLOCK_MONOTONIC", "deadlineNs": "100000000000",
+                "scriptArgumentCount": 0, "secondArgumentIsRoot": False, "thirdArgumentIsRoot": False,
+                "outputOriginal": list(output), "argumentOne": dict(absent), "packagePath": dict(absent)}
+
+    @staticmethod
+    def public():
+        value = {"schemaVersion": 1, "type": "mrk-e2-installer-context-observations-v1", "sourceCommit": SOURCE,
+                 "observerSourceSha256": "b" * 64, "clock": "CLOCK_MONOTONIC", "deadlineNs": "100000000000",
+                 "started": True, "completed": True, "enteredCases": list(fixture.CONTEXT_CASES), "cases": [],
+                 "receiptsRetired": False, "outerPackageAuthority": False, "maintenanceQualified": False}
+        for case in fixture.CONTEXT_CASES:
+            body = fixture.canonical(InstallerContextTests.raw(case=case))
+            row = fixture.context_record(body, SOURCE, "b" * 64, case, 100_000_000_000,
+                                         (1, 2, 0o100600, 501, 20, 1), {})
+            row.update(recordSha256=fixture.digest(body), installerReturnedZero=True, outputOriginalClosed=True,
+                       receiptOriginals=[{"suffix": "plist", "present": True, "bytes": 128, "sha256": "c" * 64},
+                                         {"suffix": "bom", "present": False, "bytes": None, "sha256": None}])
+            value["cases"].append(row)
+        return value
+
+    def test_no_payload_component_and_both_product_envelopes(self):
+        members = {"PackageInfo": self.package_info(), "Scripts": b"synthetic archive DATA, not executed"}
+        component = self.xar(members)
+        self.assertEqual(fixture.context_xar(component), members)
+        fixture.context_package_info(members["PackageInfo"], fixture.CONTEXT_IDENTIFIERS[1])
+        for directory in (False, True):
+            product = self.xar({"Distribution": fixture.context_distribution(),
+                               **(members if directory else {fixture.CONTEXT_PACKAGES[1]: component})}, directory=directory)
+            fixture.context_product(product, component, members)
+        completed = fixture.context_distribution().replace(b'version="1">', b'version="1" installKBytes="0" onConclusion="None">')
+        completed = completed.replace(b'>context-wrapped.pkg<', b'>#context-wrapped.pkg<')
+        fixture.context_product(self.xar({"Distribution": completed, fixture.CONTEXT_PACKAGES[1]: component}), component, members)
+
+    def test_archive_alias_payload_overlap_tail_checksum_hooks_and_product_change_are_refused(self):
+        members = {"PackageInfo": self.package_info(), "Scripts": b"inert"}
+        component = self.xar(members)
+        checksum_bad = bytearray(component)
+        compressed = struct.unpack_from(">Q", component, 8)[0]
+        checksum_bad[28 + compressed] ^= 1
+        bad = (
+            self.xar({**members, "Payload": b"no"}), self.xar({"../Scripts": b"no", "PackageInfo": members["PackageInfo"]}),
+            self.xar(members, mutate=lambda toc: setattr(toc.findall("file")[1].find("type"), "text", "symlink")),
+            self.xar(members, mutate=lambda toc: setattr(toc.findall("file")[1].find("data/offset"), "text", "32")),
+            component + b"\0", bytes(checksum_bad), component[:-1],
+        )
+        for index, body in enumerate(bad):
+            with self.subTest(archive=index), self.assertRaises(fixture.Refused):
+                fixture.context_xar(body)
+        entity = '<!DOCTYPE pkg-info [<!ENTITY hidden "expanded">]><pkg-info>&hidden;</pkg-info>'
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+            with self.subTest(xml_encoding=encoding), self.assertRaises(fixture.Refused):
+                fixture.context_xml(entity.encode(encoding), 65536)
+        with self.assertRaises(fixture.Refused):
+            fixture.context_xml(b"<pkg-info>\xff</pkg-info>", 65536)
+        for body in (members["PackageInfo"].replace(b'numberOfFiles="0"', b'numberOfFiles="1"'),
+                     members["PackageInfo"].replace(b"<postinstall", b"<preinstall"),
+                     members["PackageInfo"].replace(b"<relocate/>", b'<relocate><bundle path="/unrelated"/></relocate>')):
+            with self.assertRaises(fixture.Refused):
+                fixture.context_package_info(body, fixture.CONTEXT_IDENTIFIERS[1])
+        for extra in ({"Distribution": fixture.context_distribution() + b"<script/>"},
+                      {"Distribution": fixture.context_distribution().replace(b'>context-wrapped.pkg<', b'>https://outside.invalid/pkg<')},
+                      {"Distribution": fixture.context_distribution().replace(b'version="1">', b'version="1" onConclusion="RequireRestart">')},
+                      {fixture.CONTEXT_PACKAGES[1]: component + b"\0"}):
+            body = self.xar({"Distribution": fixture.context_distribution(), fixture.CONTEXT_PACKAGES[1]: component, **extra})
+            with self.assertRaises(fixture.Refused):
+                fixture.context_product(body, component, members)
+
+    def test_record_distinguishes_unopened_context_and_requires_the_same_input_and_output_originals(self):
+        expected_output = (1, 2, 0o100600, 501, 20, 1)
+        original = (1, 3, 0o100600, 501, 20, 1, 4096, 10, 20)
+        packages = {"outer-product": {"original": original, "sha256": "d" * 64}}
+        missing = self.raw()
+        valid = self.raw()
+        valid["packagePath"] = {"kind": "nominated", "match": "outer-product", "opened": True, "closed": True,
+                                "original": list(original), "sha256": "d" * 64}
+        for row in (missing, valid):
+            data = fixture.context_record(fixture.canonical(row), SOURCE, "b" * 64, "component",
+                                          100_000_000_000, expected_output, packages)
+            self.assertNotIn("original", data["packagePath"])
+            self.assertIs(data["packagePath"]["originalMatched"], True if row is valid else None)
+        mutations = (
+            lambda row: row.update(outputClosed=True), lambda row: row.update(case="product"),
+            lambda row: row.update(schemaVersion=True), lambda row: row.update(deadlineNs="100000000001"),
+            lambda row: row["outputOriginal"].__setitem__(1, 99),
+            lambda row: row["packagePath"]["original"].__setitem__(8, 21),
+            lambda row: row["packagePath"].update(sha256="e" * 64),
+            lambda row: row["packagePath"].update(closed=None),
+            lambda row: row["packagePath"].update(match="/private/unrelated"),
+            lambda row: row["argumentOne"].update(closed=True),
+        )
+        for index, change in enumerate(mutations):
+            row = copy.deepcopy(valid)
+            change(row)
+            with self.subTest(record=index), self.assertRaises(fixture.Refused):
+                fixture.context_record(fixture.canonical(row), SOURCE, "b" * 64, "component",
+                                       100_000_000_000, expected_output, packages)
+
+    def test_public_projection_cannot_grant_authority_or_invent_unexecuted_cases_and_closes(self):
+        value = self.public()
+        self.assertEqual(fixture.installer_context_data(value, SOURCE), value)
+        self.assertFalse(value["outerPackageAuthority"] or value["maintenanceQualified"] or value["receiptsRetired"])
+        for change in (
+            lambda row: row.update(outerPackageAuthority=True), lambda row: row.update(maintenanceQualified=True),
+            lambda row: row.update(enteredCases=["product", "component"]),
+            lambda row: row["cases"][0].update(outputOriginalClosed=False),
+            lambda row: row["cases"][0]["argumentOne"].update(rawPath="/private/local-file"),
+            lambda row: row["cases"][0]["receiptOriginals"][0].update(present=False),
+            lambda row: row.update(completed=True, cases=[]),
+        ):
+            row = copy.deepcopy(value)
+            change(row)
+            with self.assertRaises(fixture.Refused):
+                fixture.installer_context_data(row, SOURCE)
+        value.update(completed=False, enteredCases=["component"], cases=[])
+        self.assertEqual(fixture.installer_context_data(value, SOURCE), value)  # Honest failure, no completion.
+
+    def test_common_deadline_is_checked_before_and_after_the_original_owner_return(self):
+        self.assertEqual(fixture.context_timeout(100_000_000_000, 40_100_000_000, 60), 59)
+        with self.assertRaises(fixture.Refused):
+            fixture.context_timeout(100_000_000_000, 99_100_000_000, 60)
+        for mode, ticks, code, calls in (("timely", (40_000_000_000, 50_000_000_000), 0, 1),
+                                        ("late", (40_000_000_000, 100_000_000_000), 0, 1),
+                                        ("expired", (100_000_000_000,), 0, 0),
+                                        ("nonzero", (40_000_000_000, 50_000_000_000), 1, 1)):
+            with self.subTest(mode=mode):
+                invocations = []
+                def owner(argv, **kwargs):
+                    invocations.append((list(argv), kwargs))
+                    return subprocess.CompletedProcess(argv, code, b"", b"")
+                book = SimpleNamespace(check=lambda: None)
+                op = fixture.Operation(SimpleNamespace(run_owned=owner), SimpleNamespace(book=book), None, Path("/inert"),
+                                       {"GITHUB_SHA": SOURCE, "DEVELOPER_DIR": "/inert/sdk"})
+                op.outputs = op.protected = book
+                op.publish = lambda *_args: None
+                op.installer_context.update(started=True, deadlineNs="100000000000")
+                clock = iter(ticks)
+                fixed_time = SimpleNamespace(CLOCK_MONOTONIC=17, clock_gettime_ns=lambda selected:
+                                             next(clock) if selected == 17 else self.fail("different clock"))
+                with patch.object(fixture, "time", fixed_time):
+                    if mode == "timely":
+                        op.context_command("context-component-installer", ["/inert/installer"], 60)
+                    else:
+                        with self.assertRaises(fixture.Refused):
+                            op.context_command("context-component-installer", ["/inert/installer"], 60)
+                self.assertEqual(len(invocations), calls)
+                self.assertEqual(len(op.calls), calls)
+                self.assertEqual(op.installer_context["enteredCases"], ["component"] if calls else [])
+                if calls:
+                    self.assertEqual(invocations[0][1]["timeout"], 60)
+                    self.assertTrue(op.calls[0]["returned"])
+                    self.assertEqual(op.calls[0]["returncode"], code)
+                self.assertFalse(op.installer_context["completed"])
+
+    def test_private_output_keeps_original_custody_and_close_uncertainty_cannot_settle(self):
+        # Real task-private filesystem, but no Installer/helper execution. The
+        # test's explicit write stands only for record DATA in the same output.
+        for inject_close in (False, True):
+            with self.subTest(close_uncertain=inject_close), tempfile.TemporaryDirectory(prefix="mrk-context-data-") as temporary:
+                root, book = Path(temporary), fixture.Originals()
+                try:
+                    fd = fixture.os.open(root, fixture.READ_FLAGS | fixture.os.O_DIRECTORY)
+                    parent = book.register(fd, root, "directory")
+                    parent.update(identity=fixture.signature(fixture.os.fstat(fd))[:5], parent=None)
+                    book.directories[root] = parent
+                    op = fixture.Operation(None, None, None, root, {"GITHUB_SHA": SOURCE})
+                    op.outputs = book
+                    captured = []
+                    op.publish = lambda name, body: captured.append((name, body))
+                    op.installer_context.update(started=True, deadlineNs="100000000000", observerSourceSha256="b" * 64)
+                    output = op.context_output(root / "original.json")
+                    structure = output["identity"]
+                    with self.assertRaises(FileExistsError):
+                        op.context_output(root / "original.json")  # Never adopt a pre-existing output.
+                    body = fixture.canonical(self.raw(output=structure))
+                    self.assertEqual(fixture.os.write(output["fd"], body), len(body))
+                    fixture.os.fsync(output["fd"])
+                    original_close = book.close
+                    def close_unknown(entry):
+                        original_close(entry)  # Join the real local FD, then inject an UNKNOWN verdict.
+                        entry["closed"] = False
+                        book.errors.append("original-close-unknown")
+                    fixed_time = SimpleNamespace(CLOCK_MONOTONIC=17, clock_gettime_ns=lambda _clock: 1)
+                    with patch.object(fixture, "time", fixed_time), \
+                         patch.object(book, "close", close_unknown if inject_close else original_close):
+                        if inject_close:
+                            with self.assertRaises(fixture.Refused):
+                                op.context_read_output(output, "component", {})
+                        else:
+                            result = op.context_read_output(output, "component", {})
+                            self.assertTrue(result["outputOriginalClosed"])
+                    self.assertIs(output["identity"], structure)
+                    self.assertIsNone(output["fd"])
+                    self.assertEqual(output["closed"], not inject_close)
+                    self.assertEqual(len(captured), 0 if inject_close else 1)
+                    self.assertFalse(op.installer_context["completed"])
+                finally:
+                    self.assertEqual(book.finish(), not inject_close)
+
+    def test_entered_context_without_complete_original_receipt_never_retires_scratch(self):
+        op = OwnerRetirementAndModeTests.operation(b"", 0)
+        op.installer_context.update(started=True, deadlineNs="100000000000", enteredCases=["component"])
+        op.calls = [{"returned": True, "returncode": 0}]
+        with patch.object(fixture, "Originals") as cleanup, patch.object(fixture.shutil, "rmtree") as retire:
+            op.finish()
+            cleanup.assert_not_called()
+            retire.assert_not_called()
+        self.assertFalse(op.scratch_retired or op.installer_context["completed"])
+        self.assertTrue(op.sources_closed and op.outputs_closed and op.protected_closed)
+
+    def test_fixed_context_source_uses_only_existing_owner_and_private_original_output_channel(self):
+        source = PATH.read_text(encoding="utf-8")
+        observer = (PATH.parents[1] / "native/macos-installed-native/src/e2_installer_context.c").read_text(encoding="utf-8")
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-maintenance-fixture.yml").read_text(encoding="utf-8")
+        self.assertIn('"--nopayload", "--scripts"', source)
+        self.assertIn('self.stager._cpio_members(archive, (os.getuid(), os.getgid())) == expected', source)
+        self.assertIn('"${0%/*}/mrk-context-observer" ', source)
+        self.assertIn('"${PACKAGE_PATH+x}" "${PACKAGE_PATH-}" "$@"', source)
+        self.assertLess(source.index('self.observe_installer_context()', source.index('    def execute(self):')),
+                        source.index('self.build_images()', source.index('    def execute(self):')))
+        self.assertLess(source.index('self.context_command("context-" + case + "-installer"'),
+                        source.index('self.context_read_output(original_outputs[case], case, packages)'))
+        self.assertIn('context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), cap)', source)
+        self.assertIn('clock_gettime(CLOCK_MONOTONIC', observer)
+        self.assertIn('output_closed && parent_closed && timely()', observer)
+        self.assertNotIn('"outputClosed"', observer)
+        self.assertNotIn('/var/log/install.log', source + observer + workflow)
+        self.assertNotIn('--forget', source)
+        self.assertIn('fixture.installer_context_data(result["installerContext"], source)', workflow)
+        self.assertIn('installer_context is not None and installer_context["completed"]', workflow)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import stat
 import struct
 import subprocess
 import sys
+import time
 
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-maintenance-fixture"
@@ -51,6 +52,17 @@ NATIVE_RUST_TESTS = (
     "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
     "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
 )
+CONTEXT_CASES = ("component", "product")
+CONTEXT_IDENTIFIERS = tuple(IDENTIFIER + ".installer-context." + case + ".v1" for case in CONTEXT_CASES)
+CONTEXT_PACKAGES = ("context-direct.pkg", "context-wrapped.pkg", "context-product.pkg")
+CONTEXT_PACKAGE_LABELS = ("direct-component", "wrapped-component", "outer-product")
+CONTEXT_SOURCE = NATIVE + "/src/e2_installer_context.c"
+CONTEXT_SECONDS, CONTEXT_PACKAGE_LIMIT = 120, 8 * 1024 * 1024
+CONTEXT_ROLES = ("context-helper-build", "context-component-build", "context-product-component-build",
+                 "context-product-build", "context-component-empty-bom", "context-product-empty-bom",
+                 "context-component-receipt-census", "context-product-receipt-census",
+                 "context-component-installer", "context-product-installer",
+                 "context-component-receipt-query", "context-product-receipt-query")
 WORK_SECONDS, HARD_SECONDS = 990, 993
 CAPTURE_LIMIT, RESULT_LIMIT = 65536, 32768
 IMAGE_LIMIT = 32 * 1024 * 1024
@@ -309,6 +321,337 @@ def receipt_census_absent(stdout, stderr):
                  for identifier in identifiers), "fixture-receipt-query-inconclusive")
     need(len(set(identifiers)) == len(identifiers), "fixture-receipt-query-inconclusive")
     need(PACKAGE not in identifiers, "fixture-receipt-collision")
+
+
+def context_timeout(deadline, now, cap):
+    """One existing phase endpoint; an individual command never renews it."""
+    need(type(deadline) is int and type(now) is int and 0 <= now < deadline <= MAX_RAW
+         and type(cap) is int and 0 < cap <= CONTEXT_SECONDS, "context-deadline")
+    # Existing owner JSON deliberately rejects floats. Shorten to a whole
+    # second (never round up or extend the deadline); an exhausted final
+    # fraction cannot start another command or establish phase completion.
+    remaining = (deadline - now) // 1_000_000_000
+    need(remaining > 0, "context-deadline")
+    return min(cap, remaining)
+
+
+def context_xml(body, limit):
+    import xml.etree.ElementTree as ET
+    need(type(body) is bytes and 0 < len(body) <= limit and b"\0" not in body
+         and b"<!DOCTYPE" not in body and b"<!ENTITY" not in body, "context-xml-bound")
+    try:
+        # Parse only the admitted UTF8 spelling, never an auto-detected alternate
+        # XML encoding that can hide DTD/entity markers from the byte prefilter.
+        root = ET.fromstring(body.decode("utf-8", "strict"))
+    except (ValueError, ET.ParseError) as error:
+        raise Refused("context-xml-shape") from error
+    pending, count = [(root, 0)], 0
+    while pending:
+        element, depth = pending.pop()
+        count += 1
+        need(count <= 256 and depth <= 8 and type(element.tag) is str
+             and len(element.attrib) <= 16, "context-xml-shape")
+        pending.extend((child, depth + 1) for child in element)
+    return root
+
+
+def context_inflate(body, limit):
+    import zlib
+    stream = zlib.decompressobj(31 if body[:2] == b"\x1f\x8b" else 15)
+    result = stream.decompress(body, limit + 1)
+    need(len(result) <= limit and stream.eof and not stream.unconsumed_tail
+         and not stream.unused_data, "context-compressed-bound")
+    return result
+
+
+def context_xar(body, *, product=False):
+    """Two closed scripts-only envelopes, never an extractor or production parser.
+
+    XAR's format checksum covers the compressed TOC. Its heap interval and every
+    member must cover the original archive exactly. Independent SHA256 of the
+    complete original, not the format's possible SHA1, binds package evidence.
+    """
+    need(type(product) is bool and type(body) is bytes and 28 <= len(body) <= CONTEXT_PACKAGE_LIMIT,
+         "context-xar-bound")
+    magic, header, version, compressed, expanded, checksum = struct.unpack_from(">IHHQQI", body)
+    algorithms = {1: ("sha1", 20), 3: ("sha256", 32), 4: ("sha512", 64)}
+    need((magic, header, version) == (0x78617221, 28, 1)
+         and 0 < compressed <= 1024 * 1024 and 0 < expanded <= 2 * 1024 * 1024
+         and header + compressed <= len(body) and checksum in algorithms, "context-xar-header")
+    packed_toc = body[header:header + compressed]
+    toc_bytes = context_inflate(packed_toc, expanded)
+    need(len(toc_bytes) == expanded, "context-xar-expanded")
+    root = context_xml(toc_bytes, 2 * 1024 * 1024)
+    need(root.tag == "xar" and not root.attrib and [child.tag for child in root] == ["toc"],
+         "context-xar-toc")
+    toc = root[0]
+    need(not toc.attrib and all(child.tag in ("creation-time", "checksum", "file") for child in toc)
+         and len(toc.findall("checksum")) == 1 and len(toc.findall("creation-time")) <= 1,
+         "context-xar-toc")
+    for element in toc.findall("creation-time"):
+        need(not element.attrib and not list(element), "context-xar-toc")
+    algorithm, checksum_size = algorithms[checksum]
+    check = toc.find("checksum")
+    need(check.attrib == {"style": algorithm} and [child.tag for child in check] == ["offset", "size"]
+         and check.findtext("offset") == "0" and check.findtext("size") == str(checksum_size),
+         "context-xar-checksum")
+    need(all(not child.attrib and not list(child) for child in check), "context-xar-checksum")
+    heap = header + compressed
+    need(body[heap:heap + checksum_size] == hashlib.new(algorithm, packed_toc).digest(),
+         "context-xar-checksum")
+    intervals, members, seen_ids, directories = [(0, checksum_size)], {}, set(), set()
+    allowed = {"PackageInfo", "Scripts", "Bom"}
+    if product:
+        allowed = {"Distribution", CONTEXT_PACKAGES[1],
+                   *(CONTEXT_PACKAGES[1] + "/" + name for name in ("PackageInfo", "Scripts", "Bom"))}
+    queue = [(element, "") for element in toc.findall("file")]
+    while queue:
+        element, parent = queue.pop(0)
+        file_id = element.get("id")
+        need(set(element.attrib) == {"id"} and type(file_id) is str
+             and re.fullmatch(r"[1-9][0-9]{0,3}", file_id) and file_id not in seen_ids,
+             "context-xar-member-id")
+        seen_ids.add(file_id)
+        metadata = {"name", "type", "data", "file", "mode", "uid", "gid", "user", "group",
+                    "atime", "ctime", "mtime"}
+        need(all(child.tag in metadata for child in element)
+             and all(len(element.findall(tag)) == 1 for tag in ("name", "type"))
+             and all(len(element.findall(tag)) <= 1 for tag in metadata - {"file"}),
+             "context-xar-member-shape")
+        for child in element:
+            if child.tag not in ("file", "data"):
+                need(not child.attrib and not list(child), "context-xar-member-metadata")
+        name, kind = element.findtext("name"), element.findtext("type")
+        need(type(name) is str and name and "/" not in name and "\\" not in name
+             and name not in (".", ".."), "context-xar-member-name")
+        name = parent + name
+        need(name in allowed and name not in members and name not in directories, "context-xar-roster")
+        if kind == "directory":
+            need(product and name == CONTEXT_PACKAGES[1] and not parent
+                 and element.find("data") is None and 2 <= len(element.findall("file")) <= 3,
+                 "context-xar-directory")
+            directories.add(name)
+            queue.extend((child, name + "/") for child in element.findall("file"))
+            continue
+        need(kind == "file" and not element.findall("file") and len(element.findall("data")) == 1,
+             "context-xar-file")
+        data = element.find("data")
+        required = {"length", "offset", "size", "encoding"}
+        optional = {"archived-checksum", "extracted-checksum"}
+        need(not data.attrib and required <= {child.tag for child in data} <= required | optional
+             and len({child.tag for child in data}) == len(data), "context-xar-data")
+        texts = [data.findtext(key) for key in ("length", "offset", "size")]
+        need(all(type(value) is str and re.fullmatch(r"0|[1-9][0-9]{0,9}", value) for value in texts),
+             "context-xar-member-bound")
+        need(all(not data.find(key).attrib and not list(data.find(key)) for key in ("length", "offset", "size")),
+             "context-xar-member-bound")
+        length, offset, size = map(int, texts)
+        encoding = data.find("encoding")
+        need(0 < length <= CONTEXT_PACKAGE_LIMIT and 0 < size <= CONTEXT_PACKAGE_LIMIT
+             and offset >= checksum_size and heap + offset + length <= len(body)
+             and all(offset + length <= low or offset >= high for low, high in intervals),
+             "context-xar-range")
+        need(encoding.attrib in ({"style": "application/octet-stream"}, {"style": "application/x-gzip"})
+             and not list(encoding) and not (encoding.text or "").strip(), "context-xar-encoding")
+        packed = body[heap + offset:heap + offset + length]
+        decoded = packed if encoding.get("style") == "application/octet-stream" else context_inflate(packed, size)
+        need(len(decoded) == size, "context-xar-member-size")
+        for tag, content in (("archived-checksum", packed), ("extracted-checksum", decoded)):
+            item = data.find(tag)
+            if item is not None:
+                need(set(item.attrib) == {"style"} and item.get("style") in ("sha1", "sha256", "sha512")
+                     and not list(item) and item.text == hashlib.new(item.get("style"), content).hexdigest(),
+                     "context-xar-member-checksum")
+        members[name] = decoded
+        intervals.append((offset, offset + length))
+        need(len(members) <= 4 and len(seen_ids) <= 5, "context-xar-count")
+    cursor = 0
+    for low, high in sorted(intervals):
+        need(low == cursor, "context-xar-unaccounted")
+        cursor = high
+    need(heap + cursor == len(body), "context-xar-unaccounted")
+    if not product:
+        need(set(members) in ({"PackageInfo", "Scripts"}, {"PackageInfo", "Scripts", "Bom"}),
+             "context-component-roster")
+    else:
+        embedded = {CONTEXT_PACKAGES[1] + "/" + name for name in ("PackageInfo", "Scripts")}
+        need(set(members) == {"Distribution", CONTEXT_PACKAGES[1]}
+             or set(members) in ({"Distribution", *embedded},
+                                {"Distribution", *embedded, CONTEXT_PACKAGES[1] + "/Bom"}),
+             "context-product-roster")
+    return members
+
+
+def context_package_info(body, identifier):
+    need(identifier in CONTEXT_IDENTIFIERS, "context-package-identifier")
+    info = context_xml(body, 65536)
+    need(info.tag == "pkg-info" and info.get("identifier") == identifier
+         and info.get("version") == "1" and info.get("install-location") == "/"
+         and info.get("auth") == "root"
+         and set(info.attrib) <= {"format-version", "identifier", "version", "install-location", "auth", "generator-version"},
+         "context-package-identity")
+    empty = {"bundle-version", "upgrade-bundle", "update-bundle", "atomic-update-bundle",
+             "strict-identifier", "relocate"}
+    tags = [child.tag for child in info]
+    need(len(tags) == len(set(tags)) and set(tags) <= empty | {"payload", "scripts"}
+         and "scripts" in tags, "context-package-no-payload")
+    for child in info:
+        if child.tag in empty:
+            need(not child.attrib and not list(child) and not (child.text or "").strip(),
+                 "context-package-empty-action")
+        elif child.tag == "payload":
+            need(not list(child) and child.get("numberOfFiles") == "0"
+                 and child.get("installKBytes", "0") == "0"
+                 and set(child.attrib) <= {"numberOfFiles", "installKBytes"}, "context-package-no-payload")
+        else:
+            need(not child.attrib and len(child) == 1 and child[0].tag == "postinstall"
+                 and child[0].attrib in ({"file": "postinstall"}, {"file": "./postinstall"})
+                 and not list(child[0]) and not (child[0].text or "").strip(), "context-package-hook")
+
+
+def context_distribution():
+    return ('<?xml version="1.0" encoding="utf-8"?>\n'
+            '<installer-gui-script minSpecVersion="1"><title>MRK Installer Context Observation</title>'
+            '<options customize="never" require-scripts="false" allow-external-scripts="false"/>'
+            '<domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>'
+            '<choices-outline><line choice="context"/></choices-outline>'
+            '<choice id="context" visible="false"><pkg-ref id="' + CONTEXT_IDENTIFIERS[1] + '"/></choice>'
+            '<pkg-ref id="' + CONTEXT_IDENTIFIERS[1] + '" version="1">'
+            + CONTEXT_PACKAGES[1] + '</pkg-ref></installer-gui-script>\n').encode("ascii")
+
+
+def context_product(body, component, component_members):
+    members = context_xar(body, product=True)
+    def tree(element):
+        return (element.tag, tuple(sorted(element.attrib.items())), (element.text or "").strip(),
+                tuple((tree(child), (child.tail or "").strip()) for child in element))
+    distribution = context_xml(members["Distribution"], 65536)
+    # Apple documents productbuild's local URL and install-size completion.
+    # These closed non-action forms are equivalent; no arbitrary URL, script,
+    # alternate conclusion, package, destination or attribute is accepted.
+    for reference in distribution.findall("pkg-ref"):
+        if "installKBytes" in reference.attrib:
+            need(reference.attrib.pop("installKBytes") == "0", "context-product-distribution")
+        if "onConclusion" in reference.attrib:
+            need(reference.attrib.pop("onConclusion") == "None", "context-product-distribution")
+        if (reference.text or "").strip() == "#" + CONTEXT_PACKAGES[1]:
+            reference.text = CONTEXT_PACKAGES[1]
+    need(tree(distribution) == tree(context_xml(context_distribution(), 65536)),
+         "context-product-distribution")
+    if CONTEXT_PACKAGES[1] in members:
+        need(members[CONTEXT_PACKAGES[1]] == component, "context-product-component")
+    else:
+        embedded = {name.removeprefix(CONTEXT_PACKAGES[1] + "/"): content
+                    for name, content in members.items() if name != "Distribution"}
+        need(embedded == component_members, "context-product-component")
+
+
+def context_record(body, source, observer_sha, case, deadline, output_original, packages):
+    """Read only actual returned helper DATA; no package or maintenance authority."""
+    need(identity(source, 40) and identity(observer_sha, 64) and case in CONTEXT_CASES
+         and type(deadline) is int and 0 < deadline <= MAX_RAW
+         and type(body) is bytes and body.endswith(b"\n") and body.count(b"\n") == 1,
+         "context-record-binding")
+    row = decode(body, 4096)
+    keys = {"schemaVersion", "type", "sourceCommit", "observerSourceSha256", "case", "clock", "deadlineNs",
+            "scriptArgumentCount", "secondArgumentIsRoot", "thirdArgumentIsRoot", "outputOriginal",
+            "argumentOne", "packagePath"}
+    need(type(row) is dict and set(row) == keys and type(row["schemaVersion"]) is int
+         and row["schemaVersion"] == 1 and row["type"] == "mrk-e2-installer-context-v1"
+         and row["sourceCommit"] == source and row["observerSourceSha256"] == observer_sha
+         and row["case"] == case and row["clock"] == "CLOCK_MONOTONIC"
+         and decimal(row["deadlineNs"]) == deadline, "context-record-binding")
+    raw = row["outputOriginal"]
+    need(type(raw) is list and len(raw) == 6 and all(type(number) is int and 0 <= number < 1 << 64 for number in raw)
+         and raw == list(output_original) and raw[5] == 1, "context-output-original")
+    argc = row["scriptArgumentCount"]
+    need(type(argc) is int and 0 <= argc <= 16
+         and all(type(row[key]) is bool for key in ("secondArgumentIsRoot", "thirdArgumentIsRoot"))
+         and (not row["secondArgumentIsRoot"] or argc >= 2)
+         and (not row["thirdArgumentIsRoot"] or argc >= 3), "context-script-arguments")
+    result = {key: row[key] for key in ("case", "scriptArgumentCount", "secondArgumentIsRoot", "thirdArgumentIsRoot")}
+    for key in ("argumentOne", "packagePath"):
+        item = row[key]
+        need(type(item) is dict and set(item) == {"kind", "match", "opened", "closed", "original", "sha256"}
+             and type(item["kind"]) is str and item["kind"] in ("missing", "empty", "other", "nominated"),
+             "context-observation-shape")
+        if item["kind"] == "nominated":
+            label, raw = item["match"], item["original"]
+            need(type(label) is str and label in CONTEXT_PACKAGE_LABELS and label in packages
+                 and item["opened"] is True and item["closed"] is True and type(raw) is list and len(raw) == 9
+                 and all(type(number) is int and 0 <= number < 1 << 64 for number in raw)
+                 and raw == list(packages[label]["original"]) and item["sha256"] == packages[label]["sha256"],
+                 "context-package-original")
+        else:
+            need(item["match"] is None and item["opened"] is False and item["closed"] is None
+                 and item["original"] is None and item["sha256"] is None, "context-unopened-facts")
+        need(key != "argumentOne" or (item["kind"] == "missing") is (argc == 0), "context-script-arguments")
+        result[key] = {"kind": item["kind"], "match": item["match"],
+                       "originalMatched": True if item["kind"] == "nominated" else None}
+    return result
+
+
+def installer_context_data(value, source):
+    """Finite public projection; even an observed outer match grants NO authority."""
+    keys = {"schemaVersion", "type", "sourceCommit", "observerSourceSha256", "clock", "deadlineNs", "started",
+            "completed", "enteredCases", "cases", "receiptsRetired", "outerPackageAuthority", "maintenanceQualified"}
+    need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and value["type"] == "mrk-e2-installer-context-observations-v1"
+         and value["sourceCommit"] == source and value["clock"] == "CLOCK_MONOTONIC"
+         and all(type(value[key]) is bool for key in ("started", "completed", "receiptsRetired",
+                                                     "outerPackageAuthority", "maintenanceQualified"))
+         and value["receiptsRetired"] is value["outerPackageAuthority"] is value["maintenanceQualified"] is False,
+         "context-public-binding")
+    deadline = decimal(value["deadlineNs"])
+    entered, cases = value["enteredCases"], value["cases"]
+    need(type(entered) is list and len(entered) <= 2 and entered == list(CONTEXT_CASES[:len(entered)])
+         and type(cases) is list and len(cases) <= len(entered) <= len(cases) + 1,
+         "context-public-order")
+    if not value["started"]:
+        need(not value["completed"] and not entered and not cases and deadline == 0
+             and value["observerSourceSha256"] is None, "context-public-unentered")
+    else:
+        need((deadline > 0 or value["observerSourceSha256"] is None and not entered and not cases)
+             and (value["observerSourceSha256"] is None or identity(value["observerSourceSha256"], 64)),
+             "context-public-started")
+    if entered:
+        need(identity(value["observerSourceSha256"], 64), "context-public-started")
+    need(not value["completed"] or value["started"] and len(cases) == len(entered) == 2,
+         "context-public-completion")
+    for expected, row in zip(CONTEXT_CASES, cases):
+        need(type(row) is dict and set(row) == {"case", "recordSha256", "installerReturnedZero", "outputOriginalClosed",
+             "scriptArgumentCount", "secondArgumentIsRoot", "thirdArgumentIsRoot", "argumentOne", "packagePath", "receiptOriginals"}
+             and row["case"] == expected and identity(row["recordSha256"], 64)
+             and row["installerReturnedZero"] is row["outputOriginalClosed"] is True
+             and type(row["scriptArgumentCount"]) is int and 0 <= row["scriptArgumentCount"] <= 16
+             and all(type(row[key]) is bool for key in ("secondArgumentIsRoot", "thirdArgumentIsRoot"))
+             and (not row["secondArgumentIsRoot"] or row["scriptArgumentCount"] >= 2)
+             and (not row["thirdArgumentIsRoot"] or row["scriptArgumentCount"] >= 3), "context-public-case")
+        for key in ("argumentOne", "packagePath"):
+            item = row[key]
+            need(type(item) is dict and set(item) == {"kind", "match", "originalMatched"}
+                 and type(item["kind"]) is str and item["kind"] in ("missing", "empty", "other", "nominated"),
+                 "context-public-observation")
+            if item["kind"] == "nominated":
+                need(type(item["match"]) is str and item["match"] in CONTEXT_PACKAGE_LABELS
+                     and item["originalMatched"] is True, "context-public-observation")
+            else:
+                need(item["match"] is None and item["originalMatched"] is None, "context-public-observation")
+            need(key != "argumentOne" or (item["kind"] == "missing") is (row["scriptArgumentCount"] == 0),
+                 "context-public-case")
+        receipts = row["receiptOriginals"]
+        need(type(receipts) is list and len(receipts) == 2, "context-public-receipts")
+        for suffix, receipt in zip(("plist", "bom"), receipts):
+            need(type(receipt) is dict and set(receipt) == {"suffix", "present", "bytes", "sha256"}
+                 and receipt["suffix"] == suffix and type(receipt["present"]) is bool,
+                 "context-public-receipts")
+            if receipt["present"]:
+                need(type(receipt["bytes"]) is int and 0 < receipt["bytes"] <= 1024 * 1024
+                     and identity(receipt["sha256"], 64), "context-public-receipts")
+            else:
+                need(suffix == "bom" and receipt["bytes"] is None and receipt["sha256"] is None,
+                     "context-public-receipts")
+    return value
 
 
 def native_rust_test_record():
@@ -874,7 +1217,7 @@ def source_names(rows):
         "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
         "desktop/packaging/macos-android-service-signing.profile",
         "desktop/tools/macos_e2_native_fixture.py", "desktop/tools/macos_aqua_qualification.py",
-        "desktop/tools/stage_macos_installed.py",
+        "desktop/tools/stage_macos_installed.py", CONTEXT_SOURCE,
         *("src/mobile_release/" + name for name in (
             "__init__.py", "owned_process.py", "_command_process.py", "_native_process.py",
             "cancellation.py", "errors.py", "_lifetime_evidence.py",
@@ -924,7 +1267,7 @@ class SourceInputs:
         source_parents.update(self.work.parents)
         source_parents.update((self.work, CHECKOUT / ".git"))
         self.source_handle_count = len(selected) + len(source_parents) + 4
-        self.source_handle_reserve = 160  # Observer, payload and process-owner originals.
+        self.source_handle_reserve = 192  # Existing160 plus32 retained context/helper/receipt originals.
         soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         need(soft == resource.RLIM_INFINITY or soft >= self.source_handle_count + self.source_handle_reserve,
              "source-original-descriptor-capacity")
@@ -1168,6 +1511,13 @@ class Operation:
         self.observer_entry, self.observer_digest, self.metadata = None, None, []
         self.release = None
         self.sources_closed = self.outputs_closed = self.protected_closed = False
+        self.installer_context = {
+            "schemaVersion": 1, "type": "mrk-e2-installer-context-observations-v1",
+            "sourceCommit": environment["GITHUB_SHA"], "observerSourceSha256": None,
+            "clock": "CLOCK_MONOTONIC", "deadlineNs": "0", "started": False, "completed": False,
+            "enteredCases": [], "cases": [], "receiptsRetired": False,
+            "outerPackageAuthority": False, "maintenanceQualified": False,
+        }
 
     def mkdir(self, path, mode=0o700):
         need(mode in (0o700, 0o755), "scratch-directory-requested-mode")
@@ -1230,6 +1580,244 @@ class Operation:
     def native_environment(self):
         return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.scratch / "home"),
                 "TMPDIR": str(self.scratch / "tmp"), "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+
+    def context_command(self, role, argv, cap, *, limit=65536):
+        need(role in CONTEXT_ROLES, "context-command-role")
+        deadline = decimal(self.installer_context["deadlineNs"])
+        timeout = context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), cap)
+        self.outputs.check()
+        self.protected.check()
+        count = len(self.calls)
+        try:
+            result = self.call(role, argv, dict(self.native_environment(), DEVELOPER_DIR=self.environment["DEVELOPER_DIR"]),
+                               cwd=self.scratch, timeout=timeout, limit=limit)
+        finally:
+            # Copy entry only from this original call's record. Expired/source-
+            # refused preparation is NOT an entered Installer invocation.
+            if role in ("context-component-installer", "context-product-installer") and len(self.calls) > count:
+                need(len(self.calls) == count + 1 and self.calls[count]["role"] == role
+                     and self.calls[count]["entered"] is True, "context-original-call-entry")
+                self.installer_context["enteredCases"].append("component" if role == "context-component-installer" else "product")
+        # The SAME endpoint must still be live after this original returned.
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), cap)
+        self.outputs.check()
+        self.protected.check()
+        need(result.returncode == 0, "original-command-failed")
+        return result
+
+    def context_output(self, path):
+        """The only writable transition: one exclusive empty original per case."""
+        parent = self.outputs.directory(path.parent)
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=parent["fd"])
+        entry = self.outputs.register(fd, path, "context-output")
+        entry["parent"] = parent
+        before = os.fstat(fd)
+        need(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600
+             and before.st_uid == os.getuid() and before.st_nlink == 1 and before.st_size == 0,
+             "context-empty-output")
+        entry["identity"] = signature(before)[:6]
+        entry["initialIdentity"] = signature(before)
+        self.outputs.check_one(entry)
+        return entry
+
+    def context_read_output(self, entry, case, packages):
+        """Original Installer0 precedes this read; never adopt a replacement."""
+        deadline = decimal(self.installer_context["deadlineNs"])
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        self.outputs.check_one(entry)
+        final = signature(os.fstat(entry["fd"]))
+        need(0 < final[6] <= 4096 and final[:6] == entry["identity"], "context-output-bound")
+        body = os.pread(entry["fd"], final[6] + 1, 0)
+        need(len(body) == final[6] and os.pread(entry["fd"], 1, final[6]) == b""
+             and signature(os.fstat(entry["fd"])) == final
+             and signature(os.stat(entry["path"].name, dir_fd=entry["parent"]["fd"], follow_symlinks=False)) == final,
+             "context-output-readback")
+        value = context_record(body, self.environment["GITHUB_SHA"], self.installer_context["observerSourceSha256"],
+                               case, deadline, entry["identity"], packages)
+        self.outputs.check_one(entry)
+        entry["finalIdentity"] = final  # Additional fact, not replacement custody.
+        self.outputs.close(entry)
+        need(entry["closed"] and not self.outputs.errors, "context-output-close-unknown")
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        self.publish("context-" + case + "-record.json", body)  # Private; not the public workflow artifact.
+        value.update(recordSha256=digest(body), installerReturnedZero=True, outputOriginalClosed=True)
+        return value
+
+    def context_absence(self, case, identifier):
+        parent = self.protected.directory(Path("/private/var/db/receipts"))
+        for suffix in ("plist", "bom"):
+            try:
+                os.stat(identifier + "." + suffix, dir_fd=parent["fd"], follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Refused("context-receipt-collision")
+        result = self.context_command("context-" + case + "-receipt-census",
+                                      ["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"],
+                                      15, limit=RECEIPT_CENSUS_LIMIT)
+        receipt_census_absent(result.stdout, result.stderr)
+        need(identifier not in plistlib.loads(result.stdout), "context-receipt-collision")
+        self.protected.check()
+
+    def context_receipts(self, case, identifier):
+        directory = Path("/private/var/db/receipts")
+        parent = self.protected.directory(directory)
+        rows = []
+        for suffix in ("plist", "bom"):
+            name = identifier + "." + suffix
+            try:
+                os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)
+            except FileNotFoundError:
+                need(suffix == "bom", "context-receipt-missing")
+                rows.append({"suffix": suffix, "present": False, "bytes": None, "sha256": None})
+                continue
+            entry, body = self.protected.file(directory / name, 65536 if suffix == "plist" else 1024 * 1024,
+                                              uid=0, modes=(0o644,))
+            need(entry["identity"][4] == 0 and body, "context-receipt-owner")
+            rows.append({"suffix": suffix, "present": True, "bytes": len(body), "sha256": digest(body)})
+        result = self.context_command("context-" + case + "-receipt-query",
+                                      ["/usr/sbin/pkgutil", "--pkg-info-plist", identifier], 15)
+        need(not result.stderr, "context-receipt-query")
+        receipt = plistlib.loads(result.stdout)
+        need(type(receipt) is dict and receipt.get("pkgid") == identifier and receipt.get("pkg-version") == "1"
+             and receipt.get("volume") == "/" and receipt.get("install-location") in ("/", ""),
+             "context-receipt-binding")
+        self.protected.check()
+        return rows  # Actual root-owned receipt originals remain held until finish().
+
+    def observe_installer_context(self):
+        self.phase = "context-prepare"
+        need(not self.installer_context["started"], "context-single-entry")
+        # Start before any new acquisition. Failure/unknown cannot retire this
+        # phase's scratch, including a constructor which did not return an FD.
+        self.installer_context["started"] = True
+        deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + CONTEXT_SECONDS * 1_000_000_000
+        need(0 < deadline <= MAX_RAW, "context-deadline")
+        self.installer_context["deadlineNs"] = str(deadline)
+        context_root = self.scratch / "installer-context"
+        self.mkdir(context_root)
+        original_outputs = {case: self.context_output(context_root / (case + "-record.json")) for case in CONTEXT_CASES}
+        source_body = self.source.read(CONTEXT_SOURCE)
+        source_sha = digest(source_body)
+        self.installer_context["observerSourceSha256"] = source_sha
+        package_paths = [context_root / name for name in CONTEXT_PACKAGES]
+        header = ["/* Fixed original input/output nominations; not general configuration. */",
+                  "#define MRK_CONTEXT_UID UINT64_C(" + str(os.getuid()) + ")",
+                  "#define MRK_CONTEXT_DEADLINE_NS UINT64_C(" + str(deadline) + ")",
+                  "static const struct context_case MRK_CONTEXT_CASES[2] = {"]
+        for case, entry in original_outputs.items():
+            parent = entry["parent"]
+            self.outputs.check_one(parent)
+            self.outputs.check_one(entry)
+            parts = [json.dumps(value, ensure_ascii=True) for value in (case, str(parent["path"]), entry["path"].name)]
+            parts.extend("UINT64_C(" + str(value) + ")" for value in (*parent["identity"], *entry["identity"][:5]))
+            header.append("    {" + ",".join(parts) + "},")
+        header.extend(("};", "static const char *const MRK_CONTEXT_PACKAGES[3] = {"
+                       + ",".join(json.dumps(str(path), ensure_ascii=True) for path in package_paths) + "};",
+                       "static const char *const MRK_CONTEXT_PACKAGE_LABELS[3] = {"
+                       + ",".join(json.dumps(name) for name in CONTEXT_PACKAGE_LABELS) + "};", ""))
+        header_path = context_root / "mrk-context-inputs.h"
+        self.outputs.publish(header_path, "\n".join(header).encode("ascii"))
+        header_entry, header_body = self.outputs.file(header_path, 16384, modes=(0o600,))
+        helper = context_root / "mrk-context-observer"
+        argv = ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "-x", "c", "-std=c11",
+                "-Wall", "-Wextra", "-Werror", "-O2", "-arch", "arm64", "-mmacosx-version-min=26.0",
+                '-DMRK_CONTEXT_SOURCE_COMMIT="' + self.environment["GITHUB_SHA"] + '"',
+                '-DMRK_CONTEXT_OBSERVER_SHA256="' + source_sha + '"', "-I", str(context_root),
+                str(CHECKOUT / CONTEXT_SOURCE), "-o", str(helper)]
+        self.context_command("context-helper-build", argv, 30)
+        helper_entry, helper_body = self.outputs.file(helper, 1024 * 1024, modes=(0o700, 0o755))
+        self.stager.entry_macho(helper_body)
+        need(self.outputs.read(header_entry) == header_body and self.source.read(CONTEXT_SOURCE) == source_body,
+             "context-helper-source-changed")
+        self.artifacts["installer-context-observer"] = {
+            "compilerSha256": digest(helper_body), "compilerBytes": len(helper_body), "sourceSha256": source_sha,
+            "headerSha256": digest(header_body), "noPayload": True, "observationOnly": True,
+        }
+        components, package_entries = [], []
+        for index, case in enumerate(CONTEXT_CASES):
+            scripts = context_root / (case + "-scripts")
+            self.mkdir(scripts, 0o755)
+            script = ('#!/bin/sh\nexec "${0%/*}/mrk-context-observer" ' + case
+                      + ' "${PACKAGE_PATH+x}" "${PACKAGE_PATH-}" "$@"\n').encode("ascii")
+            expected = {"mrk-context-observer": (helper_body, 0o555), "postinstall": (script, 0o555)}
+            script_originals = []
+            for name, (body, mode) in expected.items():
+                self.outputs.publish(scripts / name, body, mode)
+                entry, readback = self.outputs.file(scripts / name, 1024 * 1024, modes=(0o555,))
+                need(readback == body, "context-scripts-original")
+                script_originals.append((entry, body))
+            self.context_command("context-component-build" if index == 0 else "context-product-component-build",
+                                 ["/usr/bin/pkgbuild", "--nopayload", "--scripts", str(scripts),
+                                  "--identifier", CONTEXT_IDENTIFIERS[index], "--version", "1", "--install-location", "/",
+                                  "--ownership", "recommended", "--compression", "legacy", str(package_paths[index])], 30)
+            self.phase = "context-" + case + "-audit"
+            entry, body = self.outputs.file(package_paths[index], CONTEXT_PACKAGE_LIMIT, modes=(0o600, 0o644))
+            members = context_xar(body)
+            context_package_info(members["PackageInfo"], CONTEXT_IDENTIFIERS[index])
+            archive = members["Scripts"]
+            if archive[:2] == b"\x1f\x8b":
+                archive = context_inflate(archive, 2 * 1024 * 1024)
+            need(self.stager._cpio_members(archive, (os.getuid(), os.getgid())) == expected,
+                 "context-scripts-correspondence")
+            if "Bom" in members:
+                self.phase = "context-lsbom-original"
+                tool_entry, tool_body = self.outputs.file(Path("/usr/bin/lsbom"), 4 * 1024 * 1024, uid=0, modes=(0o555, 0o755))
+                self.artifacts["installer-context-lsbom"] = {"sha256": digest(tool_body), "bytes": len(tool_body)}
+                bom_path = context_root / (case + "-empty.bom")
+                self.outputs.publish(bom_path, members["Bom"])
+                bom_entry, bom_body = self.outputs.file(bom_path, 1024 * 1024, modes=(0o600,))
+                listing = self.context_command("context-" + case + "-empty-bom", ["/usr/bin/lsbom", "-s", str(bom_path)], 10)
+                need(not listing.stderr and listing.stdout in (b"", b".\n")
+                     and self.outputs.read(bom_entry) == bom_body == members["Bom"]
+                     and self.outputs.read(tool_entry) == tool_body, "context-nonempty-bom")
+            need(all(self.outputs.read(entry) == original for entry, original in script_originals)
+                 and sorted(os.listdir(self.outputs.directories[scripts]["fd"])) == sorted(expected)
+                 and self.outputs.read(helper_entry) == helper_body, "context-scripts-changed")
+            components.append((body, members))
+            package_entries.append(entry)
+        distribution = context_root / "Distribution"
+        self.outputs.publish(distribution, context_distribution())
+        distribution_entry, distribution_body = self.outputs.file(distribution, 65536, modes=(0o600,))
+        self.phase = "context-productbuild-original"
+        product_tool, product_tool_body = self.outputs.file(Path("/usr/bin/productbuild"), 4 * 1024 * 1024,
+                                                           uid=0, modes=(0o555, 0o755))
+        self.artifacts["installer-context-productbuild"] = {"sha256": digest(product_tool_body), "bytes": len(product_tool_body)}
+        self.context_command("context-product-build", ["/usr/bin/productbuild", "--distribution", str(distribution),
+                             "--package-path", str(context_root), str(package_paths[2])], 30)
+        self.phase = "context-product-audit"
+        entry, body = self.outputs.file(package_paths[2], CONTEXT_PACKAGE_LIMIT, modes=(0o600, 0o644))
+        context_product(body, *components[1])
+        package_entries.append(entry)
+        need(self.outputs.read(distribution_entry) == distribution_body == context_distribution()
+             and self.outputs.read(product_tool) == product_tool_body,
+             "context-distribution-changed")
+        packages = {label: {"original": list(entry["identity"]), "sha256": digest(self.outputs.read(entry))}
+                    for label, entry in zip(CONTEXT_PACKAGE_LABELS, package_entries)}
+        self.artifacts["installer-context-packages"] = {label: {"sha256": row["sha256"], "bytes": row["original"][6]}
+                                                        for label, row in packages.items()}
+        for index, case in enumerate(CONTEXT_CASES):
+            self.context_absence(case, CONTEXT_IDENTIFIERS[index])
+            selected = package_entries[0 if index == 0 else 2]
+            self.outputs.check()
+            need(signature(os.fstat(original_outputs[case]["fd"])) == original_outputs[case]["initialIdentity"],
+                 "context-output-not-empty-original")
+            self.context_command("context-" + case + "-installer",
+                                 ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(selected["path"]),
+                                  "-target", "/"], 60)
+            self.phase = "context-" + case + "-record"
+            observed = self.context_read_output(original_outputs[case], case, packages)
+            observed["receiptOriginals"] = self.context_receipts(case, CONTEXT_IDENTIFIERS[index])
+            need(all(self.outputs.read(entry) == components[n][0] for n, entry in enumerate(package_entries[:2]))
+                 and digest(self.outputs.read(package_entries[2])) == packages[CONTEXT_PACKAGE_LABELS[2]]["sha256"],
+                 "context-packages-changed")
+            self.installer_context["cases"].append(observed)
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        self.outputs.check()
+        self.protected.check()
+        self.installer_context["completed"] = True
+        installer_context_data(self.installer_context, self.environment["GITHUB_SHA"])
 
     def compiler_environment(self, target):
         home = Path("/Users/runner")
@@ -1688,8 +2276,10 @@ class Operation:
         # can supply that fact; malformed/unknown reports retain this scratch.
         native_finality = (not self.native_entered or self.native_returned
                            and self.native is not None and self.native["nativeFinalityKnown"] is True)
+        context_finality = not self.installer_context["started"] or self.installer_context["completed"]
         safe = (all(record["returned"] for record in self.calls) and self.sources_closed
-                and self.outputs_closed and self.protected_closed and native_finality and not self.cleanup_errors)
+                and self.outputs_closed and self.protected_closed and native_finality and context_finality
+                and not self.cleanup_errors)
         self.scratch_retired = False
         if safe:
             cleanup = Originals()
@@ -1715,7 +2305,7 @@ class Operation:
         native_passed = self.native is not None and self.native["outcome"] == "passed"
         unit_passed = self.native_rust_tests is not None and native_rust_tests_data(self.native_rust_tests) is not None
         passed = (failure is None and native_passed and self.native_entered and self.native_returned
-                  and unit_passed
+                  and unit_passed and self.installer_context["completed"]
                   and self.sources_closed and self.outputs_closed and self.protected_closed
                   and self.scratch_retired and not self.cleanup_errors
                   and all(call["returned"] and call["returncode"] == 0 for call in self.calls))
@@ -1736,6 +2326,7 @@ class Operation:
                 "package": self.package, "installedArtifactRoster": getattr(self, "stage_roster", None),
                 "receiptOriginals": getattr(self, "receipt_originals", []), "native": self.native,
                 "nativeRustTests": self.native_rust_tests,
+                "installerContext": self.installer_context,
                 "installerEntered": self.installer_entered, "installationReturnedSuccess": self.installed,
                 "nativeEntered": self.native_entered, "nativeOwnerReturned": self.native_returned,
                 "sourceClosesKnown": self.sources_closed, "protectedClosesKnown": self.protected_closed,
@@ -1755,6 +2346,7 @@ class Operation:
         try:
             self.begin()
             self.scratch_identity = self.outputs.directories[self.scratch]["identity"]
+            self.observe_installer_context()
             self.compile_metadata_observer()
             self.absence("initial")
             self.build_images()

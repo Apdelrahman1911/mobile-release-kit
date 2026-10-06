@@ -545,7 +545,9 @@ jobs:
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
           # This original owner alone compiles/signs/installs/observes the fixed
-          # fixture. Its 990s/993s native call covers ALL THREE cases, with one
+          # fixture. First, two scripts-only Installer-context observations share
+          # one120s CLOCK_MONOTONIC endpoint and never grant maintenance authority.
+          # Its 990s/993s native call covers ALL THREE cases, with one
           # distinct aggregate 60s auxiliary ledger. Step timeout is no receipt.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
@@ -641,6 +643,10 @@ jobs:
           if not bootstrap_ok:
               raise SystemExit("E2 summary DATA source admission refused.")
           OWNER_DIAGNOSTIC_ROLES = (
+              'context-helper-build', 'context-component-build', 'context-product-component-build',
+              'context-product-build', 'context-component-empty-bom', 'context-product-empty-bom',
+              'context-component-receipt-census', 'context-product-receipt-census', 'context-component-installer',
+              'context-product-installer', 'context-component-receipt-query', 'context-product-receipt-query',
               "metadata-observer-build", "metadata-initial", "initial-receipt-query", "native-rust-tests", "client-build",
               "resident-build", "entry-build", "client-facade-build", "resident-facade-build", "sign-0",
               "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0", "verify-sign-1", "verify-sign-2",
@@ -651,6 +657,13 @@ jobs:
           )
 
           OWNER_DIAGNOSTIC_PHASES = (
+              'context-lsbom-original', 'context-productbuild-original',
+              'context-helper-build', 'context-component-build', 'context-product-component-build',
+              'context-product-build', 'context-component-empty-bom', 'context-product-empty-bom',
+              'context-component-receipt-census', 'context-product-receipt-census', 'context-component-installer',
+              'context-product-installer', 'context-component-receipt-query', 'context-product-receipt-query',
+              'context-prepare', 'context-component-audit', 'context-product-audit',
+              'context-component-record', 'context-product-record',
               "prepare", "bundle-staging", "package-components", "metadata-observer-build", "metadata-initial",
               "initial-receipt-query", "native-rust-tests", "client-build", "resident-build", "entry-build", "client-facade-build",
               "resident-facade-build", "sign-0", "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0",
@@ -662,6 +675,29 @@ jobs:
           )
 
           OWNER_DIAGNOSTIC_REFUSALS = (
+              'context-original-call-entry',
+              'context-command-role', 'context-component-roster', 'context-compressed-bound',
+              'context-deadline', 'context-distribution-changed', 'context-empty-output',
+              'context-helper-source-changed', 'context-nonempty-bom', 'context-observation-shape',
+              'context-output-bound', 'context-output-close-unknown', 'context-output-not-empty-original',
+              'context-output-original', 'context-output-readback', 'context-package-empty-action',
+              'context-package-hook', 'context-package-identifier', 'context-package-identity',
+              'context-package-no-payload', 'context-package-original', 'context-packages-changed',
+              'context-product-component', 'context-product-distribution', 'context-product-roster',
+              'context-public-binding', 'context-public-case', 'context-public-completion',
+              'context-public-observation', 'context-public-order', 'context-public-receipts',
+              'context-public-started', 'context-public-unentered', 'context-receipt-binding',
+              'context-receipt-collision', 'context-receipt-missing', 'context-receipt-owner',
+              'context-receipt-query', 'context-record-binding', 'context-script-arguments',
+              'context-scripts-changed', 'context-scripts-correspondence', 'context-scripts-original',
+              'context-single-entry', 'context-unopened-facts', 'context-xar-bound',
+              'context-xar-checksum', 'context-xar-count', 'context-xar-data',
+              'context-xar-directory', 'context-xar-encoding', 'context-xar-expanded',
+              'context-xar-file', 'context-xar-header', 'context-xar-member-bound',
+              'context-xar-member-checksum', 'context-xar-member-id', 'context-xar-member-metadata',
+              'context-xar-member-name', 'context-xar-member-shape', 'context-xar-member-size',
+              'context-xar-range', 'context-xar-roster', 'context-xar-toc',
+              'context-xar-unaccounted', 'context-xml-bound', 'context-xml-shape',
               "aggregate-auxiliary-budget", "ambient-cargo-configuration", "cargo-artifact-shape",
               "cargo-bound", "cargo-finish", "cargo-finished", "cargo-lines", "cargo-order",
               "compiler-alias-original", "compiler-alias-roster", "compiler-copy-changed",
@@ -755,7 +791,7 @@ jobs:
               "ownerResultAdmitted": False, "ownerResultSha256": None, "tree": None,
               "bindingSha256": None, "sourceInventorySha256": None, "sourceReleaseId": None,
               "ownerOutcome": None, "originalCallCount": 0, "ownerFinality": None, "native": None,
-              "ownerDiagnostic": None, "nativeRustTests": None,
+              "ownerDiagnostic": None, "nativeRustTests": None, "installerContext": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -779,7 +815,7 @@ jobs:
                            "summary-bootstrap-inventory")
               for relative in ("desktop/tools/macos_e2_native_fixture.py",
                                ".github/workflows/desktop-macos-maintenance-fixture.yml",
-                               "desktop/macos-installed-inputs/build-release.json"):
+                               "desktop/macos-installed-inputs/build-release.json", fixture.CONTEXT_SOURCE):
                   row = rows[relative]
                   _entry, content = book.file(CHECKOUT / relative, 1048576, modes=(0o444, 0o644))
                   fixture.need(len(content) == row["size"] and fixture.digest(content) == row["sha256"]
@@ -795,7 +831,7 @@ jobs:
               expected_keys = set("""schemaVersion type source tree workflowSource workflow runId runAttempt platform toolchain
                   sourceInventorySha256 sourceOriginalHandleCount sourceOriginalHandleReserve bindingSha256 sourceReleaseId
                   outcome failure phase originalCalls workTimeoutSeconds hardTimeoutSeconds auxiliaryBudgetNanoseconds
-                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests
+                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests installerContext
                   installerEntered installationReturnedSuccess nativeEntered nativeOwnerReturned sourceClosesKnown
                   protectedClosesKnown outputClosesKnown cleanupErrors scratchRetired protectedRootRetired exactReceiptRetired
                   protectedRetentionRequired administrativeDomain arbitraryConcurrentPrivilegedWriterResistance flatPayloadAtomicNoReplace
@@ -841,6 +877,24 @@ jobs:
                       fixture.need(type(call.get("returncode")) is int and 0 <= call["returncode"] <= 255
                                    and fixture.identity(call.get("stdoutSha256"), 64)
                                    and fixture.identity(call.get("stderrSha256"), 64), "summary-returned-call")
+              installer_context = None
+              context_record = fixture.installer_context_data(result["installerContext"], source)
+              if context_record["observerSourceSha256"] is not None:
+                  fixture.need(context_record["observerSourceSha256"] == rows[fixture.CONTEXT_SOURCE]["sha256"],
+                               "summary-context-source")
+              for case in context_record["cases"]:
+                  for suffix in ("installer", "receipt-query"):
+                      context_calls = [call for call in calls if call["role"] == "context-" + case["case"] + "-" + suffix]
+                      fixture.need(len(context_calls) == 1 and context_calls[0]["returned"]
+                                   and context_calls[0]["returncode"] == 0, "summary-context-original-call")
+              for case in context_record["enteredCases"]:
+                  context_calls = [call for call in calls if call["role"] == "context-" + case + "-installer"]
+                  fixture.need(len(context_calls) == 1, "summary-context-entered-call")
+              if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                      and all(call["returned"] for call in calls)):
+                  # A closed observation (including absent context) is not B admission.
+                  # An unfinished/unknown phase can never qualify native acceptance.
+                  installer_context = context_record
               native_rust_tests = None
               if result["nativeRustTests"] is not None:
                   unit_calls = [call for call in calls if call["role"] == "native-rust-tests"]
@@ -865,6 +919,7 @@ jobs:
                   and result["cleanupErrors"] == [] and calls
                   and all(call["returned"] and call["returncode"] == 0 for call in calls)
                   and native_rust_tests is not None
+                  and installer_context is not None and installer_context["completed"]
                   and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
               )
               # Only fixed diagnostic labels and returned call facts are added;
@@ -874,18 +929,20 @@ jobs:
                   bindingSha256=fixture.digest(binding_body), sourceInventorySha256=fixture.digest(inventory_body),
                   sourceReleaseId=release, ownerOutcome=result["outcome"], originalCallCount=len(calls),
                   ownerFinality={key: result[key] for key in flags}, native=native, accepted=bool(known_pass),
-                  nativeRustTests=native_rust_tests,
+                  nativeRustTests=native_rust_tests, installerContext=installer_context,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
           except BaseException:
               summary["accepted"] = False
               summary["nativeRustTests"] = None
+              summary["installerContext"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
                   summary["accepted"] = False
                   summary["nativeRustTests"] = None
+                  summary["installerContext"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:
