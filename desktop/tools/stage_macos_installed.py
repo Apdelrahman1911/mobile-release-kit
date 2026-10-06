@@ -759,6 +759,8 @@ SIGNED_PYTHON_ROLES = ("python-sign", "python-verify", "python-modules", "python
 SIGNED_ENTITLEMENTS_SHA256 = "0132721aff0bd52a1201ded4ea0234f622715d418d78b05917a191d8fe569e85"
 SIGNED_OPTIONS = ("signed_python", "signing_receipt", "expected_signed_python", "expected_signing_receipt",
                   "expected_signing_source", "expected_signing_run", "expected_signing_attempt")
+SIGNED_RUNTIME_BINDING = "macos-installed-inputs/python-signed-runtime-binding.json"
+SIGNED_RUNTIME_BINDING_LIMIT = 4096
 
 
 SIGNED_ORIGINAL_SUPPLIERS = {
@@ -868,6 +870,147 @@ def read_signed_python(args, original, original_receipt):
             identities.append((signature(info), current_directory_identity(os.fstat(fd))))
     value = signed_python_receipt(captured[1], captured[0], args, original, original_receipt, *captured[2:])
     return (*captured, tuple(identities)), value
+
+
+def signed_runtime_binding_data(body, producer, service, *, target=ARM_TARGET):
+    """Public SOURCE nomination, not certificate/key or native authority."""
+    target = mac_target(target)
+    need(type(body) is bytes and 0 < len(body) <= SIGNED_RUNTIME_BINDING_LIMIT,
+         "signed-runtime-binding-size")
+    value = decode(body.decode("utf-8", "strict"))
+    need(type(value) is dict and set(value) == {"schemaVersion", "targets"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and type(value["targets"]) is dict and set(value["targets"]) == set(MAC_TARGETS),
+         "signed-runtime-binding-shape")
+    hashes = ("signedPythonSha256", "signingReceiptSha256", "sourceInputsSha256",
+              "runtimeManifestSha256", "producerProfileSha256", "serviceProfileSha256")
+    identifiers = ("signingRunId", "signingRunAttempt", "signingArtifactId")
+    fields = {"state", "signingSourceCommit", *hashes, *identifiers}
+    for row in value["targets"].values():
+        need(type(row) is dict, "signed-runtime-binding-row")
+        if row == {"state": "unconfigured"}:
+            continue
+        need(set(row) == fields and row["state"] == "configured"
+             and maintenance_hex(row["signingSourceCommit"], 40)
+             and all(maintenance_hex(row[key], 64) for key in hashes)
+             and all(type(row[key]) is str and re.fullmatch(r"[1-9][0-9]{0,15}", row[key])
+                     and int(row[key]) <= 9007199254740991 for key in identifiers),
+             "signed-runtime-binding-row")
+    chosen = value["targets"][target]
+    need(chosen["state"] == "configured", "signed-runtime-unconfigured")
+    selection = packaging_signing_data(producer, service)
+    need((chosen["producerProfileSha256"], chosen["serviceProfileSha256"])
+         == (selection.producer_sha256, selection.service_sha256), "signed-runtime-profile-binding")
+    return dict(chosen)
+
+
+def signed_runtime_source_snapshot():
+    """Capture only three fixed SOURCE originals, not caller-nominated paths."""
+    result = []
+    for name, limit in ((SIGNED_RUNTIME_BINDING, SIGNED_RUNTIME_BINDING_LIMIT),
+                        ("packaging/macos-install-producer-signing.profile", 1024),
+                        ("packaging/macos-android-service-signing.profile", 512)):
+        with parent(DESKTOP / name) as (fd, leaf):
+            before = current_directory_identity(os.fstat(fd))
+            body, info = read_at(fd, leaf, limit)
+            need(current_directory_identity(os.fstat(fd)) == before, "signed-runtime-source-parent-changed")
+            result.append((body, signature(info), before))
+    return tuple(result)
+
+
+def signed_runtime_inputs(target=ARM_TARGET):
+    original = signed_runtime_source_snapshot()
+    row = signed_runtime_binding_data(*(item[0] for item in original), target=target)
+    need(signed_runtime_source_snapshot() == original, "signed-runtime-source-post-changed")
+    return row, original
+
+
+def runtime_signing_selection_command(args):
+    target = command_target(args)
+    row, original = signed_runtime_inputs(target)
+    result = {"schemaVersion": 1, "kind": "configured-signed-runtime-selection-data", "target": target,
+              "nominationSha256": digest(original[0][0]), **row, "nativeAuthority": False}
+    need(len(canonical(result)) + 1 <= SIGNED_RUNTIME_BINDING_LIMIT, "signed-runtime-selection-bound")
+    return result
+
+
+def project_signed_python_command(args):
+    """Normalize only the exact downloaded capsule pair; never execute it."""
+    target = command_target(args)
+    owner = packager_ids()
+    binding = signed_runtime_inputs(target)
+    chosen, source = binding
+    fold = lambda path: tuple(part.casefold() for part in path.parts)
+    paths = (args.transport_root, args.output, DESKTOP.parent)
+    need(all(isinstance(path, Path) and path.is_absolute() for path in paths), "signed-transport-paths")
+    for index, path in enumerate(paths):
+        a = fold(path)
+        for other in paths[:index]:
+            b = fold(other)
+            need(a[:len(b)] != b and b[:len(a)] != a, "signed-transport-overlap")
+    output_parent = current_output_absent(args.output)
+    names = ("python-signed-receipt.json", "python3")
+    limits = {"python3": SIGNED_PYTHON_LIMIT, "python-signed-receipt.json": SIGNED_RECEIPT_LIMIT}
+    expected = {"python3": chosen["signedPythonSha256"],
+                "python-signed-receipt.json": chosen["signingReceiptSha256"]}
+    with parent(args.transport_root) as (outer, leaf):
+        outer_identity = current_directory_identity(os.fstat(outer))
+        before = os.stat(leaf, dir_fd=outer, follow_symlinks=False)
+        need(stat.S_ISDIR(before.st_mode) and (before.st_uid, before.st_gid) == owner
+             and stat.S_IMODE(before.st_mode) in (0o700, 0o755), "signed-transport-root")
+        root = os.open(leaf, READ_FLAGS | os.O_DIRECTORY, dir_fd=outer)
+        try:
+            def snapshot():
+                need(signature(os.fstat(root)) == signature(before)
+                     and signature(os.stat(leaf, dir_fd=outer, follow_symlinks=False)) == signature(before)
+                     and current_directory_identity(os.fstat(outer)) == outer_identity,
+                     "signed-transport-root-changed")
+                no_xattrs(root)
+                need(sorted(os.listdir(root)) == list(names), "signed-transport-roster")
+                files, originals = {}, {}
+                for name in names:
+                    body, info = read_at(root, name, limits[name])
+                    need((info.st_uid, info.st_gid) == owner and stat.S_IMODE(info.st_mode) in (0o400, 0o600, 0o644)
+                         and len(body) > 0 and digest(body) == expected[name], "signed-transport-file")
+                    files[name] = (body, 0o555 if name == "python3" else 0o444)
+                    originals[name] = signature(info)
+                need(signature(os.fstat(root)) == signature(before)
+                     and signature(os.stat(leaf, dir_fd=outer, follow_symlinks=False)) == signature(before)
+                     and sorted(os.listdir(root)) == list(names), "signed-transport-post-changed")
+                return files, originals
+
+            need(signature(os.fstat(root)) == signature(before), "signed-transport-open-changed")
+            captured = snapshot()
+            current_output_absent(args.output, output_parent)
+            write_tree(args.output, captured[0], current_owned=True)
+            need(snapshot() == captured and signed_runtime_inputs(target) == binding,
+                 "signed-transport-publication-post-changed")
+        finally:
+            close_once(root)
+    # Reopen the fixed root name after closing the held root/ancestors, too.
+    with parent(args.transport_root) as (fd, name):
+        need(current_directory_identity(os.fstat(fd)) == outer_identity
+             and signature(os.stat(name, dir_fd=fd, follow_symlinks=False)) == signature(before),
+             "signed-transport-final-name-changed")
+    return {"schemaVersion": 1, "target": target, "nominationSha256": digest(source[0][0]),
+            "signedPythonSha256": chosen["signedPythonSha256"],
+            "signingReceiptSha256": chosen["signingReceiptSha256"], "files": 2,
+            "qualification": "configured-capsule-DATA-projection-not-signature-or-installed-authority"}
+
+
+def configured_current_binding(args, target):
+    need(args.command == "current-runtime" and signed_python_options(args), "configured-signing-required")
+    binding = signed_runtime_inputs(target)
+    chosen = binding[0]
+    pairs = (("expected_signed_python", "signedPythonSha256"), ("expected_signing_receipt", "signingReceiptSha256"),
+             ("expected_signing_source", "signingSourceCommit"), ("expected_signing_run", "signingRunId"),
+             ("expected_signing_attempt", "signingRunAttempt"), ("expected_source", "sourceInputsSha256"),
+             ("expected_manifest", "runtimeManifestSha256"))
+    need(all(getattr(args, option, None) == chosen[key] for option, key in pairs)
+         and args.expected_supplier == SIGNED_ORIGINAL_SUPPLIERS[target]["receiptSha256"],
+         "configured-signing-source-arguments")
+    return binding
+
 
 def current_source():
     """Capture DATA, including the committed CA's one explicit projection map."""
@@ -1023,6 +1166,9 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET):
 
 def current_runtime_command(args):
     target = command_target(args)
+    configured = getattr(args, "configured_signing", False)
+    need(type(configured) is bool, "configured-signing-option")
+    configured_inputs = configured_current_binding(args, target) if configured else None
     origin = current_supplier_origin(args)
     need(origin == "fresh-public-source" or target == ARM_TARGET, "unqualified-intel-route")
     selection = source_build_selection(target)
@@ -1080,6 +1226,8 @@ def current_runtime_command(args):
             need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
         if signed_inputs is not None:
             need(read_signed_python(args, fresh_inputs[0], fresh_inputs[3])[0] == signed_inputs, "signed-python-post-changed")
+        if configured_inputs is not None:
+            need(signed_runtime_inputs(target) == configured_inputs, "configured-signing-source-post-changed")
         core = [body for name, (body, _) in captured.items() if name.startswith("src/mobile_release/")]
         result = {"schemaVersion": 1, "release": selection.release, "target": target,
                   **provenance,
@@ -1089,6 +1237,11 @@ def current_runtime_command(args):
                   "supplierInventorySha256": digest(canonical(supplier_rows)), "supplierFileCount": len(supplier),
                   "currentCoreFileCount": len(core), "currentCoreBytes": sum(map(len, core)),
                   "qualification": "current-source-description-only-not-build-or-install-authority"}
+        if configured_inputs is not None:
+            chosen, snapshot = configured_inputs
+            result.update(signedRuntimeBindingSha256=digest(snapshot[0][0]),
+                          signingSourceCommit=chosen["signingSourceCommit"], signingRunId=chosen["signingRunId"],
+                          signingRunAttempt=chosen["signingRunAttempt"], signingArtifactId=chosen["signingArtifactId"])
         if final:
             need(manifest_digest == args.expected_manifest, "current-reviewed-manifest-mismatch")
             current_output_absent(args.output, parents[args.output])
@@ -1100,6 +1253,8 @@ def current_runtime_command(args):
             need(fresh_supplier(args) == fresh_inputs
                  and read_signed_python(args, fresh_inputs[0], fresh_inputs[3])[0] == signed_inputs,
                  "signed-python-publication-post-changed")
+        if configured_inputs is not None:
+            need(signed_runtime_inputs(target) == configured_inputs, "configured-signing-publication-post-changed")
         return result
 
 
@@ -3455,10 +3610,16 @@ def main(argv=None):
             command.add_argument("--expected-" + option)
         command.add_argument("--work", required=True, type=Path)
         if name == "current-runtime":
+            command.add_argument("--configured-signing", action="store_true",
+                                 help="Require the fixed SOURCE capsule/S/M nomination, never a CLI replacement")
             command.add_argument("--expected-source", required=True)
             command.add_argument("--expected-manifest", required=True)
             command.add_argument("--output", required=True, type=Path)
     commands.add_parser("packaging-selection", help="Fixed SOURCE signing/release DATA; refuses unconfigured ordinary distribution")
+    commands.add_parser("runtime-signing-selection", help="Fixed SOURCE signed-runtime nomination; refuses unconfigured target")
+    capsule = commands.add_parser("project-signed-python", help="Project only the two SOURCE-pinned capsule files as DATA")
+    capsule.add_argument("--transport-root", required=True, type=Path)
+    capsule.add_argument("--output", required=True, type=Path)
     app = commands.add_parser("app")
     app.add_argument("--package-role", required=True, choices=PACKAGE_ROLES)
     app.add_argument("--binary", required=True, type=Path)
@@ -3561,7 +3722,8 @@ def main(argv=None):
         result, status = installer_log_diagnostic(args)
         print(canonical(result).decode("utf-8"))
         return status
-    action = {"packaging-selection": packaging_selection_command, "describe-runtime": runtime_command, "runtime": runtime_command,
+    action = {"packaging-selection": packaging_selection_command, "runtime-signing-selection": runtime_signing_selection_command,
+              "project-signed-python": project_signed_python_command, "describe-runtime": runtime_command, "runtime": runtime_command,
               "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command, "preview": preview_command,
               "input": input_command, "android-support": android_support_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,

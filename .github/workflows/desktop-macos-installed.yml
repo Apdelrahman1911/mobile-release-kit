@@ -24,8 +24,7 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: ordinary-image
-      # Exact current-payload ad-hoc DATA pins, not shipping-signature authority.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: d1c97b3efae1a5260f5269764686b43c4f054cb59b45615984e65ab1b85747e8
+      # Final signed M comes only from the fixed configured SOURCE nomination.
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108
       # Independently accepted ARM supplier six pins; signing requires a new final M.
       MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
@@ -53,7 +52,6 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
           # Fresh supplier pins never replace the separate current-core source binding.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == d1c97b3efae1a5260f5269764686b43c4f054cb59b45615984e65ab1b85747e8 ]] || exit 1
           [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108 ]] || exit 1
           [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
           [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
@@ -82,6 +80,65 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
+      - name: Select the fixed configured signed runtime before any payload download
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
+          selection=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py runtime-signing-selection --target aarch64-apple-darwin)
+          [[ ${#selection} -le 4096 ]] || exit 1
+          "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_SIGNING_SELECTION'
+          import json, os, re, stat, sys
+          value = json.loads(sys.argv[1])
+          fields = {
+              "runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
+              "signedPythonSha256": "MRK_MACOS_SIGNED_PYTHON_SHA256",
+              "signingReceiptSha256": "MRK_MACOS_SIGNING_RECEIPT_SHA256",
+              "signingSourceCommit": "MRK_MACOS_SIGNING_SOURCE_COMMIT",
+              "signingRunId": "MRK_MACOS_SIGNING_RUN_ID",
+              "signingRunAttempt": "MRK_MACOS_SIGNING_RUN_ATTEMPT",
+              "signingArtifactId": "MRK_MACOS_SIGNING_ARTIFACT_ID",
+              "producerProfileSha256": "MRK_MACOS_SIGNING_PRODUCER_PROFILE_SHA256",
+              "serviceProfileSha256": "MRK_MACOS_SIGNING_SERVICE_PROFILE_SHA256",
+              "nominationSha256": "MRK_MACOS_SIGNING_BINDING_SHA256",
+          }
+          fixed = {"schemaVersion", "kind", "target", "state", "sourceInputsSha256", "nativeAuthority"}
+          if (type(value) is not dict or set(value) != set(fields) | fixed
+                  or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+                  or value["kind"] != "configured-signed-runtime-selection-data"
+                  or value["state"] != "configured" or value["target"] != "aarch64-apple-darwin"
+                  or value["nativeAuthority"] is not False
+                  or value["sourceInputsSha256"] != os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]):
+              raise ValueError("fixed configured runtime selection required")
+          for key in fields:
+              item = value[key]
+              if key in ("signingRunId", "signingRunAttempt", "signingArtifactId"):
+                  valid = type(item) is str and re.fullmatch(r"[1-9][0-9]{0,15}", item) and int(item) <= 9007199254740991
+              else:
+                  width = 40 if key == "signingSourceCommit" else 64
+                  valid = type(item) is str and re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", item) and item != "0" * width
+              if not valid: raise ValueError("fixed public signing field refused")
+          body = "".join(name + "=" + value[key] + "\n" for key, name in fields.items()).encode("ascii")
+          if len(body) > 4096: raise ValueError("signing selection output bound")
+          fd = os.open(os.environ["GITHUB_ENV"], os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              info = os.fstat(fd)
+              if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                  raise ValueError("original workflow environment file refused")
+              view = memoryview(body)
+              while view:
+                  count = os.write(fd, view)
+                  if count <= 0: raise OSError("signing selection write refused")
+                  view = view[count:]
+              os.fsync(fd)
+          finally:
+              os.close(fd)
+          PY_SIGNING_SELECTION
       - name: Select fixed frontend compiler
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -126,6 +183,17 @@ jobs:
                    "protocolSha256": os.environ["MRK_BUNDLED_PROTOCOL_SHA256"],
                    "githubPreflightToolingSha": os.environ["MRK_GITHUB_PREFLIGHT_TOOLING_SHA"],
                    "githubReleaseToolingSha": os.environ["MRK_GITHUB_RELEASE_TOOLING_SHA"],
+                   "signedPythonDerivation": {
+                       "nominationSha256": os.environ["MRK_MACOS_SIGNING_BINDING_SHA256"],
+                       "signingSourceCommit": os.environ["MRK_MACOS_SIGNING_SOURCE_COMMIT"],
+                       "runId": os.environ["MRK_MACOS_SIGNING_RUN_ID"],
+                       "runAttempt": os.environ["MRK_MACOS_SIGNING_RUN_ATTEMPT"],
+                       "artifactId": os.environ["MRK_MACOS_SIGNING_ARTIFACT_ID"],
+                       "signedPythonSha256": os.environ["MRK_MACOS_SIGNED_PYTHON_SHA256"],
+                       "signingReceiptSha256": os.environ["MRK_MACOS_SIGNING_RECEIPT_SHA256"],
+                       "producerProfileSha256": os.environ["MRK_MACOS_SIGNING_PRODUCER_PROFILE_SHA256"],
+                       "serviceProfileSha256": os.environ["MRK_MACOS_SIGNING_SERVICE_PROFILE_SHA256"],
+                   },
                    "freshPythonSupplier": {
                        "origin": os.environ["MRK_MACOS_RUNTIME_SUPPLIER"],
                        "repository": "Apdelrahman1911/mobile-release-kit",
@@ -365,6 +433,7 @@ jobs:
           umask 077
           [[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
           [[ ! -e "$MRK_MACOS_WORK/fresh-python-transport" && ! -L "$MRK_MACOS_WORK/fresh-python-transport" ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1
       - name: Download the independently accepted fresh Python transport
         timeout-minutes: 3
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -393,6 +462,30 @@ jobs:
             --python-output "$MRK_MACOS_WORK/fresh-python-supplier" \
             --receipt-root "$MRK_MACOS_WORK/fresh-python-receipt" \
             > "$MRK_MACOS_WORK/fresh-python-transport-result.json"
+      - name: Download only the configured signed Python capsule
+        timeout-minutes: 3
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ env.MRK_MACOS_SIGNING_ARTIFACT_ID }}
+          run-id: ${{ env.MRK_MACOS_SIGNING_RUN_ID }}
+          repository: Apdelrahman1911/mobile-release-kit
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/signed-python-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Project the configured capsule as DATA without executing it
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py project-signed-python \
+            --target aarch64-apple-darwin \
+            --transport-root "$MRK_MACOS_WORK/signed-python-transport" \
+            --output "$MRK_MACOS_WORK/signed-python-capsule" > "$MRK_MACOS_WORK/signed-python-transport-result.json"
       - name: Prepare the current payload from the independently accepted fresh Python supplier
         timeout-minutes: 3
         shell: bash
@@ -406,6 +499,14 @@ jobs:
             --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
             --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
             --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
+            --configured-signing \
+            --signed-python "$MRK_MACOS_WORK/signed-python-capsule/python3" \
+            --signing-receipt "$MRK_MACOS_WORK/signed-python-capsule/python-signed-receipt.json" \
+            --expected-signed-python "$MRK_MACOS_SIGNED_PYTHON_SHA256" \
+            --expected-signing-receipt "$MRK_MACOS_SIGNING_RECEIPT_SHA256" \
+            --expected-signing-source "$MRK_MACOS_SIGNING_SOURCE_COMMIT" \
+            --expected-signing-run "$MRK_MACOS_SIGNING_RUN_ID" \
+            --expected-signing-attempt "$MRK_MACOS_SIGNING_RUN_ATTEMPT" \
             --work "$MRK_MACOS_WORK/current-runtime-preparation" \
             --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \

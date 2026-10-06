@@ -207,6 +207,38 @@ def signed_prepared_fixture(target="aarch64-apple-darwin"):
                 raise AssertionError("fixed supplier nomination was not restored")
 
 
+def configured_binding(derived, source="b" * 64, manifest="c" * 64):
+    """Explicitly synthetic public nomination; no credential or future real pin."""
+    row = {"state": "configured", "signingSourceCommit": derived.options["expected_signing_source"],
+           "signingRunId": derived.options["expected_signing_run"],
+           "signingRunAttempt": derived.options["expected_signing_attempt"], "signingArtifactId": "456",
+           "signedPythonSha256": derived.options["expected_signed_python"],
+           "signingReceiptSha256": derived.options["expected_signing_receipt"],
+           "sourceInputsSha256": source, "runtimeManifestSha256": manifest,
+           "producerProfileSha256": TOOL.digest(derived.producer), "serviceProfileSha256": TOOL.digest(derived.service)}
+    return {"schemaVersion": 1, "targets": {target: row if target == derived.target else {"state": "unconfigured"}
+                                            for target in TOOL.MAC_TARGETS}}
+
+
+def configure_fixture(fixture, source="b" * 64, manifest="c" * 64):
+    value = configured_binding(fixture.derived, source, manifest)
+    path = fixture.checkout / "desktop" / TOOL.SIGNED_RUNTIME_BINDING
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_bytes(TOOL.canonical(value) + b"\n")
+    path.chmod(0o644)
+    return path, value
+
+
+def capsule_fixture(fixture):
+    root = fixture.root / "capsule-transport"
+    root.mkdir(mode=0o700)
+    for name, body in (("python3", fixture.derived.signed), ("python-signed-receipt.json", fixture.derived.body)):
+        path = root / name
+        path.write_bytes(body)
+        path.chmod(0o644)
+    return SimpleNamespace(target=fixture.target, transport_root=root, output=fixture.root / "capsule-projection")
+
+
 class MacFreshPythonConsumerData(unittest.TestCase):
     def test_explicit_profiles_cli_and_options_never_fall_back(self):
         argv = ["--source", "/source", "--runtime-root", "/runtime", "--target", "aarch64-apple-darwin"]
@@ -336,6 +368,65 @@ class MacFreshPythonConsumerData(unittest.TestCase):
         self.assertLess(method.index("read_signed_python("), method.index("preparer.prepare_current("))
         self.assertLess(method.index("preparer.prepare_current("), method.index("manifest_digest = digest("))
         self.assertNotIn("codesign", method)  # No signature mutation after M or at DATA staging.
+
+        for target in TOOL.MAC_TARGETS:
+            fixture = signed_fixture_data(target)
+            doc = configured_binding(fixture)
+            check = lambda value: TOOL.signed_runtime_binding_data(TOOL.canonical(value),
+                fixture.producer, fixture.service, target=target)
+            row = check(doc)
+            self.assertEqual(row, doc["targets"][target])
+            self.assertNotEqual(row["signingSourceCommit"], row["sourceInputsSha256"])
+            self.assertNotIn("consumingSourceCommit", row)  # No commit/profile digest cycle.
+            bad = [dict(doc, schemaVersion=True), dict(doc, extra=True), dict(doc, targets={})]
+            for field, changed in (("state", "unconfigured"), ("signingSourceCommit", "0"*40),
+                                   ("signingRunId", "01"), ("signingRunAttempt", True),
+                                   ("signingArtifactId", "9007199254740992"), ("signedPythonSha256", "0"*64),
+                                   ("runtimeManifestSha256", False), ("producerProfileSha256", "f"*64),
+                                   ("serviceProfileSha256", "f"*64)):
+                value = deepcopy(doc); value["targets"][target][field] = changed; bad.append(value)
+            for field in row:
+                value = deepcopy(doc); del value["targets"][target][field]; bad.append(value)
+            value = deepcopy(doc); value["targets"][target] = {"state": "unconfigured"}; bad.append(value)
+            for value in bad:
+                with self.subTest(bindingTarget=target, value=value), self.assertRaises(TOOL.Refused): check(value)
+            raw = TOOL.canonical(doc)
+            for body in (raw[:-1]+b',"schemaVersion":1}', raw+b" "*TOOL.SIGNED_RUNTIME_BINDING_LIMIT):
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.signed_runtime_binding_data(body, fixture.producer, fixture.service, target=target)
+            with self.assertRaises(TOOL.Refused):
+                TOOL.signed_runtime_binding_data(raw, b"schema=1\nstate=unconfigured\n", fixture.service, target=target)
+
+            options = args(root, command="current-runtime", target=target, configured_signing=True,
+                           signed_python=root/"signed", signing_receipt=root/"receipt", **fixture.options)
+            with (patch.object(TOOL, "signed_runtime_inputs", return_value=(row, ())) as reader,
+                  patch.object(TOOL, "SIGNED_ORIGINAL_SUPPLIERS", {target: fixture.nomination})):
+                self.assertEqual(TOOL.configured_current_binding(options, target), (row, ()))
+                for name in ("expected_signed_python", "expected_signing_receipt", "expected_signing_source",
+                             "expected_signing_run", "expected_signing_attempt", "expected_source", "expected_manifest"):
+                    changed = SimpleNamespace(**vars(options)); setattr(changed, name, "wrong")
+                    with self.subTest(configuredArgument=name), self.assertRaises(TOOL.Refused):
+                        TOOL.configured_current_binding(changed, target)
+                with self.assertRaisesRegex(TOOL.Refused, "configured-signing-required"):
+                    TOOL.configured_current_binding(args(root, configured_signing=True), target)
+            self.assertIsNot(TOOL.signed_runtime_inputs, reader)
+        with (patch.object(TOOL.os, "getuid", return_value=501), patch.object(TOOL.os, "geteuid", return_value=501),
+              patch.object(TOOL, "runtime_signing_selection_command", return_value={}) as select,
+              patch.object(TOOL, "project_signed_python_command", return_value={}) as project,
+              patch.object(TOOL, "current_runtime_command", return_value={}) as current,
+              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO())):
+            TOOL.main(["runtime-signing-selection", "--target", TOOL.INTEL_TARGET])
+            self.assertEqual(select.call_args.args[0].target, TOOL.INTEL_TARGET)
+            TOOL.main(["project-signed-python", "--transport-root", "/capsule", "--output", "/projected"])
+            self.assertEqual(project.call_args.args[0].transport_root, Path("/capsule"))
+            TOOL.main(["current-runtime", "--python-root", "/fresh", "--supplier-receipt", "/receipt",
+                "--expected-supplier", "a"*64, "--work", "/work", "--expected-source", "b"*64,
+                "--expected-manifest", "c"*64, "--output", "/output", "--configured-signing"])
+            self.assertIs(current.call_args.args[0].configured_signing, True)
+            with self.assertRaises(SystemExit):
+                TOOL.main(["describe-current-runtime", "--python-root", "/fresh", "--work", "/work", "--configured-signing"])
+        self.assertLess(method.index("configured_current_binding("), method.index("parents = current_paths("))
+        self.assertIn('"configured-signing-publication-post-changed"', method)
 
 
     def test_receipt_profile_requires_anchor_exact_schema_and_native_references(self):
@@ -511,9 +602,27 @@ class MacFreshPythonConsumerData(unittest.TestCase):
                 self.assertEqual(signed["signedPythonSha256"], TOOL.digest(fixture.derived.signed))
                 self.assertEqual(signed["signingReceiptSha256"], TOOL.digest(fixture.derived.body))
                 self.assertEqual(signed["qualification"], "current-source-description-only-not-build-or-install-authority")
+                binding_path, binding_value = configure_fixture(fixture, signed["sourceInputsSha256"], signed["successorManifestSha256"])
+                original_binding = binding_path.read_bytes()
+                selection = TOOL.runtime_signing_selection_command(SimpleNamespace(target=target))
+                self.assertIs(selection["nativeAuthority"], False)
+                self.assertEqual(selection["nominationSha256"], TOOL.digest(original_binding))
+                self.assertEqual(TOOL.current_source()[2], signed["sourceInputsSha256"])
+                projection = capsule_fixture(fixture)
+                transport_before = {name: (p.read_bytes(), TOOL.signature(p.stat()))
+                                    for name in ("python3", "python-signed-receipt.json")
+                                    for p in (projection.transport_root/name,)}
+                projected = TOOL.project_signed_python_command(projection)
+                self.assertEqual(projected["files"], 2)
+                self.assertEqual(TOOL.tree(projection.output, current_root_mode=0o555),
+                    {"python3": (fixture.derived.signed, 0o555), "python-signed-receipt.json": (fixture.derived.body, 0o444)})
+                self.assertEqual({name: (p.read_bytes(), TOOL.signature(p.stat()))
+                                  for name in transport_before for p in (projection.transport_root/name,)}, transport_before)
+                projected_options = dict(fixture.signing_options, signed_python=projection.output/"python3",
+                                         signing_receipt=projection.output/"python-signed-receipt.json")
                 final_options = args(fixture.root, command="current-runtime", target=target,
                     work=fixture.root/"signed-final", expected_source=signed["sourceInputsSha256"],
-                    expected_manifest=signed["successorManifestSha256"], **fixture.signing_options)
+                    expected_manifest=signed["successorManifestSha256"], configured_signing=True, **projected_options)
                 final = TOOL.current_runtime_command(final_options)
                 result = TOOL.tree(final_options.output, current_root_mode=0o555)
                 self.assertEqual(result[TOOL.SIGNED_PYTHON_PATH], (fixture.derived.signed, 0o555))
@@ -524,11 +633,13 @@ class MacFreshPythonConsumerData(unittest.TestCase):
                 self.assertEqual(rows[TOOL.SIGNED_PYTHON_PATH]["sha256"], TOOL.digest(fixture.derived.signed))
                 self.assertEqual(final["successorManifestSha256"], TOOL.digest(result["manifest.json"][0]))
                 self.assertEqual(final["qualification"], "current-source-staged-no-native-execution")
-                self.assertEqual(TOOL.read_signed_python(final_options, fixture.derived.original, fixture.derived.original_receipt),
+                self.assertEqual(TOOL.read_signed_python(options, fixture.derived.original, fixture.derived.original_receipt),
                                  (before, capsule))
+                self.assertEqual(final["signedRuntimeBindingSha256"], TOOL.digest(original_binding))
+                self.assertEqual(final["signingSourceCommit"], "a"*40)
+                self.assertEqual(binding_path.read_bytes(), original_binding)
                 self.assertEqual(TOOL.tree(fixture.supplier, current_root_mode=0o555), fixture.derived.original)
                 self.assertEqual(fixture.receipt_path.read_bytes(), fixture.derived.original_receipt)
-
 
     @unittest.skipIf(not hasattr(os,"geteuid") or os.geteuid() == 0, "requires reviewed nonroot POSIX DATA owner")
     def test_overlap_post_mutations_and_publication_failure_preserve_partial_outputs(self):
@@ -628,3 +739,104 @@ class MacFreshPythonConsumerData(unittest.TestCase):
                     self.assertEqual((options.output/TOOL.SIGNED_PYTHON_PATH).read_bytes(), fixture.derived.signed)
                 self.assertEqual(fixture.receipt_path.read_bytes(), fixture.derived.original_receipt)
 
+        for cause in ("unconfigured", "extra", "missing", "directory", "symlink", "hardlink", "owner", "mode", "hash", "overlap", "occupied"):
+            with self.subTest(capsuleRefusal=cause), signed_prepared_fixture() as fixture:
+                path, doc = configure_fixture(fixture)
+                projection = capsule_fixture(fixture)
+                if cause == "unconfigured":
+                    doc["targets"][fixture.target] = {"state": "unconfigured"}; path.write_bytes(TOOL.canonical(doc))
+                elif cause == "extra": (projection.transport_root/"unexpected").write_bytes(b"extra")
+                elif cause == "missing": (projection.transport_root/"python3").unlink()
+                elif cause == "directory":
+                    (projection.transport_root/"python3").unlink(); (projection.transport_root/"python3").mkdir()
+                elif cause == "symlink":
+                    (projection.transport_root/"python3").unlink(); (projection.transport_root/"python3").symlink_to(fixture.signing_options["signed_python"])
+                elif cause == "hardlink": os.link(projection.transport_root/"python3", fixture.root/"extra-hardlink")
+                elif cause == "mode": (projection.transport_root/"python3").chmod(0o755)
+                elif cause == "hash": (projection.transport_root/"python3").write_bytes(b"changed DATA")
+                elif cause == "overlap": projection.output = projection.transport_root/"inside"
+                elif cause == "occupied": projection.output.mkdir(mode=0o700)
+                original_reader = TOOL.read_at
+                def reader(fd, name, limit, **kwargs):
+                    body, info = original_reader(fd, name, limit, **kwargs)
+                    if cause == "owner" and name == "python3":
+                        # Real held/EOF/POST read, then an explicitly foreign
+                        # owner observation; no chown or root privilege.
+                        info = SimpleNamespace(st_uid=info.st_uid+1, st_gid=info.st_gid, st_mode=info.st_mode)
+                    return body, info
+                with (patch.object(TOOL, "read_at", side_effect=reader),
+                      patch.object(TOOL, "write_tree", side_effect=AssertionError("refused capsule wrote output")) as writer):
+                    with self.assertRaises((TOOL.Refused, OSError)):
+                        TOOL.project_signed_python_command(projection)
+                    writer.assert_not_called()
+                self.assertIs(TOOL.read_at, original_reader)
+                self.assertEqual(projection.output.exists(), cause == "occupied")
+
+        for cause in ("transport-post", "source-inode-post", "write", "readback", "close"):
+            with self.subTest(capsulePost=cause), signed_prepared_fixture() as fixture:
+                path, _ = configure_fixture(fixture)
+                projection = capsule_fixture(fixture)
+                original_writer, original_close, original_tree = TOOL.write_tree, TOOL.close_once, TOOL.tree
+                root_identity = (projection.transport_root.stat().st_dev, projection.transport_root.stat().st_ino)
+                failed_close = []
+                def writer(output, files, **kwargs):
+                    if cause == "write":
+                        output.mkdir(mode=0o700); (output/"partial").write_bytes(b"retained")
+                        raise OSError("inert capsule write failure")
+                    original_writer(output, files, **kwargs)
+                    if cause == "transport-post":
+                        replacement = projection.transport_root/"replacement"
+                        replacement.write_bytes(fixture.derived.signed); replacement.chmod(0o644)
+                        os.replace(replacement, projection.transport_root/"python3")
+                    elif cause == "source-inode-post":
+                        replacement = path.with_name("replacement")
+                        replacement.write_bytes(path.read_bytes()); replacement.chmod(0o644); os.replace(replacement, path)
+                def closer(fd):
+                    info = os.fstat(fd)
+                    original_close(fd)
+                    if cause == "close" and (info.st_dev, info.st_ino) == root_identity:
+                        failed_close.append(True)
+                        raise TOOL.Refused("original-close-unknown")
+                def readback(path, **kwargs):
+                    result = original_tree(path, **kwargs)
+                    if cause == "readback" and path == projection.output:
+                        result = dict(result); result.pop("python3")
+                    return result
+                with (patch.object(TOOL, "write_tree", side_effect=writer), patch.object(TOOL, "close_once", side_effect=closer),
+                      patch.object(TOOL, "tree", side_effect=readback)):
+                    with self.assertRaises((TOOL.Refused, OSError)):
+                        TOOL.project_signed_python_command(projection)
+                self.assertIs(TOOL.write_tree, original_writer)
+                self.assertIs(TOOL.close_once, original_close)
+                self.assertIs(TOOL.tree, original_tree)
+                self.assertTrue(projection.output.exists())  # Refused partial DATA is not silently retired/adopted.
+                self.assertEqual(len(failed_close), 1 if cause == "close" else 0)
+
+        for cause in ("before", "prepare-post", "publication-post"):
+            with self.subTest(configuredPost=cause), signed_prepared_fixture() as fixture:
+                description = TOOL.current_runtime_command(args(fixture.root, work=fixture.root/"describe", **fixture.signing_options))
+                path, doc = configure_fixture(fixture, description["sourceInputsSha256"], description["successorManifestSha256"])
+                options = args(fixture.root, command="current-runtime", configured_signing=True,
+                    work=fixture.root/"configured-work", expected_source=description["sourceInputsSha256"],
+                    expected_manifest=description["successorManifestSha256"], **fixture.signing_options)
+                preparer = TOOL.current_preparer(TOOL.current_source()[0])
+                original_writer = TOOL.write_tree
+                def mutate():
+                    doc["targets"][fixture.target]["signingArtifactId"] = "457"
+                    path.write_bytes(TOOL.canonical(doc))
+                def prepare(source, runtime, target):
+                    result = preparer.prepare_current(source, runtime, target)
+                    if cause == "prepare-post": mutate()
+                    return result
+                def writer(output, files, **kwargs):
+                    result = original_writer(output, files, **kwargs)
+                    if cause == "publication-post" and output == options.output: mutate()
+                    return result
+                if cause == "before":
+                    doc["targets"][fixture.target]["runtimeManifestSha256"] = "f"*64
+                    path.write_bytes(TOOL.canonical(doc))
+                with (patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=prepare)),
+                      patch.object(TOOL, "write_tree", side_effect=writer)):
+                    with self.assertRaises(TOOL.Refused): TOOL.current_runtime_command(options)
+                self.assertEqual(options.work.exists(), cause != "before")
+                self.assertEqual(options.output.exists(), cause == "publication-post")

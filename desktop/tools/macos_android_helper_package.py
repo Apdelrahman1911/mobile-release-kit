@@ -110,6 +110,49 @@ def python_code_flags(body, machine, phase, matcher):
     return [flags[key] for key in sorted(flags)]
 
 
+def python_signature_diagnostic(original, body, machine, matcher):
+    """Failure-only original-byte DATA, never signature or native authority."""
+    need(type(original) is bytes and type(body) is bytes
+         and 0 < len(original) <= MAX_HELPER and 0 < len(body) <= MAX_HELPER
+         and type(machine) is str and machine in ("arm64", "x86_64"), "python-signature-diagnostic-bound")
+    records = matcher.macho_records(body, machine)
+    commands = [row for row in records if row["command"] == 0x1D]
+    need(len(commands) == 1 and commands[0]["size"] == 16, "python-signature-diagnostic-command")
+    offset, size = struct.unpack_from("<II", body, commands[0]["offset"] + 8)
+    need(offset >= 32 + struct.unpack_from("<I", body, 20)[0] and 12 <= size <= 1024 * 1024
+         and offset + size == len(body), "python-signature-diagnostic-range")
+    magic, length, count = struct.unpack_from(">III", body, offset)
+    tail, tail_zero = None, None
+    if 12 <= length <= size:
+        start, end = offset + length, offset + size
+        remaining = body[start:end]
+        nonzero, first, last = 0, None, None
+        for position, value in enumerate(remaining):
+            if value:
+                nonzero += 1
+                if first is None:
+                    first = position
+                last = position
+        # Positions are relative to this tail, not raw bytes or process paths.
+        tail_zero = nonzero == 0
+        tail = {"bytes": len(remaining), "nonzeroBytes": nonzero, "firstNonzeroOffset": first,
+                "lastNonzeroOffset": last, "sha256": digest(remaining),
+                "matchesOriginalInput": original[start:end] == remaining if end <= len(original) else None}
+    result = {"schemaVersion": 1, "available": True, "authority": "original-byte-data-only",
+        "input": {"bytes": len(original), "sha256": digest(original)},
+        "output": {"bytes": len(body), "sha256": digest(body)},
+        "signature": {"offset": offset, "allocatedBytes": size, "magic": magic, "declaredBytes": length, "count": count},
+        "predicates": {"magicKnown": magic == 0xFADE0CC0, "countAtLeastOne": count >= 1,
+            "countAtMost32": count <= 32, "indexFitsDeclared": 12 + count * 8 <= length,
+            "declaredFitsAllocation": length <= size, "allocationTailZero": tail_zero},
+        "tail": tail}
+    # Every value is constructed from exact bytes, uint32 unpacking, len(),
+    # comparison booleans, or explicit nulls; no decoded/arbitrary fields.
+    need(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")) <= 1536,
+         "python-signature-diagnostic-output-bound")
+    return result
+
+
 class Refused(ValueError):
     pass
 
@@ -794,7 +837,17 @@ class Operation:
         output = self.original(slot, "python3", "python-signed-original", MAX_HELPER, (0o755,))
         signed = self.read(output)
         matcher.macho_content_valid(python, signed, self.arch, signing=True)
-        self.python_flags = python_code_flags(signed, self.arch, self.phase, matcher)
+        try:
+            self.python_flags = python_code_flags(signed, self.arch, self.phase, matcher)
+        except Refused as error:
+            if type(error) is Refused and error.args == ("python-signature-superblob",):
+                try:
+                    self.receipt["pythonSignatureDiagnostic"] = {
+                        "schemaVersion": 1, "available": False, "authority": "original-byte-data-only"}
+                    self.receipt["pythonSignatureDiagnostic"] = python_signature_diagnostic(python, signed, self.arch, matcher)
+                except BaseException:
+                    pass  # Optional observation must not replace the identical primary refusal.
+            raise
         self.close(old)
         need(old["closed"] and not self.errors, "python-input-slot-close-unknown")
         self.python_files["signing-slot/python3"] = (output, signed)

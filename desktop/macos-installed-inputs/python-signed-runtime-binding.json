@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "aarch64-apple-darwin": {"state": "unconfigured"},
+    "x86_64-apple-darwin": {"state": "unconfigured"}
+  }
+}

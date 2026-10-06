@@ -112,7 +112,7 @@ jobs:
           set -euo pipefail
           umask 077
           ulimit -c 0
-          ulimit -n 4096
+          ulimit -n 1024
           [[ -f "$MRK_MACOS_WORK/python-supplier-transport/supplier.tar" && ! -L "$MRK_MACOS_WORK/python-supplier-transport/supplier.tar" ]] || exit 1
           [[ -f "$MRK_MACOS_WORK/python-supplier-transport/supplier-receipt.json" && ! -L "$MRK_MACOS_WORK/python-supplier-transport/supplier-receipt.json" ]] || exit 1
           /bin/chmod 400 "$MRK_MACOS_WORK/python-supplier-transport/supplier.tar" "$MRK_MACOS_WORK/python-supplier-transport/supplier-receipt.json"

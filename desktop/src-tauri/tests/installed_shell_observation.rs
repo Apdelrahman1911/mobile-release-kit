@@ -4,10 +4,10 @@
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
     not(feature = "macos-android-registration-helper"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")),
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation",
             not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))))]
-compile_error!("installed-shell observation requires debug test + desktop-shell + custom-protocol on Linux x86_64 GNU, observed Mac ARM64 or observed Windows x86_64 MSVC, without development-runtime, publisher or installer");
+compile_error!("installed-shell observation requires debug test + desktop-shell + custom-protocol on Linux x86_64 GNU, observed Mac ARM64/Intel LP64 or observed Windows x86_64 MSVC, without development-runtime, publisher or installer");
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;
@@ -17,6 +17,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/macos_install_paths.rs"] mod macos_install_paths;
 #[path = "../src/macos_install_record.rs"] mod macos_install_record;
 #[path = "../src/macos_install_maintenance.rs"] mod macos_install_maintenance;
+#[path = "../src/macos_install_transaction.rs"] mod macos_install_transaction;
+#[path = "../src/macos_install_producer.rs"] mod macos_install_producer;
 #[path = "../src/release_version_protocol.rs"] mod release_version_protocol;
 #[path = "../src/candidate_evidence_protocol.rs"] mod candidate_evidence_protocol;
 #[path = "../src/lifecycle_evidence_protocol.rs"] mod lifecycle_evidence_protocol;
@@ -29,9 +31,9 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/android_tool_sources.rs"] mod android_tool_sources;
 #[path = "../src/android_registration_protocol.rs"] mod android_registration_protocol;
 #[path = "../src/android_registration_app_protocol.rs"] mod android_registration_app_protocol;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "../src/android_shared_lease_macos.rs"] mod android_shared_lease_macos;
-#[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
 #[path = "../src/android_catalog_query_client.rs"] mod android_catalog_query_client;
 #[path = "../src/project_recovery_protocol.rs"] mod project_recovery_protocol;
 #[path = "../src/project_recovery_owner.rs"] mod project_recovery_owner;
@@ -39,11 +41,11 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/android_toolchain_catalog.rs"] mod android_toolchain_catalog;
 #[path = "../src/android_toolchain_macos_policy.rs"] mod android_toolchain_macos_policy;
 #[path = "../src/android_native_macos_profile.rs"] mod android_native_macos_profile;
-#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(test, all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "../src/android_supplier_macos_source.rs"] mod android_supplier_macos_source;
-#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(test, all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "../src/android_sdk_metadata_macos.rs"] mod android_sdk_metadata_macos;
-#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(test, all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "../src/android_supplier_macos.rs"] mod android_supplier_macos;
 #[path = "../src/ios_archive_protocol.rs"] mod ios_archive_protocol;
 #[path = "../src/ios_archive_owner.rs"] mod ios_archive_owner;
@@ -52,7 +54,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/runtime.rs"] mod runtime;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[path = "../src/installed_runtime.rs"] mod installed_runtime;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "../src/installed_runtime_macos.rs"] mod installed_runtime;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 #[path = "../src/installed_runtime_windows.rs"] mod installed_runtime_windows;
@@ -73,16 +75,16 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/asset_session.rs"] mod asset_session;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[path = "../src/vault_keyring_linux.rs"] mod vault_keyring_linux;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "../src/vault_keyring_macos.rs"] mod vault_keyring_macos;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "macos", target_arch = "aarch64")))]
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "../src/vault_format.rs"] mod vault_format;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "macos", target_arch = "aarch64")))]
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "../src/vault_crypto.rs"] mod vault_crypto;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "macos", target_arch = "aarch64")))]
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "../src/vault_store.rs"] mod vault_store;
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
 #[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;

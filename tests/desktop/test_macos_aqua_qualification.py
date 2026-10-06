@@ -7053,6 +7053,9 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Bind the complete reviewed first-party checkout before compilation",
         }
         legacy = {
+            "Select the fixed configured signed runtime before any payload download",
+            "Download only the configured signed Python capsule",
+            "Project the configured capsule as DATA without executing it",
             "Select fixed frontend compiler",
             "Record exact source and actual tool bindings only after route admission",
             "Check current owner pins before native preparation",
@@ -11708,7 +11711,7 @@ class LocalEditsAquaDataTests(unittest.TestCase):
         self.assertNotIn("local-edits3", matrix)
         self.assertNotIn("workflow_dispatch:", workflow.split("permissions:", 1)[0])
         self.assertIn('"local-edits3": ("three-local-edit-Aqua-engineering-cases", ["local-metadata-text", "local-release-version", "local-github-apply"])', workflow)
-        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')"), 22)
+        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')"), 25)
         runner = workflow.split("      - name: Three serial local-edit Aqua journeys", 1)[1].split("      - name:", 1)[0]
         for required in ("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'local-edits3'", "timeout-minutes: 9", "set -o noclobber", "umask 077",
                          "RUNNER_ENVIRONMENT: ${{ runner.environment }}", "git -c core.fsmonitor=false diff --exit-code HEAD",
@@ -11718,7 +11721,6 @@ class LocalEditsAquaDataTests(unittest.TestCase):
             self.assertIn("${{ steps.work.outputs.root }}/aqua-local-edits3-" + suffix if suffix != "status"
                           else "${{ steps.work.outputs.root }}/aqua-local-edits3.status", workflow)
         accepted_data_pins = (
-            ("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "d1c97b3efae1a5260f5269764686b43c4f054cb59b45615984e65ab1b85747e8", False),
             ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108", False),
             ("MRK_MACOS_PYTHON_SUPPLIER_SHA256", "2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d", True),
             ("MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256", "ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695", True),
@@ -11732,6 +11734,14 @@ class LocalEditsAquaDataTests(unittest.TestCase):
             literal = "'" + value + "'" if quoted else value
             self.assertEqual(workflow.count("      " + variable + ": " + literal + "\n"), 1)
             self.assertEqual(admission.count('"$' + variable + '" == ' + value), 1)
+        selection = workflow.split("      - name: Select the fixed configured signed runtime before any payload download\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn('"runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', selection)
+        self.assertIn("desktop/tools/stage_macos_installed.py runtime-signing-selection", selection)
+        self.assertIn('value["state"] != "configured"', selection)
+        self.assertNotIn("      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256:", workflow)
+        runtime = workflow.split("      - name: Prepare the current payload from the independently accepted fresh Python supplier\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("--configured-signing", runtime)
+        self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', runtime)
         self.assertNotIn("pending-independent-current-", workflow)
         self.assertNotIn("pending-independent-supplier-", workflow)
         source = PATH.read_text()
@@ -11998,7 +12008,7 @@ class LocalChecksAquaDataTests(unittest.TestCase):
         self.assertNotIn('doctor-preflight2', matrix)
         self.assertEqual(matrix, '        scope:\n          - project-fields\n          - project-recovery-pending\n          - ios-recovery-pending\n')
         self.assertIn("timeout-minutes: ${{ matrix.scope == 'doctor-preflight2' && 150 || 75 }}", workflow)
-        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' ||"), 22)
+        self.assertEqual(workflow.count("|| env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' ||"), 25)
         step = workflow.split('      - name: Two serial doctor and saved offline Aqua journeys', 1)[1].split('      - name:', 1)[0]
         for required in ("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2'", 'timeout-minutes: 35',
                          'set -o noclobber', 'umask 077', 'RUNNER_ENVIRONMENT: ${{ runner.environment }}',

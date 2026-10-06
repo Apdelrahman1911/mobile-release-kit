@@ -232,6 +232,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     path.parent.mkdir(mode=0o700)
                 body = signed if failure != "content" else signed[:48] + b"X" + signed[49:]
                 if failure == "flags": body = self.python_image(target, 0x2)
+                if failure == "superblob":
+                    bad = bytearray(body)
+                    offset = struct.unpack_from("<I", bad, 40)[0]
+                    struct.pack_into(">I", bad, offset + 4, len(bad) - offset - 1)
+                    bad[-1] = 0xA5  # Inert nonzero allocation tail; not an observed native fact.
+                    body = bytes(bad)
                 replacement = path.with_suffix(".next")
                 replacement.write_bytes(body); replacement.chmod(0o755)
                 os.replace(replacement, path)
@@ -1111,7 +1117,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertFalse(operation.mount_entered or operation.installer_entered)
             owner.run_owned.assert_not_called()
 
-        for cause in ("owner", "sign", "slot-replaced", "content", "flags", "verify", "probe", "wrong-role",
+        for cause in ("owner", "sign", "slot-replaced", "content", "flags", "superblob", "verify", "probe", "wrong-role",
                       "late", "source-close", "source-post-close", "slot-close", "retirement-mode", "publication-close"):
             with self.subTest(pythonFailure=cause), tempfile.TemporaryDirectory() as directory:
                 fixture = self.python_fixture(Path(directory), phase="python-shipping", failure=cause)
@@ -1137,7 +1143,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse((fixture.work / "python-signed-receipt.json").exists())
                 self.assertTrue(all(row["fd"] is None for row in operation.entries))
                 self.assertTrue(all(row.get("returncode") == 0 for row in operation.calls[:-1]))
-                if cause in ("owner", "sign", "slot-replaced", "content", "flags", "slot-close"):
+                if cause in ("owner", "sign", "slot-replaced", "content", "flags", "superblob", "slot-close"):
                     self.assertEqual(len(operation.calls), 1)
                 if cause == "source-close":
                     self.assertEqual(operation.calls, [])
@@ -1145,7 +1151,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(len(operation.calls), 3)
                     self.assertTrue(operation.calls[-1]["returned"] and operation.calls[-1]["capturesSettled"])
                     self.assertTrue(operation.receipt["targetRetired"])
-                retained = cause in ("owner", "sign", "slot-replaced", "content", "flags", "source-close", "source-post-close",
+                retained = cause in ("owner", "sign", "slot-replaced", "content", "flags", "superblob", "source-close", "source-post-close",
                                      "slot-close", "retirement-mode")
                 self.assertEqual((fixture.work / operation.target_name).exists(), retained)
                 self.assertEqual((fixture.work / "python-supplier-transport/supplier.tar").read_bytes(), fixture.archive)
@@ -1155,6 +1161,58 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 if cause in ("slot-close", "retirement-mode", "publication-close"):
                     self.assertEqual(len(injected), 1)
                     self.assertTrue(operation.errors)
+                if cause == "superblob":
+                    self.assertEqual(operation.receipt["failure"],
+                        {"stage": "python-sign", "type": "Refused", "reason": "python-signature-superblob"})
+                    self.assertTrue(operation.calls[0]["returned"] and operation.calls[0]["capturesSettled"])
+                    self.assertEqual(operation.calls[0]["returncode"], 0)
+                    diagnostic = operation.receipt["pythonSignatureDiagnostic"]
+                    self.assertTrue(diagnostic["available"])
+                    self.assertEqual(diagnostic["authority"], "original-byte-data-only")
+                    self.assertEqual(diagnostic["tail"]["nonzeroBytes"], 1)
+                    self.assertFalse(diagnostic["predicates"]["allocationTailZero"])
+                    self.assertFalse(diagnostic["tail"]["matchesOriginalInput"])
+                    self.assertLessEqual(len(TOOL.canonical(diagnostic)), 1536)
+                    self.assertTrue(operation.python_mutation_pending)
+                    self.assertFalse(operation.receipt["originalClosesKnown"])
+                    self.assertIsNone(operation.python_signed)
+                else:
+                    self.assertNotIn("pythonSignatureDiagnostic", operation.receipt)
+        # Failure of the optional reducer cannot replace the original object,
+        # clear mutation custody, advance to verify, or publish a signed capsule.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self.python_fixture(Path(directory), failure="superblob")
+            operation, primary, caught = fixture.operation, module.Refused("python-signature-superblob"), []
+            prepare = operation.python_prepare
+            original_flags, original_diagnostic = module.python_code_flags, module.python_signature_diagnostic
+            def observed_prepare(modules=None):
+                try:
+                    return prepare(modules=modules)
+                except BaseException as error:
+                    caught.append(error)
+                    raise
+            try:
+                with (mock.patch.object(operation, "python_prepare", side_effect=observed_prepare),
+                      self.python_fixture_call(fixture),
+                      mock.patch.object(module, "python_code_flags", side_effect=primary),
+                      mock.patch.object(module, "python_signature_diagnostic", side_effect=ValueError("inert diagnostic refusal")) as diagnostic,
+                      self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$")):
+                    operation.execute()
+                diagnostic.assert_called_once()
+            finally:
+                self.assertIs(module.python_code_flags, original_flags)
+                self.assertIs(module.python_signature_diagnostic, original_diagnostic)
+            self.assertEqual(len(caught), 1)
+            self.assertIs(caught[0], primary)
+            self.assertEqual(operation.receipt["pythonSignatureDiagnostic"],
+                {"schemaVersion": 1, "available": False, "authority": "original-byte-data-only"})
+            self.assertEqual(operation.receipt["failure"]["reason"], "python-signature-superblob")
+            self.assertEqual(len(operation.calls), 1)
+            self.assertFalse(operation.receipt["passed"] or operation.receipt["originalClosesKnown"]
+                             or operation.receipt["targetRetired"])
+            self.assertTrue(operation.python_mutation_pending and (fixture.work / operation.target_name).is_dir())
+            self.assertTrue(all(row["fd"] is None for row in operation.entries))
+            self.assertFalse((fixture.work / "python3").exists() or (fixture.work / "python-signed-receipt.json").exists())
         # An existing primary refusal survives more than one uncertain close;
         # consumed descriptor integers are never retried or adopted.
         with tempfile.TemporaryDirectory() as directory:
@@ -1305,6 +1363,74 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 offset = struct.unpack_from("<I", body, 40)[0]
                 bad = bytearray(body); struct.pack_into(">I", bad, offset + 8, 2)
                 with self.assertRaises(module.Refused): module.python_code_flags(bytes(bad), machine, phase, matcher)
+        # The optional reducer distinguishes the actual compound terms, but
+        # none of its observations admits a signature rejected by the parser.
+        for target in (module.ARM_TARGET, module.INTEL_TARGET):
+            body, machine = self.python_image(target, 0x10002), module.build_profile(target)[0]
+            offset, size = struct.unpack_from("<II", body, 40)
+            good = module.python_signature_diagnostic(body, body, machine, matcher)
+            self.assertEqual(set(good), {"schemaVersion", "available", "authority", "input", "output", "signature", "predicates", "tail"})
+            self.assertEqual((good["schemaVersion"], good["available"], good["authority"]), (1, True, "original-byte-data-only"))
+            self.assertEqual(good["input"], {"bytes": len(body), "sha256": module.digest(body)})
+            self.assertEqual(good["output"], good["input"])
+            self.assertEqual(good["signature"], {"offset": offset, "allocatedBytes": size,
+                "magic": 0xFADE0CC0, "declaredBytes": size, "count": 1})
+            self.assertTrue(all(type(value) is int for value in good["signature"].values()))
+            self.assertEqual(good["predicates"], {"magicKnown": True, "countAtLeastOne": True,
+                "countAtMost32": True, "indexFitsDeclared": True, "declaredFitsAllocation": True, "allocationTailZero": True})
+            self.assertTrue(all(type(value) is bool for value in good["predicates"].values()))
+            self.assertEqual(good["tail"], {"bytes": 0, "nonzeroBytes": 0, "firstNonzeroOffset": None,
+                "lastNonzeroOffset": None, "sha256": module.digest(b""), "matchesOriginalInput": True})
+            for word, value, term in ((0, 0, "magicKnown"), (8, 0, "countAtLeastOne"),
+                (8, 33, "countAtMost32"), (8, 0xFFFFFFFF, "countAtMost32"),
+                (4, 19, "indexFitsDeclared"), (4, 0, "indexFitsDeclared"), (4, 0xFFFFFFFF, "declaredFitsAllocation")):
+                bad = bytearray(body); struct.pack_into(">I", bad, offset + word, value); bad = bytes(bad)
+                with self.subTest(target=target, word=word, value=value):
+                    with self.assertRaisesRegex(module.Refused, "^python-signature-superblob$"):
+                        module.python_code_flags(bad, machine, "python-engineering", matcher)
+                    row = module.python_signature_diagnostic(body, bad, machine, matcher)
+                    self.assertIs(row["predicates"][term], False)
+                    self.assertEqual(row["output"], {"bytes": len(bad), "sha256": module.digest(bad)})
+                    self.assertLessEqual(len(TOOL.canonical(row)), 1536)
+                    if word == 4 and (value < 12 or value > size):
+                        self.assertIsNone(row["tail"])
+                        self.assertIsNone(row["predicates"]["allocationTailZero"])
+            padded = bytearray(body + bytes(16)); struct.pack_into("<I", padded, 44, size + 16); padded = bytes(padded)
+            self.assertEqual(module.python_code_flags(padded, machine, "python-engineering", matcher), [0x10002])
+            zero = module.python_signature_diagnostic(padded, padded, machine, matcher)
+            self.assertEqual(zero["tail"]["bytes"], 16)
+            self.assertIs(zero["predicates"]["allocationTailZero"], True)
+            bad = bytearray(padded); bad[-15] = 0xA5; bad[-2] = 0x5A; bad = bytes(bad)
+            with self.assertRaisesRegex(module.Refused, "^python-signature-superblob$"):
+                module.python_code_flags(bad, machine, "python-engineering", matcher)
+            for original, matches in ((bad, True), (padded, False), (body, None)):
+                row = module.python_signature_diagnostic(original, bad, machine, matcher)
+                self.assertEqual(row["input"], {"bytes": len(original), "sha256": module.digest(original)})
+                self.assertEqual(row["tail"], {"bytes": 16, "nonzeroBytes": 2, "firstNonzeroOffset": 1,
+                    "lastNonzeroOffset": 14, "sha256": module.digest(bad[-16:]), "matchesOriginalInput": matches})
+                self.assertIs(row["predicates"]["allocationTailZero"], False)
+                self.assertLessEqual(len(TOOL.canonical(row)), 1536)
+            maximum = bytearray(body + bytes(1024 * 1024 - size))
+            struct.pack_into("<I", maximum, 44, 1024 * 1024); maximum = bytes(maximum)
+            row = module.python_signature_diagnostic(body, maximum, machine, matcher)
+            self.assertEqual(row["tail"]["bytes"], 1024 * 1024 - size)
+            self.assertIs(row["tail"]["matchesOriginalInput"], None)
+            self.assertIs(row["predicates"]["allocationTailZero"], True)
+            self.assertLessEqual(len(TOOL.canonical(row)), 1536)
+            oversized = bytearray(maximum + b"\0"); struct.pack_into("<I", oversized, 44, 1024 * 1024 + 1)
+            for invalid in (body[:-1], body + b"x", bytes(oversized)):
+                with self.assertRaises(module.Refused):
+                    module.python_signature_diagnostic(body, invalid, machine, matcher)
+            for old, new, arch in ((None, body, machine), (body, bytearray(body), machine),
+                                   (b"", body, machine), (body, body, True), (body, body, "aarch64")):
+                with self.assertRaises(module.Refused):
+                    module.python_signature_diagnostic(old, new, arch, matcher)
+            original_bound = module.MAX_HELPER
+            try:
+                with mock.patch.object(module, "MAX_HELPER", len(body) - 1), self.assertRaises(module.Refused):
+                    module.python_signature_diagnostic(body, body, machine, matcher)
+            finally:
+                self.assertEqual(module.MAX_HELPER, original_bound)
         with tempfile.TemporaryDirectory() as directory:
             fixture = self.python_fixture(Path(directory), phase="python-shipping", failure="unconfigured")
             with self.python_fixture_call(fixture), self.assertRaises((module.Refused, TOOL.Refused)):
@@ -3697,7 +3823,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         reserve, download, project, runtime = steps
         self.assertIn('[[ ! -e "$MRK_MACOS_WORK/fresh-python-transport" && ! -L "$MRK_MACOS_WORK/fresh-python-transport" ]] || exit 1', reserve)
         self.assertIn('[[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1', reserve)
-        self.assertEqual(workflow.count("uses: actions/download-artifact@"), 1)
+        self.assertEqual(workflow.count("uses: actions/download-artifact@"), 2)
         self.assertIn("uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", download)
         self.assertEqual([line.strip() for line in download.split("        with:\n", 1)[1].splitlines() if line.strip()], [
             "artifact-ids: ${{ env.MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID }}",
@@ -3730,7 +3856,73 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertEqual(workflow.count("            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json\n"), 1)
         for path in ("fresh-python-transport", "fresh-python-supplier", "fresh-python-receipt"):
             self.assertNotIn("            ${{ steps.work.outputs.root }}/" + path + "/", workflow)
-        return steps
+        selected_name = "Select the fixed configured signed runtime before any payload download"
+        capsule_download_name = "Download only the configured signed Python capsule"
+        capsule_project_name = "Project the configured capsule as DATA without executing it"
+        selected = workflow_step(workflow, selected_name)
+        capsule_download = workflow_step(workflow, capsule_download_name)
+        capsule_project = workflow_step(workflow, capsule_project_name)
+        selected_at = workflow.index("      - name: " + selected_name + "\n")
+        self.assertLess(workflow.index("      - name: Select DATA stager Python, not the packaged interpreter\n"), selected_at)
+        self.assertLess(selected_at, workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"))
+        self.assertLess(selected_at, workflow.index("      - name: Admit the fixed image Rust tools without installing a distribution\n"))
+        for name in ("Select fixed frontend compiler", "Select fixed Node only for the native application routes"):
+            if "      - name: " + name + "\n" in workflow:
+                self.assertLess(selected_at, workflow.index("      - name: " + name + "\n"))
+        ordered_capsule = [names[2], capsule_download_name, capsule_project_name, names[3]]
+        offsets = [workflow.index("      - name: " + name + "\n") for name in ordered_capsule]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertIn('[[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1', reserve)
+        for fragment in ("timeout-minutes: 1", "set -euo pipefail", "umask 077",
+                         "desktop/tools/stage_macos_installed.py runtime-signing-selection --target aarch64-apple-darwin",
+                         '[[ ${#selection} -le 4096 ]] || exit 1', 'value["nativeAuthority"] is not False',
+                         'value["sourceInputsSha256"] != os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]',
+                         '"runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"',
+                         'set(value) != set(fields) | fixed', 'os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC',
+                         'os.close(fd)'):
+            self.assertIn(fragment, selected)
+        self.assertNotRegex(workflow, r"(?m)^      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256:")
+        for forbidden in ("eval ", "describe-current-runtime", "|| true", "set +e", "--binding"):
+            self.assertNotIn(forbidden, selected)
+        self.assertEqual([line.strip() for line in capsule_download.split("        with:\n", 1)[1].splitlines() if line.strip()], [
+            "artifact-ids: ${{ env.MRK_MACOS_SIGNING_ARTIFACT_ID }}", "run-id: ${{ env.MRK_MACOS_SIGNING_RUN_ID }}",
+            "repository: Apdelrahman1911/mobile-release-kit", "github-token: ${{ github.token }}",
+            "path: ${{ steps.work.outputs.root }}/signed-python-transport", "merge-multiple: 'false'",
+            "digest-mismatch: error", "skip-decompress: 'false'",
+        ])
+        self.assertIn("uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", capsule_download)
+        for fragment in ("timeout-minutes: 3", "set -euo pipefail", "set -o noclobber", "umask 077",
+                         "desktop/tools/stage_macos_installed.py project-signed-python", "--target aarch64-apple-darwin",
+                         '--transport-root "$MRK_MACOS_WORK/signed-python-transport"',
+                         '--output "$MRK_MACOS_WORK/signed-python-capsule"'):
+            self.assertEqual(capsule_project.count(fragment), 1)
+        for fragment in ("--configured-signing", '--signed-python "$MRK_MACOS_WORK/signed-python-capsule/python3"',
+                         '--signing-receipt "$MRK_MACOS_WORK/signed-python-capsule/python-signed-receipt.json"',
+                         '--expected-signed-python "$MRK_MACOS_SIGNED_PYTHON_SHA256"',
+                         '--expected-signing-receipt "$MRK_MACOS_SIGNING_RECEIPT_SHA256"',
+                         '--expected-signing-source "$MRK_MACOS_SIGNING_SOURCE_COMMIT"',
+                         '--expected-signing-run "$MRK_MACOS_SIGNING_RUN_ID"',
+                         '--expected-signing-attempt "$MRK_MACOS_SIGNING_RUN_ATTEMPT"'):
+            self.assertEqual(runtime.count(fragment), 1)
+        for fragment in ('"signedPythonDerivation": {',
+                         '"signingSourceCommit": os.environ["MRK_MACOS_SIGNING_SOURCE_COMMIT"]',
+                         '"nominationSha256": os.environ["MRK_MACOS_SIGNING_BINDING_SHA256"]'):
+            self.assertIn(fragment, workflow)
+        self.assertNotIn("codesign", capsule_project)
+        self.assertNotIn("codesign", runtime)
+        # The three added calls are DATA only. No suffix or artifact name can
+        # authorize another body, and native signing remains a separate owner.
+        for path in ("signed-python-transport", "signed-python-capsule"):
+            self.assertNotIn("            ${{ steps.work.outputs.root }}/" + path + "/", workflow)
+        binding = TOOL.decode((Path(__file__).absolute().parents[2] / "desktop" / TOOL.SIGNED_RUNTIME_BINDING).read_bytes())
+        self.assertEqual(set(binding), {"schemaVersion", "targets"})
+        self.assertEqual(set(binding["targets"]), set(TOOL.MAC_TARGETS))
+        for row in binding["targets"].values():
+            if row.get("state") == "unconfigured":
+                self.assertEqual(row, {"state": "unconfigured"})  # No fabricated future hash/run/M.
+            else:
+                self.assertEqual(row.get("state"), "configured")
+        return [selected, *steps[:3], capsule_download, capsule_project, runtime]
 
 
     def test_aqua_uses_reviewed_current_source_data_before_compilation(self):
@@ -3749,7 +3941,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertIn('--work "$MRK_MACOS_WORK/current-runtime-preparation"', workflow)
         self.assertIn('--expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256"', workflow)
         self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', workflow)
-        for variable in ("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "MRK_BUNDLED_RUNTIME_SOURCE_SHA256"):
+        for variable in ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256",):
             literal = TOOL.re.search(r"^      " + variable + r": ([a-z0-9-]+)$", workflow, TOOL.re.M).group(1)
             self.assertTrue(TOOL.sha(literal))
             self.assertIn('"$' + variable + '" =~ ^[0-9a-f]{64}$', workflow)
@@ -3784,8 +3976,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         root = Path(__file__).absolute().parents[2]
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
         anchors = {}
-        for variable in ("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "MRK_BUNDLED_RUNTIME_SOURCE_SHA256",
-                         "MRK_BUNDLED_PROTOCOL_SHA256"):
+        for variable in ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256"):
             configured = TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{64})$", workflow, TOOL.re.M)
             self.assertEqual(len(configured), 1, variable)
             anchors[variable] = configured[0]

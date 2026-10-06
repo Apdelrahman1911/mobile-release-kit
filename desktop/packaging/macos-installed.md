@@ -613,11 +613,12 @@ The application is a normal Cargo-built Tauri bundled-asset binary in a standard
 `.app` wrapper (`Info.plist`, icon, `PkgInfo`). No CLI/plugin runner is added.
 The macOS Tauri overlay declares an active app and minimum 26.0. The narrow
 workflow assembles that same wrapper directly, avoiding a new Tauri-CLI build
-dependency. Its only ad-hoc signing commands target the completed app and the
-standalone Installer; the runtime lives **outside** the app and is never passed
-to codesign. A complete signed-app/runtime inventory is then passed explicitly
-into the installer build. That per-build inventory binds this build's completed
-output, not an arbitrary adjacent file, and grants no runtime/GUI qualification.
+dependency. In the earlier snapshot above, ad-hoc signing targeted the completed
+app and standalone Installer; the separate runtime was not re-signed. The
+configured derivation below now supplies the Python signature before M, not by
+mutating a completed runtime. A complete signed-app/runtime inventory is passed
+explicitly into the installer build. That per-build inventory binds this build's
+completed output, not an adjacent file, and grants no runtime/GUI qualification.
 
 ## Python signature derivation before the final runtime manifest
 
@@ -681,9 +682,60 @@ same current-core/bootstrap/CA preparation inputs. A signed executable changes
 M, so existing ARM/Intel ad-hoc S/M observations cannot be reused as the signed
 M. Both inputs and signatures are rechecked after final publication; partial
 outputs after a failed POST are inadmissible, not a retry candidate. The ordinary
-installed/Aqua callers must separately bind the actual configured capsule and
-new M when available. They must never sign a runtime after freezing M or claim
+installed/Aqua callers must never sign a runtime after freezing M or claim
 shipping readiness from the engineering workflow.
+
+### Fixed consumer nomination and transport
+
+The independent SOURCE file
+`desktop/macos-installed-inputs/python-signed-runtime-binding.json` selects the
+capsule. Its strict schema contains both fixed targets; each row is either
+exactly `{"state":"unconfigured"}` or a configured signing source commit,
+run/attempt/artifact IDs, signed Python and receipt hashes, S/M, and both existing
+identity-profile hashes. The committed initial rows are **unconfigured**. They
+contain no guessed future hashes, IDs, signatures or M. An unconfigured selected
+target fails before payload/dependency downloads or compilation; an unconfigured
+other target does not block it. There is no fallback to ad-hoc M, latest artifacts
+or a neighboring receipt. The credential-free engineering signer remains
+independent of this nomination.
+
+This file is deliberately separate from the producer identity profile: embedding
+a receipt hash in that profile would change a digest already sealed by the
+receipt. The signing producer's commit/run are also distinct from the later
+consuming app commit and its current S. Original supplier6 remain unchanged.
+Configure a row only after independently reviewing the real capsule's original
+native signing/probe/finality evidence and exact two-file correspondence, then
+describing its signed M with the existing seven explicit capsule arguments.
+`describe-current-runtime` can do that DATA work before nomination; its output
+must not be automatically adopted by a shipping job. A later nomination-only
+commit does not reclassify or recreate the original native signing evidence.
+
+After checkout and fixed DATA-Python setup, ordinary/preview and the eleven Aqua
+current-runtime scopes use `runtime-signing-selection --target` to read the
+nomination and profiles. Only its small closed public tuple is exported to fixed
+environment keys. M comes from that SOURCE tuple; the independent literal S,
+protocol and original supplier6 checks remain. Nonruntime Aqua scopes do not
+read the nomination. The source/tool record retains both the consuming commit
+and the selected signing tuple plus nomination digest, never conflating them.
+
+Each caller downloads the original supplier and exactly one separately pinned
+capsule artifact, by fixed repository/run/artifact IDs and with digest mismatch
+refusal. `project-signed-python --target --transport-root DIR --output DIR`
+reads exactly `python3` and `python-signed-receipt.json`, checks their configured
+hashes and all original no-follow names/identities/owners/EOF/POST/closes, and
+uses a new read-only output with modes 0555/0444. Downloaded originals are never
+rewritten or executed. Extra entries, links, wrong modes, overlap, replacement,
+partial output or unknown close refuse; failed output is retained unqualified,
+not cleaned up or retried. This projection is DATA, not signature validation.
+
+Both final `current-runtime` callers require `--configured-signing` plus the
+complete seven capsule arguments above. The selected tuple/profiles and original
+supplier are checked before work allocation and again across final publication;
+unchanged receipt validation establishes one-file correspondence before prepare
+computes M. The configured M must match those actual signed bytes. Receipt
+booleans or nomination state alone grant no signature, installation or shipping
+authority. Genuine identity/key availability, real signed capsule and M, and
+ordinary/installed/Aqua/notarization qualification are still separate obligations.
 
 
 ## Existing owners and native originals
@@ -724,8 +776,8 @@ Mac project discovery never creates an asset session or enables C/P2.
 registers the workflow without merging unverified code into default main; it is
 not a broad push trigger or an automatic retry. Both expected and Installer
 source bind to `github.sha`, with exact event/ref/workflow-source/path checks,
-nonroot disposable ARM64 macOS26 admission and literal accepted current M/S/Q
-with separate 64-hex/equality guards. Permissions remain read-only and checkout
+nonroot disposable ARM64 macOS26 admission, independently fixed S/Q and
+SOURCE-nominated signed M with separate 64-hex/equality guards. Permissions remain read-only and checkout
 retains no credentials. There is no release/Store action, new descriptor or
 interpreter rebuild.
 
