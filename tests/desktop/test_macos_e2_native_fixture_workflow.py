@@ -229,12 +229,56 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                          'signature(after) == entry["identity"]', 'digest(self.outputs.read(entry)) == packages[label]["sha256"]'):
             self.assertIn(required, receipt_capture)
         context_observer = section(self.owner, '    def observe_installer_context(self):', '    def compiler_environment(')
-        refusal = section(context_observer, '            except Refused as error:', '            need(all(self.outputs.read(entry)')
-        self.assertIn('error.args == ("context-receipt-missing",)', refusal)
-        self.assertIn(flat('except BaseException: self.context_receipt_diagnostic = None'), flat(refusal))
-        self.assertIn(flat('finally: self.phase = original_phase'), flat(refusal))
-        self.assertEqual(active(refusal).splitlines()[-1].strip().split(' #', 1)[0].rstrip(), 'raise')
-        self.assertLess(context_observer.index('observed = self.context_read_output('), context_observer.index(refusal))
+        # Initial SAME-slot observations choose one variant. A later original
+        # error is preserved; the old missing-plist diagnostic is never retried.
+        receipts = section(self.owner, '    def context_receipts(', '    def complete_installer_context(')
+        slots = section(self.owner, '    def context_receipt_slots(', '    def context_receipts(')
+        complete = section(self.owner, '    def complete_installer_context(', '    def observe_missing_context_receipt(')
+        self.assertIn('self.protected.directory(Path("/private/var/db/receipts"))', slots)
+        self.assertIn('os.stat(identifier + "." + suffix, dir_fd=parent["fd"], follow_symlinks=False)', slots)
+        self.assertIn(flat('except FileNotFoundError: slots.append(None)'), flat(slots))
+        self.assertIn('self.protected.check()', slots)
+        self.assertEqual(slots.count('context_timeout('), 2)
+        for required in (
+            'self.phase == "context-" + case + "-record"',
+            'observed["outputOriginalClosed"] is observed["installerReturnedZero"] is True',
+            'self.calls[-1]["entered"] is self.calls[-1]["returned"] is True',
+            'type(self.calls[-1]["returncode"]) is int and self.calls[-1]["returncode"] == 0',
+            'packages_post() parent, slots = self.context_receipt_slots(case)',
+            'need(slots[0] is not None or slots[1] is None, "context-receipt-mixed-slots")',
+            'entry["identity"] == original and entry["identity"][4] == 0 and body',
+            'receipt.get("pkg-version") == "1"',
+            'after_parent is parent and after == slots',
+            'packages_post() return rows, observation',
+        ):
+            self.assertIn(flat(required), flat(receipts))
+        present, absent = receipts.split('        if slots[0] is not None:', 1)[1].split('        else:\n', 1)
+        self.assertIn('["/usr/sbin/pkgutil", "--pkg-info-plist", identifier], 15)', present)
+        self.assertIn('observation = {"kind": "present"}', present)
+        self.assertNotIn('CONTEXT_POST_CENSUS_ROLES', present)
+        self.assertIn('self.context_command(CONTEXT_POST_CENSUS_ROLES[index]', absent)
+        self.assertIn('["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"], 15,', absent)
+        self.assertIn('receipt_census_absent(result.stdout, result.stderr)', absent)
+        self.assertIn('need(identifier not in identifiers, "context-receipt-census-listed")', absent)
+        self.assertIn('"kind": "absent-no-payload"', absent)
+        self.assertNotIn('receipt-query', absent)
+        for forbidden in ('except ', 'context-receipt-missing', 'observe_missing_context_receipt('):
+            self.assertNotIn(forbidden, active(receipts))
+            self.assertNotIn(forbidden, active(context_observer))
+        self.assertLess(context_observer.index('observed = self.context_read_output('),
+                        context_observer.index('self.context_receipts('))
+        self.assertIn(flat('self.context_receipts( case, CONTEXT_IDENTIFIERS[index], observed, package_entries, packages)'),
+                      flat(context_observer))
+        self.assertIn('observed["receiptOriginals"], observed["receiptObservation"]', context_observer)
+        self.assertLess(context_observer.index('self.installer_context["cases"].append(observed)'),
+                        context_observer.index('self.complete_installer_context(package_entries, packages)'))
+        self.assertIn('installer_context_calls(candidate, self.environment["GITHUB_SHA"], self.calls)', complete)
+        self.assertIn('if row["receiptObservation"]["kind"] == "absent-no-payload":', complete)
+        self.assertIn('need(slots == [None, None], "context-receipt-slots-changed")', complete)
+        for required in ('self.source.book.check()', 'self.outputs.check()', 'self.protected.check()',
+                         'context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)'):
+            self.assertIn(required, receipts)
+            self.assertLess(complete.index(required), complete.index('self.installer_context["completed"] = True'))
         self.assertNotIn('call("fetch-"', prepare)
         sources = section(self.owner, "def source_names(rows):", "\nclass SourceInputs:")
         for required in ('"desktop/src-tauri/"', '"desktop/macos-installed-inputs/"',
@@ -479,11 +523,22 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in active(publish).splitlines() if 'summary["contextReceiptDiagnostic"] =' in line],
                          ['summary["contextReceiptDiagnostic"] = None'] * 2)
         self.assertIn('b"diagnostic_captured=true\\n" if summary["diagnosticCaptured"] else b"diagnostic_captured=false\\n"', publish)
+        self.assertIn('context_observation = fixture.context_observation_result(result, source)', diagnostic)
+        self.assertIn('context_completed = outcome == "success" and context_observation is not None', diagnostic)
+        self.assertIn('"contextObservationCompleted": False,', publish)
+        self.assertIn('contextObservationCompleted=bool(context_completed),', publish)
+        self.assertEqual([line.strip() for line in active(publish).splitlines() if 'summary["contextObservationCompleted"] =' in line],
+                         ['summary["contextObservationCompleted"] = False'] * 2)
+        self.assertIn('b"context_observation_completed=true\\n" if summary["contextObservationCompleted"] else b"context_observation_completed=false\\n"', publish)
+        self.assertNotIn('context_completed', gates)
         main = section(self.owner, '\ndef main():', '\nif __name__ == "__main__":')
-        self.assertLess(main.index('receipt_diagnostic = context_receipt_diagnostic_result('), main.index('body = canonical(value)'))
+        self.assertLess(main.index('context_observation = context_observation_result('), main.index('body = canonical(value)'))
+        self.assertIn('context_completed = operation.context_receipts_selected and context_observation is not None', main)
+        self.assertIn(flat('except BaseException: context_observation = None'), flat(main))
         self.assertLess(main.index('need(report.finish(),'), main.index('need(os.write(1, summary)'))
-        self.assertLess(main.index('need(os.write(1, summary)'), main.index('context_timeout(decimal(receipt_diagnostic["deadlineNs"])'))
-        self.assertIn('return 0 if value["passed"] or diagnostic_captured else', main)
+        self.assertLess(main.index('need(os.write(1, summary)'), main.index('context_timeout(decimal(context_observation["deadlineNs"])'))
+        self.assertIn('return 0 if value["passed"] or context_completed else', main)
+        self.assertNotIn('context_receipt_diagnostic_result(', main)
         units = section(publish, "              native_rust_tests = None", "              installer_worker_rust_tests = None")
         self.assertEqual(flat(units), flat("""native_rust_tests = None
             if result["nativeRustTests"] is not None:
@@ -555,11 +610,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('context_record = fixture.installer_context_data(result["installerContext"], source)', context)
         for required in (
             'context_record["observerSourceSha256"] == rows[fixture.CONTEXT_SOURCE]["sha256"]',
-            'for case in context_record["cases"]:',
-            'for suffix in ("installer", "receipt-query"):',
-            'len(context_calls) == 1 and context_calls[0]["returned"] and context_calls[0]["returncode"] == 0',
-            'for case in context_record["enteredCases"]:',
-            'fixture.need(len(context_calls) == 1, "summary-context-entered-call")',
+            'fixture.installer_context_calls(context_record, source, calls)',
             'if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown")) and all(call["returned"] for call in calls)): installer_context = context_record',
         ):
             self.assertIn(flat(required), flat(context))
@@ -831,7 +882,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}",
             'set -euo pipefail',
             "DIAGNOSTIC_CAPTURED: ${{ steps.publication.outputs.diagnostic_captured }}",
-            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == false && "$DIAGNOSTIC_CAPTURED" == true ]]',
+            "CONTEXT_OBSERVATION_COMPLETED: ${{ steps.publication.outputs.context_observation_completed }}",
+            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == false && "$DIAGNOSTIC_CAPTURED" == false && "$CONTEXT_OBSERVATION_COMPLETED" == true ]]',
         ):
             with self.subTest(finality=required):
                 self.assertIn(required, active(final))

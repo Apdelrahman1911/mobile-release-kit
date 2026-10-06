@@ -536,7 +536,7 @@ jobs:
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
           # The same owner observes only Context under its unchanged 120s endpoint.
           # No Rust build/test, image, signing or service/native lifecycle route.
-          # Zero here means safely captured diagnostics, not native acceptance.
+          # Zero here means both closed Context observations, not native acceptance.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
             GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
@@ -649,6 +649,8 @@ jobs:
               "before-install-receipt-query", "standard-installer", "metadata-installed", "installed-receipt",
               "installed-signature-0", "installed-signature-1", "installed-signature-2",
               "installed-signature-3", "installed-signature-4", "native-run", "metadata-after-native",
+              "context-component-receipt-post-census",
+              "context-product-receipt-post-census",
           )
 
           OWNER_DIAGNOSTIC_PHASES = (
@@ -674,6 +676,8 @@ jobs:
               "metadata-installed", "installed-receipt", "installed-signature-0", "installed-signature-1",
               "installed-signature-2", "installed-signature-3", "installed-signature-4", "native-run",
               "metadata-after-native",
+              "context-component-receipt-post-census",
+              "context-product-receipt-post-census",
           )
 
           OWNER_DIAGNOSTIC_REFUSALS = (
@@ -738,7 +742,7 @@ jobs:
               'context-public-binding', 'context-public-case', 'context-public-completion',
               'context-public-observation', 'context-public-order', 'context-public-receipts',
               'context-public-started', 'context-public-unentered', 'context-receipt-binding',
-              'context-receipt-collision', 'context-receipt-missing', 'context-receipt-owner',
+              'context-receipt-collision', 'context-receipt-owner',
               'context-receipt-query', 'context-record-binding', 'context-script-arguments',
               'context-scripts-changed', 'context-scripts-correspondence', 'context-scripts-original',
               'context-single-entry', 'context-unopened-facts', 'context-xar-bound',
@@ -815,6 +819,15 @@ jobs:
               "target-owner-finality", "target-retirement-incomplete", "timestamp-canonical",
               "timestamp-range", "unexecuted-case-facts", "unlisted-source", "watch-without-registration",
               "work-route",
+              "context-observation-calls",
+              "context-observation-finality",
+              "context-public-calls",
+              "context-receipt-census-listed",
+              "context-receipt-mixed-slots",
+              "context-receipt-observation-route",
+              "context-receipt-packages",
+              "context-receipt-slots-changed",
+              "context-receipt-variant",
           )
 
           def native_owner_failure_data(phase, failure, calls):
@@ -859,6 +872,7 @@ jobs:
               "contextPackageInfoDiagnostic": None,
               "contextDistributionDiagnostic": None,
               "contextReceiptDiagnostic": None, "diagnosticCaptured": False,
+              "contextObservationCompleted": False,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -950,14 +964,7 @@ jobs:
               if context_record["observerSourceSha256"] is not None:
                   fixture.need(context_record["observerSourceSha256"] == rows[fixture.CONTEXT_SOURCE]["sha256"],
                                "summary-context-source")
-              for case in context_record["cases"]:
-                  for suffix in ("installer", "receipt-query"):
-                      context_calls = [call for call in calls if call["role"] == "context-" + case["case"] + "-" + suffix]
-                      fixture.need(len(context_calls) == 1 and context_calls[0]["returned"]
-                                   and context_calls[0]["returncode"] == 0, "summary-context-original-call")
-              for case in context_record["enteredCases"]:
-                  context_calls = [call for call in calls if call["role"] == "context-" + case + "-installer"]
-                  fixture.need(len(context_calls) == 1, "summary-context-entered-call")
+              fixture.installer_context_calls(context_record, source, calls)
               if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                       and all(call["returned"] for call in calls)):
                   # A closed observation (including absent context) is not B admission.
@@ -1099,6 +1106,8 @@ jobs:
                            "summary-context-receipt-route")
               context_receipt_diagnostic = fixture.context_receipt_diagnostic_result(result, source)
               diagnostic_captured = outcome == "success" and context_receipt_diagnostic is not None
+              context_observation = fixture.context_observation_result(result, source)
+              context_completed = outcome == "success" and context_observation is not None
               known_pass = (
                   outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
                   and result["failure"] is None and all(result[key] for key in flags)
@@ -1128,6 +1137,7 @@ jobs:
                   contextPackageInfoDiagnostic=context_package_diagnostic,
                   contextDistributionDiagnostic=context_distribution_diagnostic,
                   contextReceiptDiagnostic=context_receipt_diagnostic, diagnosticCaptured=bool(diagnostic_captured),
+                  contextObservationCompleted=bool(context_completed),
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
@@ -1147,6 +1157,7 @@ jobs:
               summary["contextDistributionDiagnostic"] = None
               summary["contextReceiptDiagnostic"] = None
               summary["diagnosticCaptured"] = False
+              summary["contextObservationCompleted"] = False
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
@@ -1165,6 +1176,7 @@ jobs:
                   summary["contextDistributionDiagnostic"] = None
                   summary["contextReceiptDiagnostic"] = None
                   summary["diagnosticCaptured"] = False
+                  summary["contextObservationCompleted"] = False
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:
@@ -1181,7 +1193,8 @@ jobs:
                   fixture.need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
                                and before.st_nlink == 1, "summary-step-output-original")
                   line = ((b"accepted=true\n" if summary["accepted"] else b"accepted=false\n")
-                          + (b"diagnostic_captured=true\n" if summary["diagnosticCaptured"] else b"diagnostic_captured=false\n"))
+                          + (b"diagnostic_captured=true\n" if summary["diagnosticCaptured"] else b"diagnostic_captured=false\n")
+                          + (b"context_observation_completed=true\n" if summary["contextObservationCompleted"] else b"context_observation_completed=false\n"))
                   fixture.need(os.write(fd, line) == len(line), "summary-step-output-write")
                   os.fsync(fd)
                   fixture.need(fixture.signature(os.fstat(fd)) == fixture.signature(os.stat(output_path, follow_symlinks=False)),
@@ -1191,8 +1204,8 @@ jobs:
           except BaseException:
               publisher.finish()
               raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
-          print("Context receipt diagnostics captured; native fixture remains NOT accepted." if summary["diagnosticCaptured"] else
-                "Context receipt diagnostics incomplete; native fixture remains NOT accepted.")
+          print("Both Context receipt observations completed; native fixture remains NOT accepted." if summary["contextObservationCompleted"] else
+                "Context receipt observations incomplete; native fixture remains NOT accepted.")
           PY_PUBLISH
 
       - name: Preserve only the bounded reviewed summary
@@ -1211,12 +1224,13 @@ jobs:
         env:
           ACCEPTED: ${{ steps.publication.outputs.accepted }}
           DIAGNOSTIC_CAPTURED: ${{ steps.publication.outputs.diagnostic_captured }}
+          CONTEXT_OBSERVATION_COMPLETED: ${{ steps.publication.outputs.context_observation_completed }}
           PREPARATION_OUTCOME: ${{ steps.prepare.outcome }}
           NATIVE_OUTCOME: ${{ steps.native.outcome }}
           PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
         run: |
           set -euo pipefail
-          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == false && "$DIAGNOSTIC_CAPTURED" == true ]]
+          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$ACCEPTED" == false && "$DIAGNOSTIC_CAPTURED" == false && "$CONTEXT_OBSERVATION_COMPLETED" == true ]]
           # No protected-root/receipt removal, adoption or process scan here.
           # Owner retirement is immediate and original-finality-gated. Shared
           # Cargo/Rust/Python homes and required evidence remain untouched.

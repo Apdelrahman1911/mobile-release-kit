@@ -100,11 +100,12 @@ CONTEXT_SOURCE = NATIVE + "/src/e2_installer_context.c"
 CONTEXT_SECONDS, CONTEXT_PACKAGE_LIMIT = 120, 8 * 1024 * 1024
 CONTEXT_RECEIPT_ARGUMENT = "--observe-context-receipts"
 CONTEXT_RECEIPT_ROLES = ("context-component-receipt-diagnostic-query", "context-component-receipt-diagnostic-census")
+CONTEXT_POST_CENSUS_ROLES = ("context-component-receipt-post-census", "context-product-receipt-post-census")
 CONTEXT_ROLES = ("context-helper-build", "context-component-build", "context-product-component-build",
                  "context-product-build", "context-component-empty-bom", "context-product-empty-bom",
                  "context-component-receipt-census", "context-product-receipt-census",
                  "context-component-installer", "context-product-installer",
-                 "context-component-receipt-query", "context-product-receipt-query") + CONTEXT_RECEIPT_ROLES
+                 "context-component-receipt-query", "context-product-receipt-query") + CONTEXT_RECEIPT_ROLES + CONTEXT_POST_CENSUS_ROLES
 WORK_SECONDS, HARD_SECONDS = 990, 993
 CAPTURE_LIMIT, RESULT_LIMIT = 65536, 32768
 IMAGE_LIMIT = 32 * 1024 * 1024
@@ -1638,7 +1639,7 @@ def installer_context_data(value, source):
     keys = {"schemaVersion", "type", "sourceCommit", "observerSourceSha256", "clock", "deadlineNs", "started",
             "completed", "enteredCases", "cases", "receiptsRetired", "outerPackageAuthority", "maintenanceQualified"}
     need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int
-         and value["schemaVersion"] == 1 and value["type"] == "mrk-e2-installer-context-observations-v1"
+         and value["schemaVersion"] == 2 and value["type"] == "mrk-e2-installer-context-observations-v2"
          and value["sourceCommit"] == source and value["clock"] == "CLOCK_MONOTONIC"
          and all(type(value[key]) is bool for key in ("started", "completed", "receiptsRetired",
                                                      "outerPackageAuthority", "maintenanceQualified"))
@@ -1662,7 +1663,8 @@ def installer_context_data(value, source):
          "context-public-completion")
     for expected, row in zip(CONTEXT_CASES, cases):
         need(type(row) is dict and set(row) == {"case", "recordSha256", "installerReturnedZero", "outputOriginalClosed",
-             "scriptArgumentCount", "secondArgumentIsRoot", "thirdArgumentIsRoot", "argumentOne", "packagePath", "receiptOriginals"}
+             "scriptArgumentCount", "secondArgumentIsRoot", "thirdArgumentIsRoot", "argumentOne", "packagePath",
+             "receiptOriginals", "receiptObservation"}
              and row["case"] == expected and identity(row["recordSha256"], 64)
              and row["installerReturnedZero"] is row["outputOriginalClosed"] is True
              and type(row["scriptArgumentCount"]) is int and 0 <= row["scriptArgumentCount"] <= 16
@@ -1681,6 +1683,27 @@ def installer_context_data(value, source):
                 need(item["match"] is None and item["originalMatched"] is None, "context-public-observation")
             need(key != "argumentOne" or (item["kind"] == "missing") is (row["scriptArgumentCount"] == 0),
                  "context-public-case")
+        observation = row["receiptObservation"]
+        need(type(observation) is dict and type(observation.get("kind")) is str
+             and observation["kind"] in ("present", "absent-no-payload"), "context-public-receipts")
+        absent = observation["kind"] == "absent-no-payload"
+        if absent:
+            need(set(observation) == {"kind", "slotPostKnown", "packagePostKnown", "deadlineKnown", "postCensus"}
+                 and all(observation[key] is True for key in ("slotPostKnown", "packagePostKnown", "deadlineKnown")),
+                 "context-public-receipts")
+            census = observation["postCensus"]
+            need(type(census) is dict and set(census) == {"role", "commandIndex", "returncode", "stdoutBytes",
+                 "stderrBytes", "stdoutSha256", "stderrSha256", "count", "identifierListed"}
+                 and census["role"] == "context-" + expected + "-receipt-post-census"
+                 and type(census["commandIndex"]) is int and 0 <= census["commandIndex"] < 64
+                 and type(census["returncode"]) is int and census["returncode"] == 0
+                 and type(census["stdoutBytes"]) is int and 0 < census["stdoutBytes"] <= RECEIPT_CENSUS_LIMIT
+                 and type(census["stderrBytes"]) is int and census["stderrBytes"] == 0
+                 and identity(census["stdoutSha256"], 64) and census["stderrSha256"] == digest(b"")
+                 and type(census["count"]) is int and 0 <= census["count"] <= 4096
+                 and census["identifierListed"] is False, "context-public-receipts")
+        else:
+            need(set(observation) == {"kind"}, "context-public-receipts")
         receipts = row["receiptOriginals"]
         need(type(receipts) is list and len(receipts) == 2, "context-public-receipts")
         for suffix, receipt in zip(("plist", "bom"), receipts):
@@ -1688,11 +1711,94 @@ def installer_context_data(value, source):
                  and receipt["suffix"] == suffix and type(receipt["present"]) is bool,
                  "context-public-receipts")
             if receipt["present"]:
-                need(type(receipt["bytes"]) is int and 0 < receipt["bytes"] <= 1024 * 1024
+                need(not absent and type(receipt["bytes"]) is int and 0 < receipt["bytes"] <= 1024 * 1024
                      and identity(receipt["sha256"], 64), "context-public-receipts")
             else:
-                need(suffix == "bom" and receipt["bytes"] is None and receipt["sha256"] is None,
+                need((absent or suffix == "bom") and receipt["bytes"] is None and receipt["sha256"] is None,
                      "context-public-receipts")
+    return value
+
+
+def installer_context_calls(value, source, calls):
+    """Match each finite variant to its actual original, not a public true flag."""
+    value = installer_context_data(value, source)
+    need(type(calls) is list and len(calls) <= 64
+         and all(type(call) is dict and type(call.get("role")) is str and call.get("entered") is True
+                 and type(call.get("returned")) is bool for call in calls), "context-public-calls")
+    for case in value["enteredCases"]:
+        need(len([call for call in calls if call["role"] == "context-" + case + "-installer"]) == 1,
+             "context-public-calls")
+    previous = -1
+    for row in value["cases"]:
+        observation, case = row["receiptObservation"], row["case"]
+        absent = observation["kind"] == "absent-no-payload"
+        selected = "receipt-post-census" if absent else "receipt-query"
+        other = "receipt-query" if absent else "receipt-post-census"
+        need(not any(call["role"] == "context-" + case + "-" + other for call in calls), "context-public-calls")
+        originals = []
+        for suffix, cap, limit in (("receipt-census", 15, RECEIPT_CENSUS_LIMIT), ("installer", 60, 65536),
+                                   (selected, 15, RECEIPT_CENSUS_LIMIT if absent else 65536)):
+            matches = [(index, call) for index, call in enumerate(calls)
+                       if call["role"] == "context-" + case + "-" + suffix]
+            need(len(matches) == 1, "context-public-calls")
+            index, call = matches[0]
+            need(call["returned"] is True and type(call.get("returncode")) is int and call["returncode"] == 0
+                 and type(call.get("workTimeoutSeconds")) is int and 0 < call["workTimeoutSeconds"] <= cap
+                 and type(call.get("outputLimitBytes")) is int and call["outputLimitBytes"] == limit
+                 and identity(call.get("stdoutSha256"), 64) and identity(call.get("stderrSha256"), 64),
+                 "context-public-calls")
+            if suffix != "installer":
+                need(call["stdoutSha256"] != digest(b"") and call["stderrSha256"] == digest(b""),
+                     "context-public-calls")
+            originals.append((index, call))
+        need(previous < originals[0][0] < originals[1][0] < originals[2][0], "context-public-calls")
+        if absent:
+            census = observation["postCensus"]
+            index, call = originals[2]
+            need(census["commandIndex"] == index
+                 and type(call.get("stdoutBytes")) is int and type(call.get("stderrBytes")) is int
+                 and all(call.get(key) == census[key] for key in
+                         ("role", "returncode", "stdoutBytes", "stderrBytes", "stdoutSha256", "stderrSha256")),
+                 "context-public-calls")
+        previous = originals[2][0]
+    return value
+
+
+def context_observation_result(result, source):
+    """Only this two-envelope observation; never a native/maintenance pass."""
+    value = installer_context_calls(result["installerContext"], source, result["originalCalls"])
+    if not value["completed"] or result["failure"] is not None:
+        return None
+    need(result["passed"] is False and result["outcome"] == "failed"
+         and all(result[key] is True for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown"))
+         and result["cleanupErrors"] == [] and result["scratchRetired"] is True
+         and result["contextReceiptDiagnostic"] is None
+         and all(result[key] is False for key in ("installerEntered", "installationReturnedSuccess", "nativeEntered",
+                                                 "nativeOwnerReturned", "protectedRetentionRequired"))
+         and all(result[key] is None for key in ("native", "nativeRustTests", "installerWorkerRustTests",
+                  "installedReaderRustTests", "producerSigningRustTests", "packageProducerRustTests", "package"))
+         and result["serviceLayoutObservation"]["selected"] is False, "context-observation-finality")
+    calls = result["originalCalls"]
+    roles = [call["role"] for call in calls]
+    expected = ["context-helper-build", "context-component-build"]
+    if "context-component-empty-bom" in roles:
+        expected.append("context-component-empty-bom")
+    expected.append("context-product-component-build")
+    if "context-product-empty-bom" in roles:
+        expected.append("context-product-empty-bom")
+    expected.append("context-product-build")
+    for call in calls[:len(expected)]:
+        cap = 10 if call["role"].endswith("-empty-bom") else 30
+        need(type(call.get("workTimeoutSeconds")) is int and 0 < call["workTimeoutSeconds"] <= cap
+             and type(call.get("outputLimitBytes")) is int and call["outputLimitBytes"] == 65536
+             and identity(call.get("stdoutSha256"), 64) and identity(call.get("stderrSha256"), 64),
+             "context-observation-calls")
+    for row in value["cases"]:
+        suffix = "receipt-post-census" if row["receiptObservation"]["kind"] == "absent-no-payload" else "receipt-query"
+        expected.extend("context-" + row["case"] + "-" + role for role in ("receipt-census", "installer", suffix))
+    need(10 <= len(calls) <= 12 and roles == expected
+         and all(call["returned"] is True and type(call.get("returncode")) is int and call["returncode"] == 0
+                 for call in calls), "context-observation-calls")
     return value
 
 
@@ -2822,7 +2928,7 @@ class Operation:
         self.release = None
         self.sources_closed = self.outputs_closed = self.protected_closed = False
         self.installer_context = {
-            "schemaVersion": 1, "type": "mrk-e2-installer-context-observations-v1",
+            "schemaVersion": 2, "type": "mrk-e2-installer-context-observations-v2",
             "sourceCommit": environment["GITHUB_SHA"], "observerSourceSha256": None,
             "clock": "CLOCK_MONOTONIC", "deadlineNs": "0", "started": False, "completed": False,
             "enteredCases": [], "cases": [], "receiptsRetired": False,
@@ -2922,6 +3028,9 @@ class Operation:
             need(argv == expected and cap == 15
                  and limit == (65536 if role == CONTEXT_RECEIPT_ROLES[0] else RECEIPT_CENSUS_LIMIT),
                  "context-receipt-diagnostic-route")
+        if role in CONTEXT_POST_CENSUS_ROLES:
+            need(argv == ["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"] and cap == 15
+                 and limit == RECEIPT_CENSUS_LIMIT, "context-receipt-observation-route")
         deadline = decimal(self.installer_context["deadlineNs"])
         timeout = context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), cap)
         self.outputs.check()
@@ -2944,6 +3053,12 @@ class Operation:
         # Only this fixed diagnostic query records normal nonzero status as
         # DATA. All ordinary Context commands keep their exact zero requirement.
         need(result.returncode == 0 or role == CONTEXT_RECEIPT_ROLES[0], "original-command-failed")
+        if role in CONTEXT_POST_CENSUS_ROLES:
+            need(len(self.calls) == count + 1 and self.calls[count]["role"] == role
+                 and self.calls[count]["returned"] is True and self.calls[count]["returncode"] == 0,
+                 "context-public-calls")
+            # Counts belong only to this returned original after capture closes.
+            self.calls[count].update(stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr))
         return result
 
     def context_output(self, path):
@@ -3001,31 +3116,120 @@ class Operation:
         need(identifier not in plistlib.loads(result.stdout), "context-receipt-collision")
         self.protected.check()
 
-    def context_receipts(self, case, identifier):
-        directory = Path("/private/var/db/receipts")
-        parent = self.protected.directory(directory)
-        rows = []
+    def context_receipt_slots(self, case):
+        """Two fixed slots relative to the same retained protected directory."""
+        need(type(case) is str and case in CONTEXT_CASES, "context-receipt-variant")
+        deadline = decimal(self.installer_context["deadlineNs"])
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        parent = self.protected.directory(Path("/private/var/db/receipts"))
+        identifier, slots = CONTEXT_IDENTIFIERS[CONTEXT_CASES.index(case)], []
         for suffix in ("plist", "bom"):
-            name = identifier + "." + suffix
             try:
-                os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)
+                item = os.stat(identifier + "." + suffix, dir_fd=parent["fd"], follow_symlinks=False)
             except FileNotFoundError:
-                need(suffix == "bom", "context-receipt-missing")
-                rows.append({"suffix": suffix, "present": False, "bytes": None, "sha256": None})
-                continue
-            entry, body = self.protected.file(directory / name, 65536 if suffix == "plist" else 1024 * 1024,
-                                              uid=0, modes=(0o644,))
-            need(entry["identity"][4] == 0 and body, "context-receipt-owner")
-            rows.append({"suffix": suffix, "present": True, "bytes": len(body), "sha256": digest(body)})
-        result = self.context_command("context-" + case + "-receipt-query",
-                                      ["/usr/sbin/pkgutil", "--pkg-info-plist", identifier], 15)
-        need(not result.stderr, "context-receipt-query")
-        receipt = plistlib.loads(result.stdout)
-        need(type(receipt) is dict and receipt.get("pkgid") == identifier and receipt.get("pkg-version") == "1"
-             and receipt.get("volume") == "/" and receipt.get("install-location") in ("/", ""),
-             "context-receipt-binding")
+                slots.append(None)
+            else:
+                slots.append(signature(item))
         self.protected.check()
-        return rows  # Actual root-owned receipt originals remain held until finish().
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        return parent, slots
+
+    def context_receipts(self, case, identifier, observed, package_entries, packages):
+        # This private seam is reached only from the audited no-payload loop,
+        # after its real Installer0 and consuming close of the original C output.
+        need(type(case) is str and case in CONTEXT_CASES, "context-receipt-variant")
+        index = CONTEXT_CASES.index(case)
+        need(identifier == CONTEXT_IDENTIFIERS[index]
+             and self.installer_context["enteredCases"] == list(CONTEXT_CASES[:index + 1])
+             and len(self.installer_context["cases"]) == index and self.phase == "context-" + case + "-record"
+             and observed["case"] == case and observed["outputOriginalClosed"] is observed["installerReturnedZero"] is True
+             and self.calls and self.calls[-1]["role"] == "context-" + case + "-installer"
+             and self.calls[-1]["entered"] is self.calls[-1]["returned"] is True
+             and type(self.calls[-1]["returncode"]) is int and self.calls[-1]["returncode"] == 0,
+             "context-receipt-variant")
+        deadline = decimal(self.installer_context["deadlineNs"])
+
+        def packages_post():
+            context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+            need(len(package_entries) == 3 and set(packages) == set(CONTEXT_PACKAGE_LABELS)
+                 and all(any(entry is original for original in self.outputs.entries) for entry in package_entries),
+                 "context-receipt-packages")
+            for label, entry in zip(CONTEXT_PACKAGE_LABELS, package_entries):
+                need(list(entry["identity"]) == packages[label]["original"]
+                     and digest(self.outputs.read(entry)) == packages[label]["sha256"], "context-packages-changed")
+            self.source.book.check()
+            self.outputs.check()
+            self.protected.check()
+            context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+
+        packages_post()
+        parent, slots = self.context_receipt_slots(case)
+        need(slots[0] is not None or slots[1] is None, "context-receipt-mixed-slots")
+        rows = []
+        if slots[0] is not None:
+            # Selection is final: a later missing original/error NEVER falls back.
+            directory = Path("/private/var/db/receipts")
+            for suffix, original in zip(("plist", "bom"), slots):
+                if original is None:
+                    rows.append({"suffix": suffix, "present": False, "bytes": None, "sha256": None})
+                    continue
+                entry, body = self.protected.file(directory / (identifier + "." + suffix),
+                                                  65536 if suffix == "plist" else 1024 * 1024,
+                                                  uid=0, modes=(0o644,))
+                need(entry["identity"] == original and entry["identity"][4] == 0 and body, "context-receipt-owner")
+                rows.append({"suffix": suffix, "present": True, "bytes": len(body), "sha256": digest(body)})
+            result = self.context_command("context-" + case + "-receipt-query",
+                                          ["/usr/sbin/pkgutil", "--pkg-info-plist", identifier], 15)
+            need(not result.stderr, "context-receipt-query")
+            receipt = plistlib.loads(result.stdout)
+            need(type(receipt) is dict and receipt.get("pkgid") == identifier and receipt.get("pkg-version") == "1"
+                 and receipt.get("volume") == "/" and receipt.get("install-location") in ("/", ""),
+                 "context-receipt-binding")
+            observation = {"kind": "present"}
+        else:
+            # Both absent is a defined observation, not a caught policy failure.
+            rows = [{"suffix": suffix, "present": False, "bytes": None, "sha256": None} for suffix in ("plist", "bom")]
+            command_index = len(self.calls)
+            result = self.context_command(CONTEXT_POST_CENSUS_ROLES[index],
+                                          ["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"], 15,
+                                          limit=RECEIPT_CENSUS_LIMIT)
+            receipt_census_absent(result.stdout, result.stderr)
+            identifiers = plistlib.loads(result.stdout)
+            need(identifier not in identifiers, "context-receipt-census-listed")
+            observation = {"kind": "absent-no-payload", "slotPostKnown": True, "packagePostKnown": True,
+                           "deadlineKnown": True, "postCensus": {
+                               "role": CONTEXT_POST_CENSUS_ROLES[index], "commandIndex": command_index,
+                               "returncode": result.returncode, "stdoutBytes": len(result.stdout),
+                               "stderrBytes": len(result.stderr), "stdoutSha256": digest(result.stdout),
+                               "stderrSha256": digest(result.stderr), "count": len(identifiers), "identifierListed": False}}
+        after_parent, after = self.context_receipt_slots(case)
+        need(after_parent is parent and after == slots, "context-receipt-slots-changed")
+        packages_post()
+        return rows, observation  # Present originals remain held; absence is not retirement.
+
+    def complete_installer_context(self, package_entries, packages):
+        """Close the actual two-case observation before permitting scratch retirement."""
+        need(self.installer_context["completed"] is False, "context-single-entry")
+        candidate = dict(self.installer_context, completed=True)
+        installer_context_calls(candidate, self.environment["GITHUB_SHA"], self.calls)
+        deadline = decimal(self.installer_context["deadlineNs"])
+        # Recheck absent snapshots after BOTH real Installer originals; none is
+        # called retired and no public flag is package or close authority.
+        for row in self.installer_context["cases"]:
+            if row["receiptObservation"]["kind"] == "absent-no-payload":
+                _parent, slots = self.context_receipt_slots(row["case"])
+                need(slots == [None, None], "context-receipt-slots-changed")
+        need(len(package_entries) == 3 and set(packages) == set(CONTEXT_PACKAGE_LABELS)
+             and all(any(entry is original for original in self.outputs.entries) for entry in package_entries),
+             "context-receipt-packages")
+        need(all(list(entry["identity"]) == packages[label]["original"]
+                 and digest(self.outputs.read(entry)) == packages[label]["sha256"]
+                 for label, entry in zip(CONTEXT_PACKAGE_LABELS, package_entries)), "context-packages-changed")
+        self.source.book.check()
+        self.outputs.check()
+        self.protected.check()
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        self.installer_context["completed"] = True
 
     def observe_missing_context_receipt(self, observed, package_entries, packages):
         """Called only after the original output read and missing-plist refusal."""
@@ -3308,28 +3512,13 @@ class Operation:
                                   "-target", "/"], 60)
             self.phase = "context-" + case + "-record"
             observed = self.context_read_output(original_outputs[case], case, packages)
-            try:
-                observed["receiptOriginals"] = self.context_receipts(case, CONTEXT_IDENTIFIERS[index])
-            except Refused as error:
-                if (self.context_receipts_selected and case == "component"
-                        and type(error) is Refused and error.args == ("context-receipt-missing",)):
-                    original_phase = self.phase
-                    try:
-                        self.observe_missing_context_receipt(observed, package_entries, packages)
-                    except BaseException:
-                        self.context_receipt_diagnostic = None
-                    finally:
-                        self.phase = original_phase
-                raise  # The same original refusal, never diagnostic failure or receipt acceptance.
+            observed["receiptOriginals"], observed["receiptObservation"] = self.context_receipts(
+                case, CONTEXT_IDENTIFIERS[index], observed, package_entries, packages)
             need(all(self.outputs.read(entry) == components[n][0] for n, entry in enumerate(package_entries[:2]))
                  and digest(self.outputs.read(package_entries[2])) == packages[CONTEXT_PACKAGE_LABELS[2]]["sha256"],
                  "context-packages-changed")
             self.installer_context["cases"].append(observed)
-        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
-        self.outputs.check()
-        self.protected.check()
-        self.installer_context["completed"] = True
-        installer_context_data(self.installer_context, self.environment["GITHUB_SHA"])
+        self.complete_installer_context(package_entries, packages)
 
     def compiler_environment(self, target):
         home = Path("/Users/runner")
@@ -4202,15 +4391,15 @@ def main():
         return 1
     report = Originals()
     try:
-        receipt_diagnostic = None
+        context_observation = None
         if operation.context_receipts_selected:
             try:
-                receipt_diagnostic = context_receipt_diagnostic_result(value, os.environ["GITHUB_SHA"])
+                context_observation = context_observation_result(value, os.environ["GITHUB_SHA"])
             except BaseException:
-                # A provisional observation cannot survive unknown original
-                # finality. Keep the original failure/call evidence, not success.
-                value["contextReceiptDiagnostic"] = None
-        diagnostic_captured = operation.context_receipts_selected and receipt_diagnostic is not None
+                # Retain the actual failure/call evidence, but never grant a
+                # completion output from a provisional/unknown final result.
+                context_observation = None
+        context_completed = operation.context_receipts_selected and context_observation is not None
         body = canonical(value)
         need(len(body) <= 65536, "owner-result-bound")
         report.publish(work / "e2-native-result.json", body)
@@ -4222,15 +4411,15 @@ def main():
                              "type": value["type"], "reportSha256": digest(body),
                              "nativeChecksPassed": value["passed"]})
         need(os.write(1, summary) == len(summary), "owner-summary-write")
-        if diagnostic_captured:
+        if context_completed:
             # Output publication cannot renew the original Context endpoint.
-            context_timeout(decimal(receipt_diagnostic["deadlineNs"]),
+            context_timeout(decimal(context_observation["deadlineNs"]),
                             time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
     except BaseException:
         report.finish()
         print("E2 fixture evidence finalization failed; do not accept a provisional result.", file=sys.stderr)
         return 1
-    return 0 if value["passed"] or diagnostic_captured else 77 if value["outcome"] == "unavailable" else 1
+    return 0 if value["passed"] or context_completed else 77 if value["outcome"] == "unavailable" else 1
 
 
 if __name__ == "__main__":
