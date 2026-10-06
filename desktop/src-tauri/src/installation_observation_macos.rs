@@ -2,12 +2,20 @@
 //! original blocking child. No launch capability, maintenance or alternate path.
 use super::*;
 use crate::{installation::{CheckReason as Problem, Matching},
-    macos_install_paths as paths, macos_install_record::{self as data, Inventory, InventoryIndex}};
+    macos_install_paths as paths, macos_install_record::{self as data, Inventory, InventoryIndex},
+    macos_install_maintenance::{ActionData, MaintenanceTargetData, ReleaseSetData},
+    macos_install_transaction::{self as transaction, AppIdentityData, CapsuleData, CorrespondenceData,
+        GenerationData, IntentData, StateData}};
 use std::mem::size_of;
 type InspectResult<T> = std::result::Result<T, Problem>;
 pub(crate) const CONTROL_RESERVE: usize = 16 * 1024 * 1024;
 const RECORDS: usize = 8256;
 const NATIVE_FRAME_LIMIT: usize = 16384;
+
+// Read-only linked DATA. This contains no previous outer-Installer exit proof,
+// permission to install, or selected executable. A selected producer set comes
+// from the original caller's authenticated package policy, never these files.
+struct HistoricalRecord { intent: IntentData, state: StateData, capsule: CapsuleData }
 
 fn problem(failure: AdmissionFailure, content: Problem) -> Problem {
     match failure {
@@ -223,6 +231,183 @@ impl InstallationSlots {
         }
         Ok(())
     }
+    fn history_read(&mut self, parent: usize, name: &str, limit: usize, retained: &mut usize,
+        base: usize, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<Vec<u8>> {
+        // Typed history has only bounded ASCII fields/arrays. Charge eight times
+        // all original bytes plus a per-record backing allowance BEFORE another
+        // parser/read. The existing 4MiB parser/native-frame reserve remains in
+        // base; actual Book capacities are still checked at every native return.
+        let available = CONTROL_RESERVE.checked_sub(base).and_then(|n| n.checked_sub(*retained))
+            .and_then(|n| n.checked_sub(4096)).map(|n| n / 8).unwrap_or(0);
+        if available == 0 { return self.reject(Problem::Bounds, Instant::now(), publish); }
+        let bytes = self.read_record(parent, name, limit.min(available), end, stop, publish)?;
+        let charge = bytes.capacity().checked_mul(8).and_then(|n| n.checked_add(4096))
+            .and_then(|n| retained.checked_add(n)).filter(|n| base.checked_add(*n).is_some_and(|v| v <= CONTROL_RESERVE));
+        let Some(charge) = charge else { return self.reject(Problem::Bounds, Instant::now(), publish); };
+        *retained = charge; Ok(bytes)
+    }
+    fn history_record(&mut self, install: usize, invocation: &str, state: StateData, selected: &ReleaseSetData,
+        retained: &mut usize, base: usize, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<HistoricalRecord> {
+        if state.invocation_data() != invocation || !state.mutation_recorded_data() {
+            return self.reject(Problem::Incomplete, Instant::now(), publish);
+        }
+        let intent_name = transaction::intent_name_data(invocation).map_err(|_| Problem::RecordMismatch)?;
+        let capsule_name = transaction::capsule_name_data(invocation).map_err(|_| Problem::RecordMismatch)?;
+        let intent_bytes = self.history_read(install,&intent_name,transaction::INTENT_LIMIT,retained,base,end,stop,publish)?;
+        let capsule_bytes = self.history_read(install,&capsule_name,transaction::CAPSULE_LIMIT,retained,base,end,stop,publish)?;
+        let intent = match IntentData::parse_recorded_data(&intent_bytes,selected) {
+            Ok(value) => value, Err(_) => return self.reject(Problem::RecordMismatch,Instant::now(),publish),
+        };
+        let capsule = match CapsuleData::parse_recorded_data(&capsule_bytes,selected) {
+            Ok(value) => value, Err(_) => return self.reject(Problem::RecordMismatch,Instant::now(),publish),
+        };
+        if intent.invocation_data() != invocation || capsule.invocation_data() != invocation {
+            return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+        }
+        Ok(HistoricalRecord { intent,state,capsule })
+    }
+    fn app_identity(&self, index: usize) -> InspectResult<AppIdentityData> {
+        let value = self.book.as_ref().and_then(|book| book.records.get(index)).and_then(|r| r.identity)
+            .ok_or(Problem::CleanupUnknown)?;
+        AppIdentityData::from_original_fields_data(i64::from(value.dev),value.ino,u32::from(value.mode),
+            value.uid,value.gid,value.flags).map_err(|_| Problem::Protection)
+    }
+    fn private_stage(&mut self, install: usize, name: &str, inode: u64, end: Instant,
+        stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
+        self.check(end,stop,publish)?;
+        let before = self.attempt(Problem::PayloadMismatch,publish,|book|
+            stat::fstatat(book.fd(install)?,name,AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
+        if before.st_mode != (SFlag::S_IFDIR.bits() | 0o700) || before.st_uid != 0 || before.st_gid != 0
+            || before.st_flags != 0 || before.st_ino != inode {
+            return self.reject(Problem::Protection,Instant::now(),publish);
+        }
+        self.attempt(Problem::PayloadMismatch,publish,|book| book.check_name(install,end,stop))?;
+        let after = self.attempt(Problem::PayloadMismatch,publish,|book|
+            stat::fstatat(book.fd(install)?,name,AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
+        if Identity::of(&before) != Identity::of(&after) { return self.reject(Problem::CleanupUnknown,Instant::now(),publish); }
+        // An ordinary nonroot reader does not open root's0700 receipt directory
+        // or claim to have inspected its contents. Actual maintenance's new EX
+        // owner reobserves the complete contents before any later mutation.
+        Ok(())
+    }
+    fn v2_roster(&mut self, install: usize, versions: usize, current_record: &data::Record,
+        install_root: data::DirectoryIdentity, release_directory: data::DirectoryIdentity,
+        selected: &ReleaseSetData, base: usize, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<GenerationData> {
+        let mut retained = crate::macos_install_maintenance::INPUT_LIMIT * 8;
+        let raw = self.history_read(install,transaction::STATE_NAME,transaction::STATE_LIMIT,&mut retained,base,end,stop,publish)?;
+        let state = match StateData::parse_data(&raw,selected) {
+            Ok(value) => value, Err(_) => return self.reject(Problem::RecordMismatch,Instant::now(),publish),
+        };
+        let links:Vec<_> = state.evidence_data().map(|r| (r.invocation.to_owned(),r.intent_sha256.to_owned(),
+            r.state_sha256.to_owned(),r.capsule_sha256.to_owned())).collect();
+        let invocation = state.invocation_data().to_owned();
+        let current = self.history_record(install,&invocation,state,selected,&mut retained,base,end,stop,publish)?;
+        let mut history = BTreeMap::new();
+        for (invocation,intent_sha,state_sha,capsule_sha) in links {
+            let name = transaction::archived_state_name_data(&invocation).map_err(|_| Problem::RecordMismatch)?;
+            let bytes = self.history_read(install,&name,transaction::STATE_LIMIT,&mut retained,base,end,stop,publish)?;
+            let state = match StateData::parse_data(&bytes,selected) {
+                Ok(value) => value, Err(_) => return self.reject(Problem::RecordMismatch,Instant::now(),publish),
+            };
+            if state.digest_data() != state_sha { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+            let record = self.history_record(install,&invocation,state,selected,&mut retained,base,end,stop,publish)?;
+            if record.intent.digest_data() != intent_sha || record.capsule.digest_data() != capsule_sha
+                || history.insert(invocation,record).is_some() {
+                return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+            }
+        }
+        let mut names = BTreeSet::from([paths::APP_NAME.to_owned(),"versions".to_owned(),
+            paths::MAINTENANCE_GATE_NAME.to_owned(),transaction::STATE_NAME.to_owned()]);
+        let mut stages = BTreeSet::new();
+        let mut requests = BTreeSet::new();
+        for record in history.values().chain(std::iter::once(&current)) {
+            self.check(end,stop,publish)?;
+            if !requests.insert(record.intent.request_id_data()) {
+                return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+            }
+            let previous = match record.intent.previous_state_data() {
+                None => None,
+                Some((invocation,sha)) => {
+                    let Some(old):Option<&HistoricalRecord> = history.get(invocation) else {
+                        return self.reject(Problem::Incomplete,Instant::now(),publish);
+                    };
+                    if old.state.digest_data() != sha { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+                    Some((&old.state,&old.capsule))
+                },
+            };
+            if transaction::correspondence_data(&record.intent,previous,Some(&record.state),Some(&record.capsule))
+                != CorrespondenceData::MatchingRecordedData {
+                return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+            }
+            let invocation = record.state.invocation_data();
+            names.insert(transaction::intent_name_data(invocation).map_err(|_| Problem::RecordMismatch)?);
+            names.insert(transaction::capsule_name_data(invocation).map_err(|_| Problem::RecordMismatch)?);
+            if invocation != current.state.invocation_data() {
+                names.insert(transaction::archived_state_name_data(invocation).map_err(|_| Problem::RecordMismatch)?);
+            }
+            if record.intent.action_data() != ActionData::SamePackageNoop {
+                let stage = format!(".install-{invocation}"); names.insert(stage.clone()); stages.insert(stage);
+            }
+        }
+        let generation = current.state.current_data();
+        if generation.release_data() != selected.current_data() || generation.instance_data() != current_record.instance()
+            || generation.release_directory_data() != release_directory {
+            return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+        }
+        let mut version_names = BTreeSet::from([paths::RELEASE.to_owned()]);
+        for old in current.state.retained_data() {
+            self.check(end,stop,publish)?;
+            // Only SOURCE-selected exact predecessors can name retained roots.
+            // These metadata/identity checks do not claim historical payload
+            // byte reinspection or old outer-process finality. Current payload
+            // is still fully hashed below; a later writer rehashes every root.
+            let binding = old.release_data().binding_data();
+            let name = transaction::retained_app_name_data(old.retained_invocation_data().ok_or(Problem::RecordMismatch)?)
+                .map_err(|_| Problem::RecordMismatch)?;
+            if !names.insert(name.clone()) || !version_names.insert(binding.release.to_owned()) {
+                return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+            }
+            let old_app = self.open(Some(install),&name,true,end,stop,publish)?;
+            self.protected(old_app,0o555,end,stop,publish)?;
+            if self.app_identity(old_app)? != old.app_identity_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+            let old_release = self.open(Some(versions),binding.release,true,end,stop,publish)?;
+            self.protected(old_release,0o755,end,stop,publish)?;
+            if self.directory_identity(old_release)? != old.release_directory_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+            self.match_fixed_roster(old_release,&["runtime",data::INVENTORY_NAME,data::RECORD_NAME],None,end,stop,publish)?;
+            // These two temporary originals are charged then released before
+            // the next predecessor. They are never retained as a second core.
+            let checkpoint_retained = retained;
+            let descriptor = self.history_read(old_release,data::RECORD_NAME,data::RECORD_LIMIT,&mut retained,base,end,stop,publish)?;
+            let inventory = self.history_read(old_release,data::INVENTORY_NAME,data::INVENTORY_LIMIT,&mut retained,base,end,stop,publish)?;
+            let expected = data::Expected { kind:data::Kind::Ordinary,source_commit:binding.source_commit,
+                runtime_manifest:binding.runtime_manifest_sha256,install_root,release_directory:old.release_directory_data() };
+            let record = match data::Record::parse_for_release_data(&descriptor,&inventory,&expected,old.release_data()) {
+                Ok(value) => value, Err(_) => return self.reject(Problem::RecordMismatch,Instant::now(),publish),
+            };
+            if record.instance() != old.instance_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+            let old_runtime = self.open(Some(old_release),"runtime",true,end,stop,publish)?;
+            self.protected(old_runtime,0o555,end,stop,publish)?;
+            self.close(old_runtime,end,stop,publish)?; self.close(old_release,end,stop,publish)?; self.close(old_app,end,stop,publish)?;
+            drop(record); drop(inventory); drop(descriptor); retained = checkpoint_retained;
+        }
+        let actual = self.roster(install,names.len(),end,stop,publish)?;
+        if actual.keys().cloned().collect::<BTreeSet<_>>() != names { return self.reject(Problem::PayloadMismatch,Instant::now(),publish); }
+        for stage in stages {
+            let Some((inode,kind)) = actual.get(&stage).copied() else { return self.reject(Problem::Incomplete,Instant::now(),publish); };
+            if kind != nix::libc::DT_DIR { return self.reject(Problem::Protection,Instant::now(),publish); }
+            self.private_stage(install,&stage,inode,end,stop,publish)?;
+        }
+        let version_roster = self.roster(versions,version_names.len(),end,stop,publish)?;
+        if version_roster.keys().cloned().collect::<BTreeSet<_>>() != version_names
+            || version_roster.values().any(|(_,kind)| *kind != nix::libc::DT_DIR) {
+            return self.reject(Problem::PayloadMismatch,Instant::now(),publish);
+        }
+        // All temporary historical DATA is dropped before current payload walk.
+        // Matching below continues to describe only that compiled current code.
+        Ok(generation)
+    }
     fn walk(&mut self, parent: usize, prefix: &str, index: &InventoryIndex<'_>, observed: &mut BTreeSet<String>,
         depth: usize, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant),
         read_returned: &mut dyn FnMut(u32, u64)) -> InspectResult<()> {
@@ -272,10 +457,20 @@ impl InstallationSlots {
         }
         self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(parent, end, stop))
     }
-    fn inspect(&mut self, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant),
+    fn inspect(&mut self, selected: Option<&ReleaseSetData>, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant),
         read_returned: &mut dyn FnMut(u32, u64)) -> InspectResult<Matching> {
         self.check(end, stop, publish)?;
         if !crate::installation::NORMAL_MAC_PROFILE { return self.reject(Problem::UnavailableProfile, Instant::now(), publish); }
+        if let Some(selected) = selected {
+            let value = selected.current_data().binding_data();
+            if MaintenanceTargetData::compiled() != Some(selected.target_data()) || value.release != paths::RELEASE
+                || value.package_version != paths::PACKAGE_VERSION || value.package_identifier != paths::PACKAGE_ID
+                || value.bundle_identifier != paths::BUNDLE_ID || value.protocol_sha256 != paths::PROTOCOL_SHA
+                || value.source_commit != option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").unwrap_or("")
+                || value.runtime_manifest_sha256 != option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").unwrap_or("") {
+                return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+            }
+        }
         let user = native::real_user(); let user_at = Instant::now();
         if user.is_err() { return self.reject(Problem::Protection, user_at, publish); }
         self.check(end, stop, publish)?;
@@ -319,7 +514,11 @@ impl InstallationSlots {
         let manifest = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").unwrap_or("");
         let expected = data::Expected { kind: data::Kind::Ordinary, source_commit: source, runtime_manifest: manifest,
             install_root, release_directory };
-        let record = match data::Record::parse_data(&descriptor, &inventory_bytes, &expected) {
+        let parsed_record = match selected {
+            Some(selected) => data::Record::parse_for_release_data(&descriptor,&inventory_bytes,&expected,selected.current_data()),
+            None => data::Record::parse_data(&descriptor,&inventory_bytes,&expected),
+        };
+        let record = match parsed_record {
             Ok(record) => record, Err(_) => return self.reject(Problem::RecordMismatch, Instant::now(), publish),
         };
         self.check(end, stop, publish)?;
@@ -331,16 +530,28 @@ impl InstallationSlots {
         // snapshot is quiescent here; every live/native frame must be accountable.
         let Some(native_bytes) = self.control_bytes() else { return self.reject(Problem::CleanupUnknown, Instant::now(), publish); };
         let planned = control_bound(&descriptor, &inventory_bytes, &inventory, &index, native_bytes);
-        if planned.is_none_or(|bytes| bytes > CONTROL_RESERVE) { return self.reject(Problem::Bounds, Instant::now(), publish); }
+        let Some(planned) = planned.filter(|bytes| *bytes <= CONTROL_RESERVE) else {
+            return self.reject(Problem::Bounds, Instant::now(), publish);
+        };
         // Prove a required absence before checking a complete roster; an absent
         // app/runtime is incomplete, not an unexplained generic mismatch.
         self.require_present(install, paths::APP_NAME, Problem::Incomplete, end, stop, publish)?;
         self.require_present(release, "runtime", Problem::Incomplete, end, stop, publish)?;
-        self.match_fixed_roster(install, &[paths::APP_NAME, "versions", paths::MAINTENANCE_GATE_NAME], Some(&format!(".install-{}", record.instance())), end, stop, publish)?;
-        self.match_fixed_roster(versions, &[paths::RELEASE], None, end, stop, publish)?;
+        let generation = if let Some(selected) = selected {
+            Some(self.v2_roster(install,versions,&record,install_root,release_directory,selected,planned,end,stop,publish)?)
+        } else {
+            // Legacy engineering read-only behavior is preserved exactly. It
+            // cannot migrate/adopt a v2 layout or wildcard predecessor names.
+            self.match_fixed_roster(install, &[paths::APP_NAME, "versions", paths::MAINTENANCE_GATE_NAME], Some(&format!(".install-{}", record.instance())), end, stop, publish)?;
+            self.match_fixed_roster(versions, &[paths::RELEASE], None, end, stop, publish)?;
+            None
+        };
         self.match_fixed_roster(release, &["runtime", data::INVENTORY_NAME, data::RECORD_NAME], None, end, stop, publish)?;
         let app = self.open(Some(install), paths::APP_NAME, true, end, stop, publish)?;
         self.protected(app, 0o555, end, stop, publish)?;
+        if let Some(generation) = generation {
+            if self.app_identity(app)? != generation.app_identity_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+        }
         let runtime = self.open(Some(release), "runtime", true, end, stop, publish)?;
         self.protected(runtime, 0o555, end, stop, publish)?;
         let mut observed = BTreeSet::from(["app".to_owned(), "runtime".to_owned()]);
@@ -363,11 +574,27 @@ impl InstallationSlots {
     pub(crate) fn run(&mut self, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant),
         cleanup_expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool,
         read_returned: &mut dyn FnMut(u32, u64)) -> InspectResult<Matching> {
+        self.run_selected(None,end,stop,publish,cleanup_expired,read_returned)
+    }
+    /// The caller retains the authenticated producer/source selection and its
+    /// original ownership through this same existing blocking-reader lifetime.
+    /// This DATA argument does not verify a signature or activate a native role.
+    /// Ordinary v2 entry wiring is completed with the producer adapter, not by
+    /// deserializing an installation's own declaration to make it acceptable.
+    pub(crate) fn run_for_selected_release_data(&mut self, selected: &ReleaseSetData, end: Instant,
+        stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant),
+        cleanup_expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool,
+        read_returned: &mut dyn FnMut(u32, u64)) -> InspectResult<Matching> {
+        self.run_selected(Some(selected),end,stop,publish,cleanup_expired,read_returned)
+    }
+    fn run_selected(&mut self, selected: Option<&ReleaseSetData>, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Problem, Instant), cleanup_expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool,
+        read_returned: &mut dyn FnMut(u32, u64)) -> InspectResult<Matching> {
         if self.entered || !self.book.as_ref().is_some_and(Book::never_started) {
             return self.reject(Problem::CleanupUnknown, Instant::now(), publish);
         }
         self.entered = true;
-        let result = self.inspect(end, stop, publish, read_returned);
+        let result = self.inspect(selected,end, stop, publish, read_returned);
         let at = Instant::now();
         if let Err(why) = result { self.note_native(publish); publish(why, at); }
         // Stop means no more inspection, not permission to skip independently

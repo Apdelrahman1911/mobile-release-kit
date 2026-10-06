@@ -53,6 +53,9 @@ NATIVE_RUST_TESTS = (
     "tests::compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts",
     "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
     "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
+    "install_producer::tests::report_decoder_binds_slots_error_outputs_and_consuming_returns",
+    "install_producer::tests::signature_result_requires_same_owner_finality_and_late_gate_refuses",
+    "install_producer::tests::unknown_native_or_gate_custody_never_releases_or_publishes_success",
 )
 INSTALLER_WORKER_RUST_TESTS = (
     "installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",
@@ -823,6 +826,140 @@ CONTEXT_METADATA_CHECKS = ("finder-shape", "finder-values", "finder-calendar", "
                            "inode-value", "deviceno-value")
 CONTEXT_METADATA_ARTIFACT = "installer-context-metadata-refusal"
 
+# Diagnostic vocabulary only, NOT accepted PackageInfo attributes/values.
+# An unknown name/value is counted/classified, never copied into evidence.
+CONTEXT_PACKAGE_INFO_ARTIFACT = "installer-context-package-info-refusal"
+CONTEXT_PACKAGE_INFO_FAILURES = ("context-package-identity", "context-package-no-payload",
+                                 "context-package-empty-action", "context-package-hook")
+CONTEXT_PACKAGE_INFO_FIELDS = {
+    "root": {
+        "format-version": ("1", "2"), "identifier": ("expected",), "version": ("1", "1.0"),
+        "install-location": ("/", ""), "auth": ("root", "none"), "generator-version": ("present",),
+        "overwrite-permissions": ("true", "false"), "relocatable": ("true", "false"),
+        "postinstall-action": ("none", "restart", "shutdown", "RequireRestart"),
+        "minimum-system-version": ("present",), "preserve-xattr": ("true", "false"),
+        "followSymLinks": ("true", "false"), "allow-external-scripts": ("true", "false"),
+    },
+    "payload": {"numberOfFiles": ("0", "1"), "installKBytes": ("0", "1")},
+    "scripts": {},
+    "postinstall": {"file": ("postinstall", "./postinstall"), "timeout": ("0", "60", "120", "600")},
+}
+CONTEXT_PACKAGE_INFO_CHILDREN = ("bundle-version", "upgrade-bundle", "update-bundle", "atomic-update-bundle",
+                                 "strict-identifier", "relocate", "payload", "scripts")
+
+
+def context_audit_call_data(package, phase, index, calls):
+    """Finite original-build binding, not a parser-success or cleanup flag."""
+    if (type(package) is not str or package not in CONTEXT_PACKAGE_LABELS
+            or type(calls) is not list or not 1 <= len(calls) <= 64
+            or type(index) is not int or not 0 <= index < len(calls)):
+        return False
+    position = CONTEXT_PACKAGE_LABELS.index(package)
+    role = ("context-component-build", "context-product-component-build", "context-product-build")[position]
+    call = calls[index]
+    return (phase == ("context-component-audit" if position == 0 else "context-product-audit")
+            and type(call) is dict and call.get("role") == role
+            and call.get("entered") is True and call.get("returned") is True
+            and type(call.get("returncode")) is int and call["returncode"] == 0
+            and sum(type(row) is dict and row.get("role") == role for row in calls) == 1)
+
+
+def _context_package_info_observation(body, identifier):
+    """Inspect the SAME bounded bytes after refusal; never alter acceptance."""
+    root = context_xml(body, 65536)
+    children = list(root)
+    scripts = [node for node in children if node.tag == "scripts"]
+    selected = {"root": [root], "payload": [node for node in children if node.tag == "payload"],
+                "scripts": scripts, "postinstall": [node for group in scripts for node in group if node.tag == "postinstall"]}
+    rows = {}
+    for role, nodes in selected.items():
+        row = {"count": len(nodes), "attributes": None, "otherAttributes": None,
+               "children": None, "textPresent": None, "tailPresent": None}
+        if len(nodes) == 1:
+            node, values = nodes[0], {}
+            for name, vocabulary in CONTEXT_PACKAGE_INFO_FIELDS[role].items():
+                raw = node.get(name)
+                if raw is None:
+                    value = None
+                elif role == "root" and name == "identifier":
+                    value = "expected" if raw == identifier else "other"
+                elif role == "root" and name in ("generator-version", "minimum-system-version"):
+                    value = "present"
+                else:
+                    value = raw if raw in vocabulary else "other"
+                values[name] = value
+            row.update(attributes=values, otherAttributes=sum(name not in values for name in node.attrib),
+                       children=len(node), textPresent=bool((node.text or "").strip()),
+                       tailPresent=bool((node.tail or "").strip()))
+        rows[role] = row
+    allowed = {"format-version", "identifier", "version", "install-location", "auth", "generator-version"}
+    return {"checks": {"rootTagMatches": root.tag == "pkg-info", "identifierMatches": root.get("identifier") == identifier,
+                       "versionMatches": root.get("version") == "1", "installLocationMatches": root.get("install-location") == "/",
+                       "authMatches": root.get("auth") == "root", "onlyExpectedAttributes": set(root.attrib) <= allowed},
+            "elements": rows, "childCounts": {name: sum(node.tag == name for node in children) for name in CONTEXT_PACKAGE_INFO_CHILDREN},
+            "otherChildren": sum(node.tag not in CONTEXT_PACKAGE_INFO_CHILDREN for node in children)}
+
+
+def context_package_info_diagnostic_data(value, phase, failure, calls):
+    """Closed failure projection; no arbitrary XML names, values or paths."""
+    keys = {"schemaVersion", "type", "diagnosticOnly", "phase", "package", "packageSha256", "packageBytes",
+            "packageInfoSha256", "packageInfoBytes", "buildCallIndex", "packageInfo"}
+    if (type(value) is not dict or set(value) != keys or type(value["schemaVersion"]) is not int
+            or value["schemaVersion"] != 1 or value["type"] != "mrk-context-package-info-diagnostic-v1"
+            or value["diagnosticOnly"] is not True or failure not in CONTEXT_PACKAGE_INFO_FAILURES
+            or value["phase"] != phase or value["package"] not in CONTEXT_PACKAGE_LABELS[:2]
+            or not context_audit_call_data(value["package"], phase, value["buildCallIndex"], calls)):
+        return None
+    for prefix, low, high in (("package", 28, CONTEXT_PACKAGE_LIMIT), ("packageInfo", 1, 65536)):
+        if (type(value[prefix + "Bytes"]) is not int or not low <= value[prefix + "Bytes"] <= high
+                or not identity(value[prefix + "Sha256"], 64)):
+            return None
+    info = value["packageInfo"]
+    check_keys = {"rootTagMatches", "identifierMatches", "versionMatches", "installLocationMatches", "authMatches", "onlyExpectedAttributes"}
+    if (type(info) is not dict or set(info) != {"checks", "elements", "childCounts", "otherChildren"}
+            or type(info["checks"]) is not dict or set(info["checks"]) != check_keys
+            or any(type(item) is not bool for item in info["checks"].values())
+            or type(info["elements"]) is not dict or set(info["elements"]) != set(CONTEXT_PACKAGE_INFO_FIELDS)
+            or type(info["childCounts"]) is not dict or set(info["childCounts"]) != set(CONTEXT_PACKAGE_INFO_CHILDREN)
+            or any(type(item) is not int or not 0 <= item <= 256 for item in (*info["childCounts"].values(), info["otherChildren"]))):
+        return None
+    for role, fields in CONTEXT_PACKAGE_INFO_FIELDS.items():
+        row = info["elements"][role]
+        if (type(row) is not dict or set(row) != {"count", "attributes", "otherAttributes", "children", "textPresent", "tailPresent"}
+                or type(row["count"]) is not int or not 0 <= row["count"] <= 256):
+            return None
+        if row["count"] != 1:
+            if any(row[name] is not None for name in row if name != "count"):
+                return None
+            continue
+        if (type(row["attributes"]) is not dict or set(row["attributes"]) != set(fields)
+                or type(row["otherAttributes"]) is not int or not 0 <= row["otherAttributes"] <= 16
+                or type(row["children"]) is not int or not 0 <= row["children"] <= 256
+                or type(row["textPresent"]) is not bool or type(row["tailPresent"]) is not bool):
+            return None
+        for name, vocabulary in fields.items():
+            scalar = row["attributes"][name]
+            if scalar is not None and (type(scalar) is not str or scalar not in (*vocabulary, "other")):
+                return None
+        if sum(scalar is not None for scalar in row["attributes"].values()) + row["otherAttributes"] > 16:
+            return None
+    rows, checks = info["elements"], info["checks"]
+    if rows["root"]["count"] != 1:
+        return None
+    attributes = rows["root"]["attributes"]
+    allowed = {"format-version", "identifier", "version", "install-location", "auth", "generator-version"}
+    expected = {"identifierMatches": attributes["identifier"] == "expected", "versionMatches": attributes["version"] == "1",
+                "installLocationMatches": attributes["install-location"] == "/", "authMatches": attributes["auth"] == "root",
+                "onlyExpectedAttributes": rows["root"]["otherAttributes"] == 0 and all(value is None for name, value in attributes.items() if name not in allowed)}
+    if (any(checks[key] != item for key, item in expected.items())
+            or (failure == "context-package-identity") == all(checks.values())
+            or sum(info["childCounts"].values()) + info["otherChildren"] != rows["root"]["children"]
+            or any(rows[name]["count"] != info["childCounts"][name] for name in ("payload", "scripts"))
+            or rows["scripts"]["count"] == 0 and rows["postinstall"]["count"] != 0
+            or rows["scripts"]["count"] == 1 and rows["postinstall"]["count"] > rows["scripts"]["children"]):
+        return None
+    return value if len(canonical(value)) <= 4096 else None
+
 
 def _context_metadata_scalar(value, *, timestamp=False):
     """Observed spelling only, never a timestamp/inode or normalization."""
@@ -1264,7 +1401,7 @@ def installer_context_data(value, source):
 
 def native_rust_test_record():
     return {"schemaVersion": 1, "type": "mrk-macos-native-rust-tests-v1", "target": TARGET,
-            "tests": list(NATIVE_RUST_TESTS), "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
+            "tests": list(NATIVE_RUST_TESTS), "passed": 6, "failed": 0, "ignored": 0, "measured": 0}
 
 
 def installer_worker_rust_test_record():
@@ -1275,12 +1412,14 @@ def installer_worker_rust_test_record():
 
 def _rust_tests_data(value, expected, label):
     """Only the two fixed wrappers supply this expected record; never output DATA."""
+    count = len(expected["tests"])  # SOURCE-fixed wrapper record, not received DATA.
+    need(count in (3, 6) and expected["passed"] == count, label + "-record")
     need(type(value) is dict and set(value) == set(expected)
          and all(type(value[key]) is int and value[key] == expected[key]
                  for key in ("schemaVersion", "passed", "failed", "ignored", "measured"))
          and all(type(value[key]) is str and value[key] == item
                  for key, item in expected.items() if type(item) is str)
-         and type(value["tests"]) is list and len(value["tests"]) == 3
+         and type(value["tests"]) is list and len(value["tests"]) == count
          and all(type(name) is str for name in value["tests"])
          and value["tests"] == expected["tests"], label + "-record")
     return expected
@@ -1298,19 +1437,21 @@ def installer_worker_rust_tests_data(value):
 
 def _rust_test_output(stdout, expected_names, label):
     """Complete pinned libtest pretty output from an already-successful original."""
+    count = len(expected_names)  # Only the native6 and worker3 SOURCE tuples call this.
+    need(count in (3, 6), label + "-roster")
     need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), label + "-bound")
     lines = stdout.split(b"\n")
-    need(len(lines) == 9 and lines[:2] == [b"", b"running 3 tests"]
-         and lines[5] == b"" and lines[7:] == [b"", b""], label + "-framing")
+    need(len(lines) == count + 6 and lines[:2] == [b"", ("running %d tests" % count).encode("ascii")]
+         and lines[count + 2] == b"" and lines[count + 4:] == [b"", b""], label + "-framing")
     names = []
-    for line in lines[2:5]:
+    for line in lines[2:count + 2]:
         match = re.fullmatch(rb"test ([A-Za-z0-9_:]+) +\.\.\. ok", line)
         need(match is not None, label + "-roster")
         names.append(match[1].decode("ascii"))
-    need(len(set(names)) == 3 and set(names) == set(expected_names), label + "-roster")
+    need(len(set(names)) == count and set(names) == set(expected_names), label + "-roster")
     finish = re.fullmatch(
-        rb"test result: ok\. 3 passed; 0 failed; 0 ignored; 0 measured; (0|[1-9][0-9]{0,3}) filtered out; "
-        rb"finished in (0|[1-9][0-9]{0,2})\.([0-9]{2})s", lines[6])
+        rb"test result: ok\. " + str(count).encode("ascii") + rb" passed; 0 failed; 0 ignored; 0 measured; (0|[1-9][0-9]{0,3}) filtered out; "
+        rb"finished in (0|[1-9][0-9]{0,2})\.([0-9]{2})s", lines[count + 3])
     need(finish is not None and int(finish[2]) * 100 + int(finish[3]) <= 48000, label + "-result")
 
 
@@ -1889,6 +2030,7 @@ def source_names(rows):
         ".github/workflows/desktop-macos-maintenance-fixture.yml",
         "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
         "desktop/packaging/macos-android-service-signing.profile",
+        "desktop/packaging/macos-install-producer-signing.profile",
         "desktop/tools/macos_e2_native_fixture.py", "desktop/tools/macos_aqua_qualification.py",
         "desktop/tools/stage_macos_installed.py", CONTEXT_SOURCE, LAYOUT_SOURCE,
         "desktop/tools/macos_android_sdk_metadata.py",
@@ -1900,6 +2042,10 @@ def source_names(rows):
             "_store_lane_contract.py", "_store_lane_evidence.py")),
     }
     need(explicit <= set(rows), "required-source-roster")
+    # Only a configured SOURCE profile uses these three fixed public certificates.
+    # The unconfigured profile must not require fabricated certificate inputs.
+    optional = {"desktop/packaging/macos-install-producer-certificates/" + name + ".der"
+                for name in ("leaf", "issuer", "root")}
     prefixes = ("desktop/native/macos-installed-native/", "desktop/native/macos-installed-entry/",
                 "desktop/helpers/macos-android-register/", "desktop/src-tauri/",
                 "desktop/macos-installed-inputs/", "templates/", "schemas/")
@@ -1907,7 +2053,7 @@ def source_names(rows):
     # its checked-in generated catalogue, Python bootstrap SOURCE and templates.
     # No unrelated Debian notices, UI frontend, registry cache or other platform
     # implementation is held merely because it shares a repository.
-    return sorted(name for name in rows if name in explicit or name.startswith(prefixes)
+    return sorted(name for name in rows if name in explicit or name in optional or name.startswith(prefixes)
                   or name.startswith("desktop/") and name.count("/") == 1 and name.endswith(".py")
                   or name.startswith("desktop/") and name.rsplit("/", 1)[-1] in ("Cargo.toml", "Cargo.lock"))
 
@@ -2193,8 +2339,8 @@ class Operation:
         self.btm_started, self.btm_finished = None, None
         self.btm_log = btm_record(environment["GITHUB_SHA"])
         self.artifacts = {}
-        self._context_metadata_refusal = None
-        self.context_pure_metadata_refused = False
+        self._context_audit_refusal = None
+        self.context_pure_audit_refused = False
         self.observer_entry, self.observer_digest, self.metadata = None, None, []
         self.release = None
         self.sources_closed = self.outputs_closed = self.protected_closed = False
@@ -2394,39 +2540,75 @@ class Operation:
         self.protected.check()
         return rows  # Actual root-owned receipt originals remain held until finish().
 
-    def context_audit(self, entry, body, *, component=None):
-        """Only the existing pure parser, after its caller's bound body read."""
+    def context_audit(self, entry, body, *, component=None, identifier=None, expected=None):
+        """Pure archive/PackageInfo/scripts DATA after the original body read.
+
+        No acquisition, tool call or readback belongs in this refusal boundary.
+        Known pure refusal finality is independent of the particular error label.
+        """
+        self._context_audit_refusal = None
+        stage, members = "archive", None
         try:
-            if component is None:
-                return context_xar(body)
-            return context_product(body, *component)
+            if component is not None:
+                return context_product(body, *component)
+            members = context_xar(body)
+            stage = "package-info"
+            context_package_info(members["PackageInfo"], identifier)
+            stage = "scripts"
+            archive = members["Scripts"]
+            if archive[:2] == b"\x1f\x8b":
+                archive = context_inflate(archive, 2 * 1024 * 1024)
+            need(self.stager._cpio_members(archive, (os.getuid(), os.getgid())) == expected,
+                 "context-scripts-correspondence")
+            return members
         except Refused as error:
-            if type(error) is Refused and error.args == ("context-xar-member-metadata",):
-                try:
-                    observed = getattr(error, "_context_metadata", None)
-                    paths = [self.scratch / "installer-context" / name for name in CONTEXT_PACKAGES]
-                    if (type(observed) is dict and set(observed) == {"metadata", "parsedArchiveSha256", "parsedArchiveBytes"}
-                            and type(body) is bytes and type(entry) is dict
-                            and entry.get("path") in paths and entry.get("kind") == "file"
-                            and type(entry.get("fd")) is int and entry["fd"] >= 0 and entry.get("closed") is False
-                            and type(entry.get("identity")) is tuple and len(entry["identity"]) == 9
-                            and entry["identity"][6] == len(body)
-                            and any(entry is original for original in self.outputs.entries)):
-                        position = paths.index(entry["path"])
-                        value = {"schemaVersion": 1, "type": "mrk-context-xar-metadata-diagnostic-v1",
+            try:
+                paths = [self.scratch / "installer-context" / name for name in CONTEXT_PACKAGES]
+                if (type(error) is Refused and type(body) is bytes and type(entry) is dict
+                        and entry.get("path") in paths and entry.get("kind") == "file"
+                        and type(entry.get("fd")) is int and entry["fd"] >= 0 and entry.get("closed") is False
+                        and type(entry.get("identity")) is tuple and len(entry["identity"]) == 9
+                        and entry["identity"][6] == len(body) and 28 <= len(body) <= CONTEXT_PACKAGE_LIMIT
+                        and any(entry is original for original in self.outputs.entries)):
+                    position = paths.index(entry["path"])
+                    package, call_index = CONTEXT_PACKAGE_LABELS[position], len(self.calls) - 1
+                    admitted = context_audit_call_data(package, self.phase, call_index, self.calls)
+                    diagnostic_known = True
+                    if admitted and error.args == ("context-xar-member-metadata",):
+                        observed = getattr(error, "_context_metadata", None)
+                        diagnostic_known = (type(observed) is dict
+                                            and set(observed) == {"metadata", "parsedArchiveSha256", "parsedArchiveBytes"})
+                        if diagnostic_known:
+                            value = {"schemaVersion": 1, "type": "mrk-context-xar-metadata-diagnostic-v1",
+                                     "diagnosticOnly": True, "phase": self.phase,
+                                     "package": package, "packageSha256": digest(body),
+                                     "packageBytes": len(body), "buildCallIndex": call_index, **observed}
+                            diagnostic_known = context_metadata_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None
+                            if diagnostic_known:
+                                self.artifacts[CONTEXT_METADATA_ARTIFACT] = value
+                    elif (admitted and stage == "package-info" and len(error.args) == 1
+                          and error.args[0] in CONTEXT_PACKAGE_INFO_FAILURES):
+                        info_body = members["PackageInfo"]
+                        observed = _context_package_info_observation(info_body, identifier)
+                        value = {"schemaVersion": 1, "type": "mrk-context-package-info-diagnostic-v1",
                                  "diagnosticOnly": True, "phase": self.phase,
-                                 "package": CONTEXT_PACKAGE_LABELS[position], "packageSha256": digest(body),
-                                 "packageBytes": len(body), "buildCallIndex": len(self.calls) - 1, **observed}
-                        if context_metadata_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None:
-                            self.artifacts[CONTEXT_METADATA_ARTIFACT] = value
-                            # Not a receipt/input flag. execute must catch THIS
-                            # exact Refused before it may permit retirement.
-                            self._context_metadata_refusal = error
-                except BaseException:
-                    # A diagnostic/cancellation error is never cleanup proof
-                    # and never replaces the original parser refusal.
-                    self._context_metadata_refusal = None
-                    self.artifacts.pop(CONTEXT_METADATA_ARTIFACT, None)
+                                 "package": package, "packageSha256": digest(body), "packageBytes": len(body),
+                                 "buildCallIndex": call_index, "packageInfoBytes": len(info_body),
+                                 "packageInfoSha256": digest(info_body), "packageInfo": observed}
+                        diagnostic_known = (position < 2 and identifier == CONTEXT_IDENTIFIERS[position]
+                                            and context_package_info_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None)
+                        if diagnostic_known:
+                            self.artifacts[CONTEXT_PACKAGE_INFO_ARTIFACT] = value
+                    if admitted and diagnostic_known:
+                        # Not a serialized/input flag. execute must catch THIS
+                        # exact pure Refused; every call/close still participates.
+                        self._context_audit_refusal = error
+            except BaseException:
+                # Diagnostic/cancellation failure never becomes cleanup proof
+                # and never replaces the original parser's refusal.
+                self._context_audit_refusal = None
+                self.artifacts.pop(CONTEXT_METADATA_ARTIFACT, None)
+                self.artifacts.pop(CONTEXT_PACKAGE_INFO_ARTIFACT, None)
             raise
 
 
@@ -2498,13 +2680,7 @@ class Operation:
                                   "--ownership", "recommended", "--compression", "legacy", str(package_paths[index])], 30)
             self.phase = "context-" + case + "-audit"
             entry, body = self.outputs.file(package_paths[index], CONTEXT_PACKAGE_LIMIT, modes=(0o600, 0o644))
-            members = self.context_audit(entry, body)
-            context_package_info(members["PackageInfo"], CONTEXT_IDENTIFIERS[index])
-            archive = members["Scripts"]
-            if archive[:2] == b"\x1f\x8b":
-                archive = context_inflate(archive, 2 * 1024 * 1024)
-            need(self.stager._cpio_members(archive, (os.getuid(), os.getgid())) == expected,
-                 "context-scripts-correspondence")
+            members = self.context_audit(entry, body, identifier=CONTEXT_IDENTIFIERS[index], expected=expected)
             if "Bom" in members:
                 self.phase = "context-lsbom-original"
                 tool_entry, tool_body = self.outputs.file(Path("/usr/bin/lsbom"), 4 * 1024 * 1024, uid=0, modes=(0o555, 0o755))
@@ -3233,7 +3409,7 @@ class Operation:
         native_finality = (not self.native_entered or self.native_returned
                            and self.native is not None and self.native["nativeFinalityKnown"] is True)
         context_finality = (not self.installer_context["started"] or self.installer_context["completed"]
-                            or self.context_pure_metadata_refused is True
+                            or self.context_pure_audit_refused is True
                             and self.installer_context["started"] is True
                             and self.installer_context["completed"] is False
                             and self.installer_context["enteredCases"] == [] and self.installer_context["cases"] == []
@@ -3317,10 +3493,15 @@ class Operation:
             self.scratch_identity = self.outputs.directories[self.scratch]["identity"]
             if not self.service_layout["selected"]:
                 self.build_installer_worker_tests()
+                # Native DATA/client compilation is independent of Context.
+                # Keep this complete original graph/retirement before Context
+                # so a metadata refusal cannot hide a native compiler failure.
+                self.build_images()
                 self.observe_installer_context()
             self.compile_metadata_observer()
             self.absence("initial")
-            self.build_images()
+            if self.service_layout["selected"]:
+                self.build_images()  # Diagnostic layout retains its original order.
             self.compile_facades()
             if self.service_layout["selected"]:
                 self.compile_service_layout()
@@ -3332,7 +3513,7 @@ class Operation:
             else:
                 self.run_native()
         except BaseException as error:
-            self.context_pure_metadata_refused = (type(error) is Refused and error is self._context_metadata_refusal)
+            self.context_pure_audit_refused = (type(error) is Refused and error is self._context_audit_refusal)
             failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
                        and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])
                        else "original-operation-refused-or-unknown")
@@ -3341,7 +3522,7 @@ class Operation:
             try:
                 self.observe_btm_logs()
             except BaseException as error:
-                self.context_pure_metadata_refused = False
+                self.context_pure_audit_refused = False
                 if failure is None:
                     failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
                                and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])

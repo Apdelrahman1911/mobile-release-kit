@@ -90,6 +90,13 @@ pub mod macos_install_paths;
 pub mod macos_install_record;
 pub mod macos_install_maintenance;
 pub mod macos_install_transaction;
+// Producer comparison DATA alone is not signature/purpose/installation authority.
+pub mod macos_install_producer;
+// Exercise the ACTUAL build-only SOURCE parser in the existing portable DATA
+// test binary, not a duplicate configuration implementation or a Mac mock.
+#[cfg(test)]
+#[path = "../../native/macos-installed-native/build_support/producer_selection.rs"]
+mod macos_install_producer_selection_data;
 // Protected original books. The retained Android launch path is wired but
 // qualification-disabled; legacy inspection-only DATA remains separate.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

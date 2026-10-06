@@ -13,7 +13,9 @@ mod installer {
         sys::{stat::{self, FileStat, Mode, SFlag}, statfs}, unistd};
     use sha2::{Digest, Sha256};
     use mobile_release_desktop::{macos_install_paths as paths,
-        macos_install_record::{self as installation_record, Entry, Inventory}, runtime::safe_payload_path};
+        macos_install_record::{self as installation_record, Entry, Inventory},
+        macos_install_maintenance::{ActionData, ReleaseSetData},
+        macos_install_transaction as transaction, runtime::safe_payload_path};
     use mrk_macos_installed_native as native;
     type Result<T> = std::result::Result<T, &'static str>;
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,8 @@ mod installer {
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
         metadata: installation_record::Progress,
         gate: MaintenanceGate,
+        // Actual native observations of the one B3 writer, never parsed action authority.
+        maintenance: Option<maintenance::Effects>,
         #[cfg(feature = "macos-installed-installer-fixture")]
         fixture: Option<fixture::Context>,
     }
@@ -325,7 +329,7 @@ mod installer {
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
-                gate:MaintenanceGate::new(),
+                gate:MaintenanceGate::new(),maintenance:None,
                 #[cfg(feature = "macos-installed-installer-fixture")]
                 fixture: None }
         }
@@ -771,21 +775,25 @@ mod installer {
             self.maintenance_gate(destination)?;
             Ok(PreparedFresh { input, inventory, inventory_bytes, destination, versions })
         }
+        fn prepare_maintenance_input(&mut self, input: usize, inventory: Inventory, inventory_bytes: Vec<u8>) -> Result<PreparedFresh> {
+            check(!cfg!(feature="macos-installed-installer-fixture"),"worker-fixture-route-unavailable")?;
+            let index = inventory.index()?;
+            check(index.payload_bytes.checked_add(inventory_bytes.len() as u64)
+                .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64 + paths::MAINTENANCE_GATE_BYTES.len() as u64))
+                .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT)
+                && index.files.len().checked_add(3).is_some_and(|n| n <= installation_record::FILE_LIMIT),"inventory-bound")?;
+            let support = self.support_root()?;
+            let destination = self.directory(support,"MobileReleaseKit",false,0o755)?;
+            let versions = self.directory(destination,"versions",false,0o755)?;
+            self.maintenance_gate(destination)?;
+            Ok(PreparedFresh { input,inventory,inventory_bytes,destination,versions })
+        }
         fn install_prepared(&mut self, prepared: PreparedFresh, invocation: &str) -> Result<()> {
             check(!self.worker_stderr_is_gate || self.worker_go_eof, "worker-go-eof-required")?;
             check(worker::invocation_valid(invocation), "stage-identity")?;
-            let PreparedFresh { input, inventory, inventory_bytes, destination, versions } = prepared;
-            let indexed = inventory.index()?;
-            let files = indexed.files; let directories = indexed.directories;
-            let name = format!(".install-{invocation}");
-            self.stage_name = Some(name.clone()); // Reserve the effect identity before mkdir.
-            let stage = self.directory(destination, &name, true, 0o700)?; self.stage = Some(stage);
-            self.receipt("staging-created")?;
-            let app = self.copy_tree("app", input, stage, &files, &directories, 0)?; self.app = Some(app);
-            let runtime = self.copy_tree("runtime", input, stage, &files, &directories, 0)?; self.runtime = Some(runtime);
-            self.check_name(input, true)?;
-            check(self.payload_writers_settled() && !self.unknown, "writer-finality")?;
-            self.payload_verified = true; self.persist(stage, false)?; self.receipt("prepared")?;
+            let (stage, app, runtime) = self.stage_payload(&prepared, invocation, true)?;
+            let runtime = runtime.ok_or("stage-missing")?;
+            let PreparedFresh { input: _, inventory: _, inventory_bytes, destination, versions } = prepared;
             // The fresh version parent is also exclusively created; failure
             // preserves an existing user's version and our unpublished staging.
             self.absent(destination, paths::APP_NAME)?;
@@ -794,13 +802,35 @@ mod installer {
             self.fixture_before_runtime_publication(release)?;
             self.publish(runtime, stage, "runtime", release, "runtime", true)?;
             self.receipt("runtime-publication-confirmed")?;
-            self.record_metadata(destination, release, &name[9..], &inventory_bytes)?;
+            self.record_metadata(destination, release, invocation, &inventory_bytes)?;
             #[cfg(feature = "macos-installed-installer-fixture")]
             self.fixture_before_app_publication(destination)?;
             self.publish(app, stage, "app", destination, paths::APP_NAME, false)?;
             // Not an "installed/settled" receipt: remaining original descriptors
             // still have to close. Only final exit/output can report that fact.
             self.receipt("both-publications-confirmed")?; Ok(())
+        }
+        // Sole payload copier. Restore selects the App subset, never a second
+        // publisher/copy engine. Legacy fresh still calls it once in the same order.
+        fn stage_payload(&mut self, prepared: &PreparedFresh, invocation: &str, with_runtime: bool)
+            -> Result<(usize, usize, Option<usize>)> {
+            check(!self.worker_stderr_is_gate || self.worker_go_eof, "worker-go-eof-required")?;
+            check(worker::invocation_valid(invocation), "stage-identity")?;
+            let indexed = prepared.inventory.index()?;
+            let name = format!(".install-{invocation}");
+            self.stage_name = Some(name.clone()); // Reserve before the actual mkdir.
+            let stage = self.directory(prepared.destination, &name, true, 0o700)?; self.stage = Some(stage);
+            self.receipt("staging-created")?;
+            let app = self.copy_tree("app", prepared.input, stage, &indexed.files, &indexed.directories, 0)?;
+            self.app = Some(app);
+            let runtime = if with_runtime {
+                let original = self.copy_tree("runtime", prepared.input, stage, &indexed.files, &indexed.directories, 0)?;
+                self.runtime = Some(original); Some(original)
+            } else { None };
+            self.check_name(prepared.input, true)?;
+            check(self.payload_writers_settled() && !self.unknown, "writer-finality")?;
+            self.payload_verified = true; self.persist(stage, false)?; self.receipt("prepared")?;
+            Ok((stage, app, runtime))
         }
         fn recorded_directory(&self, n: usize) -> Result<installation_record::DirectoryIdentity> {
             self.clock()?; self.check_name(n, false)?; self.protected(n, true, Some(0o755))?;
@@ -816,9 +846,30 @@ mod installer {
             check(data.valid(), "installation-directory-policy")?; Ok(data)
         }
         fn metadata_file(&mut self, release: usize, name: &str, bytes: &[u8]) -> Result<()> {
-            let writer = self.create_file(release, name, Role::MetadataWriter)?;
+            let reader = self.record_file(release, name, bytes, Role::MetadataWriter)?;
+            self.forward_close(reader, "installation-readback-close")
+        }
+        // The caller chooses only a fixed metadata/evidence role. The returned
+        // READ original remains held for a state swap or is consumed by caller.
+        fn record_file(&mut self, release: usize, name: &str, bytes: &[u8], role: Role) -> Result<usize> {
+            check(matches!(role, Role::MetadataWriter | Role::ReceiptWriter)
+                && !bytes.is_empty() && bytes.len() <= transaction::CAPSULE_LIMIT.max(installation_record::INVENTORY_LIMIT),
+                "installation-metadata-plan")?;
+            let writer = self.create_file(release, name, role)?;
+            self.record_reserved_file(writer, bytes)
+        }
+        fn record_reserved_file(&mut self, writer: usize, bytes: &[u8]) -> Result<usize> {
+            check(matches!(self.originals[writer].role, Role::MetadataWriter | Role::ReceiptWriter)
+                && !bytes.is_empty() && bytes.len() <= transaction::CAPSULE_LIMIT.max(installation_record::INVENTORY_LIMIT)
+                && self.identity(writer)?.size == 0, "installation-metadata-plan")?;
+            self.check_name(writer, true)?; self.protected(writer, false, Some(0o600))?;
+            native::no_xattrs(self.fd(writer)?.as_fd()).map_err(|_| "installation-file-attributes")?;
+            check(stat::fstat(self.fd(writer)?).map_err(|_| "installation-file-flags")?.st_flags == 0,
+                "installation-file-flags")?;
+            let release = self.originals[writer].parent.ok_or("installation-metadata-parent")?;
+            let name = self.originals[writer].name.clone();
             self.write_all(writer, bytes)?; self.seal_file(writer, false)?;
-            let reader = self.open(Some(release), name, false)?;
+            let reader = self.open(Some(release), &name, false)?;
             check(self.identity(writer)?.same_object(self.identity(reader)?), "installation-file-original")?;
             self.protected(reader, false, Some(0o444))?;
             native::no_xattrs(self.fd(reader)?.as_fd()).map_err(|_| "installation-file-attributes")?;
@@ -828,7 +879,7 @@ mod installer {
             check(self.read(reader, bytes.len() as u64, false)?.0 == expected, "installation-file-readback")?;
             check(stat::fstat(self.fd(reader)?).map_err(|_| "installation-file-flags")?.st_flags == 0,
                 "installation-file-flags")?;
-            self.forward_close(reader, "installation-readback-close")
+            Ok(reader)
         }
         fn record_metadata(&mut self, destination: usize, release: usize, instance: &str, inventory: &[u8]) -> Result<()> {
             #[cfg(not(feature = "macos-installed-installer-fixture"))]
@@ -898,8 +949,9 @@ mod installer {
             match self.worker_deadline.as_ref() {
                 Some(deadline) => {
                     let timely = deadline.check_total().is_ok();
-                    final_result_after_deadline(result, settled, self.unknown || deadline.is_unknown(),
-                        self.runtime_publication, self.app_publication, timely)
+                    if self.maintenance.is_some() { maintenance::finish(self,result,settled,timely) }
+                    else { final_result_after_deadline(result, settled, self.unknown || deadline.is_unknown(),
+                        self.runtime_publication, self.app_publication, timely) }
                 }
                 None => final_result(result, settled, self.unknown, self.runtime_publication, self.app_publication, self.end, Instant::now()),
             }
@@ -915,6 +967,870 @@ mod installer {
                 "runtimeManifestSha256":option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")})
         }
     }
+    // B3 shares the existing original descriptor book, copier and fixed roots.
+    // None of these private DATA arguments authenticates a producer. The only
+    // entry caller must first admit its genuine completed-package expectation.
+    mod maintenance {
+        use super::*;
+        use transaction::{AppIdentityData, CapsuleData, CorrespondenceData, GenerationCostData,
+            GenerationData, IntentData, ProgressData, ProgressOutcomeData, ReturnedData, StateData, StepData};
+
+        pub(super) struct Effects {
+            pub action: ActionData, pub progress: ProgressData,
+            pub state: Option<StateData>, pub state_bytes: Option<Vec<u8>>,
+            pub state_published: bool, pub inverse: bool,
+        }
+        pub(super) struct Recorded {
+            pub intent: IntentData, pub state: StateData, pub capsule: CapsuleData,
+        }
+        pub(super) struct History {
+            pub current: Recorded, pub originals: BTreeMap<String, Recorded>, pub state_original: usize,
+            pub state_bytes: Vec<u8>, bytes: u64,
+        }
+        pub(super) struct Observed {
+            pub prepared: PreparedFresh, pub selected: ReleaseSetData, pub action: ActionData,
+            pub history: Option<History>, pub old_app: Option<usize>, pub old_release: Option<usize>,
+            pub intent: Option<IntentData>, pub intent_original: Option<usize>,
+        }
+        fn data<T>(value: std::result::Result<T, transaction::TransactionDataError>) -> Result<T> {
+            value.map_err(|_| "maintenance-record-binding")
+        }
+        fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+        pub(super) fn selected_compile(selected: &ReleaseSetData) -> Result<()> {
+            let current = selected.current_data().binding_data();
+            let target = if cfg!(target_arch = "aarch64") { "aarch64-apple-darwin" } else { "x86_64-apple-darwin" };
+            check(selected.target_data().target() == target && current.release == paths::RELEASE
+                && current.package_version == paths::PACKAGE_VERSION && current.protocol_sha256 == paths::PROTOCOL_SHA
+                && Some(current.source_commit) == option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
+                && Some(current.inventory_sha256) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")
+                && Some(current.runtime_manifest_sha256) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
+                "maintenance-selected-compile")
+        }
+        // Each additional observation acquires and accounts its own descriptor;
+        // it is not adoption of a failed or retired descriptor, nor an offset reset.
+        fn roster_now(book: &mut Install, directory: usize) -> Result<BTreeMap<String, u64>> {
+            book.check_name(directory, false)?;
+            let parent = book.originals[directory].parent;
+            let name = book.originals[directory].name.clone();
+            let reader = book.open(parent, &name, true)?;
+            check(book.identity(directory)?.same_object(book.identity(reader)?), "maintenance-roster-original")?;
+            let values = book.roster(reader)?;
+            book.check_name(reader, true)?;
+            book.forward_close(reader, "maintenance-roster-close")?;
+            book.check_name(directory, false)?; Ok(values)
+        }
+        fn exact_roster(book: &mut Install, directory: usize, wanted: &BTreeSet<String>) -> Result<()> {
+            check(roster_now(book, directory)?.keys().cloned().collect::<BTreeSet<_>>() == *wanted,
+                "maintenance-exact-roster")
+        }
+        fn metadata_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
+            let reader = book.open(Some(parent), name, false)?;
+            book.protected(reader, false, Some(0o444))?;
+            native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_| "maintenance-record-attributes")?;
+            let original = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
+            let size = usize::try_from(original.st_size).map_err(|_| "maintenance-record-size")?;
+            check(original.st_flags == 0 && size > 0 && size <= limit, "maintenance-record-size")?;
+            let bytes = book.read(reader, size as u64, true)?.1;
+            let post = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
+            check(post.st_flags == 0 && Identity::of(&post) == book.identity(reader)?, "maintenance-record-post")?;
+            Ok((reader, bytes))
+        }
+        fn metadata_bytes(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<Vec<u8>> {
+            let (reader, bytes) = metadata_original(book, parent, name, limit)?;
+            book.forward_close(reader, "maintenance-record-close")?; Ok(bytes)
+        }
+        // Bounded positional read on the SAME held original. Unlike read(), this
+        // does not depend on a previously consumed offset or mutate a shared OFD.
+        fn held_bytes(book: &Install, reader: usize, expected: &[u8]) -> Result<()> {
+            check(!expected.is_empty() && expected.len() <= transaction::CAPSULE_LIMIT, "maintenance-record-size")?;
+            book.check_name(reader, true)?;
+            check(book.identity(reader)?.size == expected.len() as i64, "maintenance-record-size")?;
+            let mut at: usize = 0; let mut block = [0u8;4096];
+            loop {
+                book.clock()?;
+                let count = nix::sys::uio::pread(book.fd(reader)?, &mut block, at as i64)
+                    .map_err(|_| "maintenance-record-read")?;
+                if count == 0 { break; }
+                check(count <= block.len() && at.checked_add(count).is_some_and(|n| n <= expected.len())
+                    && block[..count] == expected[at..at+count], "maintenance-record-content")?;
+                at += count;
+            }
+            check(at == expected.len(), "maintenance-record-size")?; book.check_name(reader, true)
+        }
+        fn recorded(book: &mut Install, root: usize, invocation: &str, state: StateData,
+            selected: &ReleaseSetData, bytes: &mut u64) -> Result<Recorded> {
+            check(state.invocation_data() == invocation && state.mutation_recorded_data(), "maintenance-history-state")?;
+            let intent_bytes = metadata_bytes(book, root, &data(transaction::intent_name_data(invocation))?, transaction::INTENT_LIMIT)?;
+            let capsule_bytes = metadata_bytes(book, root, &data(transaction::capsule_name_data(invocation))?, transaction::CAPSULE_LIMIT)?;
+            *bytes = bytes.checked_add((intent_bytes.len() + capsule_bytes.len()) as u64).ok_or("maintenance-control-bound")?;
+            let intent = data(IntentData::parse_recorded_data(&intent_bytes, selected))?;
+            let capsule = data(CapsuleData::parse_recorded_data(&capsule_bytes, selected))?;
+            check(intent.invocation_data() == invocation && capsule.invocation_data() == invocation,
+                "maintenance-history-invocation")?;
+            Ok(Recorded { intent, state, capsule })
+        }
+        fn previous<'a>(record: &Recorded, history: &'a BTreeMap<String, Recorded>) -> Result<Option<(&'a StateData, &'a CapsuleData)>> {
+            match record.intent.previous_state_data() {
+                None => Ok(None),
+                Some((invocation, digest)) => {
+                    let old = history.get(invocation).ok_or("maintenance-history-missing")?;
+                    check(old.state.digest_data() == digest, "maintenance-history-binding")?;
+                    Ok(Some((&old.state, &old.capsule)))
+                }
+            }
+        }
+        fn read_history(book: &mut Install, root: usize, selected: &ReleaseSetData) -> Result<History> {
+            let (state_original, current_bytes) = metadata_original(book, root, transaction::STATE_NAME, transaction::STATE_LIMIT)?;
+            let state = data(StateData::parse_data(&current_bytes, selected))?;
+            check(state.mutation_recorded_data(), "maintenance-history-pending")?;
+            let refs: Vec<_> = state.evidence_data().map(|item| (item.invocation.to_owned(), item.intent_sha256.to_owned(),
+                item.state_sha256.to_owned(), item.capsule_sha256.to_owned())).collect();
+            let invocation = state.invocation_data().to_owned();
+            let mut bytes = current_bytes.len() as u64;
+            let current = recorded(book, root, &invocation, state, selected, &mut bytes)?;
+            let mut originals = BTreeMap::new();
+            for (invocation, intent_sha, state_sha, capsule_sha) in refs {
+                let archived = metadata_bytes(book, root, &data(transaction::archived_state_name_data(&invocation))?, transaction::STATE_LIMIT)?;
+                bytes = bytes.checked_add(archived.len() as u64).ok_or("maintenance-control-bound")?;
+                check(hash(&archived) == state_sha, "maintenance-history-binding")?;
+                let record = recorded(book, root, &invocation, data(StateData::parse_data(&archived, selected))?, selected, &mut bytes)?;
+                check(record.intent.digest_data() == intent_sha && record.capsule.digest_data() == capsule_sha
+                    && originals.insert(invocation, record).is_none(), "maintenance-history-binding")?;
+            }
+            let mut requests = BTreeSet::new();
+            for record in originals.values().chain(std::iter::once(&current)) {
+                check(requests.insert(record.intent.request_id_data()), "maintenance-request-reused")?;
+                check(transaction::correspondence_data(&record.intent, previous(record, &originals)?,
+                    Some(&record.state), Some(&record.capsule)) == CorrespondenceData::MatchingRecordedData,
+                    "maintenance-history-correspondence")?;
+            }
+            held_bytes(book, state_original, &current_bytes)?;
+            Ok(History { current, originals, state_original, state_bytes:current_bytes, bytes })
+        }
+        fn app_identity(book: &Install, original: usize) -> Result<AppIdentityData> {
+            book.check_name(original, true)?; book.protected(original, true, Some(0o555))?;
+            native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "maintenance-app-attributes")?;
+            let stat = stat::fstat(book.fd(original)?).map_err(|_| "maintenance-app-stat")?;
+            data(AppIdentityData::from_original_fields_data(i64::from(stat.st_dev), stat.st_ino,
+                u32::from(stat.st_mode), stat.st_uid, stat.st_gid, stat.st_flags))
+        }
+        fn audit_tree(book: &mut Install, root: usize, prefix: &str, index: &installation_record::InventoryIndex<'_>, depth: usize) -> Result<()> {
+            check(depth <= 16, "maintenance-tree-depth")?;
+            book.protected(root, true, Some(0o555))?;
+            native::no_xattrs(book.fd(root)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?;
+            check(stat::fstat(book.fd(root)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
+                "maintenance-payload-flags")?;
+            let wanted: BTreeSet<String> = index.files.keys().chain(index.directories.iter()).filter_map(|name|
+                name.rsplit_once('/').filter(|(parent,_)| *parent == prefix).map(|(_,leaf)| leaf.to_owned())).collect();
+            let actual = roster_now(book, root)?;
+            check(actual.keys().cloned().collect::<BTreeSet<_>>() == wanted, "maintenance-payload-roster")?;
+            for name in wanted {
+                let path = format!("{prefix}/{name}");
+                if let Some(entry) = index.files.get(&path) {
+                    let reader = book.open(Some(root), &name, false)?;
+                    book.protected(reader, false, Some(if entry.executable { 0o555 } else { 0o444 }))?;
+                    native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?;
+                    check(book.identity(reader)?.ino == actual[&name]
+                        && stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
+                        "maintenance-payload-original")?;
+                    check(book.read(reader, entry.size, false)?.0 == entry.sha256, "maintenance-payload-hash")?;
+                    book.forward_close(reader, "maintenance-payload-close")?;
+                } else {
+                    let reader = book.open(Some(root), &name, true)?;
+                    check(book.identity(reader)?.ino == actual[&name], "maintenance-payload-original")?;
+                    audit_tree(book, reader, &path, index, depth + 1)?;
+                    book.forward_close(reader, "maintenance-payload-close")?;
+                }
+            }
+            book.check_name(root, true)
+        }
+        fn audit_generation(book: &mut Install, destination: usize, versions: usize, generation: &GenerationData,
+            allow_missing_app: bool, keep: bool) -> Result<(Option<usize>, usize, GenerationCostData, u64)> {
+            let binding = generation.release_data().binding_data();
+            let release = book.open(Some(versions), binding.release, true)?;
+            check(book.recorded_directory(release)? == generation.release_directory_data(), "maintenance-release-original")?;
+            let raw = metadata_bytes(book, release, installation_record::INVENTORY_NAME, installation_record::INVENTORY_LIMIT)?;
+            let descriptor = metadata_bytes(book, release, installation_record::RECORD_NAME, installation_record::RECORD_LIMIT)?;
+            let expected = installation_record::Expected { kind:installation_record::Kind::Ordinary,
+                source_commit:binding.source_commit, runtime_manifest:binding.runtime_manifest_sha256,
+                install_root:book.recorded_directory(destination)?, release_directory:generation.release_directory_data() };
+            let record = installation_record::Record::parse_for_release_data(&descriptor, &raw, &expected, generation.release_data())?;
+            check(record.instance() == generation.instance_data(), "maintenance-generation-instance")?;
+            let inventory = Inventory::parse_for_release(&raw, binding.runtime_manifest_sha256, binding.release)?;
+            let index = inventory.index()?;
+            exact_roster(book, release, &["runtime", installation_record::INVENTORY_NAME, installation_record::RECORD_NAME]
+                .into_iter().map(str::to_owned).collect())?;
+            let runtime = book.open(Some(release), "runtime", true)?;
+            audit_tree(book, runtime, "runtime", &index, 0)?;
+            book.forward_close(runtime, "maintenance-runtime-close")?;
+            let app_name = match generation.retained_invocation_data() {
+                None => paths::APP_NAME.to_owned(), Some(invocation) => data(transaction::retained_app_name_data(invocation))?,
+            };
+            let app = match book.named(Some(destination), &app_name) {
+                Err(Errno::ENOENT) if allow_missing_app && generation.retained_invocation_data().is_none() => None,
+                Err(_) => return Err("maintenance-app-missing-or-refused"),
+                Ok(_) => {
+                    let original = book.open(Some(destination), &app_name, true)?;
+                    check(app_identity(book, original)? == generation.app_identity_data(), "maintenance-app-original")?;
+                    audit_tree(book, original, "app", &index, 0)?; Some(original)
+                },
+            };
+            let mut cost = GenerationCostData { files:2, bytes:(raw.len() + descriptor.len()) as u64 };
+            for (path, entry) in &index.files {
+                if app.is_some() || !path.starts_with("app/") {
+                    cost.files += 1; cost.bytes = cost.bytes.checked_add(entry.size).ok_or("maintenance-payload-bound")?;
+                }
+            }
+            if !keep {
+                if let Some(app) = app { book.forward_close(app, "maintenance-retained-app-close")?; }
+                book.forward_close(release, "maintenance-retained-release-close")?;
+            }
+            Ok((app, release, cost, (raw.len() + descriptor.len()) as u64))
+        }
+        fn stage_roster(book: &mut Install, root: usize, record: &Recorded, evidence_bytes: &mut u64) -> Result<()> {
+            if record.intent.action_data() == ActionData::SamePackageNoop { return Ok(()); }
+            let name = format!(".install-{}", record.intent.invocation_data());
+            let stage = book.open(Some(root), &name, true)?; book.protected(stage, true, Some(0o700))?;
+            native::no_xattrs(book.fd(stage)?.as_fd()).map_err(|_| "maintenance-stage-attributes")?;
+            check(stat::fstat(book.fd(stage)?).map_err(|_| "maintenance-stage-stat")?.st_flags == 0,
+                "maintenance-stage-flags")?;
+            let phases: &[&str] = if record.intent.action_data() == ActionData::RestoreFixedApp {
+                &["staging-created", "prepared", "app-publication-confirmed"]
+            } else { &["staging-created", "prepared", "runtime-publication-confirmed", "both-publications-confirmed"] };
+            exact_roster(book, stage, &phases.iter().map(|phase| format!("{phase}.json")).collect())?;
+            for phase in phases {
+                let body = metadata_bytes(book, stage, &format!("{phase}.json"), transaction::STATE_LIMIT)?;
+                *evidence_bytes = evidence_bytes.checked_add(body.len() as u64).ok_or("maintenance-control-bound")?;
+                let value = mobile_release_desktop::protocol::strict_json(&body).map_err(|_| "maintenance-stage-record")?;
+                check(value.is_object() && value["schemaVersion"] == 1 && value["phase"] == *phase
+                    && value["release"] == record.intent.next_data().binding_data().release
+                    && value["inventorySha256"] == record.intent.next_data().binding_data().inventory_sha256
+                    && value["originalSettlement"] == "pending-final-closes", "maintenance-stage-record")?;
+            }
+            book.check_name(stage, true)?; book.forward_close(stage, "maintenance-stage-close")
+        }
+        pub(super) fn observe(book: &mut Install, prepared: PreparedFresh, selected: ReleaseSetData,
+            pending_intent: Option<&str>) -> Result<Observed> {
+            selected_compile(&selected)?;
+            check(book.gate.verified && (book.gate.exclusive_acquired || book.worker_stderr_is_gate),
+                "maintenance-original-gate-required")?;
+            let root = prepared.destination; let versions = prepared.versions;
+            let history = match book.named(Some(root), transaction::STATE_NAME) {
+                Err(Errno::ENOENT) => None,
+                Err(_) => return Err("maintenance-state-observation"),
+                Ok(_) => Some(read_history(book, root, &selected)?),
+            };
+            let mut root_names: BTreeSet<String> = ["versions", paths::MAINTENANCE_GATE_NAME].into_iter().map(str::to_owned).collect();
+            let mut version_names = BTreeSet::new(); let mut costs = Vec::new(); let mut evidence_bytes = 0u64;
+            let mut metadata_control = 0u64;
+            let (action, old_app, old_release, invocation_count) = if let Some(history) = &history {
+                root_names.insert(transaction::STATE_NAME.into()); evidence_bytes = history.bytes;
+                let generation = history.current.state.current_data();
+                let same = generation.release_data() == selected.current_data();
+                let (app, release, cost, metadata) = audit_generation(book, root, versions, &generation, same, true)?;
+                costs.push(cost); metadata_control = metadata_control.checked_add(metadata).ok_or("maintenance-control-bound")?;
+                version_names.insert(generation.release_data().binding_data().release.to_owned());
+                if app.is_some() { root_names.insert(paths::APP_NAME.into()); }
+                for generation in history.current.state.retained_data() {
+                    let (_, _, cost, metadata) = audit_generation(book, root, versions, &generation, false, false)?;
+                    costs.push(cost); metadata_control = metadata_control.checked_add(metadata).ok_or("maintenance-control-bound")?;
+                    version_names.insert(generation.release_data().binding_data().release.to_owned());
+                    root_names.insert(data(transaction::retained_app_name_data(generation.retained_invocation_data()
+                        .ok_or("maintenance-retained-shape")?))?);
+                }
+                for record in history.originals.values().chain(std::iter::once(&history.current)) {
+                    let invocation = record.intent.invocation_data();
+                    root_names.insert(data(transaction::intent_name_data(invocation))?);
+                    root_names.insert(data(transaction::capsule_name_data(invocation))?);
+                    if invocation != history.current.state.invocation_data() {
+                        root_names.insert(data(transaction::archived_state_name_data(invocation))?);
+                    }
+                    if record.intent.action_data() != ActionData::SamePackageNoop { root_names.insert(format!(".install-{invocation}")); }
+                    stage_roster(book, root, record, &mut evidence_bytes)?;
+                }
+                let action = if same { if app.is_some() { ActionData::SamePackageNoop } else { ActionData::RestoreFixedApp } }
+                    else {
+                        check(app.is_some() && selected.predecessor_data().contains(generation.release_data()), "maintenance-predecessor")?;
+                        book.absent(versions, paths::RELEASE)?; ActionData::Update
+                    };
+                (action, app, Some(release), history.originals.len() + 2)
+            } else {
+                book.absent(root, paths::APP_NAME)?; book.absent(versions, paths::RELEASE)?;
+                (ActionData::FreshInstall, None, None, 1)
+            };
+            if let Some(invocation) = pending_intent {
+                check(worker::invocation_valid(invocation) && history.as_ref().is_none_or(|h|
+                    invocation != h.current.state.invocation_data() && !h.originals.contains_key(invocation)), "maintenance-invocation-reused")?;
+                root_names.insert(data(transaction::intent_name_data(invocation))?);
+            }
+            exact_roster(book, root, &root_names)?; exact_roster(book, versions, &version_names)?;
+            let incoming = prepared.inventory.index()?;
+            let copy_app_only = action == ActionData::RestoreFixedApp;
+            let mut incoming_cost = GenerationCostData { files:0, bytes:0 };
+            if action != ActionData::SamePackageNoop {
+                for (path, entry) in &incoming.files {
+                    if !copy_app_only || path.starts_with("app/") {
+                        incoming_cost.files += 1;
+                        incoming_cost.bytes = incoming_cost.bytes.checked_add(entry.size).ok_or("maintenance-payload-bound")?;
+                    }
+                }
+            }
+            let copy_files = incoming_cost.files;
+            if copy_app_only {
+                let current = costs.first_mut().ok_or("maintenance-generation-missing")?;
+                current.files = current.files.checked_add(incoming_cost.files).ok_or("maintenance-payload-bound")?;
+                current.bytes = current.bytes.checked_add(incoming_cost.bytes).ok_or("maintenance-payload-bound")?;
+            } else if incoming_cost.files > 0 {
+                incoming_cost.files += 2;
+                incoming_cost.bytes = incoming_cost.bytes.checked_add(prepared.inventory_bytes.len() as u64)
+                    .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64)).ok_or("maintenance-payload-bound")?;
+                costs.push(incoming_cost);
+            }
+            let selected_bytes = selected.encode_data().map_err(|_| "maintenance-selected-shape")?;
+            check(EXPORT_LIMIT == transaction::REQUEST_EXPORT_LIMIT, "maintenance-request-bound")?;
+            // Historical results are not success authority and need not be
+            // opened here. Reserve their maximum persisted extent, including
+            // the current result, inside the same aggregate storage cap.
+            let result_bytes = (invocation_count as u64).checked_mul(EXPORT_LIMIT as u64).ok_or("maintenance-control-bound")?;
+            let planned_evidence = evidence_bytes.checked_add((transaction::INTENT_LIMIT + transaction::STATE_LIMIT + transaction::CAPSULE_LIMIT) as u64)
+                .and_then(|bytes| bytes.checked_add(result_bytes)).ok_or("maintenance-control-bound")?;
+            let controls = evidence_bytes.checked_mul(3).and_then(|n| n.checked_add(metadata_control * 3))
+                .and_then(|n| n.checked_add(prepared.inventory_bytes.len() as u64 * 3))
+                .and_then(|n| n.checked_add(selected_bytes.len() as u64 + 128 * 1024 + 2 * EXPORT_LIMIT as u64))
+                .ok_or("maintenance-control-bound")?;
+            let records = (book.originals.len() as u64).checked_add(copy_files.checked_mul(3).ok_or("maintenance-original-bound")?)
+                .and_then(|n| n.checked_add(incoming.directories.len() as u64 * 3 + 256)).ok_or("maintenance-original-bound")?;
+            let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12;
+            data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, controls, records, live))?;
+            Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None })
+        }
+        impl Observed {
+            pub(super) fn previous(&self) -> Option<(&StateData, &CapsuleData)> {
+                self.history.as_ref().map(|h| (&h.current.state, &h.current.capsule))
+            }
+            fn intent_bytes(&self, invocation: &str, request_id: &str) -> Result<Vec<u8>> {
+                data(IntentData::encode_data(invocation, request_id, self.action, self.previous(), &self.selected))
+            }
+            pub(super) fn create_intent(&mut self, book: &mut Install, invocation: &str, request_id: &str) -> Result<()> {
+                check(self.intent.is_none() && self.intent_original.is_none(), "maintenance-intent-once")?;
+                for name in [data(transaction::intent_name_data(invocation))?, data(transaction::capsule_name_data(invocation))?,
+                    data(transaction::archived_state_name_data(invocation))?, data(transaction::retained_app_name_data(invocation))?,
+                    format!(".install-{invocation}")] { book.absent(self.prepared.destination, &name)?; }
+                if let Some(history) = &self.history {
+                    book.absent(self.prepared.destination, &data(transaction::archived_state_name_data(history.current.state.invocation_data()))?)?;
+                    held_bytes(book, history.state_original, &history.state_bytes)?;
+                }
+                // Reusing an earlier request would point at its already
+                // reserved result, not this independent original invocation.
+                if let Some(history) = &self.history {
+                    check(history.originals.values().chain(std::iter::once(&history.current))
+                        .all(|old| old.intent.request_id_data() != request_id), "maintenance-request-reused")?;
+                }
+                let bytes = self.intent_bytes(invocation, request_id)?;
+                let original = book.record_file(self.prepared.destination, &data(transaction::intent_name_data(invocation))?,
+                    &bytes, Role::ReceiptWriter)?;
+                self.intent_original = Some(original); // Custody before persistence veto.
+                book.persist(self.prepared.destination, false)?; held_bytes(book, original, &bytes)?;
+                self.intent = Some(data(IntentData::parse_data(&bytes, &self.selected))?); Ok(())
+            }
+            pub(super) fn read_intent(&mut self, book: &mut Install, invocation: &str, request_id: &str) -> Result<()> {
+                check(self.intent.is_none() && self.intent_original.is_none(), "maintenance-intent-once")?;
+                let (original, bytes) = metadata_original(book, self.prepared.destination,
+                    &data(transaction::intent_name_data(invocation))?, transaction::INTENT_LIMIT)?;
+                self.intent_original = Some(original);
+                check(bytes == self.intent_bytes(invocation, request_id)?, "maintenance-intent-binding")?;
+                self.intent = Some(data(IntentData::parse_data(&bytes, &self.selected))?); Ok(())
+            }
+            pub(super) fn binding(&self, book: &Install) -> Result<serde_json::Value> {
+                let intent = self.intent.as_ref().ok_or("maintenance-intent-missing")?;
+                let original = self.intent_original.ok_or("maintenance-intent-missing")?;
+                let previous = self.history.as_ref().map(|h| serde_json::json!({"stateSha256":h.current.state.digest_data(),
+                    "capsuleSha256":h.current.capsule.digest_data()}));
+                let release_bytes = self.selected.encode_data().map_err(|_| "maintenance-selected-shape")?;
+                let releases = mobile_release_desktop::protocol::strict_json(&release_bytes).map_err(|_| "maintenance-selected-shape")?;
+                Ok(serde_json::json!({"action":self.action,"requestId":intent.request_id_data(),"releases":releases,"intentSha256":intent.digest_data(),
+                    "intentOriginal":worker::identity_data(book.identity(original)?),"previous":previous,
+                    "installRoot":book.recorded_directory(self.prepared.destination)?,
+                    "versionsRoot":book.recorded_directory(self.prepared.versions)?,
+                    "oldApp":self.old_app.map(|n| app_identity(book,n).map(|i| i.fields_data())).transpose()?}))
+            }
+            pub(super) fn selected_from_binding(value: &serde_json::Value) -> Result<ReleaseSetData> {
+                let fields = ["action","requestId","releases","intentSha256","intentOriginal","previous","installRoot","versionsRoot","oldApp"];
+                let map = value.as_object().ok_or("maintenance-init-shape")?;
+                check(map.len() == fields.len() && fields.iter().all(|key| map.contains_key(*key)), "maintenance-init-shape")?;
+                data(transaction::export_name_data(value["requestId"].as_str().ok_or("maintenance-request-shape")?))?;
+                let bytes = serde_json::to_vec(&value["releases"]).map_err(|_| "maintenance-selected-shape")?;
+                let target = if cfg!(target_arch="aarch64") { mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64 }
+                    else { mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Intel };
+                let selected = ReleaseSetData::parse_for_target_data(&bytes,target).map_err(|_| "maintenance-selected-shape")?;
+                selected_compile(&selected)?; Ok(selected)
+            }
+        }
+        fn timestamp(book: &Install) -> (u64, bool) {
+            book.worker_deadline.as_ref().map_or((0,true), worker::Deadline::returned_time)
+        }
+        fn step(book: &mut Install, which: StepData, returned: ReturnedData, result: Result<()>, inverse: bool) -> Result<()> {
+            let (at, uncertain) = timestamp(book);
+            if uncertain { book.unknown = true; }
+            let returned = if uncertain { ReturnedData::Unknown } else { returned };
+            let effects = book.maintenance.as_mut().ok_or("maintenance-progress-missing")?;
+            let recorded = if inverse { effects.progress.inverse_return_data(which,returned,at) }
+                else { effects.progress.forward_return_data(which,returned,at) };
+            if let Err(error) = result {
+                // The preceding returned effect remains recorded even when a
+                // following same-original POST/fsync/checkpoint refused.
+                let _ = effects.progress.stop_data(if book.unknown { ReturnedData::Unknown } else { ReturnedData::KnownRefusal },at);
+                return Err(error);
+            }
+            data(recorded)
+        }
+        fn returned_publication(book: &Install, state: &str) -> ReturnedData {
+            if state == "confirmed" { ReturnedData::KnownSuccess }
+            else if book.unknown || state == "unknown" { ReturnedData::Unknown } else { ReturnedData::KnownRefusal }
+        }
+        // Only known authorized rename metadata may differ. Immutable identity,
+        // content extent, mode/owner/link count and mtime remain invariant; ctime
+        // is recaptured after the exact known name transition, never ignored on
+        // an unmutated original. Both held and named POST must agree in full.
+        fn same_renamed(before: Identity, after: Identity) -> bool {
+            before.dev == after.dev && before.ino == after.ino && before.mode == after.mode
+                && before.uid == after.uid && before.gid == after.gid && before.links == after.links
+                && before.size == after.size && before.mtime == after.mtime && before.mtime_ns == after.mtime_ns
+        }
+        fn rebind_renamed(book: &mut Install, original: usize, parent: usize, name: &str) -> Result<()> {
+            let before = book.identity(original)?;
+            let actual = stat::fstat(book.fd(original)?).map_err(|_| "maintenance-renamed-stat")?;
+            let named = book.named(Some(parent),name).map_err(|_| "maintenance-renamed-name")?;
+            check(actual.st_flags == 0 && named.st_flags == 0 && Identity::of(&actual) == Identity::of(&named)
+                && same_renamed(before,Identity::of(&actual)), "maintenance-renamed-original")?;
+            book.originals[original].parent = Some(parent); book.originals[original].name = name.into();
+            book.originals[original].identity = Some(Identity::of(&actual));
+            let directory = actual.st_mode & SFlag::S_IFMT.bits() == SFlag::S_IFDIR.bits();
+            book.protected(original,directory,Some(if directory { 0o555 } else { 0o444 }))?;
+            native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "maintenance-renamed-attributes")?;
+            book.check_name(original,true)
+        }
+        struct RenameReturn { returned: ReturnedData, result: Result<()> }
+        fn move_app(book: &mut Install, original: usize, from: usize, source: &str, to: usize, destination: &str) -> RenameReturn {
+            let mut returned = ReturnedData::KnownRefusal;
+            let result = (|| {
+                book.clock()?; book.check_name(original,true)?;
+                check(book.originals[original].parent == Some(from) && book.originals[original].name == source,
+                    "maintenance-move-source")?;
+                book.check_name(from,false)?; book.check_name(to,false)?;
+                check(book.identity(original)?.dev == book.identity(from)?.dev && book.identity(from)?.dev == book.identity(to)?.dev,
+                    "maintenance-move-filesystem")?;
+                book.protected(original,true,Some(0o555))?; book.absent(to,destination)?;
+                let actual = native::publish_directory(book.fd(from)?.as_fd(),source,book.fd(to)?.as_fd(),destination);
+                match actual {
+                    Ok(()) => returned = ReturnedData::KnownSuccess,
+                    Err(error) => {
+                        if error.raw_os_error() != Some(Errno::EEXIST as i32) { returned = ReturnedData::Unknown; book.unknown = true; }
+                        return Err("maintenance-exclusive-move");
+                    },
+                }
+                rebind_renamed(book,original,to,destination)?; book.absent(from,source)?;
+                book.persist(from,false)?; if from != to { book.persist(to,false)?; }
+                book.check_name(original,true)
+            })();
+            RenameReturn { returned, result }
+        }
+        fn publish_state(book: &mut Install, observed: &Observed, bytes: Vec<u8>, inverse: bool) -> Result<()> {
+            let state = data(StateData::parse_data(&bytes,&observed.selected))?;
+            let root = observed.prepared.destination;
+            let mut returned = ReturnedData::KnownRefusal;
+            let result = (|| {
+                book.clock()?;
+                let reader = if let Some(history) = &observed.history {
+                    held_bytes(book,history.state_original,&history.state_bytes)?;
+                    let archive = data(transaction::archived_state_name_data(history.current.state.invocation_data()))?;
+                    book.absent(root,&archive)?;
+                    let pending = book.record_file(root,&archive,&bytes,Role::ReceiptWriter)?;
+                    held_bytes(book,pending,&bytes)?;
+                    check(book.identity(pending)?.dev == book.identity(history.state_original)?.dev
+                        && book.identity(pending)?.dev == book.identity(root)?.dev
+                        && book.identity(pending)?.ino != book.identity(history.state_original)?.ino, "maintenance-state-filesystem")?;
+                    book.clock()?;
+                    match native::swap_installation_state(book.fd(root)?.as_fd(),&archive) {
+                        Ok(()) => {
+                            returned = ReturnedData::KnownSuccess;
+                            book.maintenance.as_mut().ok_or("maintenance-progress-missing")?.state_published = true;
+                        },
+                        Err(_) => { book.unknown = true; returned = ReturnedData::Unknown; return Err("maintenance-state-swap"); },
+                    }
+                    rebind_renamed(book,history.state_original,root,&archive)?;
+                    rebind_renamed(book,pending,root,transaction::STATE_NAME)?;
+                    held_bytes(book,history.state_original,&history.state_bytes)?; held_bytes(book,pending,&bytes)?;
+                    pending
+                } else {
+                    check(!inverse, "maintenance-inverse-without-history")?;
+                    book.absent(root,transaction::STATE_NAME)?;
+                    let reader = book.record_file(root,transaction::STATE_NAME,&bytes,Role::ReceiptWriter)?;
+                    returned = ReturnedData::KnownSuccess;
+                    book.maintenance.as_mut().ok_or("maintenance-progress-missing")?.state_published = true;
+                    reader
+                };
+                book.persist(root,false)?; held_bytes(book,reader,&bytes)?;
+                let effects = book.maintenance.as_mut().ok_or("maintenance-progress-missing")?;
+                effects.state = Some(state); effects.state_bytes = Some(bytes);
+                book.forward_close(reader,"maintenance-state-reader-close")
+            })();
+            step(book,if inverse { StepData::StateRestored } else { StepData::StatePublished },returned,result,inverse)
+        }
+        fn generation(book: &Install, observed: &Observed, release: usize, app: usize, instance: &str) -> Result<GenerationData> {
+            data(GenerationData::from_original_fields_data(&observed.selected,observed.selected.current_data(),instance,
+                book.recorded_directory(release)?,app_identity(book,app)?))
+        }
+        fn forward(book: &mut Install, observed: &Observed, invocation: &str) -> Result<()> {
+            let root = observed.prepared.destination;
+            let intent = observed.intent.as_ref().ok_or("maintenance-intent-missing")?;
+            if let Some(history) = &observed.history { held_bytes(book,history.state_original,&history.state_bytes)?; }
+            held_bytes(book,observed.intent_original.ok_or("maintenance-intent-missing")?,&observed.intent_bytes(invocation, observed.intent.as_ref().ok_or("maintenance-intent-missing")?.request_id_data())?)?;
+            if observed.action != ActionData::FreshInstall {
+                step(book,StepData::Reobserved,ReturnedData::KnownSuccess,Ok(()),false)?;
+            }
+            let current = if observed.action == ActionData::SamePackageNoop {
+                check(book.payload_write_calls == 0 && book.payload_written == 0, "maintenance-noop-payload")?;
+                book.payload_verified = true; // Entire original App/runtime was actually read above.
+                observed.history.as_ref().ok_or("maintenance-history-missing")?.current.state.current_data()
+            } else {
+                let staged = book.stage_payload(&observed.prepared,invocation,observed.action != ActionData::RestoreFixedApp);
+                let succeeded = staged.is_ok();
+                step(book,StepData::Prepared,if succeeded { ReturnedData::KnownSuccess } else { ReturnedData::KnownRefusal },
+                    staged.as_ref().map(|_| ()).map_err(|e| *e),false)?;
+                let (stage,app,runtime) = staged?;
+                let release = if observed.action == ActionData::RestoreFixedApp {
+                    observed.old_release.ok_or("maintenance-generation-missing")?
+                } else {
+                    book.absent(observed.prepared.versions,paths::RELEASE)?;
+                    let release = book.directory(observed.prepared.versions,paths::RELEASE,true,0o755)?;
+                    let runtime = runtime.ok_or("stage-missing")?;
+                    let published = book.publish(runtime,stage,"runtime",release,"runtime",true);
+                    let returned = returned_publication(book,book.runtime_publication);
+                    step(book,StepData::RuntimePublished,returned,published,false)?;
+                    book.receipt("runtime-publication-confirmed")?;
+                    let metadata = book.record_metadata(root,release,invocation,&observed.prepared.inventory_bytes);
+                    step(book,StepData::MetadataPublished,if metadata.is_ok() { ReturnedData::KnownSuccess }
+                        else { ReturnedData::KnownRefusal },metadata,false)?;
+                    release
+                };
+                if observed.action == ActionData::Update {
+                    let old = observed.old_app.ok_or("maintenance-app-missing-or-refused")?;
+                    let quarantine = data(transaction::retained_app_name_data(invocation))?;
+                    let renamed = move_app(book,old,root,paths::APP_NAME,root,&quarantine);
+                    step(book,StepData::OldAppQuarantined,renamed.returned,renamed.result,false)?;
+                }
+                let published = book.publish(app,stage,"app",root,paths::APP_NAME,false);
+                let returned = returned_publication(book,book.app_publication);
+                step(book,StepData::AppPublished,returned,published,false)?;
+                book.receipt(if observed.action == ActionData::RestoreFixedApp { "app-publication-confirmed" }
+                    else { "both-publications-confirmed" })?;
+                let instance = if observed.action == ActionData::RestoreFixedApp {
+                    observed.history.as_ref().ok_or("maintenance-history-missing")?.current.state.current_data().instance_data().to_owned()
+                } else { invocation.to_owned() };
+                generation(book,observed,release,app,&instance)?
+            };
+            let state = data(StateData::encode_applied_data(intent,observed.previous(),&current,&observed.selected))?;
+            publish_state(book,observed,state,false)
+        }
+        fn try_inverse(book: &mut Install, observed: &Observed, invocation: &str) -> Result<()> {
+            check(observed.action == ActionData::Update && !book.unknown, "maintenance-inverse-not-eligible")?;
+            book.clock()?;
+            let history = observed.history.as_ref().ok_or("maintenance-history-missing")?;
+            let root = observed.prepared.destination;
+            let old = observed.old_app.ok_or("maintenance-app-missing-or-refused")?;
+            let stage = book.stage.ok_or("stage-missing")?;
+            let quarantine = data(transaction::retained_app_name_data(invocation))?;
+            check(book.originals[old].parent == Some(root) && book.originals[old].name == quarantine,
+                "maintenance-inverse-original")?;
+            book.check_name(old,true)?; held_bytes(book,history.state_original,&history.state_bytes)?;
+            book.absent(root,&data(transaction::archived_state_name_data(history.current.state.invocation_data()))?)?;
+            let new_published = book.app_publication == "confirmed";
+            if new_published {
+                let app = book.app.ok_or("stage-missing")?;
+                book.check_name(app,true)?; book.absent(stage,"app")?;
+            } else { book.absent(root,paths::APP_NAME)?; }
+            let (at, uncertain) = timestamp(book);
+            check(!uncertain, "maintenance-inverse-clock")?;
+            let effects = book.maintenance.as_mut().ok_or("maintenance-progress-missing")?;
+            check(!effects.state_published,"maintenance-inverse-after-state")?;
+            data(effects.progress.begin_inverse_data(at,true,true))?;
+            effects.inverse = true;
+            if new_published {
+                let app = book.app.ok_or("stage-missing")?;
+                let returned = move_app(book,app,root,paths::APP_NAME,stage,"app");
+                step(book,StepData::NewAppWithdrawn,returned.returned,returned.result,true)?;
+            }
+            let returned = move_app(book,old,root,&quarantine,root,paths::APP_NAME);
+            step(book,StepData::OldAppRestored,returned.returned,returned.result,true)?;
+            let bytes = data(StateData::encode_inverse_data(observed.intent.as_ref().ok_or("maintenance-intent-missing")?,
+                (&history.current.state,&history.current.capsule),true,book.runtime_publication == "confirmed",&observed.selected))?;
+            publish_state(book,observed,bytes,true)
+        }
+        pub(super) fn execute(book: &mut Install, observed: Observed, invocation: &str) -> Result<()> {
+            check(book.worker_stderr_is_gate && book.worker_go_eof && book.maintenance.is_none(), "maintenance-original-go-required")?;
+            let deadline = book.worker_deadline.as_ref().ok_or("worker-clock-missing")?;
+            let at = deadline.check_work()?;
+            let progress = data(ProgressData::new_data(observed.action,at,deadline.original_endpoint()))?;
+            book.maintenance = Some(Effects { action:observed.action,progress,state:None,state_bytes:None,state_published:false,inverse:false });
+            let result = forward(book,&observed,invocation);
+            if let Err(error) = result {
+                let (at, uncertain) = timestamp(book);
+                if uncertain { book.unknown = true; }
+                if let Some(effects) = book.maintenance.as_mut() {
+                    let _ = effects.progress.stop_data(if book.unknown { ReturnedData::Unknown } else { ReturnedData::KnownRefusal },at);
+                }
+                // A failure may allow ONE known inverse under the same original
+                // gate/objects/time. Never erase the original failure or leftovers.
+                if observed.action == ActionData::Update { let _ = try_inverse(book,&observed,invocation); }
+                return Err(error);
+            }
+            Ok(())
+        }
+        pub(super) fn state_after_join(book: &mut Install, observed: &Observed, invocation: &str,
+            reported_bytes: Option<&str>, inverse: bool) -> Result<Option<StateData>> {
+            let Some(reported) = reported_bytes else { return Ok(None); };
+            let (reader, bytes) = metadata_original(book,observed.prepared.destination,transaction::STATE_NAME,transaction::STATE_LIMIT)?;
+            check(bytes == reported.as_bytes(),"maintenance-parent-state-readback")?;
+            let state = data(StateData::parse_data(&bytes,&observed.selected))?;
+            check(state.invocation_data() == invocation,"maintenance-parent-state-invocation")?;
+            let intent = observed.intent.as_ref().ok_or("maintenance-intent-missing")?;
+            let reproduced = if inverse {
+                data(StateData::encode_inverse_data(intent,observed.previous().ok_or("maintenance-history-missing")?,true,true,&observed.selected))?
+            } else { data(StateData::encode_applied_data(intent,observed.previous(),&state.current_data(),&observed.selected))? };
+            check(reproduced == bytes,"maintenance-parent-state-transition")?;
+            if let Some(history) = &observed.history {
+                let archive = data(transaction::archived_state_name_data(history.current.state.invocation_data()))?;
+                rebind_renamed(book,history.state_original,observed.prepared.destination,&archive)?;
+                held_bytes(book,history.state_original,&history.state_bytes)?;
+            }
+            if observed.action == ActionData::Update {
+                let old = observed.old_app.ok_or("maintenance-app-missing-or-refused")?;
+                let name = if inverse { paths::APP_NAME.to_owned() } else { data(transaction::retained_app_name_data(invocation))? };
+                rebind_renamed(book,old,observed.prepared.destination,&name)?;
+                check(app_identity(book,old)? == observed.history.as_ref().ok_or("maintenance-history-missing")?
+                    .current.state.current_data().app_identity_data(),"maintenance-parent-old-app")?;
+            }
+            // Fresh originals, exact descriptor and complete current payload;
+            // never make a worker-selected tuple the parent's expected release.
+            let _ = audit_generation(book,observed.prepared.destination,observed.prepared.versions,
+                &state.current_data(),false,false)?;
+            held_bytes(book,reader,&bytes)?;
+            book.forward_close(reader,"maintenance-parent-state-close")?; Ok(Some(state))
+        }
+        pub(super) fn persist_capsule(book: &mut Install, observed: &Observed, invocation: &str, bytes: &[u8]) -> Result<()> {
+            check(bytes.len() <= transaction::CAPSULE_LIMIT,"maintenance-capsule-bound")?;
+            let parsed = data(CapsuleData::parse_data(bytes,&observed.selected))?;
+            check(parsed.invocation_data() == invocation,"maintenance-capsule-invocation")?;
+            let reader = book.record_file(observed.prepared.destination,&data(transaction::capsule_name_data(invocation))?,bytes,Role::ReceiptWriter)?;
+            book.persist(observed.prepared.destination,false)?; held_bytes(book,reader,bytes)?;
+            book.forward_close(reader,"maintenance-capsule-close")
+        }
+        pub(super) fn finish(book: &mut Install, result: Result<()>, settled: bool, timely: bool) -> FinalResult {
+            let (at, uncertain) = timestamp(book);
+            if uncertain { book.unknown = true; }
+            // The close observation itself must still precede the ORIGINAL
+            // endpoint; a prior successful checkpoint is not a lease.
+            let timely = timely && !uncertain && book.worker_deadline.as_ref()
+                .is_some_and(|clock| at < clock.original_endpoint());
+            let Some(effects) = book.maintenance.as_mut() else {
+                return final_result_after_deadline(Err("maintenance-progress-missing"),settled,true,
+                    book.runtime_publication,book.app_publication,timely);
+            };
+            let returned = if settled && !uncertain { ReturnedData::KnownSuccess } else { ReturnedData::Unknown };
+            if effects.inverse { let _ = effects.progress.inverse_return_data(StepData::OriginalsSettled,returned,at); }
+            else { let _ = effects.progress.forward_return_data(StepData::OriginalsSettled,returned,at); }
+            let reason = result.err().or_else(|| (!settled).then_some("original-close-unknown"))
+                .or_else(|| (!timely).then_some("deadline"));
+            let progress = effects.progress.outcome_data();
+            let complete = reason.is_none() && settled && timely && !book.unknown && progress == ProgressOutcomeData::Recorded
+                && effects.state_published && effects.state.is_some();
+            let inverse = reason.is_some() && settled && timely && !book.unknown && progress == ProgressOutcomeData::InverseRecorded
+                && effects.state_published && effects.state.is_some();
+            let published = book.runtime_publication == "confirmed" || book.app_publication == "confirmed" || effects.state_published;
+            let state = if complete { match effects.action { ActionData::SamePackageNoop => "same-package",
+                ActionData::RestoreFixedApp => "restored-app", _ => "installed" } }
+                else if inverse { "inverse-recorded" } else if published { "partial-installation-retained" }
+                else if book.unknown || progress == ProgressOutcomeData::Unknown { "unknown-retained" } else { "refused-staging-retained" };
+            FinalResult { state,reason,exit:if complete { 0 } else if published || inverse { 20 } else { 1 },deadline_met:timely }
+        }
+    }
+
+    #[allow(dead_code)]
+    // The complete outer package is input DATA. The source-selected signature,
+    // fixed current-code purpose and compiled tuple, not this path or mount,
+    // establish producer authority in the original Parent before GO.
+    mod completed_package {
+        use super::*;
+        use mobile_release_desktop::macos_install_producer::{DESCRIPTOR_FILENAME, SIGNATURE_FILENAME,
+            DESCRIPTOR_LIMIT, SIGNATURE_LIMIT};
+        use nix::sys::uio::pread;
+
+        #[derive(Clone, PartialEq, Eq)]
+        struct MountData { id: statfs::fsid_t, flags: MntFlags, kind: String, device: i64 }
+        impl MountData {
+            fn read(book: &Install, original: usize) -> Result<Self> {
+                book.clock()?;
+                let fs = statfs::fstatfs(book.fd(original)?).map_err(|_| "producer-source-mount")?;
+                let value = Self { id:fs.filesystem_id(),flags:fs.flags(),
+                    kind:fs.filesystem_type_name().into(),device:book.identity(original)?.dev };
+                book.clock()?;
+                Ok(value)
+            }
+            fn same_mount(&self, other: &Self) -> bool { self == other }
+        }
+        fn readonly_distribution(kind: &str, flags: MntFlags) -> bool {
+            matches!(kind,"apfs"|"hfs") && flags.contains(MntFlags::MNT_LOCAL | MntFlags::MNT_RDONLY)
+                && !flags.intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED)
+        }
+        fn source_component(value: &str) -> bool {
+            // The native DMG title can contain single spaces (and macOS may
+            // append a space plus mount collision number). This is not a
+            // payload-relative entry: keep its bounded component grammar local.
+            value.len() <= 255 && value.split(' ').all(component)
+        }
+        fn source_name(path: &str) -> Result<(&str, Vec<&str>)> {
+            check(path.starts_with('/') && path.len() <= 4096
+                && path[1..].split('/').count() <= 32, "producer-source-spelling")?;
+            let mut parts: Vec<_> = path[1..].split('/').collect();
+            check(parts.len() >= 2 && parts.iter().all(|name| source_component(name)), "producer-source-spelling")?;
+            let name = parts.pop().ok_or("producer-package-name")?;
+            transaction::request_from_package_name_data(name).map_err(|_| "producer-package-name")?;
+            Ok((name,parts))
+        }
+        // Offset reads retain this SAME held original and never reset or share
+        // an OFD position. Complete EOF/count plus named/held POST are required.
+        // For the package, retain only the four-byte XAR spelling, not its body.
+        fn original_bytes(book: &Install, original: usize, limit: usize, collect: bool) -> Result<(String,Vec<u8>)> {
+            book.check_name(original,true)?;
+            let size = usize::try_from(book.identity(original)?.size).map_err(|_| "producer-source-size")?;
+            check(size > 0 && size <= limit && limit as u64 <= installation_record::PAYLOAD_LIMIT
+                && (!collect || limit <= DESCRIPTOR_LIMIT), "producer-source-size")?;
+            let mut digest = Sha256::new(); let mut bytes = Vec::new();
+            let mut offset = 0usize; let mut block = [0u8;65536];
+            loop {
+                book.clock()?;
+                let used = match pread(book.fd(original)?,&mut block,offset as i64) {
+                    Ok(used) => used, Err(Errno::EINTR) => continue,
+                    Err(_) => return Err("producer-source-read"),
+                };
+                book.clock()?;
+                if used == 0 { break; }
+                check(used <= block.len(),"producer-source-read")?;
+                offset = offset.checked_add(used).ok_or("producer-source-size")?;
+                check(offset <= size,"producer-source-size")?;
+                digest.update(&block[..used]);
+                if collect { bytes.extend_from_slice(&block[..used]); }
+                else if bytes.len() < 4 { bytes.extend_from_slice(&block[..used.min(4-bytes.len())]); }
+            }
+            check(offset == size,"producer-source-size")?; book.check_name(original,true)?;
+            Ok((digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect(),bytes))
+        }
+        struct Held { original: usize, mount: MountData, readonly: bool, directory: bool }
+        impl Held {
+            fn post(&self, book: &Install) -> Result<()> {
+                book.check_name(self.original,true)?;
+                check(MountData::read(book,self.original)? == self.mount,"producer-source-mount-changed")?;
+                if self.readonly {
+                    check(readonly_distribution(&self.mount.kind,self.mount.flags),"producer-distribution-writable")?;
+                    // A read-only mounted distribution is not represented as
+                    // UID0 ownership or as a producer signature. Existing ACLs,
+                    // quarantine and files are neither modified nor erased.
+                    let id = book.identity(self.original)?;
+                    check(id.mode & 0o170000 == if self.directory { 0o040000 } else { 0o100000 }
+                        && (self.directory || id.links == 1),"producer-source-shape")
+                } else { book.protected(self.original,self.directory,None) }
+            }
+        }
+        pub(super) struct Input {
+            held: Vec<Held>, package: usize, descriptor: usize, signature: usize,
+            package_sha256: String, descriptor_sha256: String, signature_sha256: String,
+            descriptor_body: Vec<u8>, signature_body: Vec<u8>, requested_id: Option<String>,
+        }
+        impl Input {
+            pub(super) fn open(book: &mut Install, completed_path: &str) -> Result<Self> {
+                // The caller must already have admitted the fixed extracted
+                // SOURCE and self image; no argument alone grants this role.
+                book.clock()?;
+                let (name,parts) = source_name(completed_path)?;
+                let mut directories = Vec::new();
+                let mut parent = book.open(None,"/",true)?; directories.push(parent);
+                for part in parts { parent=book.open(Some(parent),part,true)?; directories.push(parent); }
+                let destination_mount=MountData::read(book,parent)?;
+                let readonly=readonly_distribution(&destination_mount.kind,destination_mount.flags);
+                let mut entered_distribution=false; let mut held=Vec::new();
+                for original in directories {
+                    let mount=MountData::read(book,original)?;
+                    let on_distribution=readonly && mount.same_mount(&destination_mount);
+                    check(!entered_distribution || on_distribution,"producer-distribution-cross-mount")?;
+                    entered_distribution |= on_distribution;
+                    let value=Held { original,mount,readonly:on_distribution,directory:true };
+                    value.post(book)?;held.push(value);
+                }
+                check(!readonly || entered_distribution,"producer-distribution-missing")?;
+                let mut open_file=|file_name: &str| -> Result<usize> {
+                    let original=book.open(Some(parent),file_name,false)?;
+                    let mount=MountData::read(book,original)?;
+                    check(mount.same_mount(&destination_mount),"producer-file-cross-mount")?;
+                    let value=Held { original,mount,readonly,directory:false };
+                    value.post(book)?;held.push(value);Ok(original)
+                };
+                let package=open_file(name)?;
+                let descriptor=open_file(DESCRIPTOR_FILENAME)?;
+                let signature=open_file(SIGNATURE_FILENAME)?;
+                drop(open_file); // No retained mutable book borrow across reads.
+                let (package_sha256,prefix)=original_bytes(book,package,installation_record::PAYLOAD_LIMIT as usize,false)?;
+                check(book.identity(package)?.size >= 28 && prefix == b"xar!","producer-completed-package")?;
+                let (descriptor_sha256,descriptor_body)=original_bytes(book,descriptor,DESCRIPTOR_LIMIT,true)?;
+                let (signature_sha256,signature_body)=original_bytes(book,signature,SIGNATURE_LIMIT,true)?;
+                let requested_id=transaction::request_from_package_name_data(name).map_err(|_| "producer-package-name")?;
+                let input=Self { held,package,descriptor,signature,package_sha256,descriptor_sha256,signature_sha256,
+                    descriptor_body,signature_body,requested_id };
+                input.post(book)?;Ok(input)
+            }
+            pub(super) fn post(&self, book: &Install) -> Result<()> {
+                book.clock()?;
+                for held in &self.held { held.post(book)?; }
+                book.clock()
+            }
+            pub(super) fn content_post(&self, book: &Install) -> Result<()> {
+                self.post(book)?;
+                let (package,prefix)=original_bytes(book,self.package,installation_record::PAYLOAD_LIMIT as usize,false)?;
+                let (descriptor,body)=original_bytes(book,self.descriptor,DESCRIPTOR_LIMIT,true)?;
+                let (signature,sign)=original_bytes(book,self.signature,SIGNATURE_LIMIT,true)?;
+                check(package==self.package_sha256 && prefix==b"xar!" && descriptor==self.descriptor_sha256
+                    && body==self.descriptor_body && signature==self.signature_sha256 && sign==self.signature_body,
+                    "producer-original-content-changed")?;
+                self.post(book)
+            }
+            pub(super) fn descriptor_data(&self) -> &[u8] { &self.descriptor_body }
+            pub(super) fn signature_data(&self) -> &[u8] { &self.signature_body }
+            pub(super) fn package_sha256_data(&self) -> &str { &self.package_sha256 }
+            pub(super) fn request_id_data(&self) -> Option<&str> { self.requested_id.as_deref() }
+        }
+        #[cfg(test)]
+        pub(super) fn fixed_source_data_checks() {
+            let local=MntFlags::MNT_LOCAL;let readonly=MntFlags::MNT_RDONLY;
+            assert!(readonly_distribution("apfs",local|readonly));
+            assert!(readonly_distribution("hfs",local|readonly|MntFlags::MNT_IGNORE_OWNERSHIP));
+            for flags in [local,readonly,local|readonly|MntFlags::MNT_UNION,local|readonly|MntFlags::MNT_AUTOMOUNTED] {
+                assert!(!readonly_distribution("apfs",flags));
+            }
+            for kind in ["nfs","smbfs","autofs",""] { assert!(!readonly_distribution(kind,local|readonly)); }
+            assert!(source_name("/Volumes/Mobile Release Kit/Install.pkg").is_ok());
+            assert!(source_name("/Volumes/Mobile Release Kit 1/Install.pkg").is_ok());
+            for name in ["", ".", "..", " name", "name ", "double  space", "line\nfeed", "tab\tname", "non-ascii-é"] {
+                assert!(!source_component(name));
+            }
+            assert!(!source_component(&"a".repeat(256)));
+            assert!(source_name("/root-owned/MobileReleaseKit-Request-11111111111111111111111111111111.pkg").is_ok());
+            for path in ["Install.pkg","/Install.pkg","/Volumes/../Install.pkg","/Volumes/a//Install.pkg",
+                "/Volumes/a/Other.pkg","/Volumes/a/Install.pkg/","/Volumes/a/Install.pkg\0"] {
+                assert!(source_name(path).is_err());
+            }
+        }
+    }
+
     // B2 is deliberately private and is not selected by either run() below.
     // B3 must bind genuine package/context admission and the outer parent's
     // result/export finality before wiring this fixed role into an entry.
@@ -986,6 +1902,20 @@ mod installer {
             pub(super) fn check_work(&self) -> Result<u64> { self.observe(true) }
             pub(super) fn check_total(&self) -> Result<u64> { self.observe(false) }
             pub(super) fn is_unknown(&self) -> bool { self.unknown.get() }
+            pub(super) fn original_endpoint(&self) -> u64 { self.end }
+            // Accounting for a call which has ALREADY returned: report its real
+            // timestamp even if late; this never authorizes another work call.
+            pub(super) fn returned_time(&self) -> (u64, bool) {
+                match monotonic() {
+                    Ok(now) => {
+                        let uncertain = self.unknown.get() || now < self.last.get() || now < self.start;
+                        self.last.set(self.last.get().max(now));
+                        if uncertain { self.unknown.set(true); }
+                        (now,uncertain)
+                    },
+                    Err(_) => { self.unknown.set(true); (self.last.get(),true) },
+                }
+            }
             fn poll_ms(&self, work: bool) -> Result<u16> {
                 let now = self.observe(work)?;
                 let end = if work { self.end - SETTLEMENT } else { self.end };
@@ -1002,7 +1932,7 @@ mod installer {
                     payload_written:0,payload_write_calls:0,
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
-                    metadata:installation_record::Progress::default(),gate:MaintenanceGate::new(),
+                    metadata:installation_record::Progress::default(),gate:MaintenanceGate::new(),maintenance:None,
                     #[cfg(feature = "macos-installed-installer-fixture")]
                     fixture:None }
             }
@@ -1028,7 +1958,7 @@ mod installer {
                 Ok(())
             }
         }
-        fn identity_data(id: Identity) -> Value {
+        pub(super) fn identity_data(id: Identity) -> Value {
             json!({"device":id.dev,"inode":id.ino,"mode":id.mode,"uid":id.uid,"gid":id.gid,
                 "links":id.links,"bytes":id.size,"mtime":id.mtime,"mtimeNanos":id.mtime_ns,
                 "ctime":id.ctime,"ctimeNanos":id.ctime_ns})
@@ -1292,10 +2222,75 @@ mod installer {
                     && runtime == "confirmed" && app == "confirmed" && writes > 0)
                 && (state != "installed" || exit == 0)
         }
+        struct MaintenanceReply {
+            action: ActionData, progress: String, state_published: bool, state_bytes: Option<String>, inverse: bool,
+        }
+        impl MaintenanceReply {
+            fn from_original(effects: &maintenance::Effects) -> Self {
+                let progress = match effects.progress.outcome_data() {
+                    transaction::ProgressOutcomeData::InProgress => "in-progress",
+                    transaction::ProgressOutcomeData::Recorded => "recorded",
+                    transaction::ProgressOutcomeData::Refused => "refused",
+                    transaction::ProgressOutcomeData::Unknown => "unknown",
+                    transaction::ProgressOutcomeData::InverseRecorded => "inverse-recorded",
+                };
+                Self { action:effects.action,progress:progress.into(),state_published:effects.state_published,
+                    // The encoder emitted UTF-8 JSON. If its storage is invalid,
+                    // omit it and fail the result predicate; never lossy-decode.
+                    state_bytes:effects.state_bytes.as_ref().and_then(|b| std::str::from_utf8(b).ok()).map(str::to_owned),
+                    inverse:effects.inverse }
+            }
+            fn data(&self) -> Value {
+                json!({"action":self.action,"progress":self.progress,"statePublished":self.state_published,
+                    "stateBytes":self.state_bytes,"inverseStarted":self.inverse})
+            }
+            fn parse(value: &Value) -> Result<Self> {
+                object(value,&["action","progress","statePublished","stateBytes","inverseStarted"])?;
+                let action: ActionData = serde_json::from_value(value["action"].clone()).map_err(|_| "maintenance-result-shape")?;
+                check(action != ActionData::Uninstall,"maintenance-result-shape")?;
+                let progress = value["progress"].as_str().ok_or("maintenance-result-shape")?;
+                check(matches!(progress,"in-progress" | "recorded" | "refused" | "unknown" | "inverse-recorded"),
+                    "maintenance-result-shape")?;
+                let state_published = value["statePublished"].as_bool().ok_or("maintenance-result-shape")?;
+                let state_bytes = if value["stateBytes"].is_null() { None } else {
+                    let text = value["stateBytes"].as_str().ok_or("maintenance-result-shape")?;
+                    check(state_published && !text.is_empty() && text.len() <= transaction::STATE_LIMIT,
+                        "maintenance-result-bound")?;
+                    Some(text.to_owned())
+                };
+                let inverse = value["inverseStarted"].as_bool().ok_or("maintenance-result-shape")?;
+                check(!inverse || action == ActionData::Update,"maintenance-result-shape")?;
+                Ok(Self { action,progress:progress.into(),state_published,state_bytes,inverse })
+            }
+            fn accepts(&self, returned: &PreExit) -> bool {
+                let published = returned.runtime == "confirmed" || returned.app == "confirmed" || self.state_published;
+                let finality = returned.originals && returned.payload && returned.verified && returned.timely && !returned.unknown;
+                let committed = self.progress == "recorded" && self.state_published && self.state_bytes.is_some() && !self.inverse;
+                matches!(returned.exit,0 | 1 | 20) && returned.bytes <= installation_record::PAYLOAD_LIMIT
+                    && (returned.writes == 0) == (returned.bytes == 0) && returned.writes <= returned.bytes
+                    && (!returned.originals || returned.payload)
+                    && match returned.state.as_str() {
+                        "installed" => returned.exit == 0 && finality && committed && returned.writes > 0
+                            && matches!(self.action,ActionData::FreshInstall | ActionData::Update)
+                            && returned.runtime == "confirmed" && returned.app == "confirmed",
+                        "same-package" => returned.exit == 0 && finality && committed && self.action == ActionData::SamePackageNoop
+                            && returned.writes == 0 && returned.runtime == "not-attempted" && returned.app == "not-attempted",
+                        "restored-app" => returned.exit == 0 && finality && committed && self.action == ActionData::RestoreFixedApp
+                            && returned.writes > 0 && returned.runtime == "not-attempted" && returned.app == "confirmed",
+                        "inverse-recorded" => returned.exit == 20 && finality && self.action == ActionData::Update && self.inverse
+                            && self.progress == "inverse-recorded" && self.state_published && self.state_bytes.is_some()
+                            && returned.writes > 0 && returned.runtime == "confirmed",
+                        "partial-installation-retained" => returned.exit == 20 && published,
+                        "unknown-retained" => returned.exit == 1 && !published && (returned.unknown || self.progress == "unknown"),
+                        "refused-staging-retained" => returned.exit == 1 && !published && !returned.unknown && self.progress != "unknown",
+                        _ => false,
+                    }
+            }
+        }
         struct PreExit {
             exit: i32, state: String, originals: bool, payload: bool, verified: bool,
             runtime: String, app: String, timely: bool, unknown: bool, writes: u64, bytes: u64,
-            reason: Option<String>,
+            reason: Option<String>, maintenance: Option<MaintenanceReply>,
         }
         impl PreExit {
             fn from_original(book: &Install, result: &FinalResult) -> Self {
@@ -1304,20 +2299,27 @@ mod installer {
                     runtime:book.runtime_publication.into(),app:book.app_publication.into(),
                     timely:result.deadline_met,unknown:book.unknown || book.worker_deadline.as_ref().is_some_and(Deadline::is_unknown),
                     writes:book.payload_write_calls,bytes:book.payload_written,
-                    reason:result.reason.map(|label| closed_reason(label).to_owned()) }
+                    reason:result.reason.map(|label| closed_reason(label).to_owned()),
+                    maintenance:book.maintenance.as_ref().map(MaintenanceReply::from_original) }
             }
             fn data(&self, invocation: &str, init_sha: &str) -> Value {
-                json!({"schemaVersion":2,"kind":"pre-exit-writer-result","invocation":invocation,"initSha256":init_sha,
+                let mut value = json!({"schemaVersion":2,"kind":"pre-exit-writer-result","invocation":invocation,"initSha256":init_sha,
                     "exitCode":self.exit,"state":self.state,"reason":self.reason,"originalsClosed":self.originals,"payloadClosed":self.payload,
                     "payloadVerified":self.verified,"runtimePublication":self.runtime,"appPublication":self.app,
                     "withinOriginalDeadline":self.timely,"unknown":self.unknown,
                     "payloadWriteCount":self.writes,"payloadWriteBytes":self.bytes,
-                    "stdoutClosed":false,"inheritedGateClosed":false,"selfJoined":false})
+                    "stdoutClosed":false,"inheritedGateClosed":false,"selfJoined":false});
+                if let Some(maintenance) = &self.maintenance { value["maintenance"] = maintenance.data(); }
+                value
             }
             fn parse(value: &Value, invocation: &str, init_sha: &str) -> Result<Self> {
-                object(value, &["schemaVersion","kind","invocation","initSha256","exitCode","state","reason","originalsClosed",
+                let mut keys = vec!["schemaVersion","kind","invocation","initSha256","exitCode","state","reason","originalsClosed",
                     "payloadClosed","payloadVerified","runtimePublication","appPublication","withinOriginalDeadline",
-                    "unknown","payloadWriteCount","payloadWriteBytes","stdoutClosed","inheritedGateClosed","selfJoined"])?;
+                    "unknown","payloadWriteCount","payloadWriteBytes","stdoutClosed","inheritedGateClosed","selfJoined"];
+                let maintenance = if let Some(value) = value.get("maintenance") {
+                    keys.push("maintenance"); Some(MaintenanceReply::parse(value)?)
+                } else { None };
+                object(value,&keys)?;
                 check(value["schemaVersion"] == 2 && value["kind"] == "pre-exit-writer-result"
                     && value["invocation"] == invocation && value["initSha256"] == init_sha
                     && value["stdoutClosed"] == false && value["inheritedGateClosed"] == false && value["selfJoined"] == false,
@@ -1330,15 +2332,18 @@ mod installer {
                     timely:boolean("withinOriginalDeadline")?,unknown:boolean("unknown")?,
                     writes:value["payloadWriteCount"].as_u64().ok_or("worker-result-shape")?,
                     bytes:value["payloadWriteBytes"].as_u64().ok_or("worker-result-shape")?,
-                    reason:if value["reason"].is_null() { None } else { Some(text("reason")?) } };
+                    reason:if value["reason"].is_null() { None } else { Some(text("reason")?) },maintenance };
                 check(result.reason.as_deref().is_none_or(|label| closed_reason(label) == label)
                     && (result.exit != 0 || result.reason.is_none()), "worker-result-reason")?;
                 for publication in [&result.runtime,&result.app] {
                     check(matches!(publication.as_str(), "not-attempted" | "attempting" | "confirmed" | "occupied-refused" | "unknown"),
                         "worker-result-shape")?;
                 }
-                check(outcome_data(result.exit,&result.state,result.originals,result.payload,result.verified,
-                    &result.runtime,&result.app,result.timely,result.unknown,result.writes,result.bytes), "worker-result-shape")?;
+                check(match &result.maintenance {
+                    Some(maintenance) => maintenance.accepts(&result),
+                    None => outcome_data(result.exit,&result.state,result.originals,result.payload,result.verified,
+                        &result.runtime,&result.app,result.timely,result.unknown,result.writes,result.bytes),
+                }, "worker-result-shape")?;
                 Ok(result)
             }
         }
@@ -1353,9 +2358,256 @@ mod installer {
             frame && eof && output_close && command_close && wait == Some(reported)
                 && source_post && timely && !uncertainty
         }
+        // No second output owner, timeout, or per-release shared filename.
+        // The original Parent book retains this exact exclusive writer before
+        // intent/GO; a failed attempt leaves its own pending file, never removes
+        // or overwrites another request's result. All bytes remain provisional
+        // until the outer original Installer return is independently observed.
+        struct RequestExport {
+            request_id: String, name: String, support: usize, writer: usize,
+            attempted: bool, sealed_record: bool,
+        }
+        impl RequestExport {
+            fn reserve(book: &mut Install, destination: usize, request_id: &str) -> Result<Self> {
+                let name = transaction::export_name_data(request_id).map_err(|_| "maintenance-request-shape")?;
+                let support = book.originals[destination].parent.ok_or("maintenance-request-parent")?;
+                check(book.originals[destination].name == "MobileReleaseKit"
+                    && book.originals[support].name == "Application Support", "maintenance-request-parent")?;
+                book.check_name(support, false)?;
+                book.protected_as(support,true,None,AclRole::SystemSupport)?;
+                let writer = book.create_file(support,&name,Role::ReceiptWriter)?;
+                Ok(Self { request_id:request_id.into(),name,support,writer,attempted:false,sealed_record:false })
+            }
+            fn empty_original(&self, book: &Install) -> Result<()> {
+                check(!self.attempted && !self.sealed_record, "maintenance-request-once")?;
+                book.check_name(self.support,false)?; book.check_name(self.writer,true)?;
+                book.protected(self.writer,false,Some(0o600))?;
+                let actual = stat::fstat(book.fd(self.writer)?).map_err(|_| "maintenance-request-stat")?;
+                check(actual.st_size == 0 && actual.st_flags == 0, "maintenance-request-empty")?;
+                native::no_xattrs(book.fd(self.writer)?.as_fd()).map_err(|_| "maintenance-request-attributes")?;
+                book.clock()
+            }
+            fn persist_reservation(&self, book: &mut Install) -> Result<()> {
+                self.empty_original(book)?; book.persist(self.writer,true)?;
+                book.persist(self.support,false)?; self.empty_original(book)
+            }
+            fn publish(&mut self, book: &mut Install, record: &Value) -> Result<()> {
+                self.empty_original(book)?;
+                check(record["schemaVersion"] == 2 && record["kind"] == "maintenance-parent-pending-finalization"
+                    && record["requestId"].as_str() == Some(self.request_id.as_str())
+                    && record["resultName"].as_str() == Some(self.name.as_str())
+                    && record["originalWriterJoined"] == true
+                    && record["parentFinality"] == "pending-original-closes-and-outer-return",
+                    "maintenance-request-record")?;
+                let mut bytes = ExportBytes(Vec::with_capacity(EXPORT_LIMIT));
+                serde_json::to_writer(&mut bytes,record).map_err(|_| "maintenance-request-record")?;
+                bytes.0.push(b'\n');
+                check(!bytes.0.is_empty() && bytes.0.len() <= EXPORT_LIMIT, "maintenance-request-bound")?;
+                self.attempted = true; // No retry even after a partial returned write.
+                let reader = book.record_reserved_file(self.writer,&bytes.0)?;
+                book.persist(self.support,false)?;
+                book.forward_close(reader,"maintenance-request-readback-close")?;
+                self.sealed_record = true;
+                book.clock()
+            }
+        }
+        // These wrappers stay in the original Parent, before their first call.
+        // No parsed descriptor, read-only mount or caller boolean constructs a
+        // positive result. Native unknown custody survives to process exit.
+        struct ProducerAdmission {
+            input: completed_package::Input,
+            signature: native::install_producer::ProducerVerifier,
+            entry: native::install_producer::CurrentProductVerifier,
+            payload: native::install_producer::CurrentProductVerifier,
+            code_chain: [usize;4], outer_path: String,
+            signature_result: Option<native::install_producer::SignatureResult>,
+            entry_result: Option<native::install_producer::CurrentProductResult>,
+            payload_result: Option<native::install_producer::CurrentProductResult>,
+            descriptor: Option<mobile_release_desktop::macos_install_producer::ProducerData>,
+            first: Option<&'static str>,
+        }
+        fn producer_phase(point: native::install_producer::ProducerCheckpoint)
+            -> (native::install_producer::ProducerPhase, native::install_producer::ProducerCustody) {
+            use native::install_producer::ProducerCheckpoint;
+            match point {
+                ProducerCheckpoint::Before{phase,custody} | ProducerCheckpoint::Returned{phase,custody,..} => (phase,custody),
+            }
+        }
+        fn producer_cleanup_point(book: &Install, point: native::install_producer::ProducerCheckpoint)
+            -> native::android_service_management::Decision {
+            use native::android_service_management::Decision;
+            let (phase,custody) = producer_phase(point);
+            if !phase.is_cleanup() || custody.unknown { return Decision::Unknown; }
+            match book.shared_deadline() {
+                Ok(clock) if clock.check_total().is_ok() => Decision::Proceed,
+                Ok(clock) if !clock.is_unknown() => Decision::Stop,
+                _ => Decision::Unknown,
+            }
+        }
+        fn producer_original_post(book: &Install, source: &Source, input: &completed_package::Input,
+            code_chain: &[usize;4]) -> Result<()> {
+            book.source_post(source)?;
+            input.post(book)?;
+            for original in code_chain {
+                book.check_name(*original,true)?;
+                book.protected_as(*original,true,Some(0o555),AclRole::InputDirectory)?;
+            }
+            book.clock()
+        }
+        fn producer_point(book: &Install, source: &Source, input: &completed_package::Input,
+            code_chain: &[usize;4], first: &mut Option<&'static str>,
+            point: native::install_producer::ProducerCheckpoint) -> native::android_service_management::Decision {
+            use native::android_service_management::Decision;
+            let (phase,custody) = producer_phase(point);
+            // A returned Instant is not a CLOCK_MONOTONIC integer. The native
+            // adapter records that real return; we independently sample THIS
+            // original parent clock before/after each synchronous native phase.
+            if phase.is_cleanup() { return producer_cleanup_point(book,point); }
+            if custody.unknown { first.get_or_insert("producer-native-custody-unknown"); return Decision::Unknown; }
+            if first.is_some() { return Decision::Stop; }
+            if let Err(error) = producer_original_post(book,source,input,code_chain) {
+                first.get_or_insert(error);
+                return if book.shared_deadline().is_ok_and(Deadline::is_unknown) { Decision::Unknown }
+                    else { Decision::Stop };
+            }
+            Decision::Proceed
+        }
+        fn producer_policy_matches_data(policy: &mobile_release_desktop::macos_install_producer::SigningPolicyData,
+            team: &[u8;10], sha1: &[u8;20], sha256: &[u8;32]) -> bool {
+            let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            policy.team_identifier_data().as_bytes() == team
+                && policy.leaf_certificate_sha1_data() == hex(sha1)
+                && policy.leaf_certificate_sha256_data() == hex(sha256)
+                && policy.requires_hardened_runtime_data() && policy.requires_empty_entitlements_data()
+        }
+        impl ProducerAdmission {
+            fn new(book: &mut Install, source: &Source, completed_path: &str) -> Result<Self> {
+                use native::install_producer::{ProducerVerifier,CurrentProductVerifier,CurrentProductRole};
+                book.source_post(source)?;
+                let input = completed_package::Input::open(book,completed_path)?;
+                let outer_path = format!("{}/app",source.source);
+                check(outer_path.len() < 1024,"producer-code-path-bound")?;
+                let outer = book.open(Some(source.input),"app",true)?;
+                let contents = book.open(Some(outer),"Contents",true)?;
+                let helpers = book.open(Some(contents),"Helpers",true)?;
+                let payload = book.open(Some(helpers),"MobileReleaseKitPayload.app",true)?;
+                let code_chain = [outer,contents,helpers,payload];
+                for original in code_chain {
+                    book.protected_as(original,true,Some(0o555),AclRole::InputDirectory)?;
+                    native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "producer-code-attributes")?;
+                    book.check_name(original,true)?;
+                }
+                // Supplied copies/wrappers have a finite peak; this is not a
+                // claim about Security.framework's private allocation heap.
+                let supplied = ProducerVerifier::project_owned_upper_bound()
+                    .and_then(|n| CurrentProductVerifier::project_owned_upper_bound().and_then(|m| m.checked_mul(2)?.checked_add(n)))
+                    .and_then(|n| n.checked_add(2 * 65536 + 2 * 16384 + 4096))
+                    .ok_or("producer-native-resource-bound")?;
+                check(supplied <= 2 * 1024 * 1024,"producer-native-resource-bound")?;
+                Ok(Self { input,signature:ProducerVerifier::new(),
+                    entry:CurrentProductVerifier::new(CurrentProductRole::EntryApp),
+                    payload:CurrentProductVerifier::new(CurrentProductRole::PayloadApp),code_chain,outer_path,
+                    signature_result:None,entry_result:None,payload_result:None,descriptor:None,first:None })
+            }
+            fn inspect(&mut self, book: &Install, source: &Source) -> Result<ReleaseSetData> {
+                use native::install_producer::{SignatureResult,CurrentProductResult};
+                use mobile_release_desktop::{macos_install_producer::ProducerData,macos_install_maintenance::MaintenanceTargetData};
+                check(self.signature_result.is_none() && self.entry_result.is_none()
+                    && self.payload_result.is_none() && self.descriptor.is_none(),"producer-original-once")?;
+                producer_original_post(book,source,&self.input,&self.code_chain)?;
+                let signature = {
+                    let Self { input,signature,code_chain,first,.. } = self;
+                    signature.verify_and_close(input.descriptor_data(),input.signature_data(),
+                        &mut |point| producer_point(book,source,input,code_chain,first,point))
+                };
+                self.signature_result = Some(signature);
+                check(self.signature.settled(),"producer-native-finality-unknown")?;
+                check(signature == SignatureResult::SignatureVerified,self.first.unwrap_or(match signature {
+                    SignatureResult::Unavailable => "producer-source-unavailable",
+                    SignatureResult::Unknown => "producer-native-custody-unknown",_ => "producer-signature-refused",
+                }))?;
+                // These remain parsed DATA until BOTH actual code roles have
+                // matched and retired under this same original parent clock.
+                let target = if cfg!(target_arch = "aarch64") { MaintenanceTargetData::Arm64 } else { MaintenanceTargetData::Intel };
+                let descriptor = ProducerData::parse_data(self.input.descriptor_data(),target)
+                    .map_err(|_| "producer-descriptor-binding")?;
+                let signer = native::install_producer::source_signer_data().ok_or("producer-source-unavailable")?;
+                producer_original_post(book,source,&self.input,&self.code_chain)?;
+                check(producer_policy_matches_data(descriptor.signing_policy_data(),signer.team_data(),signer.leaf_sha1_data(),signer.leaf_sha256_data()),
+                    "producer-current-policy-source")?;
+                check(descriptor.completed_package_sha256_data() == self.input.package_sha256_data(),"producer-completed-package-binding")?;
+                maintenance::selected_compile(descriptor.release_set_data())?;
+                let entry = {
+                    let Self { input,entry,code_chain,outer_path,first,.. } = self;
+                    entry.verify_and_close(book.fd(code_chain[0])?.as_fd(),book.fd(code_chain[0])?.as_fd(),Path::new(outer_path),
+                        &mut |point| producer_point(book,source,input,code_chain,first,point))
+                };
+                self.entry_result = Some(entry);
+                check(self.entry.settled(),"producer-native-finality-unknown")?;
+                check(entry == CurrentProductResult::PurposeVerified,self.first.unwrap_or(match entry {
+                    CurrentProductResult::Unavailable => "producer-source-unavailable",
+                    CurrentProductResult::Unknown => "producer-native-custody-unknown",_ => "producer-entry-purpose-refused",
+                }))?;
+                let payload = {
+                    let Self { input,payload,code_chain,outer_path,first,.. } = self;
+                    payload.verify_and_close(book.fd(code_chain[0])?.as_fd(),book.fd(code_chain[3])?.as_fd(),Path::new(outer_path),
+                        &mut |point| producer_point(book,source,input,code_chain,first,point))
+                };
+                self.payload_result = Some(payload);
+                check(self.payload.settled(),"producer-native-finality-unknown")?;
+                check(payload == CurrentProductResult::PurposeVerified,self.first.unwrap_or(match payload {
+                    CurrentProductResult::Unavailable => "producer-source-unavailable",
+                    CurrentProductResult::Unknown => "producer-native-custody-unknown",_ => "producer-payload-purpose-refused",
+                }))?;
+                producer_original_post(book,source,&self.input,&self.code_chain)?;
+                check(self.first.is_none(),"producer-original-refused")?;
+                let selected = descriptor.release_set_data().clone();
+                self.descriptor = Some(descriptor);
+                Ok(selected)
+            }
+            fn authenticated_post(&self, book: &Install, source: &Source, content: bool) -> Result<()> {
+                check(producer_results_data(self.signature_result,self.entry_result,self.payload_result,
+                    self.descriptor.is_some(),self.first.is_none(),
+                    [self.signature.settled(),self.entry.settled(),self.payload.settled()]),"producer-original-finality")?;
+                producer_original_post(book,source,&self.input,&self.code_chain)?;
+                if content { self.input.content_post(book)?; }
+                Ok(())
+            }
+            fn settle(&mut self, book: &Install) -> bool {
+                // Cleanup does not reinterpret changed source as authority. It
+                // consumes only these original known CF references, inside the
+                // same total120s; an unknown adapter refuses further native work.
+                let mut gate = |point| producer_cleanup_point(book,point);
+                let payload = self.payload.close(&mut gate);
+                let entry = self.entry.close(&mut gate);
+                let signature = self.signature.close(&mut gate);
+                payload && entry && signature && self.payload.settled()
+                    && self.entry.settled() && self.signature.settled()
+            }
+        }
+        fn producer_results_data(signature: Option<native::install_producer::SignatureResult>,
+            entry: Option<native::install_producer::CurrentProductResult>,
+            payload: Option<native::install_producer::CurrentProductResult>,
+            descriptor: bool, no_original_refusal: bool, settled: [bool;3]) -> bool {
+            use native::install_producer::{SignatureResult,CurrentProductResult};
+            descriptor && no_original_refusal && settled.into_iter().all(|known| known)
+                && signature == Some(SignatureResult::SignatureVerified)
+                && entry == Some(CurrentProductResult::PurposeVerified)
+                && payload == Some(CurrentProductResult::PurposeVerified)
+        }
+        fn completed_exit_data(writer_exit: Option<i32>, published: bool, exported: bool,
+            originals: bool, native: bool, command_kernel_retained: bool, timely: bool,
+            original_clean: bool, unknown: bool) -> i32 {
+            if writer_exit == Some(0) && exported && originals && native && command_kernel_retained
+                && timely && original_clean && !unknown { 0 }
+            else if published || writer_exit == Some(20) { 20 }
+            else { 1 }
+        }
         struct Parent {
             book: Install, entered: bool, command: Option<ManuallyDrop<Command>>, child: Option<Child>,
             source: Option<Source>, invocation: String, init_sha: String,
+            maintenance: Option<maintenance::Observed>, request_export: Option<RequestExport>,
+            producer: Option<ProducerAdmission>,
             command_original: Option<usize>, output_original: Option<usize>,
             command_close: bool, output_close: bool, output_eof: bool, output_admitted: bool,
             wait: Option<ExitStatus>, wait_unknown: bool, termination_attempted: bool,
@@ -1365,7 +2617,7 @@ mod installer {
             fn new() -> Result<Self> {
                 // This sample precedes input/gate/file admission.
                 Ok(Self { book:Install::with_worker_deadline(Deadline::start()?,false),entered:false,
-                    command:None,child:None,source:None,invocation:String::new(),init_sha:String::new(),
+                    command:None,child:None,source:None,invocation:String::new(),init_sha:String::new(),maintenance:None,request_export:None,producer:None,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
                     wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
                     command_gate_kernel_retained:false,parent_book_settled:false })
@@ -1409,8 +2661,15 @@ mod installer {
                     self.settlement_time();
                 }
             }
-            fn admit_and_go(&mut self, source: &str) -> Result<()> {
-                check(!self.entered, "worker-parent-once")?; self.entered = true;
+            fn admit_and_go(&mut self, source: &str) -> Result<()> { self.admit_and_go_selected(source,None) }
+            fn admit_and_go_selected(&mut self, source: &str, selected: Option<(ReleaseSetData, &str)>) -> Result<()> {
+                self.admit_and_go_inputs(source,selected,None)
+            }
+            fn admit_and_go_inputs(&mut self, source: &str, selected: Option<(ReleaseSetData, &str)>,
+                completed_path: Option<&str>) -> Result<()> {
+                check(!self.entered && !(selected.is_some() && completed_path.is_some()), "worker-parent-once")?;
+                self.entered = true;
+                let mut selected = selected.map(|(set,request)| (set,request.to_owned()));
                 // Existing fixture destinations have their own original owner.
                 // B3 will integrate a reviewed fixed fixture route, not a path flag.
                 check(!cfg!(feature = "macos-installed-installer-fixture"), "worker-fixture-route-unavailable")?;
@@ -1419,13 +2678,41 @@ mod installer {
                 // Authenticate fixed self/source before even the parent's fixed
                 // ancestor/gate creation; the child remains the sole payload writer.
                 self.book.source_post(&actual)?;
-                let _prepared = self.book.prepare_fresh_input(input,inventory,inventory_bytes)?;
-                let gate = self.book.gate.participant.ok_or("worker-gate-original")?;
-                check(self.book.gate.exclusive_acquired && self.book.gate.lock_attempted, "worker-parent-exclusive-required")?;
-                self.book.gate_protected(gate)?; self.book.source_post(&actual)?;
+                if let Some(completed_path) = completed_path {
+                    // Store all inert verifier wrappers before their first call.
+                    // A failed/unknown native return cannot drop the original
+                    // borrowed code directories into an unrelated close path.
+                    self.producer = Some(ProducerAdmission::new(&mut self.book,&actual,completed_path)?);
+                    let producer = self.producer.as_mut().ok_or("producer-original-missing")?;
+                    let releases = producer.inspect(&self.book,&actual)?;
+                    let request = if let Some(request) = producer.input.request_id_data() { request.to_owned() }
+                        else {
+                            let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "maintenance-request-random")?;
+                            let request: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+                            transaction::export_name_data(&request).map_err(|_| "maintenance-request-random")?;
+                            request
+                        };
+                    selected = Some((releases,request));
+                }
                 let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "worker-invocation")?;
                 self.invocation = nonce.iter().map(|b| format!("{b:02x}")).collect();
                 check(invocation_valid(&self.invocation), "worker-invocation")?;
+                if let Some((selected,request_id)) = selected {
+                    maintenance::selected_compile(&selected)?;
+                    transaction::export_name_data(&request_id).map_err(|_| "maintenance-request-shape")?;
+                    let prepared = self.book.prepare_maintenance_input(input,inventory,inventory_bytes)?;
+                    let mut observed = maintenance::observe(&mut self.book,prepared,selected,None)?;
+                    // This fixed sibling is reserved before intent or worker
+                    // payload. Request spelling supplies correlation, not EX,
+                    // producer trust, a source tuple, or package identity.
+                    self.request_export = Some(RequestExport::reserve(&mut self.book,observed.prepared.destination,&request_id)?);
+                    self.request_export.as_ref().ok_or("maintenance-request-missing")?.persist_reservation(&mut self.book)?;
+                    observed.create_intent(&mut self.book,&self.invocation,&request_id)?;
+                    self.maintenance = Some(observed);
+                } else { let _prepared = self.book.prepare_fresh_input(input,inventory,inventory_bytes)?; }
+                let gate = self.book.gate.participant.ok_or("worker-gate-original")?;
+                check(self.book.gate.exclusive_acquired && self.book.gate.lock_attempted, "worker-parent-exclusive-required")?;
+                self.book.gate_protected(gate)?; self.book.source_post(&actual)?;
                 let end = self.book.shared_deadline()?.end;
                 // Include temporary ends of two pipes and the standard spawn
                 // error channel as headroom, not extra permitted live book FDs.
@@ -1466,10 +2753,11 @@ mod installer {
                 let actual = self.source.as_ref().ok_or("worker-source-original")?;
                 let command_before = pipe_data(self.book.fd(command_n)?.as_fd(),true,self.book.shared_deadline()?)?;
                 let result_before = pipe_data(self.book.fd(output_n)?.as_fd(),false,self.book.shared_deadline()?)?;
-                let init = json!({"schemaVersion":2,"kind":"private-writer-init","invocation":self.invocation,"endNanos":end,
+                let mut init = json!({"schemaVersion":2,"kind":"private-writer-init","invocation":self.invocation,"endNanos":end,
                     "parent":parent,"child":child,"compile":compile_binding()?,"source":source_data(&self.book,actual)?,
                     "gate":identity_data(self.book.identity(gate)?),
                     "parentCommandEndpoint":command_before,"parentResultEndpoint":result_before});
+                if let Some(observed) = &self.maintenance { init["maintenance"] = observed.binding(&self.book)?; }
                 let bytes = serde_json::to_vec(&init).map_err(|_| "worker-frame-json")?;
                 self.init_sha = hash(&bytes);
                 write_frame(self.book.fd(command_n)?.as_fd(), &init, INIT_LIMIT, self.book.shared_deadline()?, true)?;
@@ -1479,12 +2767,14 @@ mod installer {
                 pipe_shape(worker_command)?; pipe_shape(worker_result)?;
                 valid_control(&ready,&control("ready",&self.invocation,&self.init_sha,end,parent,child,worker_command,worker_result))?;
                 self.book.source_post(actual)?; self.book.gate_protected(gate)?;
+                if let Some(request) = &self.request_export { request.empty_original(&self.book)?; }
                 // XNU gives opposite pipe endpoints different inode facts.
                 // Recheck each OWN original; remote endpoint numbers confer no authority.
                 check(command_before == pipe_data(self.book.fd(command_n)?.as_fd(),true,self.book.shared_deadline()?)?
                     && result_before == pipe_data(self.book.fd(output_n)?.as_fd(),false,self.book.shared_deadline()?)?,
                     "worker-pipe-post")?;
                 self.original_wait(); check(self.wait.is_none() && !self.wait_unknown, "worker-exited-before-go")?;
+                self.producer_post(true)?; // Same originals/content again, BEFORE the sole GO.
                 write_frame(self.book.fd(command_n)?.as_fd(),&control("go",&self.invocation,&self.init_sha,end,parent,child,worker_command,worker_result),
                     CONTROL_LIMIT,self.book.shared_deadline()?,true)?;
                 // Actual EOF is part of the child's pre-mutation barrier.
@@ -1564,23 +2854,111 @@ mod installer {
                 check(self.output_eof && length == Some(bytes.len()), "worker-result-incomplete")?;
                 Ok(bytes[4..].to_vec())
             }
-            fn run_fresh(&mut self, source: &str) -> Result<JoinedWriter> {
+            fn run_fresh(&mut self, source: &str) -> Result<JoinedWriter> { self.run_selected(source,None) }
+            // The ordinary entry must authenticate the actual completed package,
+            // expected producer tuple and Developer-ID purpose before calling.
+            // This fixed request is only correlation; there is no trusted bool,
+            // arbitrary path, ambient identity, or fixture fallback.
+            fn run_maintenance(&mut self, source: &str, selected: ReleaseSetData, request_id: &str) -> Result<JoinedWriter> {
+                self.run_selected(source,Some((selected,request_id)))
+            }
+            fn run_selected(&mut self, source: &str, selected: Option<(ReleaseSetData, &str)>) -> Result<JoinedWriter> {
+                self.run_inputs(source,selected,None)
+            }
+            fn run_completed(&mut self, source: &str, completed_path: &str) -> Result<JoinedWriter> {
+                self.run_inputs(source,None,Some(completed_path))
+            }
+            fn producer_post(&self, content: bool) -> Result<()> {
+                if let Some(producer) = &self.producer {
+                    producer.authenticated_post(&self.book,self.source.as_ref().ok_or("worker-source-original")?,content)?;
+                }
+                Ok(())
+            }
+            fn run_inputs(&mut self, source: &str, selected: Option<(ReleaseSetData, &str)>,
+                completed_path: Option<&str>) -> Result<JoinedWriter> {
                 check(!self.entered, "worker-parent-once")?;
-                if let Err(error) = self.admit_and_go(source) { self.note(error); }
+                if let Err(error) = self.admit_and_go_inputs(source,selected,completed_path) { self.note(error); }
                 if self.child.is_none() { return Err(self.errors.first().copied().unwrap_or("worker-original-child")); }
                 let bytes = match self.collect() {
                     Ok(bytes) => bytes, Err(error) => { self.note(error); return Err(error); }
                 };
                 let value = packet(&bytes,RESULT_LIMIT)?;
                 let outcome = PreExit::parse(&value,&self.invocation,&self.init_sha)?;
+                check(match (&self.maintenance,&outcome.maintenance) {
+                    (None,None) => true,
+                    (Some(observed),Some(returned)) => observed.action == returned.action,
+                    _ => false,
+                },"maintenance-returned-action")?;
                 let source_post = self.source.as_ref().is_some_and(|source| self.book.source_post(source).is_ok());
                 if !source_post { self.note("worker-source-post"); }
+                if let Err(error) = self.producer_post(true) { self.note(error); }
                 let observed_at = self.book.shared_deadline()?.check_total()?;
                 let status = self.wait.as_ref().and_then(ExitStatus::code);
                 check(joined_data(true,self.output_eof,self.output_close,self.command_close,status,outcome.exit,
                     source_post,true,self.wait_unknown || !self.errors.is_empty()), "worker-joined-result-refused")?;
                 let child = self.child.as_ref().ok_or("worker-original-child")?.id();
                 Ok(JoinedWriter { invocation:self.invocation.clone(),child,outcome,observed_at })
+            }
+            fn record_maintenance_capsule(&mut self, joined: &JoinedWriter) -> Result<Value> {
+                // Only this SAME retained Child can supply this native fact.
+                // This writes no attestation about the parent's future exit or
+                // its retained Command/gate references; outer entry owns that.
+                check(joined.invocation == self.invocation && self.child.as_ref().is_some_and(|child| child.id() == joined.child)
+                    && self.wait.as_ref().and_then(ExitStatus::code) == Some(joined.outcome.exit)
+                    && self.output_eof && self.output_close && self.command_close && !self.wait_unknown && self.errors.is_empty(),
+                    "maintenance-original-join-required")?;
+                self.book.shared_deadline()?.check_work()?;
+                self.producer_post(false)?;
+                check(joined.observed_at < self.book.shared_deadline()?.original_endpoint(),"maintenance-original-join-deadline")?;
+                let observed = self.maintenance.as_ref().ok_or("maintenance-observation-missing")?;
+                let request = self.request_export.as_ref().ok_or("maintenance-request-missing")?;
+                request.empty_original(&self.book)?;
+                check(observed.intent.as_ref().ok_or("maintenance-intent-missing")?.request_id_data() == request.request_id,
+                    "maintenance-request-binding")?;
+                let returned = joined.outcome.maintenance.as_ref().ok_or("maintenance-result-shape")?;
+                check(returned.action == observed.action,"maintenance-returned-action")?;
+                let state = maintenance::state_after_join(&mut self.book,observed,&self.invocation,
+                    returned.state_bytes.as_deref(),returned.inverse)?;
+                let writer_known = joined.outcome.originals && joined.outcome.payload && joined.outcome.timely && !joined.outcome.unknown;
+                let outcome = if !writer_known { transaction::RecordedOutcomeData::Unknown }
+                    else { match joined.outcome.state.as_str() {
+                        "installed" => transaction::RecordedOutcomeData::Applied,
+                        "same-package" => transaction::RecordedOutcomeData::SamePackage,
+                        "restored-app" => transaction::RecordedOutcomeData::RestoredApp,
+                        "inverse-recorded" => transaction::RecordedOutcomeData::InverseRecorded,
+                        "partial-installation-retained" => transaction::RecordedOutcomeData::Partial,
+                        "refused-staging-retained" => transaction::RecordedOutcomeData::Refused,
+                        _ => transaction::RecordedOutcomeData::Unknown,
+                    }};
+                let current = state.as_ref().map(transaction::StateData::current_data);
+                let capsule = transaction::CapsuleData::encode_data(observed.intent.as_ref().ok_or("maintenance-intent-missing")?,
+                    observed.previous(),state.as_ref(),current.as_ref().map(transaction::GenerationData::release_data),outcome,
+                    transaction::WriterObservationData { returned:true,exit_code:Some(u8::try_from(joined.outcome.exit).map_err(|_| "maintenance-result-shape")?),
+                        original_joined:true,result_eof:self.output_eof,original_closes_known:joined.outcome.originals && self.output_close && self.command_close,
+                        within_original_deadline:joined.outcome.timely,payload_write_count:joined.outcome.writes,payload_write_bytes:joined.outcome.bytes },
+                    &observed.selected).map_err(|_| "maintenance-capsule-binding")?;
+                maintenance::persist_capsule(&mut self.book,observed,&self.invocation,&capsule)?;
+                self.book.source_post(self.source.as_ref().ok_or("worker-source-original")?)?;
+                Ok(json!({"schemaVersion":2,"kind":"maintenance-parent-pending-finalization","invocation":self.invocation,
+                    "requestId":request.request_id,"resultName":request.name,
+                    "resultFinality":"pending-own-write-readback-close-and-outer-return",
+                    "action":observed.action,"writerState":joined.outcome.state,"writerExit":joined.outcome.exit,
+                    "intentSha256":observed.intent.as_ref().ok_or("maintenance-intent-missing")?.digest_data(),
+                    "stateSha256":state.as_ref().map(transaction::StateData::digest_data),"capsuleSha256":hash(&capsule),
+                    "payloadWriteCount":joined.outcome.writes,"payloadWriteBytes":joined.outcome.bytes,
+                    "originalWriterJoined":true,"parentFinality":"pending-original-closes-and-outer-return",
+                    "retainedGate":"parent-command-reference-until-kernel-exit","historicalOuterExit":"unverified"}))
+            }
+            fn record_maintenance_export(&mut self, joined: &JoinedWriter) -> Result<Value> {
+                let record = self.record_maintenance_capsule(joined)?;
+                self.request_export.as_mut().ok_or("maintenance-request-missing")?.publish(&mut self.book,&record)?;
+                self.book.source_post(self.source.as_ref().ok_or("worker-source-original")?)?;
+                self.producer_post(false)?;
+                // The exported bytes cannot attest these following closes or
+                // this process's future return. The actual entry must settle its
+                // book and preserve Command/OFD to kernel exit; the outer caller
+                // requires original Installer0 and exact correlated readback.
+                Ok(record)
             }
             fn settle_parent_originals(&mut self) -> bool {
                 // B3 invokes this only after its parent's evidence writers.
@@ -1591,7 +2969,24 @@ mod installer {
                     if !self.book.close(n) { self.note("worker-result-close-unknown"); }
                 }
                 if self.wait_unknown || self.child.is_some() && self.wait.is_none() { self.book.unknown = true; }
-                self.parent_book_settled = self.book.settle_originals();
+                // Native references may still borrow these exact book FDs.
+                // Retire them under this original clock BEFORE any book close.
+                let native_settled = self.producer.as_mut().is_none_or(|producer| producer.settle(&self.book));
+                if native_settled { self.parent_book_settled = self.book.settle_originals(); }
+                else {
+                    self.note("producer-native-finality-unknown");
+                    self.book.unknown = true;
+                    for original in &mut self.book.originals {
+                        if let Some(fd) = original.fd.take() {
+                            std::mem::forget(fd);
+                            original.state = State::KernelExitRetained;
+                        }
+                    }
+                    // Neither the borrowed descriptors nor an unknown native
+                    // cell are consumed by a Drop/replacement owner. The actual
+                    // outer process return is still required for kernel exit.
+                    self.parent_book_settled = false;
+                }
                 self.settlement_time();
                 self.parent_book_settled
             }
@@ -1621,8 +3016,12 @@ mod installer {
             let directory = executable.parent().and_then(Path::to_str).ok_or("worker-script-parent")?;
             Ok(format!("{directory}/input"))
         }
-        fn prepare_worker(book: &mut Install, init: &Value, gate_fd: BorrowedFd<'_>, invocation: &str, end: u64) -> Result<PreparedFresh> {
-            object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate","parentCommandEndpoint","parentResultEndpoint"])?;
+        enum PreparedWorker { Fresh(PreparedFresh), Maintenance(maintenance::Observed) }
+        fn prepare_worker(book: &mut Install, init: &Value, gate_fd: BorrowedFd<'_>, invocation: &str, end: u64) -> Result<PreparedWorker> {
+            let maintenance_value = init.get("maintenance");
+            if maintenance_value.is_some() {
+                object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate", "parentCommandEndpoint","parentResultEndpoint","maintenance"])?;
+            } else { object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate","parentCommandEndpoint","parentResultEndpoint"])?; }
             check(init["schemaVersion"] == 2 && init["kind"] == "private-writer-init" && init["invocation"] == invocation
                 && init["endNanos"].as_u64() == Some(end)
                 && init["parent"].as_u64() == Some(unistd::getppid().as_raw() as u64)
@@ -1647,7 +3046,7 @@ mod installer {
             book.protected(destination,true,Some(0o755))?;
             let versions = book.open(Some(destination),"versions",true)?;
             book.protected(versions,true,Some(0o755))?;
-            book.absent(destination,paths::APP_NAME)?; book.absent(versions,paths::RELEASE)?;
+            if maintenance_value.is_none() { book.absent(destination,paths::APP_NAME)?; book.absent(versions,paths::RELEASE)?; }
             let access = fcntl::fcntl(gate_fd,fcntl::FcntlArg::F_GETFL).map_err(|_| "worker-gate-flags")?;
             check(OFlag::from_bits_truncate(access) & OFlag::O_ACCMODE == OFlag::O_RDONLY, "worker-gate-readonly")?;
             let original = Identity::of(&stat::fstat(gate_fd).map_err(|_| "worker-gate-stat")?);
@@ -1666,7 +3065,15 @@ mod installer {
             // admission/GO supplies that handoff; the worker never flocks.
             book.gate.verified = true;
             book.source_post(&source)?;
-            Ok(PreparedFresh { input,inventory,inventory_bytes,destination,versions })
+            let prepared = PreparedFresh { input,inventory,inventory_bytes,destination,versions };
+            if let Some(value) = maintenance_value {
+                let selected = maintenance::Observed::selected_from_binding(value)?;
+                let mut observed = maintenance::observe(book,prepared,selected,Some(invocation))?;
+                let request_id = value["requestId"].as_str().ok_or("maintenance-request-shape")?;
+                observed.read_intent(book,invocation,request_id)?;
+                check(observed.binding(book)? == *value,"maintenance-init-binding")?;
+                Ok(PreparedWorker::Maintenance(observed))
+            } else { Ok(PreparedWorker::Fresh(prepared)) }
         }
         fn dispatch_private(args: &[String]) -> i32 {
             // Intentionally not called by the current ordinary or fixture run.
@@ -1703,7 +3110,10 @@ mod installer {
                     && result_endpoint == pipe_data(stdout.as_fd(),true,book.shared_deadline()?)?, "worker-pipe-post")?;
                 check(unistd::getppid().as_raw() == parent as i32, "worker-parent-changed")?;
                 book.worker_go_eof = true; // Actual complete GO and EOF, not parsed permission DATA alone.
-                book.install_prepared(prepared,&args[3])
+                match prepared {
+                    PreparedWorker::Fresh(prepared) => book.install_prepared(prepared,&args[3]),
+                    PreparedWorker::Maintenance(observed) => maintenance::execute(&mut book,observed,&args[3]),
+                }
             })();
             let result = book.finish(attempt);
             let outcome = PreExit::from_original(&book,&result);
@@ -1712,6 +3122,38 @@ mod installer {
             let sent = book.shared_deadline().and_then(|deadline|
                 write_frame(stdout.as_fd(),&outcome.data(&args[3],&init_sha),RESULT_LIMIT,deadline,false));
             if sent.is_ok() { result.exit } else if result.exit == 0 { 1 } else { result.exit }
+        }
+        // Ordinary run/postinstall must pass ONLY the genuinely qualified
+        // completed-package Context field here. This helper never guesses $1
+        // or trusts a mount/filename/UID. No new public switch selects it yet.
+        pub(super) fn completed_entry(source: &str, completed_path: &str) -> i32 {
+            let mut parent = match Parent::new() { Ok(parent) => parent, Err(_) => return 1 };
+            let returned = parent.run_completed(source,completed_path);
+            let mut writer_exit = None;
+            let mut published = false;
+            let mut exported = false;
+            match returned {
+                Ok(joined) => {
+                    writer_exit = Some(joined.outcome.exit);
+                    published = joined.outcome.runtime == "confirmed" || joined.outcome.app == "confirmed";
+                    match parent.record_maintenance_export(&joined) {
+                        Ok(_) => exported = true,
+                        Err(error) => parent.note(error),
+                    }
+                }
+                Err(error) => parent.note(error),
+            }
+            let originals = parent.settle_parent_originals();
+            let native = parent.producer.as_ref().is_some_and(|producer| producer.signature.settled()
+                && producer.entry.settled() && producer.payload.settled());
+            let timely = parent.settlement_time();
+            // These are actual completed observations, not the pending exported
+            // document claiming its own future close or the parent's return.
+            // The one retained Command/OFD survives this Rust value's Drop and
+            // retires only when the caller immediately returns to main's exit.
+            completed_exit_data(writer_exit,published,exported,originals,native,
+                parent.command_gate_kernel_retained && parent.command.is_some(),timely,
+                parent.errors.is_empty(),parent.book.unknown || parent.wait_unknown)
         }
         #[cfg(test)]
         mod tests {
@@ -1726,11 +3168,37 @@ mod installer {
                 assert!(time_data(start,end,start+2,start+1,true).is_err());
                 assert!(time_data(u64::MAX-10,5,u64::MAX-10,u64::MAX-10,false).is_err());
                 assert!(time_data(start,end+1,start,start,true).is_err());
+                completed_package::fixed_source_data_checks();
             }
             #[test]
             fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
+                use native::install_producer::{SignatureResult,CurrentProductResult};
+                let signature=Some(SignatureResult::SignatureVerified);
+                let purpose=Some(CurrentProductResult::PurposeVerified);
+                assert!(producer_results_data(signature,purpose,purpose,true,true,[true;3]));
+                for rejected in [None,Some(SignatureResult::Unavailable),Some(SignatureResult::Refused),Some(SignatureResult::Unknown)] {
+                    assert!(!producer_results_data(rejected,purpose,purpose,true,true,[true;3]));
+                }
+                for rejected in [None,Some(CurrentProductResult::Unavailable),Some(CurrentProductResult::Refused),Some(CurrentProductResult::Unknown)] {
+                    assert!(!producer_results_data(signature,rejected,purpose,true,true,[true;3]));
+                    assert!(!producer_results_data(signature,purpose,rejected,true,true,[true;3]));
+                }
+                for index in 0..3 {
+                    let mut closed=[true;3]; closed[index]=false;
+                    assert!(!producer_results_data(signature,purpose,purpose,true,true,closed));
+                }
+                assert!(!producer_results_data(signature,purpose,purpose,false,true,[true;3]));
+                assert!(!producer_results_data(signature,purpose,purpose,true,false,[true;3]));
                 let invocation = "11111111111111111111111111111111"; let sha = "a".repeat(64);
                 assert!(invocation_valid(invocation)); assert!(!invocation_valid(&"0".repeat(32)));
+                assert_eq!(transaction::request_from_package_name_data("Install.pkg").unwrap(),None);
+                assert_eq!(transaction::request_from_package_name_data(&format!("MobileReleaseKit-Request-{invocation}.pkg")).unwrap(),Some(invocation.into()));
+                assert_eq!(transaction::export_name_data(invocation).unwrap(),format!("MobileReleaseKit-InstallerResult-v2-{invocation}.json"));
+                for bad in ["../Install.pkg".into(),"Other.pkg".into(),
+                    format!("MobileReleaseKit-Request-{}.pkg","0".repeat(32)),
+                    format!("MobileReleaseKit-Request-{invocation}.pkg/extra")] {
+                    assert!(transaction::request_from_package_name_data(&bad).is_err());
+                }
                 let endpoint = json!({"device":0,"inode":14,"mode":0o010660,"uid":0,"gid":0});
                 let opposite = json!({"device":0,"inode":15,"mode":0o010660,"uid":0,"gid":0});
                 assert!(pipe_shape(&endpoint).is_ok() && pipe_shape(&opposite).is_ok());
@@ -1747,7 +3215,7 @@ mod installer {
                 assert!(frame_size(&0u32.to_be_bytes(),CONTROL_LIMIT).is_err());
                 assert!(frame_size(&(CONTROL_LIMIT as u32+1).to_be_bytes(),CONTROL_LIMIT).is_err());
                 let result = PreExit { exit:0,state:"installed".into(),originals:true,payload:true,verified:true,
-                    runtime:"confirmed".into(),app:"confirmed".into(),timely:true,unknown:false,writes:1,bytes:1,reason:None };
+                    runtime:"confirmed".into(),app:"confirmed".into(),timely:true,unknown:false,writes:1,bytes:1,reason:None,maintenance:None };
                 let data = result.data(invocation,&sha);
                 assert!(PreExit::parse(&data,invocation,&sha).is_ok());
                 for field in ["stdoutClosed","inheritedGateClosed","selfJoined"] {
@@ -1760,10 +3228,67 @@ mod installer {
                 assert!(PreExit::parse(&private,invocation,&sha).is_err());
                 assert_eq!(closed_reason("/private/unexpected/value"),"other-original-refusal");
                 assert!(PreExit::parse(&json!([]),invocation,&sha).is_err());
+                for (action,state,runtime,app,writes) in [
+                    (ActionData::FreshInstall,"installed","confirmed","confirmed",24_577),
+                    (ActionData::Update,"installed","confirmed","confirmed",24_577),
+                    (ActionData::SamePackageNoop,"same-package","not-attempted","not-attempted",0),
+                    (ActionData::RestoreFixedApp,"restored-app","not-attempted","confirmed",17),
+                ] {
+                    let returned = PreExit { exit:0,state:state.into(),originals:true,payload:true,verified:true,
+                        runtime:runtime.into(),app:app.into(),timely:true,unknown:false,writes,bytes:writes,reason:None,
+                        maintenance:Some(MaintenanceReply { action,progress:"recorded".into(),state_published:true,
+                            // This bounded frame does not confer StateData or
+                            // package authority. The parent separately parses
+                            // and reobserves the exact state after original wait.
+                            state_bytes:Some("{}".into()),inverse:false }) };
+                    let value = returned.data(invocation,&sha);
+                    assert!(PreExit::parse(&value,invocation,&sha).is_ok(),"{state}");
+                    for key in ["originalsClosed","payloadClosed","payloadVerified","withinOriginalDeadline"] {
+                        let mut changed = value.clone(); changed[key] = json!(false);
+                        assert!(PreExit::parse(&changed,invocation,&sha).is_err(),"{state}/{key}");
+                    }
+                    for (key,bad) in [("statePublished",json!(false)),("stateBytes",Value::Null),
+                        ("progress",json!("refused")),("inverseStarted",json!(true)),("action",json!("uninstall")),
+                        ("parentJoined",json!(true))] {
+                        let mut changed = value.clone(); changed["maintenance"][key] = bad;
+                        assert!(PreExit::parse(&changed,invocation,&sha).is_err(),"{state}/{key}");
+                    }
+                    let mut changed = value.clone(); changed["maintenance"]["stateBytes"] = json!("x".repeat(transaction::STATE_LIMIT+1));
+                    assert!(PreExit::parse(&changed,invocation,&sha).is_err());
+                    let mut changed = value.clone(); changed["payloadWriteBytes"] = json!(writes+1);
+                    if writes == 0 { assert!(PreExit::parse(&changed,invocation,&sha).is_err()); }
+                    else {
+                        changed["payloadWriteBytes"] = json!(writes-1);
+                        assert!(PreExit::parse(&changed,invocation,&sha).is_err());
+                    }
+                    let mut changed = value.clone(); changed["runtimePublication"] = json!(if runtime == "confirmed" { "not-attempted" } else { "confirmed" });
+                    assert!(PreExit::parse(&changed,invocation,&sha).is_err());
+                }
+                let inverse = PreExit { exit:20,state:"inverse-recorded".into(),originals:true,payload:true,verified:true,
+                    runtime:"confirmed".into(),app:"confirmed".into(),timely:true,unknown:false,writes:17,bytes:17,
+                    reason:Some("other-original-refusal".into()),maintenance:Some(MaintenanceReply { action:ActionData::Update,
+                        progress:"inverse-recorded".into(),state_published:true,state_bytes:Some("{}".into()),inverse:true }) };
+                let value = inverse.data(invocation,&sha); assert!(PreExit::parse(&value,invocation,&sha).is_ok());
+                for (key,bad) in [("exitCode",json!(0)),("withinOriginalDeadline",json!(false)),("unknown",json!(true))] {
+                    let mut changed = value.clone(); changed[key] = bad;
+                    assert!(PreExit::parse(&changed,invocation,&sha).is_err());
+                }
             }
             #[test]
             fn original_join_requires_eof_closes_matching_return_and_timely_sources() {
                 assert!(joined_data(true,true,true,true,Some(0),0,true,true,false));
+                assert_eq!(completed_exit_data(Some(0),true,true,true,true,true,true,true,false),0);
+                assert_eq!(completed_exit_data(Some(0),false,true,true,true,true,true,true,false),0); // Same-package.
+                for missing in 0..6 {
+                    let mut facts=[true;6]; facts[missing]=false;
+                    assert_eq!(completed_exit_data(Some(0),true,facts[0],facts[1],facts[2],facts[3],facts[4],facts[5],false),20);
+                    assert_eq!(completed_exit_data(Some(0),false,facts[0],facts[1],facts[2],facts[3],facts[4],facts[5],false),1);
+                }
+                assert_eq!(completed_exit_data(Some(0),true,true,true,true,true,true,true,true),20);
+                assert_eq!(completed_exit_data(Some(1),false,true,true,true,true,true,true,false),1);
+                assert_eq!(completed_exit_data(Some(20),true,true,true,true,true,true,true,false),20);
+                assert_eq!(completed_exit_data(None,false,true,true,true,true,true,true,false),1);
+                assert_eq!(completed_exit_data(Some(101),false,true,true,true,true,true,true,false),1);
                 for failed in 0..8 {
                     let mut facts = [true;7]; let mut wait = Some(0);
                     if failed < 7 { facts[failed] = false; } else { wait = None; }

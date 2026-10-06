@@ -489,6 +489,9 @@ NATIVE_TEST_NAMES = (
     "tests::compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts",
     "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
     "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
+    "install_producer::tests::report_decoder_binds_slots_error_outputs_and_consuming_returns",
+    "install_producer::tests::signature_result_requires_same_owner_finality_and_late_gate_refuses",
+    "install_producer::tests::unknown_native_or_gate_custody_never_releases_or_publishes_success",
 )
 
 
@@ -500,8 +503,9 @@ INSTALLER_WORKER_TEST_NAMES = (
 
 
 def native_test_stdout(names=NATIVE_TEST_NAMES):
-    return ("\nrunning 3 tests\n" + "".join("test " + name + " ... ok\n" for name in names)
-            + "\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.01s\n\n").encode("ascii")
+    count = len(names)
+    return (("\nrunning %d tests\n" % count) + "".join("test " + name + " ... ok\n" for name in names)
+            + ("\ntest result: ok. %d passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.01s\n\n" % count)).encode("ascii")
 
 
 class CargoTests(unittest.TestCase):
@@ -535,6 +539,31 @@ class CargoTests(unittest.TestCase):
         self.assertNotIn("cargo:rustc-link-arg=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib", build)
         self.assertNotIn("cargo:rustc-link-arg=-mmacosx-version-min=26.0", build)
         self.assertEqual(fixture.NATIVE_RUST_TESTS, NATIVE_TEST_NAMES)
+
+        required = {
+            ".github/workflows/desktop-macos-maintenance-fixture.yml",
+            "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
+            "desktop/packaging/macos-android-service-signing.profile",
+            "desktop/packaging/macos-install-producer-signing.profile",
+            "desktop/tools/macos_e2_native_fixture.py", "desktop/tools/macos_aqua_qualification.py",
+            "desktop/tools/stage_macos_installed.py", fixture.CONTEXT_SOURCE, fixture.LAYOUT_SOURCE,
+            "desktop/tools/macos_android_sdk_metadata.py",
+            "src/mobile_release/api/data/metadata-images-v1.json",
+            "src/mobile_release/api/data/metadata-image-help-v1.json",
+            *("src/mobile_release/" + name for name in (
+                "__init__.py", "owned_process.py", "_command_process.py", "_native_process.py",
+                "cancellation.py", "errors.py", "_lifetime_evidence.py",
+                "_store_lane_contract.py", "_store_lane_evidence.py")),
+        }
+        certificates = {"desktop/packaging/macos-install-producer-certificates/" + name + ".der"
+                        for name in ("leaf", "issuer", "root")}
+        unrelated = {"desktop/packaging/macos-install-producer-certificates/extra.der",
+                     "desktop/packaging/macos-install-producer-certificates/leaf.key",
+                     "desktop/packaging/other-signing.profile"}
+        self.assertEqual(fixture.source_names(required), sorted(required))
+        self.assertEqual(fixture.source_names(required | certificates | unrelated), sorted(required | certificates))
+        with self.assertRaisesRegex(fixture.Refused, "^required-source-roster$"):
+            fixture.source_names(required - {"desktop/packaging/macos-install-producer-signing.profile"})
 
         class UnknownOriginal(Exception):
             dispatched, contained, cleanup_complete = True, False, False
@@ -839,9 +868,9 @@ class CargoTests(unittest.TestCase):
             self.assertEqual(value.calls[0]["returncode"], 101)
             self.assertEqual("installerWorkerDiagnostic" in value.calls[0], mode == "known")
 
-    def test_native_rust_results_require_three_actual_successes_and_exact_closed_record(self):
+    def test_native_rust_results_require_fixed_actual_successes_and_exact_closed_record(self):
         expected = {"schemaVersion": 1, "type": "mrk-macos-native-rust-tests-v1", "target": "aarch64-apple-darwin",
-                    "tests": list(NATIVE_TEST_NAMES), "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
+                    "tests": list(NATIVE_TEST_NAMES), "passed": 6, "failed": 0, "ignored": 0, "measured": 0}
         body = native_test_stdout()
         for data in (body, native_test_stdout(tuple(reversed(NATIVE_TEST_NAMES))), body.replace(b"0.01s", b"480.00s")):
             self.assertEqual(fixture.native_rust_tests_result(data), expected)
@@ -850,13 +879,13 @@ class CargoTests(unittest.TestCase):
         self.assertIsNot(projected, expected)
         self.assertIsNot(projected["tests"], expected["tests"])
         bad_output = (None, "not bytes", b"", b"x" * 65537, body + b"\xff", body[:-1], b"extra\n" + body,
-                      body.replace(b"running 3 tests", b"running 0 tests"),
-                      native_test_stdout(NATIVE_TEST_NAMES[:2]),
-                      native_test_stdout((NATIVE_TEST_NAMES[0], NATIVE_TEST_NAMES[0], NATIVE_TEST_NAMES[2])),
+                      body.replace(b"running 6 tests", b"running 0 tests"),
+                      native_test_stdout(NATIVE_TEST_NAMES[:-1]),
+                      native_test_stdout((NATIVE_TEST_NAMES[0], NATIVE_TEST_NAMES[0], *NATIVE_TEST_NAMES[2:])),
                       body.replace(NATIVE_TEST_NAMES[0].encode(), b"unknown::test"),
                       body.replace(b" ... ok\n", b" ... ignored\n", 1),
                       body.replace(b" ... ok\n", b" ... FAILED\n", 1),
-                      body.replace(b"3 passed; 0 failed", b"2 passed; 1 failed"),
+                      body.replace(b"6 passed; 0 failed", b"5 passed; 1 failed"),
                       body.replace(b"0 ignored", b"1 ignored"), body.replace(b"127 filtered", b"0127 filtered"),
                       body.replace(b"0.01s", b"NaNs"), body.replace(b"0.01s", b"480.01s"),
                       body.replace(b" ... ok\n", b" ... \x1b[32mok\x1b[0m\n", 1))
@@ -865,7 +894,7 @@ class CargoTests(unittest.TestCase):
                 fixture.native_rust_tests_result(data)
         mutations = [{key: bool(expected[key])} for key in ("schemaVersion", "passed", "failed", "ignored", "measured")]
         mutations += [{"target": "x86_64-apple-darwin"}, {"tests": tuple(NATIVE_TEST_NAMES)},
-                      {"tests": [NATIVE_TEST_NAMES[0]] * 3}, {"tests": [None, *NATIVE_TEST_NAMES[1:]]},
+                      {"tests": [NATIVE_TEST_NAMES[0]] * 6}, {"passed": 3}, {"tests": list(NATIVE_TEST_NAMES[:3])}, {"tests": [None, *NATIVE_TEST_NAMES[1:]]},
                       {"rawOutput": "synthetic-private-output"}, {"type": "other"}]
         for index, change in enumerate(mutations):
             with self.subTest(record=index), self.assertRaises(fixture.Refused):
@@ -890,7 +919,7 @@ class CargoTests(unittest.TestCase):
                              (fixture.native_rust_tests_data, worker_expected),
                              (fixture.installer_worker_rust_tests_data, expected)):
             with self.assertRaises(fixture.Refused):
-                parser(data)  # A different actual three-test batch cannot satisfy this role.
+                parser(data)  # A different SOURCE-selected batch cannot satisfy this role.
         for data in (worker_body.replace(b"0 ignored", b"1 ignored"),
                      worker_body.replace(b"0.01s", b"480.01s"),
                      native_test_stdout((INSTALLER_WORKER_TEST_NAMES[0],) * 3),
@@ -2197,6 +2226,79 @@ class InstallerContextTests(unittest.TestCase):
                      members["PackageInfo"].replace(b"<relocate/>", b'<relocate><bundle path="/unrelated"/></relocate>')):
             with self.assertRaises(fixture.Refused):
                 fixture.context_package_info(body, fixture.CONTEXT_IDENTIFIERS[1])
+        # Observations distinguish each original identity conjunct without
+        # changing what is accepted or publishing arbitrary XML names/values.
+        identity_changes = (
+            ("rootTagMatches", lambda root: setattr(root, "tag", "private-root")),
+            ("identifierMatches", lambda root: root.set("identifier", "private-identifier")),
+            ("versionMatches", lambda root: root.set("version", "private-version")),
+            ("installLocationMatches", lambda root: root.attrib.pop("install-location")),
+            ("installLocationMatches", lambda root: root.set("install-location", "/private-path")),
+            ("authMatches", lambda root: root.attrib.pop("auth")),
+            ("authMatches", lambda root: root.set("auth", "private-auth")),
+            ("onlyExpectedAttributes", lambda root: root.set("overwrite-permissions", "true")),
+            ("onlyExpectedAttributes", lambda root: root.set("private-attribute", "private-value")),
+        )
+        package_calls = [{"role": "context-product-component-build", "entered": True, "returned": True, "returncode": 0}]
+        package_diagnostics = []
+        for failed_check, mutate in identity_changes:
+            root = ET.fromstring(self.package_info())
+            mutate(root)
+            info_body = ET.tostring(root, encoding="utf-8")
+            with self.subTest(package_identity=failed_check), self.assertRaisesRegex(fixture.Refused, "^context-package-identity$"):
+                fixture.context_package_info(info_body, fixture.CONTEXT_IDENTIFIERS[1])
+            observed = fixture._context_package_info_observation(info_body, fixture.CONTEXT_IDENTIFIERS[1])
+            self.assertEqual({name for name, passed in observed["checks"].items() if not passed}, {failed_check})
+            self.assertNotIn("private-", fixture.canonical(observed).decode("ascii"))
+            if failed_check in ("installLocationMatches", "authMatches"):
+                name = "auth" if failed_check == "authMatches" else "install-location"
+                self.assertEqual(observed["elements"]["root"]["attributes"][name], None if name not in root.attrib else "other")
+            package_body = self.xar({"PackageInfo": info_body, "Scripts": b"inert"})
+            diagnostic = {"schemaVersion": 1, "type": "mrk-context-package-info-diagnostic-v1", "diagnosticOnly": True,
+                          "phase": "context-product-audit", "package": "wrapped-component",
+                          "packageSha256": fixture.digest(package_body), "packageBytes": len(package_body),
+                          "packageInfoSha256": fixture.digest(info_body), "packageInfoBytes": len(info_body),
+                          "buildCallIndex": 0, "packageInfo": observed}
+            self.assertIs(fixture.context_package_info_diagnostic_data(diagnostic, diagnostic["phase"], "context-package-identity", package_calls), diagnostic)
+            self.assertLessEqual(len(fixture.canonical(diagnostic)), 4096)
+            package_diagnostics.append(diagnostic)
+        # A later no-payload/hook failure still has all six TRUE identity facts.
+        for before, after, label in ((b'numberOfFiles="0"', b'numberOfFiles="1"', "context-package-no-payload"),
+                                     (b'file="./postinstall"', b'file="/private-path" timeout="600"', "context-package-hook")):
+            info_body = self.package_info().replace(before, after)
+            with self.assertRaisesRegex(fixture.Refused, "^" + label + "$"):
+                fixture.context_package_info(info_body, fixture.CONTEXT_IDENTIFIERS[1])
+            observed = fixture._context_package_info_observation(info_body, fixture.CONTEXT_IDENTIFIERS[1])
+            self.assertTrue(all(observed["checks"].values()))
+            self.assertNotIn("private-path", fixture.canonical(observed).decode("ascii"))
+            package_body = self.xar({"PackageInfo": info_body, "Scripts": b"inert"})
+            diagnostic = dict(package_diagnostics[0], packageInfo=observed, packageInfoBytes=len(info_body), packageInfoSha256=fixture.digest(info_body),
+                              packageSha256=fixture.digest(package_body), packageBytes=len(package_body))
+            self.assertIs(fixture.context_package_info_diagnostic_data(diagnostic, diagnostic["phase"], label, package_calls), diagnostic)
+        diagnostic = package_diagnostics[0]
+        for field, value in (("schemaVersion", True), ("diagnosticOnly", 1), ("package", "outer-product"),
+                             ("packageInfoBytes", 65537), ("packageInfoSha256", "private-text"), ("buildCallIndex", True)):
+            self.assertIsNone(fixture.context_package_info_diagnostic_data(dict(diagnostic, **{field: value}), diagnostic["phase"], "context-package-identity", package_calls))
+        for mutation in (
+            lambda info: info["checks"].update(rootTagMatches=1),
+            lambda info: info["checks"].update(authMatches=False),
+            lambda info: info["elements"]["root"].update(count=True),
+            lambda info: info["elements"]["root"]["attributes"].update(auth="private-value"),
+            lambda info: info["elements"]["root"]["attributes"].update(auth="x" * 5000),
+            lambda info: info["elements"]["postinstall"].update(otherAttributes=17),
+            lambda info: info["childCounts"].update(payload=257),
+            lambda info: info.update(otherChildren=True),
+        ):
+            bad = copy.deepcopy(diagnostic)
+            mutation(bad["packageInfo"])
+            self.assertIsNone(fixture.context_package_info_diagnostic_data(bad, diagnostic["phase"], "context-package-identity", package_calls))
+        for bad_calls in ([], package_calls * 2, [dict(package_calls[0], returned=False)],
+                          [dict(package_calls[0], returncode=1)], [dict(package_calls[0], returncode=False)],
+                          [dict(package_calls[0], role="context-product-build")]):
+            self.assertIsNone(fixture.context_package_info_diagnostic_data(diagnostic, diagnostic["phase"], "context-package-identity", bad_calls))
+        self.assertIsNone(fixture.context_package_info_diagnostic_data(diagnostic, "context-component-audit", "context-package-identity", package_calls))
+        self.assertIsNone(fixture.context_package_info_diagnostic_data(diagnostic, diagnostic["phase"], None, package_calls))
+        fixture.context_package_info(self.package_info(), fixture.CONTEXT_IDENTIFIERS[1])  # Original acceptance unchanged.
         for extra in ({"Distribution": fixture.context_distribution() + b"<script/>"},
                       {"Distribution": fixture.context_distribution().replace(b'>context-wrapped.pkg<', b'>https://outside.invalid/pkg<')},
                       {"Distribution": fixture.context_distribution().replace(b'version="1">', b'version="1" onConclusion="RequireRestart">')},
@@ -2347,15 +2449,48 @@ class InstallerContextTests(unittest.TestCase):
         self.assertFalse(op.scratch_retired or op.installer_context["completed"])
         self.assertTrue(op.sources_closed and op.outputs_closed and op.protected_closed)
 
+        # Exercise the real route with inert per-instance work. This is order
+        # DATA, not a compiler/native/cleanup success or a fabricated receipt.
+        for layout in (False, True):
+            with self.subTest(early_images_layout=layout):
+                op = OwnerRetirementAndModeTests.operation(b"", 0)
+                op.service_layout["selected"] = layout
+                op.outputs.directories = {op.scratch: {"identity": WORK[:5]}}
+                route = []
+                def step(name):
+                    return lambda *_args, **_kwargs: route.append(name)
+                for method, event in (
+                        ("begin", "begin"), ("build_installer_worker_tests", "worker3"),
+                        ("build_images", "images"), ("observe_installer_context", "context"),
+                        ("compile_metadata_observer", "metadata"), ("absence", "absence"),
+                        ("compile_facades", "facades"), ("compile_service_layout", "layout-compile"),
+                        ("sign", "sign"), ("package_fixture", "package"), ("install_fixture", "install"),
+                        ("run_native", "native"), ("observe_service_layout", "layout-observe"),
+                        ("observe_btm_logs", "btm"), ("finish", "finish")):
+                    setattr(op, method, step(event))
+                op.receipt = lambda failure: failure
+                self.assertIsNone(op.execute())
+                expected = (["begin", "metadata", "absence", "images", "facades", "layout-compile",
+                             "sign", "package", "install", "layout-observe", "btm", "finish"] if layout else
+                            ["begin", "worker3", "images", "context", "metadata", "absence", "facades",
+                             "sign", "package", "install", "native", "btm", "finish"])
+                self.assertEqual(route, expected)
+                self.assertEqual(route.count("images"), 1)
+
         # These are inert original-read/process/book DATA. The actual pure
         # parser and execute/finish run; no native process or deletion occurs.
         def invalid_finder(toc):
             toc.find("file/FinderCreateTime/time").text = "2026-01-01T12:34:56Z"
-        body = self.xar({"PackageInfo": self.package_info(), "Scripts": b"inert"}, mutate=invalid_finder)
-        scenarios = ("known-pure", "read-refused", "read-unknown", "parser-unexpected", "parser-unmarked",
-                     "diagnostic-unknown", "foreign-original", "context-entered", "installer-entered",
+        finder_body = self.xar({"PackageInfo": self.package_info(), "Scripts": b"inert"}, mutate=invalid_finder)
+        good_body = self.xar({"PackageInfo": self.package_info(0), "Scripts": b"inert"})
+        package_body = self.xar({"PackageInfo": self.package_info(0).replace(b' install-location="/"', b''), "Scripts": b"inert"})
+        product_body = self.xar({"Distribution": fixture.context_distribution(), fixture.CONTEXT_PACKAGES[1]: b"different component"})
+        known = {"known-pure", "known-package", "known-cpio", "known-product", "known-checksum"}
+        scenarios = (*sorted(known), "read-refused", "read-unknown", "parser-unexpected", "parser-unmarked",
+                      "diagnostic-unknown", "foreign-original", "context-entered", "installer-entered",
+                     "native-entered", "wrong-phase", "build-nonzero", "build-duplicated", "package-diagnostic-unknown",
                      "call-unknown", "source-close-unknown", "output-close-unknown", "protected-close-unknown",
-                     "secondary-unknown")
+                      "secondary-unknown")
         stat_info = SimpleNamespace(**dict(zip(
             ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), WORK)))
         for scenario in scenarios:
@@ -2365,10 +2500,19 @@ class InstallerContextTests(unittest.TestCase):
                 op.installer_context.update(started=True, deadlineNs="100000000000")
                 op.phase = "context-component-audit"
                 op.calls = [{"role": "context-component-build", "entered": True, "returned": True, "returncode": 0}]
+                body = (package_body if scenario in ("known-package", "package-diagnostic-unknown") else good_body if scenario == "known-cpio"
+                        else product_body if scenario == "known-product" else good_body[:-1] + bytes([good_body[-1] ^ 1]) if scenario == "known-checksum"
+                        else finder_body)
+                position = 2 if scenario == "known-product" else 0
+                if position == 2:
+                    op.phase = "context-product-audit"
+                    op.calls[0]["role"] = "context-product-build"
                 entry = {"fd": 92, "path": op.scratch / "installer-context" / fixture.CONTEXT_PACKAGES[0],
                          "kind": "file", "closed": False, "identity": (*WORK[:6], len(body), *WORK[7:])}
+                entry["path"] = op.scratch / "installer-context" / fixture.CONTEXT_PACKAGES[position]
                 op.outputs.entries = [] if scenario == "foreign-original" else [entry]
                 op.outputs.directories = {op.scratch: {"identity": WORK[:5]}}
+                op.stager = SimpleNamespace(_cpio_members=lambda *_args: {})  # Inert parser-return DATA, not a native/archive run.
                 events = []
                 def original_read(*_args, **_kwargs):
                     if scenario == "read-refused":
@@ -2378,14 +2522,20 @@ class InstallerContextTests(unittest.TestCase):
                     events.append("original-body-read-eof-post-returned")
                     return entry, body
                 op.outputs.file = original_read
+                image_calls = []
                 def audit():
+                    self.assertEqual(image_calls, ["images"])
                     bound, original_body = op.outputs.file(entry["path"], fixture.CONTEXT_PACKAGE_LIMIT)
                     try:
-                        op.context_audit(bound, original_body)
+                        if scenario == "known-product":
+                            op.context_audit(bound, original_body, component=(b"expected component", {}))
+                        else:
+                            op.context_audit(bound, original_body, identifier=fixture.CONTEXT_IDENTIFIERS[0], expected={"expected": (b"inert", 0o555)})
                     except fixture.Refused as error:
                         events.append(error)
                         raise
                 op.begin = op.build_installer_worker_tests = lambda: None
+                op.build_images = lambda: image_calls.append("images")
                 op.observe_installer_context = audit
                 op.observe_btm_logs = lambda: None
                 op.receipt = lambda failure: failure  # No synthetic receipt/pass.
@@ -2393,6 +2543,14 @@ class InstallerContextTests(unittest.TestCase):
                     op.installer_context["enteredCases"] = ["component"]
                 elif scenario == "installer-entered":
                     op.installer_entered = True
+                elif scenario == "native-entered":
+                    op.native_entered = True
+                elif scenario == "wrong-phase":
+                    op.phase = "context-prepare"
+                elif scenario == "build-nonzero":
+                    op.calls[0]["returncode"] = 1
+                elif scenario == "build-duplicated":
+                    op.calls.append(dict(op.calls[0]))
                 elif scenario == "call-unknown":
                     op.calls[0]["returned"] = False
                 elif scenario.endswith("close-unknown"):
@@ -2405,6 +2563,7 @@ class InstallerContextTests(unittest.TestCase):
                     op.observe_btm_logs = unknown_log
                 parse = fixture.context_xar
                 observation = fixture._context_metadata_observation
+                package_observation = fixture._context_package_info_observation
                 unmarked = fixture.Refused("context-xar-member-metadata")
                 def selected_parse(data, **kwargs):
                     if scenario == "parser-unexpected":
@@ -2416,20 +2575,32 @@ class InstallerContextTests(unittest.TestCase):
                     if scenario == "diagnostic-unknown":
                         raise KeyboardInterrupt()
                     return observation(*args)
+                def selected_package_observation(*args):
+                    if scenario == "package-diagnostic-unknown":
+                        raise KeyboardInterrupt()
+                    return package_observation(*args)
                 cleanup = SimpleNamespace(directory=lambda _path: {"fd": 93}, finish=lambda: True)
                 with patch.object(fixture, "context_xar", selected_parse), \
                      patch.object(fixture, "_context_metadata_observation", selected_observation), \
+                     patch.object(fixture, "_context_package_info_observation", selected_package_observation), \
                      patch.object(fixture, "Originals", return_value=cleanup) as originals, \
                      patch.object(fixture.os, "stat", side_effect=[stat_info, FileNotFoundError()]) as named, \
                      patch.object(fixture.shutil, "rmtree") as retire:
                     retire.avoids_symlink_attacks = True
                     failure = op.execute()
-                    if scenario == "known-pure":
+                    if scenario in known:
                         self.assertEqual(events[0], "original-body-read-eof-post-returned")
-                        self.assertIs(events[1], op._context_metadata_refusal)
-                        self.assertTrue(op.context_pure_metadata_refused)
-                        self.assertEqual(failure, "context-xar-member-metadata")
-                        self.assertIn(fixture.CONTEXT_METADATA_ARTIFACT, op.artifacts)
+                        self.assertIs(events[1], op._context_audit_refusal)
+                        self.assertTrue(op.context_pure_audit_refused)
+                        self.assertEqual(failure, events[1].args[0])
+                        if scenario == "known-pure":
+                            self.assertIn(fixture.CONTEXT_METADATA_ARTIFACT, op.artifacts)
+                        elif scenario == "known-package":
+                            self.assertEqual(failure, "context-package-identity")
+                            self.assertIn(fixture.CONTEXT_PACKAGE_INFO_ARTIFACT, op.artifacts)
+                            observed = op.artifacts[fixture.CONTEXT_PACKAGE_INFO_ARTIFACT]
+                            self.assertIsNone(observed["packageInfo"]["elements"]["root"]["attributes"]["install-location"])
+                            self.assertFalse(observed["packageInfo"]["checks"]["installLocationMatches"])
                         originals.assert_called_once_with()
                         retire.assert_called_once_with(op.scratch.name, dir_fd=93)
                         self.assertEqual(named.call_count, 2)
@@ -2437,11 +2608,13 @@ class InstallerContextTests(unittest.TestCase):
                         originals.assert_not_called()
                         retire.assert_not_called()
                         named.assert_not_called()
-                self.assertEqual(op.scratch_retired, scenario == "known-pure")
+                self.assertEqual(image_calls, ["images"])  # No retry after a refused/unknown Context.
+                self.assertEqual(op.scratch_retired, scenario in known)
                 self.assertFalse(op.installer_context["completed"])
                 if scenario in ("read-refused", "read-unknown", "parser-unexpected", "parser-unmarked",
-                                "diagnostic-unknown", "foreign-original", "call-unknown", "secondary-unknown"):
-                    self.assertFalse(op.context_pure_metadata_refused)
+                                "diagnostic-unknown", "package-diagnostic-unknown", "foreign-original", "call-unknown", "secondary-unknown",
+                                "wrong-phase", "build-nonzero", "build-duplicated"):
+                    self.assertFalse(op.context_pure_audit_refused)
                 if scenario == "parser-unmarked":
                     self.assertIs(events[-1], unmarked)
 

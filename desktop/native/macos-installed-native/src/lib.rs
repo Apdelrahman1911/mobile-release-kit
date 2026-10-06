@@ -44,6 +44,8 @@ pub mod android_service_resident;
 pub mod android_service_budget;
 #[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
 pub mod android_service_management;
+#[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
+pub mod install_producer;
 mod android_service_lease;
 mod android_service_client_data;
 pub const DESKTOP_IMAGE_BUILD: bool = cfg!(feature = "desktop-image");
@@ -87,6 +89,7 @@ unsafe extern "C" {
     fn mrk_entries(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
     fn mrk_publish(from: c_int, source: *const c_char, to: c_int, destination: *const c_char) -> c_int;
+    fn mrk_swap_installation_state(root: c_int, archived: *const c_char) -> c_int;
     fn mrk_panel_reserve() -> *mut c_void;
     fn mrk_panel_reserve_images() -> *mut c_void;
     fn mrk_panel_start(panel: *mut c_void, kind: c_int) -> c_int;
@@ -184,6 +187,24 @@ pub fn publish_directory(from: BorrowedFd<'_>, source: &str, to: BorrowedFd<'_>,
     // SAFETY: original directory descriptors and NUL-terminated single names.
     // The C call always uses RENAME_EXCL; never an overwrite-capable fallback.
     result(unsafe { mrk_publish(from.as_raw_fd(), source.as_ptr(), to.as_raw_fd(), destination.as_ptr()) })
+}
+fn state_archive_component(value: &str) -> io::Result<CString> {
+    let invocation = value.strip_prefix(".maintenance-").and_then(|s| s.strip_suffix(".state.json"))
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    if invocation.len() != 32 || !invocation.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !invocation.bytes().any(|b| b != b'0') { return Err(io::ErrorKind::InvalidInput.into()); }
+    CString::new(value).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+/// One fixed metadata swap, not an overwrite-capable payload publisher. Caller
+/// must hold the original EX gate and BOTH authenticated files, account the
+/// actual return, recheck names/content and persist the original parent. No
+/// absence fallback, path discovery, file deletion or durability claim here.
+pub fn swap_installation_state(root: BorrowedFd<'_>, archived: &str) -> io::Result<()> {
+    let archived = state_archive_component(archived)?;
+    // SAFETY: borrowed directory and a checked fixed-format NUL-terminated leaf.
+    // Native admits two distinct protected metadata files on this filesystem;
+    // the canonical name and RENAME_SWAP flags are fixed in the shim.
+    result(unsafe { mrk_swap_installation_state(root.as_raw_fd(), archived.as_ptr()) })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

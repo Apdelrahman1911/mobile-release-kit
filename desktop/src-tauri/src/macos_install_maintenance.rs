@@ -2,7 +2,8 @@
 //! Expected releases come from the release producer, never from the installation
 //! being classified. Supplied check labels cannot establish signature trust,
 //! current invocation, native finality, live-use exclusion or permission to act.
-//! No production caller/Installer branch is enabled by this module.
+//! Native callers must retain their own admitted producer and original handles;
+//! the accessors and encoders here do not turn DATA into authority.
 #![forbid(unsafe_code)]
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -60,7 +61,23 @@ pub struct ReleaseData {
     protocol_sha256: String, runtime_manifest_sha256: String, inventory_sha256: String,
     signing_policy_sha256: String, package_sha256: String,
 }
+/// Read-only tuple fields for the separate Installer binary and its original
+/// readers. This is not an independently authenticated producer selection.
+#[derive(Clone, Copy)]
+pub struct ReleaseBindingData<'a> {
+    pub profile: &'a str, pub package_identifier: &'a str, pub bundle_identifier: &'a str,
+    pub package_version: &'a str, pub release: &'a str, pub source_commit: &'a str,
+    pub protocol_sha256: &'a str, pub runtime_manifest_sha256: &'a str,
+    pub inventory_sha256: &'a str, pub signing_policy_sha256: &'a str, pub package_sha256: &'a str,
+}
 impl ReleaseData {
+    pub fn binding_data(&self) -> ReleaseBindingData<'_> {
+        ReleaseBindingData { profile: &self.profile, package_identifier: &self.package_identifier,
+            bundle_identifier: &self.bundle_identifier, package_version: &self.package_version,
+            release: &self.release, source_commit: &self.source_commit, protocol_sha256: &self.protocol_sha256,
+            runtime_manifest_sha256: &self.runtime_manifest_sha256, inventory_sha256: &self.inventory_sha256,
+            signing_policy_sha256: &self.signing_policy_sha256, package_sha256: &self.package_sha256 }
+    }
     /// Ordering DATA shared by live and recorded updates; tuples still require
     /// independent membership/target validation before this comparison.
     pub(crate) fn is_strictly_newer_data(&self, previous: &Self) -> bool {
@@ -87,14 +104,14 @@ impl ReleaseData {
 }
 
 /// An explicit finite allow-list, not a destination-derived upgrade policy.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReleaseSetData {
     target: MaintenanceTargetData,
     current: ReleaseData, accepted_predecessors: Vec<ReleaseData>,
 }
 // The validated wrapper does not implement Deserialize: callers cannot bypass
 // parse_data's size/identity/predecessor checks through serde_json::from_value.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReleaseSetWireData {
     schema_version: u32, current: ReleaseData, accepted_predecessors: Vec<ReleaseData>,
@@ -126,11 +143,20 @@ impl ReleaseSetData {
     }
     pub fn target_data(&self) -> MaintenanceTargetData { self.target }
     pub fn current_data(&self) -> &ReleaseData { &self.current }
-    pub(crate) fn contains_data(&self, release: &ReleaseData) -> bool {
+    pub fn contains_data(&self, release: &ReleaseData) -> bool {
         release.validate(self.target).is_ok()
             && (release == &self.current || self.accepted_predecessors.contains(release))
     }
     pub fn predecessor_data(&self) -> &[ReleaseData] { &self.accepted_predecessors }
+    /// Canonical bounded DATA for an already selected set. A private channel
+    /// may carry these bytes, but channel/producer authentication remains native.
+    pub fn encode_data(&self) -> Result<Vec<u8>> {
+        let wire = ReleaseSetWireData { schema_version: 2, current: self.current.clone(),
+            accepted_predecessors: self.accepted_predecessors.clone() };
+        let bytes = serde_json::to_vec(&wire).map_err(|_| DataError::Shape)?;
+        Self::parse_for_target_data(&bytes, self.target)?;
+        Ok(bytes)
+    }
     fn tuple_class(&self, value: &ReleaseData) -> ClassificationData {
         if value == &self.current { ClassificationData::ExactCurrentTuple }
         else if self.accepted_predecessors.contains(value) { ClassificationData::AcceptedPredecessorTuple }

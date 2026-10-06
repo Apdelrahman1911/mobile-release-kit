@@ -1,5 +1,7 @@
 #[path = "../../src-tauri/src/macos_install_fixed_paths.rs"]
 mod installed_paths;
+#[path = "build_support/producer_selection.rs"]
+mod producer_selection;
 
 // Only reviewed source inputs can select the shipping identity. This is not a
 // renderer/environment requirement string, same-team wildcard or ad-hoc path.
@@ -20,6 +22,33 @@ fn android_requirements() -> Option<(String, String)> {
     let requirement = |identifier: &str| format!(
         "anchor apple generic and identifier \"{identifier}\" and certificate leaf[subject.OU] = \"{team}\" and certificate leaf = H\"{certificate}\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists");
     Some((requirement(installed_paths::BUNDLE_ID), requirement("dev.mobile-release-kit.desktop.android-register")))
+}
+
+// These are fixed public SOURCE inputs inside the already admitted read-only
+// build projection. No certificate path is supplied by a package or environment.
+fn producer_certificate(path: &str) -> Vec<u8> {
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let before = std::fs::symlink_metadata(path).expect("fixed public producer certificate SOURCE");
+    assert!(before.is_file() && before.len() > 0
+        && before.len() <= producer_selection::CERTIFICATE_LIMIT as u64,
+        "bounded regular public producer certificate SOURCE");
+    let same = |actual: &std::fs::Metadata| actual.dev() == before.dev()
+        && actual.ino() == before.ino() && actual.mode() == before.mode()
+        && actual.uid() == before.uid() && actual.gid() == before.gid()
+        && actual.nlink() == before.nlink() && actual.size() == before.size()
+        && actual.mtime() == before.mtime() && actual.mtime_nsec() == before.mtime_nsec()
+        && actual.ctime() == before.ctime() && actual.ctime_nsec() == before.ctime_nsec();
+    let mut input = std::fs::File::open(path).expect("open original public producer certificate");
+    assert!(same(&input.metadata().expect("original producer certificate metadata")),
+        "original named/held producer certificate SOURCE");
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    (&mut input).take(producer_selection::CERTIFICATE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes).expect("read bounded original public producer certificate");
+    assert!(bytes.len() == before.len() as usize
+        && same(&input.metadata().expect("producer certificate held POST"))
+        && same(&std::fs::symlink_metadata(path).expect("producer certificate named POST")),
+        "complete unchanged producer certificate SOURCE");
+    bytes
 }
 
 fn main() {
@@ -100,6 +129,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src/native.m");
     println!("cargo:rerun-if-changed=src/android_registration.m");
     println!("cargo:rerun-if-changed=src/android_service_management.m");
+    println!("cargo:rerun-if-changed=src/install_producer.m");
+    println!("cargo:rerun-if-changed=src/install_producer.h");
+    println!("cargo:rerun-if-changed=build_support/producer_selection.rs");
+    println!("cargo:rerun-if-changed=build_support/producer_compile_only.h");
+    println!("cargo:rerun-if-changed=../../packaging/macos-install-producer-signing.profile");
     println!("cargo:rerun-if-changed=../../packaging/macos-android-service-signing.profile");
     println!("cargo:rerun-if-changed=src/vault_filesystem.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain.m");
@@ -109,6 +143,55 @@ fn main() {
     println!("cargo:rerun-if-changed=src/vault_helper_auth.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain_fixture.m");
     let mut build = cc::Build::new();
+    if !helper && !android_helper {
+        let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo native output binding"));
+        let selection = producer_selection::SourceSelection::parse(
+            include_bytes!("../../packaging/macos-install-producer-signing.profile"),
+            include_bytes!("../../packaging/macos-android-service-signing.profile"))
+            .expect("complete fixed producer SOURCE profile matching current service identity");
+        let certificates = if selection.requires_certificates() {
+            let paths = [
+                "../../packaging/macos-install-producer-certificates/leaf.der",
+                "../../packaging/macos-install-producer-certificates/issuer.der",
+                "../../packaging/macos-install-producer-certificates/root.der",
+            ];
+            for path in paths { println!("cargo:rerun-if-changed={path}"); }
+            Some(paths.map(producer_certificate))
+        } else { None };
+        // Shape and SOURCE correspondence only. The native runtime independently
+        // checks every declared digest, returned key, full chain and trust policy.
+        let header = selection.header(certificates.as_ref().map(|rows|
+            [rows[0].as_slice(), rows[1].as_slice(), rows[2].as_slice()]))
+            .expect("bounded public producer SOURCE header");
+        std::fs::write(out.join("mrk-install-producer-selection.h"), header)
+            .expect("write fixed producer source selection");
+        build.include(&out).file("src/install_producer.m");
+
+        if e2_fixture {
+            // Compile the accepted CONFIGURED1 C branch in this existing native
+            // fixture build, WITHOUT selecting it for any Rust/native operation.
+            // Invalid empty DER sequences cannot authenticate a certificate.
+            // The normal header above and all shipping exports stay unchanged.
+            let compile_only = out.join("producer-configured-compile");
+            std::fs::create_dir_all(&compile_only).expect("fixed fixture compiler output");
+            std::fs::write(compile_only.join("mrk-install-producer-selection.h"),
+                include_bytes!("build_support/producer_compile_only.h"))
+                .expect("write nonshipping compile-only producer header");
+            let mut syntax = cc::Build::new();
+            for (from, to) in [
+                ("mrk_install_producer_source", "mrk_install_producer_compile_only_source"),
+                ("mrk_install_producer_source_leaf_matches", "mrk_install_producer_compile_only_source_leaf_matches"),
+                ("mrk_install_producer_new", "mrk_install_producer_compile_only_new"),
+                ("mrk_install_producer_code_new", "mrk_install_producer_compile_only_code_new"),
+                ("mrk_install_producer_step", "mrk_install_producer_compile_only_step"),
+                ("mrk_install_producer_release", "mrk_install_producer_compile_only_release"),
+                ("mrk_install_producer_retire", "mrk_install_producer_compile_only_retire"),
+            ] { syntax.define(from, Some(to)); }
+            syntax.include(&compile_only).file("src/install_producer.m")
+                .flag("-fno-objc-arc").flag("-fblocks").flag("-mmacosx-version-min=26.0")
+                .warnings(true).compile("mrk_install_producer_compile_only");
+        }
+    }
     if e2_fixture {
         // Fixed test identity is independently validated at runtime. This
         // compile gate is never an identity-ready or native-finality receipt.

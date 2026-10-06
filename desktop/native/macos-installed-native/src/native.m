@@ -229,6 +229,38 @@ int mrk_publish(int from, const char *source, int to, const char *destination) {
     if (renameatx_np(from, source, to, destination, RENAME_EXCL)) return errno ? errno : EIO;
     return 0;
 }
+int mrk_swap_installation_state(int root, const char *archived) {
+    // The parent owns both held originals and EX. These last name/shape checks
+    // are defense in depth, not a substitute for that custody or content pins.
+    static const char prefix[] = ".maintenance-";
+    static const char suffix[] = ".state.json";
+    const size_t prefix_n = sizeof(prefix) - 1, suffix_n = sizeof(suffix) - 1;
+    if (!archived || strnlen(archived, 256) != prefix_n + 32 + suffix_n
+        || strncmp(archived, prefix, prefix_n) || strcmp(archived + prefix_n + 32, suffix)) return EINVAL;
+    int nonzero = 0;
+    for (size_t i = 0; i < 32; ++i) {
+        unsigned char c = (unsigned char)archived[prefix_n + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return EINVAL;
+        nonzero |= c != '0';
+    }
+    if (!nonzero || getuid() || geteuid() || getgid() || getegid()) return EPERM;
+    struct stat directory, canonical, pending;
+    if (fstat(root, &directory) || fstatat(root, "installation-v2.json", &canonical, AT_SYMLINK_NOFOLLOW)
+        || fstatat(root, archived, &pending, AT_SYMLINK_NOFOLLOW)) return errno ? errno : EIO;
+    if (directory.st_mode != (S_IFDIR | 0755) || directory.st_uid || directory.st_gid || directory.st_flags
+        || canonical.st_mode != (S_IFREG | 0444) || canonical.st_uid || canonical.st_gid || canonical.st_flags
+        || pending.st_mode != (S_IFREG | 0444) || pending.st_uid || pending.st_gid || pending.st_flags
+        || canonical.st_nlink != 1 || pending.st_nlink != 1
+        || canonical.st_size <= 0 || canonical.st_size > 16384 || pending.st_size <= 0 || pending.st_size > 16384
+        || directory.st_dev != canonical.st_dev || directory.st_dev != pending.st_dev
+        || canonical.st_ino == pending.st_ino) return EPERM;
+    // Apple rename(2): SWAP is atomic and cannot be combined with EXCL. Single
+    // fixed leaves plus nofollow/beneath prohibit redirected intermediate paths.
+    // Nonzero is never retried as an overwrite or a second rename.
+    if (renameatx_np(root, archived, root, "installation-v2.json",
+        RENAME_SWAP | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH)) return errno ? errno : EIO;
+    return 0;
+}
 int mrk_main_thread(void) { return pthread_main_np(); }
 
 #ifdef MRK_INSTALLED_OBSERVATION

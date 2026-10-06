@@ -831,6 +831,7 @@ jobs:
               "serviceLayoutObservation": None,
               "btmLogObservation": None, "installerWorkerDiagnostic": None,
               "contextMetadataDiagnostic": None,
+              "contextPackageInfoDiagnostic": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -997,6 +998,15 @@ jobs:
                       and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
                   # Pure failure observations, never metadata acceptance or Context completion.
                   context_metadata_diagnostic = metadata_candidate
+              context_package_diagnostic = None
+              package_candidate = fixture.context_package_info_diagnostic_data(
+                  result["artifacts"].get(fixture.CONTEXT_PACKAGE_INFO_ARTIFACT) if type(result["artifacts"]) is dict else None,
+                  result["phase"], result["failure"], calls)
+              if (package_candidate is not None
+                      and all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                      and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
+                  # Failure observations only: no acceptance, package trust or Context completion.
+                  context_package_diagnostic = package_candidate
               btm_log = None
               btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
               if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
@@ -1024,6 +1034,7 @@ jobs:
                   serviceLayoutObservation=service_layout,
                   btmLogObservation=btm_log, installerWorkerDiagnostic=installer_worker_diagnostic,
                   contextMetadataDiagnostic=context_metadata_diagnostic,
+                  contextPackageInfoDiagnostic=context_package_diagnostic,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
@@ -1036,6 +1047,7 @@ jobs:
               summary["btmLogObservation"] = None
               summary["installerWorkerDiagnostic"] = None
               summary["contextMetadataDiagnostic"] = None
+              summary["contextPackageInfoDiagnostic"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
@@ -1047,6 +1059,7 @@ jobs:
                   summary["btmLogObservation"] = None
                   summary["installerWorkerDiagnostic"] = None
                   summary["contextMetadataDiagnostic"] = None
+                  summary["contextPackageInfoDiagnostic"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:
