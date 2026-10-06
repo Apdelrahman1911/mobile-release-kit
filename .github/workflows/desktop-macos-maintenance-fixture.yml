@@ -544,11 +544,10 @@ jobs:
           umask 077
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
-          # This original owner alone compiles/signs/installs/observes the fixed
-          # fixture. This diagnostic observes only public factory/status in two
-          # physical layouts, sharing one30s endpoint. Installer-context and
-          # registration/lifecycle cases remain unentered and unqualified.
-          # A completed comparison is intentionally NOT fixture acceptance.
+          # The same original owner runs the four fixed Mac8 DATA graphs,
+          # independent Native6/client compilation, then normal Context and
+          # the fixture. A DATA/compile pass alone never grants installation,
+          # signing, service, ordinary-entry or distribution qualification.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
             GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
@@ -653,7 +652,7 @@ jobs:
               'context-product-build', 'context-component-empty-bom', 'context-product-empty-bom',
               'context-component-receipt-census', 'context-product-receipt-census', 'context-component-installer',
               'context-product-installer', 'context-component-receipt-query', 'context-product-receipt-query',
-              "metadata-observer-build", "metadata-initial", "initial-receipt-query", "native-rust-tests", "installer-worker-rust-tests", "client-build",
+              "metadata-observer-build", "metadata-initial", "initial-receipt-query", "native-rust-tests", "installer-worker-rust-tests", "installed-reader-rust-tests", "producer-signing-rust-tests", "package-producer-rust-tests", "client-build",
               "resident-build", "entry-build", "client-facade-build", "resident-facade-build", "sign-0",
               "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0", "verify-sign-1", "verify-sign-2",
               "verify-sign-3", "verify-sign-4", "package-analyze", "package-build", "metadata-before-install",
@@ -677,7 +676,7 @@ jobs:
               'context-prepare', 'context-component-audit', 'context-product-audit',
               'context-component-record', 'context-product-record',
               "prepare", "bundle-staging", "package-components", "metadata-observer-build", "metadata-initial",
-              "initial-receipt-query", "native-rust-tests", "installer-worker-rust-tests", "client-build", "resident-build", "entry-build", "client-facade-build",
+              "initial-receipt-query", "native-rust-tests", "installer-worker-rust-tests", "installed-reader-rust-tests", "producer-signing-rust-tests", "package-producer-rust-tests", "client-build", "resident-build", "entry-build", "client-facade-build",
               "resident-facade-build", "sign-0", "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0",
               "verify-sign-1", "verify-sign-2", "verify-sign-3", "verify-sign-4", "package-analyze",
               "package-build", "metadata-before-install", "before-install-receipt-query", "standard-installer",
@@ -687,6 +686,23 @@ jobs:
           )
 
           OWNER_DIAGNOSTIC_REFUSALS = (
+              "mac8-group-clock",
+              "mac8-group-deadline",
+              "installed-reader-rust-test-record",
+              "installed-reader-rust-test-bound",
+              "installed-reader-rust-test-framing",
+              "installed-reader-rust-test-roster",
+              "installed-reader-rust-test-result",
+              "producer-signing-rust-test-record",
+              "producer-signing-rust-test-bound",
+              "producer-signing-rust-test-framing",
+              "producer-signing-rust-test-roster",
+              "producer-signing-rust-test-result",
+              "package-producer-rust-test-record",
+              "package-producer-rust-test-bound",
+              "package-producer-rust-test-framing",
+              "package-producer-rust-test-roster",
+              "package-producer-rust-test-result",
               "installer-worker-rust-test-record", "installer-worker-rust-test-bound",
               "installer-worker-rust-test-framing", "installer-worker-rust-test-roster",
               "installer-worker-rust-test-result",
@@ -707,6 +723,7 @@ jobs:
               'context-original-call-entry',
               'context-command-role', 'context-component-roster', 'context-compressed-bound',
               'context-deadline', 'context-distribution-changed', 'context-empty-output',
+              'context-distribution-observation',
               'context-helper-source-changed', 'context-nonempty-bom', 'context-observation-shape',
               'context-output-bound', 'context-output-close-unknown', 'context-output-not-empty-original',
               'context-output-original', 'context-output-readback', 'context-package-empty-action',
@@ -827,11 +844,15 @@ jobs:
               "bindingSha256": None, "sourceInventorySha256": None, "sourceReleaseId": None,
               "ownerOutcome": None, "originalCallCount": 0, "ownerFinality": None, "native": None,
               "ownerDiagnostic": None, "nativeRustTests": None, "installerWorkerRustTests": None,
+              "installedReaderRustTests": None,
+              "producerSigningRustTests": None,
+              "packageProducerRustTests": None,
               "installerContext": None,
               "serviceLayoutObservation": None,
               "btmLogObservation": None, "installerWorkerDiagnostic": None,
               "contextMetadataDiagnostic": None,
               "contextPackageInfoDiagnostic": None,
+              "contextDistributionDiagnostic": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -872,7 +893,7 @@ jobs:
               expected_keys = set("""schemaVersion type source tree workflowSource workflow runId runAttempt platform toolchain
                   sourceInventorySha256 sourceOriginalHandleCount sourceOriginalHandleReserve bindingSha256 sourceReleaseId
                   outcome failure phase originalCalls workTimeoutSeconds hardTimeoutSeconds auxiliaryBudgetNanoseconds
-                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests installerWorkerRustTests installerContext serviceLayoutObservation btmLogObservation
+                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests installerWorkerRustTests installedReaderRustTests producerSigningRustTests packageProducerRustTests installerContext serviceLayoutObservation btmLogObservation
                   installerEntered installationReturnedSuccess nativeEntered nativeOwnerReturned sourceClosesKnown
                   protectedClosesKnown outputClosesKnown cleanupErrors scratchRetired protectedRootRetired exactReceiptRetired
                   protectedRetentionRequired administrativeDomain arbitraryConcurrentPrivilegedWriterResistance flatPayloadAtomicNoReplace
@@ -961,7 +982,7 @@ jobs:
                   fixture.need(len(worker_calls) == 1 and worker_calls[0]["returned"]
                                and worker_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release
                                and type(worker_calls[0].get("workTimeoutSeconds")) is int
-                               and worker_calls[0]["workTimeoutSeconds"] == 480
+                               and 0 < worker_calls[0]["workTimeoutSeconds"] <= 480
                                and type(worker_calls[0].get("outputLimitBytes")) is int
                                and worker_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,
                                "summary-installer-worker-rust-tests-call")
@@ -970,6 +991,48 @@ jobs:
                           and all(call["returned"] for call in calls)):
                       # Actual Mac test-profile compilation, not a shipping-release build.
                       installer_worker_rust_tests = worker_record
+              installed_reader_rust_tests = None
+              if result["installedReaderRustTests"] is not None:
+                  selected_calls = [call for call in calls if call["role"] == "installed-reader-rust-tests"]
+                  fixture.need(len(selected_calls) == 1 and selected_calls[0]["returned"]
+                               and selected_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release
+                               and type(selected_calls[0].get("workTimeoutSeconds")) is int
+                               and 0 < selected_calls[0]["workTimeoutSeconds"] <= 480
+                               and type(selected_calls[0].get("outputLimitBytes")) is int
+                               and selected_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,
+                               "summary-installed-reader-rust-tests-call")
+                  selected_record = fixture.installed_reader_rust_tests_data(result["installedReaderRustTests"])
+                  if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                          and all(call["returned"] for call in calls)):
+                      installed_reader_rust_tests = selected_record
+              producer_signing_rust_tests = None
+              if result["producerSigningRustTests"] is not None:
+                  selected_calls = [call for call in calls if call["role"] == "producer-signing-rust-tests"]
+                  fixture.need(len(selected_calls) == 1 and selected_calls[0]["returned"]
+                               and selected_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release
+                               and type(selected_calls[0].get("workTimeoutSeconds")) is int
+                               and 0 < selected_calls[0]["workTimeoutSeconds"] <= 480
+                               and type(selected_calls[0].get("outputLimitBytes")) is int
+                               and selected_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,
+                               "summary-producer-signing-rust-tests-call")
+                  selected_record = fixture.producer_signing_rust_tests_data(result["producerSigningRustTests"])
+                  if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                          and all(call["returned"] for call in calls)):
+                      producer_signing_rust_tests = selected_record
+              package_producer_rust_tests = None
+              if result["packageProducerRustTests"] is not None:
+                  selected_calls = [call for call in calls if call["role"] == "package-producer-rust-tests"]
+                  fixture.need(len(selected_calls) == 1 and selected_calls[0]["returned"]
+                               and selected_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release
+                               and type(selected_calls[0].get("workTimeoutSeconds")) is int
+                               and 0 < selected_calls[0]["workTimeoutSeconds"] <= 480
+                               and type(selected_calls[0].get("outputLimitBytes")) is int
+                               and selected_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,
+                               "summary-package-producer-rust-tests-call")
+                  selected_record = fixture.package_producer_rust_tests_data(result["packageProducerRustTests"])
+                  if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                          and all(call["returned"] for call in calls)):
+                      package_producer_rust_tests = selected_record
               installer_worker_diagnostic = None
               diagnostic_calls = [call for call in calls if "installerWorkerDiagnostic" in call]
               if (len(diagnostic_calls) == 1 and len([call for call in calls
@@ -1007,6 +1070,15 @@ jobs:
                       and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
                   # Failure observations only: no acceptance, package trust or Context completion.
                   context_package_diagnostic = package_candidate
+              context_distribution_diagnostic = None
+              distribution_candidate = fixture.context_distribution_diagnostic_data(
+                  result["artifacts"].get(fixture.CONTEXT_DISTRIBUTION_ARTIFACT) if type(result["artifacts"]) is dict else None,
+                  result["phase"], result["failure"], calls)
+              if (distribution_candidate is not None
+                      and all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                      and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
+                  # Same-original failure DATA; never product acceptance or Context completion.
+                  context_distribution_diagnostic = distribution_candidate
               btm_log = None
               btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
               if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
@@ -1019,6 +1091,8 @@ jobs:
                   and result["cleanupErrors"] == [] and calls
                   and all(call["returned"] and call["returncode"] == 0 for call in calls)
                   and native_rust_tests is not None and installer_worker_rust_tests is not None
+                  and installed_reader_rust_tests is not None and producer_signing_rust_tests is not None
+                  and package_producer_rust_tests is not None
                   and installer_context is not None and installer_context["completed"]
                   and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
               )
@@ -1030,11 +1104,15 @@ jobs:
                   sourceReleaseId=release, ownerOutcome=result["outcome"], originalCallCount=len(calls),
                   ownerFinality={key: result[key] for key in flags}, native=native, accepted=bool(known_pass),
                   nativeRustTests=native_rust_tests, installerWorkerRustTests=installer_worker_rust_tests,
+                  installedReaderRustTests=installed_reader_rust_tests,
+                  producerSigningRustTests=producer_signing_rust_tests,
+                  packageProducerRustTests=package_producer_rust_tests,
                   installerContext=installer_context,
                   serviceLayoutObservation=service_layout,
                   btmLogObservation=btm_log, installerWorkerDiagnostic=installer_worker_diagnostic,
                   contextMetadataDiagnostic=context_metadata_diagnostic,
                   contextPackageInfoDiagnostic=context_package_diagnostic,
+                  contextDistributionDiagnostic=context_distribution_diagnostic,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
@@ -1042,24 +1120,32 @@ jobs:
               summary["accepted"] = False
               summary["nativeRustTests"] = None
               summary["installerWorkerRustTests"] = None
+              summary["installedReaderRustTests"] = None
+              summary["producerSigningRustTests"] = None
+              summary["packageProducerRustTests"] = None
               summary["installerContext"] = None
               summary["serviceLayoutObservation"] = None
               summary["btmLogObservation"] = None
               summary["installerWorkerDiagnostic"] = None
               summary["contextMetadataDiagnostic"] = None
               summary["contextPackageInfoDiagnostic"] = None
+              summary["contextDistributionDiagnostic"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
                   summary["accepted"] = False
                   summary["nativeRustTests"] = None
                   summary["installerWorkerRustTests"] = None
+                  summary["installedReaderRustTests"] = None
+                  summary["producerSigningRustTests"] = None
+                  summary["packageProducerRustTests"] = None
                   summary["installerContext"] = None
                   summary["serviceLayoutObservation"] = None
                   summary["btmLogObservation"] = None
                   summary["installerWorkerDiagnostic"] = None
                   summary["contextMetadataDiagnostic"] = None
                   summary["contextPackageInfoDiagnostic"] = None
+                  summary["contextDistributionDiagnostic"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:

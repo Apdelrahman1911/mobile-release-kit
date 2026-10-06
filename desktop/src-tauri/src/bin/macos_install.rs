@@ -1,6 +1,7 @@
 //! One-shot scripts-only standard Installer entry. Installer never lays files
-//! into the final app/runtime destinations. This process alone owns all copy
-//! writers; no Python, app, copy helper, daemon or general publisher runs as root.
+//! into the final app/runtime destinations. One original parent admits the
+//! completed package; its exact self-worker owns the existing copy writer.
+//! No Python, app, daemon or general publisher runs as root.
 #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn main() { eprintln!("This Installer requires LP64 ARM64 or Intel macOS 26."); std::process::exit(1); }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -991,6 +992,24 @@ mod installer {
             pub prepared: PreparedFresh, pub selected: ReleaseSetData, pub action: ActionData,
             pub history: Option<History>, pub old_app: Option<usize>, pub old_release: Option<usize>,
             pub intent: Option<IntentData>, pub intent_original: Option<usize>,
+            controls: Option<ProducerControls>,
+        }
+        // Same-book originals, not installed-file trust. An old pair is only
+        // bounded retained DATA; the new package selects eligible generations.
+        struct ProducerControls { originals: [usize;2], bytes: [Vec<u8>;2] }
+        impl ProducerControls {
+            fn post(&self, book: &Install) -> Result<()> {
+                for (original, bytes) in self.originals.iter().zip(&self.bytes) { held_bytes(book,*original,bytes)?; }
+                Ok(())
+            }
+            fn matches(&self, descriptor: &[u8], signature: &[u8]) -> bool {
+                self.bytes[0] == descriptor && self.bytes[1] == signature
+            }
+            fn binding(&self, book: &Install) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({"descriptorOriginal":worker::identity_data(book.identity(self.originals[0])?),
+                    "signatureOriginal":worker::identity_data(book.identity(self.originals[1])?),
+                    "descriptorSha256":hash(&self.bytes[0]),"signatureSha256":hash(&self.bytes[1])}))
+            }
         }
         fn data<T>(value: std::result::Result<T, transaction::TransactionDataError>) -> Result<T> {
             value.map_err(|_| "maintenance-record-binding")
@@ -1038,6 +1057,32 @@ mod installer {
         fn metadata_bytes(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<Vec<u8>> {
             let (reader, bytes) = metadata_original(book, parent, name, limit)?;
             book.forward_close(reader, "maintenance-record-close")?; Ok(bytes)
+        }
+        fn control_names(selected: &ReleaseSetData, release: &str) -> Result<(String,String)> {
+            mobile_release_desktop::macos_install_producer::installed_control_names_data(selected.target_data(),release)
+                .map_err(|_| "maintenance-producer-name")
+        }
+        fn generation_controls(book: &mut Install, root: usize, generation: &GenerationData,
+            selected: &ReleaseSetData, root_names: &mut BTreeSet<String>, keep: bool) -> Result<(Option<ProducerControls>,u64)> {
+            use mobile_release_desktop::macos_install_producer as producer;
+            let names = control_names(selected,generation.release_data().binding_data().release)?;
+            check(root_names.insert(names.0.clone()) && root_names.insert(names.1.clone()),"maintenance-producer-name-reused")?;
+            let (descriptor, descriptor_bytes) = metadata_original(book,root,&names.0,producer::DESCRIPTOR_LIMIT)?;
+            let (signature, signature_bytes) = metadata_original(book,root,&names.1,producer::SIGNATURE_LIMIT)?;
+            // Parsing an old descriptor checks only correspondence with an
+            // independently accepted old tuple; it is not old signer/finality
+            // authority. The incoming current pair is additionally compared to
+            // its actual authenticated source bytes before GO.
+            let parsed = producer::ProducerData::parse_data(&descriptor_bytes,selected.target_data())
+                .map_err(|_| "maintenance-producer-record")?;
+            check(parsed.release_set_data().current_data() == generation.release_data(),"maintenance-producer-generation")?;
+            let count = (descriptor_bytes.len() + signature_bytes.len()) as u64;
+            let pair = ProducerControls { originals:[descriptor,signature],bytes:[descriptor_bytes,signature_bytes] };
+            pair.post(book)?;
+            if keep { Ok((Some(pair),count)) } else {
+                for original in pair.originals { book.forward_close(original,"maintenance-producer-close")?; }
+                Ok((None,count))
+            }
         }
         // Bounded positional read on the SAME held original. Unlike read(), this
         // does not depend on a previously consumed offset or mutate a shared OFD.
@@ -1222,18 +1267,22 @@ mod installer {
             };
             let mut root_names: BTreeSet<String> = ["versions", paths::MAINTENANCE_GATE_NAME].into_iter().map(str::to_owned).collect();
             let mut version_names = BTreeSet::new(); let mut costs = Vec::new(); let mut evidence_bytes = 0u64;
-            let mut metadata_control = 0u64;
+            let mut metadata_control = 0u64; let mut controls = None;
             let (action, old_app, old_release, invocation_count) = if let Some(history) = &history {
                 root_names.insert(transaction::STATE_NAME.into()); evidence_bytes = history.bytes;
                 let generation = history.current.state.current_data();
                 let same = generation.release_data() == selected.current_data();
                 let (app, release, cost, metadata) = audit_generation(book, root, versions, &generation, same, true)?;
                 costs.push(cost); metadata_control = metadata_control.checked_add(metadata).ok_or("maintenance-control-bound")?;
+                let (pair, count) = generation_controls(book,root,&generation,&selected,&mut root_names,same)?;
+                controls = pair; metadata_control = metadata_control.checked_add(count).ok_or("maintenance-control-bound")?;
                 version_names.insert(generation.release_data().binding_data().release.to_owned());
                 if app.is_some() { root_names.insert(paths::APP_NAME.into()); }
                 for generation in history.current.state.retained_data() {
                     let (_, _, cost, metadata) = audit_generation(book, root, versions, &generation, false, false)?;
                     costs.push(cost); metadata_control = metadata_control.checked_add(metadata).ok_or("maintenance-control-bound")?;
+                    let (_, count) = generation_controls(book,root,&generation,&selected,&mut root_names,false)?;
+                    metadata_control = metadata_control.checked_add(count).ok_or("maintenance-control-bound")?;
                     version_names.insert(generation.release_data().binding_data().release.to_owned());
                     root_names.insert(data(transaction::retained_app_name_data(generation.retained_invocation_data()
                         .ok_or("maintenance-retained-shape")?))?);
@@ -1258,6 +1307,10 @@ mod installer {
                 book.absent(root, paths::APP_NAME)?; book.absent(versions, paths::RELEASE)?;
                 (ActionData::FreshInstall, None, None, 1)
             };
+            if matches!(action,ActionData::FreshInstall | ActionData::Update) {
+                let names = control_names(&selected,selected.current_data().binding_data().release)?;
+                book.absent(root,&names.0)?; book.absent(root,&names.1)?;
+            }
             if let Some(invocation) = pending_intent {
                 check(worker::invocation_valid(invocation) && history.as_ref().is_none_or(|h|
                     invocation != h.current.state.invocation_data() && !h.originals.contains_key(invocation)), "maintenance-invocation-reused")?;
@@ -1294,17 +1347,50 @@ mod installer {
             let result_bytes = (invocation_count as u64).checked_mul(EXPORT_LIMIT as u64).ok_or("maintenance-control-bound")?;
             let planned_evidence = evidence_bytes.checked_add((transaction::INTENT_LIMIT + transaction::STATE_LIMIT + transaction::CAPSULE_LIMIT) as u64)
                 .and_then(|bytes| bytes.checked_add(result_bytes)).ok_or("maintenance-control-bound")?;
-            let controls = evidence_bytes.checked_mul(3).and_then(|n| n.checked_add(metadata_control * 3))
+            let control_bound = evidence_bytes.checked_mul(3).and_then(|n| n.checked_add(metadata_control * 3))
                 .and_then(|n| n.checked_add(prepared.inventory_bytes.len() as u64 * 3))
                 .and_then(|n| n.checked_add(selected_bytes.len() as u64 + 128 * 1024 + 2 * EXPORT_LIMIT as u64))
+                .and_then(|n| n.checked_add(6 * transaction::PRODUCER_CONTROL_LIMIT as u64))
                 .ok_or("maintenance-control-bound")?;
             let records = (book.originals.len() as u64).checked_add(copy_files.checked_mul(3).ok_or("maintenance-original-bound")?)
                 .and_then(|n| n.checked_add(incoming.directories.len() as u64 * 3 + 256)).ok_or("maintenance-original-bound")?;
             let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12;
-            data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, controls, records, live))?;
-            Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None })
+            data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live))?;
+            Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls })
         }
         impl Observed {
+            pub(super) fn controls_post(&self, book: &Install) -> Result<()> {
+                if let Some(controls) = &self.controls { controls.post(book) } else {
+                    check(matches!(self.action,ActionData::FreshInstall | ActionData::Update),"maintenance-producer-pair-missing")?;
+                    let names = control_names(&self.selected,self.selected.current_data().binding_data().release)?;
+                    book.absent(self.prepared.destination,&names.0)?; book.absent(self.prepared.destination,&names.1)
+                }
+            }
+            pub(super) fn incoming_controls(&self, book: &Install, descriptor: &[u8], signature: &[u8]) -> Result<()> {
+                use mobile_release_desktop::macos_install_producer as producer;
+                check(!descriptor.is_empty() && descriptor.len() <= producer::DESCRIPTOR_LIMIT
+                    && !signature.is_empty() && signature.len() <= producer::SIGNATURE_LIMIT,"maintenance-producer-bound")?;
+                if let Some(pair) = &self.controls { check(pair.matches(descriptor,signature),"maintenance-producer-source-bytes")?; }
+                self.controls_post(book)
+            }
+            pub(super) fn publish_controls(&mut self, book: &mut Install, state: &StateData,
+                descriptor: &[u8], signature: &[u8]) -> Result<()> {
+                // Called only after the parent's actual original join. The
+                // child owns payload/state; the parent owns these public copies.
+                // A partial pair never gets a capsule/export, deletion or retry.
+                check(state.mutation_recorded_data() && state.current_data().release_data() == self.selected.current_data(),
+                    "maintenance-producer-state")?;
+                self.incoming_controls(book,descriptor,signature)?;
+                if self.controls.is_none() {
+                    let names = control_names(&self.selected,self.selected.current_data().binding_data().release)?;
+                    let first = book.record_file(self.prepared.destination,&names.0,descriptor,Role::ReceiptWriter)?;
+                    book.persist(self.prepared.destination,false)?; held_bytes(book,first,descriptor)?;
+                    let second = book.record_file(self.prepared.destination,&names.1,signature,Role::ReceiptWriter)?;
+                    book.persist(self.prepared.destination,false)?; held_bytes(book,second,signature)?;
+                    self.controls = Some(ProducerControls { originals:[first,second],bytes:[descriptor.to_vec(),signature.to_vec()] });
+                }
+                self.incoming_controls(book,descriptor,signature)
+            }
             pub(super) fn previous(&self) -> Option<(&StateData, &CapsuleData)> {
                 self.history.as_ref().map(|h| (&h.current.state, &h.current.capsule))
             }
@@ -1350,12 +1436,13 @@ mod installer {
                 let releases = mobile_release_desktop::protocol::strict_json(&release_bytes).map_err(|_| "maintenance-selected-shape")?;
                 Ok(serde_json::json!({"action":self.action,"requestId":intent.request_id_data(),"releases":releases,"intentSha256":intent.digest_data(),
                     "intentOriginal":worker::identity_data(book.identity(original)?),"previous":previous,
+                    "producerControls":self.controls.as_ref().map(|pair| pair.binding(book)).transpose()?,
                     "installRoot":book.recorded_directory(self.prepared.destination)?,
                     "versionsRoot":book.recorded_directory(self.prepared.versions)?,
                     "oldApp":self.old_app.map(|n| app_identity(book,n).map(|i| i.fields_data())).transpose()?}))
             }
             pub(super) fn selected_from_binding(value: &serde_json::Value) -> Result<ReleaseSetData> {
-                let fields = ["action","requestId","releases","intentSha256","intentOriginal","previous","installRoot","versionsRoot","oldApp"];
+                let fields = ["action","requestId","releases","intentSha256","intentOriginal","previous","producerControls","installRoot","versionsRoot","oldApp"];
                 let map = value.as_object().ok_or("maintenance-init-shape")?;
                 check(map.len() == fields.len() && fields.iter().all(|key| map.contains_key(*key)), "maintenance-init-shape")?;
                 data(transaction::export_name_data(value["requestId"].as_str().ok_or("maintenance-request-shape")?))?;
@@ -1875,10 +1962,10 @@ mod installer {
         }
         pub(super) struct Deadline { start: u64, end: u64, last: Cell<u64>, unknown: Cell<bool> }
         impl Deadline {
-            fn start() -> Result<Self> {
-                let start = monotonic()?;
+            fn from_entry(start: u64) -> Result<Self> {
                 let end = start.checked_add(TOTAL).ok_or("worker-clock-value")?;
-                Ok(Self { start, end, last: Cell::new(start), unknown: Cell::new(false) })
+                let deadline = Self { start, end, last: Cell::new(start), unknown: Cell::new(false) };
+                deadline.check_work()?; Ok(deadline)
             }
             fn inherit(end: u64) -> Result<Self> {
                 let start = end.checked_sub(TOTAL).ok_or("worker-clock-value")?;
@@ -2614,9 +2701,11 @@ mod installer {
             errors: Vec<&'static str>, command_gate_kernel_retained: bool, parent_book_settled: bool,
         }
         impl Parent {
-            fn new() -> Result<Self> {
-                // This sample precedes input/gate/file admission.
-                Ok(Self { book:Install::with_worker_deadline(Deadline::start()?,false),entered:false,
+            fn new(deadline: Deadline) -> Result<Self> {
+                // The original entry sample preceded argv collection, not just
+                // input/gate admission. Do not renew it after argument work.
+                deadline.check_work()?;
+                Ok(Self { book:Install::with_worker_deadline(deadline,false),entered:false,
                     command:None,child:None,source:None,invocation:String::new(),init_sha:String::new(),maintenance:None,request_export:None,producer:None,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
                     wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
@@ -2700,8 +2789,12 @@ mod installer {
                 if let Some((selected,request_id)) = selected {
                     maintenance::selected_compile(&selected)?;
                     transaction::export_name_data(&request_id).map_err(|_| "maintenance-request-shape")?;
+                    check(request_id != self.invocation, "maintenance-request-invocation-reused")?;
                     let prepared = self.book.prepare_maintenance_input(input,inventory,inventory_bytes)?;
                     let mut observed = maintenance::observe(&mut self.book,prepared,selected,None)?;
+                    if let Some(producer) = &self.producer {
+                        observed.incoming_controls(&self.book,producer.input.descriptor_data(),producer.input.signature_data())?;
+                    }
                     // This fixed sibling is reserved before intent or worker
                     // payload. Request spelling supplies correlation, not EX,
                     // producer trust, a source tuple, or package identity.
@@ -2871,6 +2964,7 @@ mod installer {
             fn producer_post(&self, content: bool) -> Result<()> {
                 if let Some(producer) = &self.producer {
                     producer.authenticated_post(&self.book,self.source.as_ref().ok_or("worker-source-original")?,content)?;
+                    if let Some(observed) = &self.maintenance { observed.controls_post(&self.book)?; }
                 }
                 Ok(())
             }
@@ -2910,7 +3004,7 @@ mod installer {
                 self.book.shared_deadline()?.check_work()?;
                 self.producer_post(false)?;
                 check(joined.observed_at < self.book.shared_deadline()?.original_endpoint(),"maintenance-original-join-deadline")?;
-                let observed = self.maintenance.as_ref().ok_or("maintenance-observation-missing")?;
+                let observed = self.maintenance.as_mut().ok_or("maintenance-observation-missing")?;
                 let request = self.request_export.as_ref().ok_or("maintenance-request-missing")?;
                 request.empty_original(&self.book)?;
                 check(observed.intent.as_ref().ok_or("maintenance-intent-missing")?.request_id_data() == request.request_id,
@@ -2931,6 +3025,11 @@ mod installer {
                         _ => transaction::RecordedOutcomeData::Unknown,
                     }};
                 let current = state.as_ref().map(transaction::StateData::current_data);
+                if writer_known && joined.outcome.exit == 0 {
+                    let producer = self.producer.as_ref().ok_or("producer-original-missing")?;
+                    observed.publish_controls(&mut self.book,state.as_ref().ok_or("maintenance-producer-state")?,
+                        producer.input.descriptor_data(),producer.input.signature_data())?;
+                }
                 let capsule = transaction::CapsuleData::encode_data(observed.intent.as_ref().ok_or("maintenance-intent-missing")?,
                     observed.previous(),state.as_ref(),current.as_ref().map(transaction::GenerationData::release_data),outcome,
                     transaction::WriterObservationData { returned:true,exit_code:Some(u8::try_from(joined.outcome.exit).map_err(|_| "maintenance-result-shape")?),
@@ -3076,7 +3175,6 @@ mod installer {
             } else { Ok(PreparedWorker::Fresh(prepared)) }
         }
         fn dispatch_private(args: &[String]) -> i32 {
-            // Intentionally not called by the current ordinary or fixture run.
             // The deadline is decoded BEFORE the first potentially blocking read.
             let admitted: Result<(Deadline, u64)> = (|| {
                 check(args.len() == 4 && args[1] == ROLE && invocation_valid(&args[3]), "worker-role")?;
@@ -3123,11 +3221,45 @@ mod installer {
                 write_frame(stdout.as_fd(),&outcome.data(&args[3],&init_sha),RESULT_LIMIT,deadline,false));
             if sent.is_ok() { result.exit } else if result.exit == 0 { 1 } else { result.exit }
         }
-        // Ordinary run/postinstall must pass ONLY the genuinely qualified
-        // completed-package Context field here. This helper never guesses $1
-        // or trusts a mount/filename/UID. No new public switch selects it yet.
-        pub(super) fn completed_entry(source: &str, completed_path: &str) -> i32 {
-            let mut parent = match Parent::new() { Ok(parent) => parent, Err(_) => return 1 };
+        const ARGUMENT_LIMIT: usize = 1024;
+        const ARGUMENT_BYTES_LIMIT: usize = 4096;
+        #[derive(Debug,PartialEq,Eq)]
+        enum EntryKind { CompletedPackage, PrivateWriter }
+        fn entry_arguments_data(values: impl IntoIterator<Item=std::ffi::OsString>) -> Result<Vec<String>> {
+            let mut result = Vec::with_capacity(4); let mut total = 0usize;
+            // Read at most the four admitted values plus one refusal sentinel.
+            // Never collect an unbounded iterator or replace invalid UTF-8.
+            for value in values.into_iter().take(5) {
+                let bytes = value.as_encoded_bytes();
+                check(result.len() < 4 && !bytes.is_empty() && bytes.len() <= ARGUMENT_LIMIT
+                    && !bytes.iter().any(|b| b.is_ascii_control()),"entry-argument-bound")?;
+                total = total.checked_add(bytes.len()).filter(|n| *n <= ARGUMENT_BYTES_LIMIT).ok_or("entry-argument-bound")?;
+                result.push(value.into_string().map_err(|_| "entry-argument-utf8")?);
+            }
+            Ok(result)
+        }
+        fn entry_kind_data(args: &[String]) -> Result<EntryKind> {
+            match args {
+                [_,source,completed] if source.starts_with('/') && completed.starts_with('/') => Ok(EntryKind::CompletedPackage),
+                [_,role,endpoint,invocation] if role == ROLE && invocation_valid(invocation)
+                    && endpoint.parse::<u64>().ok().is_some_and(|n| endpoint == &n.to_string()) => Ok(EntryKind::PrivateWriter),
+                _ => Err("fixed-completed-package-input-required"),
+            }
+        }
+        pub(super) fn entry() -> i32 {
+            // This is the first original sample, BEFORE arguments or admission.
+            let started = match monotonic() { Ok(value) => value, Err(_) => return 1 };
+            let args = match entry_arguments_data(std::env::args_os()) { Ok(args) => args, Err(_) => return 1 };
+            match entry_kind_data(&args) {
+                Ok(EntryKind::PrivateWriter) => dispatch_private(&args), // Inherit, never renew the parent's endpoint.
+                Ok(EntryKind::CompletedPackage) => completed_entry(&args[1],&args[2],started),
+                Err(_) => 1,
+            }
+        }
+        // Postinstall must supply ONLY the genuinely qualified completed outer
+        // package field. A fixed spelling/UID/mount is not producer authority.
+        fn completed_entry(source: &str, completed_path: &str, started: u64) -> i32 {
+            let mut parent = match Deadline::from_entry(started).and_then(Parent::new) { Ok(parent) => parent, Err(_) => return 1 };
             let returned = parent.run_completed(source,completed_path);
             let mut writer_exit = None;
             let mut published = false;
@@ -3168,6 +3300,21 @@ mod installer {
                 assert!(time_data(start,end,start+2,start+1,true).is_err());
                 assert!(time_data(u64::MAX-10,5,u64::MAX-10,u64::MAX-10,false).is_err());
                 assert!(time_data(start,end+1,start,start,true).is_err());
+                let args = |values: &[&str]| entry_arguments_data(values.iter().map(|value| std::ffi::OsString::from(*value)));
+                let outer = args(&["mrk-macos-install","/private/Script/input","/Volumes/Mobile Release Kit/Install.pkg"]).unwrap();
+                assert_eq!(entry_kind_data(&outer),Ok(EntryKind::CompletedPackage));
+                let private = args(&["mrk-macos-install",ROLE,"120000000001","11111111111111111111111111111111"]).unwrap();
+                assert_eq!(entry_kind_data(&private),Ok(EntryKind::PrivateWriter));
+                for values in [vec!["mrk-macos-install","/private/Script/input"],vec!["mrk-macos-install",ROLE,"/any.pkg"],
+                    vec!["mrk-macos-install",ROLE,"0123","11111111111111111111111111111111"],
+                    vec!["mrk-macos-install",ROLE,"123","00000000000000000000000000000000"],
+                    vec!["mrk-macos-install","relative","/any.pkg"]] {
+                    assert!(entry_kind_data(&args(&values).unwrap()).is_err());
+                }
+                for values in [vec!["a";5],vec![""],vec!["a\nb"],vec!["a\0b"]] { assert!(args(&values).is_err()); }
+                assert!(entry_arguments_data([std::ffi::OsString::from("x".repeat(ARGUMENT_LIMIT+1))]).is_err());
+                use std::os::unix::ffi::OsStringExt;
+                assert!(entry_arguments_data([std::ffi::OsString::from_vec(vec![0xff])]).is_err());
                 completed_package::fixed_source_data_checks();
             }
             #[test]
@@ -3314,13 +3461,7 @@ mod installer {
         }
     }
     #[cfg(not(feature = "macos-installed-installer-fixture"))]
-    pub(super) fn run() -> i32 {
-        let mut install = Install::new();
-        let args: Vec<String> = std::env::args().collect();
-        let result = if args.len() == 2 { install.install(&args[1]) } else { Err("fixed-scripts-input-required") };
-        let final_result = install.finish(result);
-        finish_transport(&install.result_record(&final_result), final_result.exit, install.end)
-    }
+    pub(super) fn run() -> i32 { worker::entry() }
     #[cfg(feature = "macos-installed-installer-fixture")]
     pub(super) fn run() -> i32 { fixture::run() }
 

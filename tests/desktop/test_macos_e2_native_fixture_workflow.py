@@ -183,25 +183,37 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('result = self.command(role + "-build", argv, environment, cwd=CHECKOUT, timeout=480, limit=4 * 1024 * 1024)', flat(build))
         worker = section(self.owner, "    def build_installer_worker_tests(self):", "    def build_images(self):")
         for required in (
-            'target = self.scratch / "installer-worker-target"',
+            'origin = time.clock_gettime_ns(time.CLOCK_MONOTONIC)',
+            'deadline, last = origin + WORK_SECONDS * 1_000_000_000, origin',
+            'need(type(now) is int and last <= now < deadline, "mac8-group-clock")',
+            'seconds = (deadline - now) // 1_000_000_000',
+            'return min(480, seconds)',
+            '("installer-worker", INSTALLER, ("--features", "macos-installed-installer", "--bin", "mrk-macos-install"), INSTALLER_WORKER_RUST_TESTS, installer_worker_rust_tests_result, "installer_worker_rust_tests")',
+            '("installed-reader", INSTALLER, ("--lib",), INSTALLED_READER_RUST_TESTS, installed_reader_rust_tests_result, "installed_reader_rust_tests")',
+            '("producer-signing", NATIVE, ("--features", "package-producer-signing", "--lib"), PRODUCER_SIGNING_RUST_TESTS, producer_signing_rust_tests_result, "producer_signing_rust_tests")',
+            '("package-producer", INSTALLER, ("--features", "macos-package-producer", "--example", "macos_package_producer"), PACKAGE_PRODUCER_RUST_TESTS, package_producer_rust_tests_result, "package_producer_rust_tests")',
+            'target = self.scratch / (role + "-target")',
             'self.scratch_origins[target] = entry["identity"]',
-            '"--manifest-path", str(CHECKOUT / INSTALLER / "Cargo.toml")',
+            '"--manifest-path", str(CHECKOUT / directory / "Cargo.toml")',
             '"--locked", "--offline", "--jobs", "1", "--target", TARGET',
-            '"--no-default-features", "--features", "macos-installed-installer"',
-            '"--bin", "mrk-macos-install"',
-            '"--exact", "--test-threads=1", "--format", "pretty", "--color", "never"',
-            '*INSTALLER_WORKER_RUST_TESTS',
-            'result = self.command("installer-worker-rust-tests", argv, environment, cwd=CHECKOUT, timeout=480, limit=4 * 1024 * 1024)',
-            'self.installer_worker_rust_tests = installer_worker_rust_tests_result(result.stdout)',
+            '"--no-default-features", *flags, "--message-format=short", "--color", "never"',
+            '"--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *names',
+            'result = self.command(role + "-rust-tests", argv, environment, cwd=CHECKOUT, timeout=remaining(), limit=4 * 1024 * 1024)',
             'finally: if all(call["returned"] for call in self.calls): self.retire_target(target)',
+            'setattr(self, field, record)',
         ):
             self.assertIn(flat(required), flat(worker))
+        self.assertEqual(worker.count('deadline, last ='), 1)
+        self.assertEqual(worker.count('result = self.command('), 1)  # One literal loop over four SOURCE rows, not a new owner.
+        self.assertLess(worker.index('self.retire_target(target)'), worker.index('setattr(self, field, record)'))
         self.assertNotIn('"--release"', worker)
-        self.assertNotIn('"--lib"', worker)
         self.assertNotIn('e2-native-fixture', worker)
         execute = section(self.owner, "    def execute(self):", "\ndef canonical(")
-        self.assertIn(flat('if not self.service_layout["selected"]: self.build_installer_worker_tests() self.observe_installer_context()'), flat(execute))
-        self.assertLess(execute.index('self.build_installer_worker_tests()'), execute.index('self.compile_metadata_observer()'))
+        self.assertIn(flat('if not self.service_layout["selected"]: self.build_installer_worker_tests()'), flat(execute))
+        self.assertLess(execute.index('self.build_installer_worker_tests()'), execute.index('self.build_images()'))
+        self.assertLess(execute.index('self.build_images()'), execute.index('self.observe_installer_context()'))
+        self.assertLess(execute.index('self.observe_installer_context()'), execute.index('self.compile_metadata_observer()'))
+        self.assertIn(flat('if self.service_layout["selected"]: self.build_images()'), flat(execute))
         sources = section(self.owner, "def source_names(rows):", "\nclass SourceInputs:")
         for required in ('"desktop/src-tauri/"', '"desktop/macos-installed-inputs/"',
                          '"desktop/tools/macos_android_sdk_metadata.py"',
@@ -422,6 +434,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             and result["cleanupErrors"] == [] and calls
             and all(call["returned"] and call["returncode"] == 0 for call in calls)
             and native_rust_tests is not None and installer_worker_rust_tests is not None
+            and installed_reader_rust_tests is not None and producer_signing_rust_tests is not None
+            and package_producer_rust_tests is not None
             and installer_context is not None and installer_context["completed"]
             and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
         )"""))
@@ -441,14 +455,14 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                 if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                         and all(call["returned"] for call in calls)):
                     native_rust_tests = unit_record"""))
-        worker_units = section(publish, "              installer_worker_rust_tests = None", "              installer_worker_diagnostic = None")
+        worker_units = section(publish, "              installer_worker_rust_tests = None", "              installed_reader_rust_tests = None")
         self.assertEqual(flat(worker_units), flat("""installer_worker_rust_tests = None
             if result["installerWorkerRustTests"] is not None:
                 worker_calls = [call for call in calls if call["role"] == "installer-worker-rust-tests"]
                 fixture.need(len(worker_calls) == 1 and worker_calls[0]["returned"]
                              and worker_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release
                              and type(worker_calls[0].get("workTimeoutSeconds")) is int
-                             and worker_calls[0]["workTimeoutSeconds"] == 480
+                             and 0 < worker_calls[0]["workTimeoutSeconds"] <= 480
                              and type(worker_calls[0].get("outputLimitBytes")) is int
                              and worker_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,
                              "summary-installer-worker-rust-tests-call")
@@ -458,7 +472,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     installer_worker_rust_tests = worker_record"""))
         self.assertGreater(publish.index(worker_units), publish.index('"summary-returned-call"'))
         self.assertLess(publish.index(worker_units), publish.index("              known_pass = ("))
-        self.assertIn('native nativeRustTests installerWorkerRustTests installerContext', publish)
+        self.assertIn('native nativeRustTests installerWorkerRustTests installedReaderRustTests producerSigningRustTests packageProducerRustTests installerContext', publish)
         self.assertIn('"installerWorkerRustTests": None,', publish)
         self.assertIn('installerWorkerRustTests=installer_worker_rust_tests,', publish)
         self.assertEqual([line.strip() for line in active(publish).splitlines()
@@ -468,8 +482,35 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('"cargoProfile": "test"', record)
         self.assertNotIn('"release"', record)
         receipt = section(self.owner, "    def receipt(self, failure):", "    def execute(self):")
-        self.assertIn('and unit_passed and installer_unit_passed and self.installer_context["completed"]', flat(receipt))
+        self.assertIn('and unit_passed and installer_unit_passed and mac8_passed and self.installer_context["completed"]', flat(receipt))
         self.assertIn('"installerWorkerRustTests": self.installer_worker_rust_tests', receipt)
+        selected_units = section(publish, "              installed_reader_rust_tests = None", "              producer_signing_rust_tests = None")
+        self.assertEqual(flat(selected_units), flat('installed_reader_rust_tests = None\nif result["installedReaderRustTests"] is not None:\n    selected_calls = [call for call in calls if call["role"] == "installed-reader-rust-tests"]\n    fixture.need(len(selected_calls) == 1 and selected_calls[0]["returned"]\n                 and selected_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release\n                 and type(selected_calls[0].get("workTimeoutSeconds")) is int\n                 and 0 < selected_calls[0]["workTimeoutSeconds"] <= 480\n                 and type(selected_calls[0].get("outputLimitBytes")) is int\n                 and selected_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,\n                 "summary-installed-reader-rust-tests-call")\n    selected_record = fixture.installed_reader_rust_tests_data(result["installedReaderRustTests"])\n    if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))\n            and all(call["returned"] for call in calls)):\n        installed_reader_rust_tests = selected_record'))
+        self.assertGreater(publish.index(selected_units), publish.index('"summary-returned-call"'))
+        self.assertLess(publish.index(selected_units), publish.index("              known_pass = ("))
+        self.assertIn('"installedReaderRustTests": None,', publish)
+        self.assertIn('installedReaderRustTests=installed_reader_rust_tests,', publish)
+        self.assertIn('"installedReaderRustTests": self.installed_reader_rust_tests', receipt)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["installedReaderRustTests"] =' in line], ['summary["installedReaderRustTests"] = None'] * 2)
+        selected_units = section(publish, "              producer_signing_rust_tests = None", "              package_producer_rust_tests = None")
+        self.assertEqual(flat(selected_units), flat('producer_signing_rust_tests = None\nif result["producerSigningRustTests"] is not None:\n    selected_calls = [call for call in calls if call["role"] == "producer-signing-rust-tests"]\n    fixture.need(len(selected_calls) == 1 and selected_calls[0]["returned"]\n                 and selected_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release\n                 and type(selected_calls[0].get("workTimeoutSeconds")) is int\n                 and 0 < selected_calls[0]["workTimeoutSeconds"] <= 480\n                 and type(selected_calls[0].get("outputLimitBytes")) is int\n                 and selected_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,\n                 "summary-producer-signing-rust-tests-call")\n    selected_record = fixture.producer_signing_rust_tests_data(result["producerSigningRustTests"])\n    if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))\n            and all(call["returned"] for call in calls)):\n        producer_signing_rust_tests = selected_record'))
+        self.assertGreater(publish.index(selected_units), publish.index('"summary-returned-call"'))
+        self.assertLess(publish.index(selected_units), publish.index("              known_pass = ("))
+        self.assertIn('"producerSigningRustTests": None,', publish)
+        self.assertIn('producerSigningRustTests=producer_signing_rust_tests,', publish)
+        self.assertIn('"producerSigningRustTests": self.producer_signing_rust_tests', receipt)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["producerSigningRustTests"] =' in line], ['summary["producerSigningRustTests"] = None'] * 2)
+        selected_units = section(publish, "              package_producer_rust_tests = None", "              installer_worker_diagnostic = None")
+        self.assertEqual(flat(selected_units), flat('package_producer_rust_tests = None\nif result["packageProducerRustTests"] is not None:\n    selected_calls = [call for call in calls if call["role"] == "package-producer-rust-tests"]\n    fixture.need(len(selected_calls) == 1 and selected_calls[0]["returned"]\n                 and selected_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release\n                 and type(selected_calls[0].get("workTimeoutSeconds")) is int\n                 and 0 < selected_calls[0]["workTimeoutSeconds"] <= 480\n                 and type(selected_calls[0].get("outputLimitBytes")) is int\n                 and selected_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,\n                 "summary-package-producer-rust-tests-call")\n    selected_record = fixture.package_producer_rust_tests_data(result["packageProducerRustTests"])\n    if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))\n            and all(call["returned"] for call in calls)):\n        package_producer_rust_tests = selected_record'))
+        self.assertGreater(publish.index(selected_units), publish.index('"summary-returned-call"'))
+        self.assertLess(publish.index(selected_units), publish.index("              known_pass = ("))
+        self.assertIn('"packageProducerRustTests": None,', publish)
+        self.assertIn('packageProducerRustTests=package_producer_rust_tests,', publish)
+        self.assertIn('"packageProducerRustTests": self.package_producer_rust_tests', receipt)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["packageProducerRustTests"] =' in line], ['summary["packageProducerRustTests"] = None'] * 2)
         context = section(publish, "              installer_context = None", "              native_rust_tests = None")
         self.assertIn('context_record = fixture.installer_context_data(result["installerContext"], source)', context)
         for required in (
@@ -516,7 +557,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["contextMetadataDiagnostic"] =' in line],
                          ['summary["contextMetadataDiagnostic"] = None'] * 2)
-        package_diagnostic = section(publish, "              context_package_diagnostic = None", "              btm_log = None")
+        package_diagnostic = section(publish, "              context_package_diagnostic = None", "              context_distribution_diagnostic = None")
         self.assertEqual(flat(active(package_diagnostic)), flat("""context_package_diagnostic = None
             package_candidate = fixture.context_package_info_diagnostic_data(
                 result["artifacts"].get(fixture.CONTEXT_PACKAGE_INFO_ARTIFACT) if type(result["artifacts"]) is dict else None,
@@ -533,6 +574,23 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["contextPackageInfoDiagnostic"] =' in line],
                          ['summary["contextPackageInfoDiagnostic"] = None'] * 2)
+        distribution_diagnostic = section(publish, "              context_distribution_diagnostic = None", "              btm_log = None")
+        self.assertEqual(flat(active(distribution_diagnostic)), flat("""context_distribution_diagnostic = None
+            distribution_candidate = fixture.context_distribution_diagnostic_data(
+                result["artifacts"].get(fixture.CONTEXT_DISTRIBUTION_ARTIFACT) if type(result["artifacts"]) is dict else None,
+                result["phase"], result["failure"], calls)
+            if (distribution_candidate is not None
+                    and all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                    and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
+                context_distribution_diagnostic = distribution_candidate"""))
+        self.assertLess(publish.index('"summary-returned-call"'), publish.index(distribution_diagnostic))
+        self.assertLess(publish.index(distribution_diagnostic), publish.index('              known_pass = ('))
+        self.assertNotIn('context_distribution_diagnostic', gates)
+        self.assertIn('"contextDistributionDiagnostic": None,', publish)
+        self.assertIn('contextDistributionDiagnostic=context_distribution_diagnostic,', publish)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+                          if 'summary["contextDistributionDiagnostic"] =' in line],
+                         ['summary["contextDistributionDiagnostic"] = None'] * 2)
         audit = section(self.owner, "    def context_audit(", "    def observe_installer_context(")
         self.assertIn('members = context_xar(body)', audit)
         self.assertIn('return context_product(body, *component)', audit)
@@ -599,8 +657,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('installerContext=installer_context,', publish)
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["installerContext"] =' in line], ['summary["installerContext"] = None'] * 2)
-        for refused in ('except BaseException: summary["accepted"] = False summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installerContext"] = None',
-                        'if not book.finish(): summary["accepted"] = False summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installerContext"] = None'):
+        for refused in ('except BaseException: summary["accepted"] = False summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installedReaderRustTests"] = None summary["producerSigningRustTests"] = None summary["packageProducerRustTests"] = None summary["installerContext"] = None',
+                        'if not book.finish(): summary["accepted"] = False summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installedReaderRustTests"] = None summary["producerSigningRustTests"] = None summary["packageProducerRustTests"] = None summary["installerContext"] = None'):
             self.assertIn(refused, flat(publish))
         self.assertGreater(publish.index(units), publish.index('"summary-returned-call"'))
         self.assertLess(publish.index(units), publish.index("              known_pass = ("))
@@ -663,7 +721,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     and node.func.id in {"need", "Refused"} and node.args
                     and isinstance(node.args[-1], ast.Constant) and type(node.args[-1].value) is str):
                 labels.add(node.args[-1].value)
-        # The two fixed wrappers share only strict parsing, not record identity.
+        # The fixed wrappers share only strict parsing, not record identity.
         # Derive their finite prefix/suffix products from SOURCE, never runtime DATA.
         suffixes = {"_rust_tests_data": {"-record"},
                     "_rust_test_output": {"-bound", "-framing", "-roster", "-result"}}
@@ -688,7 +746,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     self.assertEqual(node.keywords, [])
                     self.assertIsInstance(node.args[-1], ast.Constant)
                     prefixes.append(node.args[-1].value)
-            self.assertEqual(sorted(prefixes), ["installer-worker-rust-test", "native-rust-test"])
+            self.assertEqual(sorted(prefixes), ["installed-reader-rust-test", "installer-worker-rust-test", "native-rust-test", "package-producer-rust-test", "producer-signing-rust-test"])
             labels.update(prefix + suffix for prefix in prefixes for suffix in actual_suffixes)
         self.assertEqual(labels, set(tables["OWNER_DIAGNOSTIC_REFUSALS"]))
         # Owner output is sanitized before this workflow sees it. A listed

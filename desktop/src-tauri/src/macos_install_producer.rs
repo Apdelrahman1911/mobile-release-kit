@@ -30,6 +30,22 @@ fn hex(value: &str, length: usize) -> bool {
 }
 fn digest(bytes: &[u8]) -> String { Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect() }
 
+/// Two immutable public controls, outside the hashed payload. This validates
+/// only the SOURCE-selected name grammar; a path or parser result is not signer,
+/// installation-state, previous-process or current-writer authority.
+pub fn installed_control_names_data(target: MaintenanceTargetData, release: &str) -> Result<(String, String)> {
+    require(release.len() <= 128 && release.starts_with(target.release_prefix())
+        && release.len() > target.release_prefix().len()
+        && release.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
+        && release.as_bytes().last().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit()), DataError::Binding)?;
+    Ok((format!(".producer-{release}.json"), format!(".producer-{release}.sig")))
+}
+fn hex_matches(value: &str, bytes: &[u8]) -> bool {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    value.len() == bytes.len() * 2 && value.as_bytes().chunks_exact(2).zip(bytes).all(|(pair, byte)|
+        pair[0] == DIGITS[usize::from(*byte >> 4)] && pair[1] == DIGITS[usize::from(*byte & 15)])
+}
+
 // Declaration order is the v1 canonical policy encoding, not arbitrary JSON
 // property ordering. This hash is NOT the old signing.profile text-file hash.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -66,6 +82,25 @@ impl SigningPolicyData {
     pub fn sha256_data(&self) -> &str { &self.sha256 }
     pub fn requires_hardened_runtime_data(&self) -> bool { self.wire.hardened_runtime }
     pub fn requires_empty_entitlements_data(&self) -> bool { self.wire.entitlements == "empty" }
+    /// DATA equality only. The caller must supply its independent SOURCE signer,
+    /// authenticate the descriptor and verify actual code purpose separately.
+    pub fn matches_source_data(&self, team: &[u8; 10], leaf_sha1: &[u8; 20], leaf_sha256: &[u8; 32]) -> bool {
+        self.wire.team_identifier.as_bytes() == team
+            && hex_matches(&self.wire.leaf_certificate_sha1, leaf_sha1)
+            && hex_matches(&self.wire.leaf_certificate_sha256, leaf_sha256)
+            && self.requires_hardened_runtime_data() && self.requires_empty_entitlements_data()
+    }
+}
+
+/// Independently supplied SOURCE/current facts plus the actual FINAL package
+/// hash. No constructor learns this tuple from a descriptor or installed tree.
+#[derive(Clone, Copy)]
+pub struct EmissionBindingData<'a> {
+    pub target: MaintenanceTargetData,
+    pub release: &'a str, pub package_version: &'a str, pub source_commit: &'a str,
+    pub protocol_sha256: &'a str, pub runtime_manifest_sha256: &'a str,
+    pub inventory_sha256: &'a str, pub completed_package_sha256: &'a str,
+    pub team: &'a [u8; 10], pub leaf_sha1: &'a [u8; 20], pub leaf_sha256: &'a [u8; 32],
 }
 
 #[derive(Deserialize)]
@@ -122,6 +157,19 @@ impl ProducerData {
     pub fn release_set_data(&self) -> &ReleaseSetData { &self.releases }
     pub fn completed_package_sha256_data(&self) -> &str { self.releases.current_data().binding_data().package_sha256 }
     pub fn signing_policy_data(&self) -> &SigningPolicyData { &self.policies[self.current_policy] }
+    /// Correspondence only: native signing/finality and the parent's mandatory
+    /// actual package, purpose and original-file admission remain separate.
+    pub fn validate_emission_data(&self, expected: &EmissionBindingData<'_>) -> Result<()> {
+        let current = self.releases.current_data().binding_data();
+        require(self.releases.target_data() == expected.target
+            && current.release == expected.release && current.package_version == expected.package_version
+            && current.source_commit == expected.source_commit && current.protocol_sha256 == expected.protocol_sha256
+            && current.runtime_manifest_sha256 == expected.runtime_manifest_sha256
+            && current.inventory_sha256 == expected.inventory_sha256
+            && current.package_sha256 == expected.completed_package_sha256, DataError::Binding)?;
+        require(self.signing_policy_data().matches_source_data(expected.team, expected.leaf_sha1, expected.leaf_sha256),
+            DataError::Policy)
+    }
     pub fn policy_for_release_data(&self, release: &ReleaseData) -> Result<&SigningPolicyData> {
         require(self.releases.contains_data(release), DataError::Membership)?;
         self.policies.iter().find(|policy| policy.sha256 == release.binding_data().signing_policy_sha256)
@@ -186,6 +234,41 @@ mod tests {
             assert_eq!(&message[..SIGNED_DOMAIN.len()], b"MobileReleaseKit-package-producer-v2\0");
             assert_eq!(&message[SIGNED_DOMAIN.len()..], raw);
             assert_ne!(message, message_data(&serde_json::to_vec(&value).unwrap()).unwrap());
+            let release = data.release_set_data().current_data().binding_data().release;
+            assert_eq!(installed_control_names_data(target, release).unwrap(),
+                (format!(".producer-{release}.json"), format!(".producer-{release}.sig")));
+            let maximum = format!("{}{}", target.release_prefix(), "a".repeat(128-target.release_prefix().len()));
+            assert!(installed_control_names_data(target, &maximum).unwrap().0.len() < 255);
+            assert!(installed_control_names_data(target, &(maximum + "a")).is_err());
+            for bad in ["", "../producer", "macos26-arm64-", "macos26-x86_64-", "macos26-arm64-../",
+                "macos26-arm64-sp ace", "macos26-arm64-upperA", "macos26-arm64-end.", "macos26-arm64-x\0"] {
+                assert!(installed_control_names_data(target, bad).is_err());
+            }
+            let other = if target == MaintenanceTargetData::Arm64 { MaintenanceTargetData::Intel } else { MaintenanceTargetData::Arm64 };
+            assert!(installed_control_names_data(other, release).is_err());
+            let current = data.release_set_data().current_data().binding_data();
+            let expected = EmissionBindingData { target, release: current.release,
+                package_version: current.package_version, source_commit: current.source_commit,
+                protocol_sha256: current.protocol_sha256, runtime_manifest_sha256: current.runtime_manifest_sha256,
+                inventory_sha256: current.inventory_sha256, completed_package_sha256: current.package_sha256,
+                team: b"TEAM000001", leaf_sha1: &[0x11;20], leaf_sha256: &[0x11;32] };
+            assert_eq!(data.validate_emission_data(&expected), Ok(()));
+            for bad in [EmissionBindingData { target: if target == MaintenanceTargetData::Arm64 {
+                    MaintenanceTargetData::Intel } else { MaintenanceTargetData::Arm64 }, ..expected },
+                EmissionBindingData { release: "other", ..expected },
+                EmissionBindingData { package_version: "0.4.0", ..expected },
+                EmissionBindingData { source_commit: "", ..expected },
+                EmissionBindingData { protocol_sha256: "wrong", ..expected },
+                EmissionBindingData { runtime_manifest_sha256: "wrong", ..expected },
+                EmissionBindingData { inventory_sha256: "wrong", ..expected },
+                EmissionBindingData { completed_package_sha256: "wrong", ..expected }] {
+                assert_eq!(data.validate_emission_data(&bad), Err(DataError::Binding));
+            }
+            for bad in [EmissionBindingData { team: b"TEAM000002", ..expected },
+                EmissionBindingData { leaf_sha1: &[0x22;20], ..expected },
+                EmissionBindingData { leaf_sha256: &[0x22;32], ..expected }] {
+                assert_eq!(data.validate_emission_data(&bad), Err(DataError::Policy));
+            }
         }
         assert_eq!(message_data(&[]),Err(DataError::Limit));
         assert_eq!(message_data(&vec![b' ';DESCRIPTOR_LIMIT+1]),Err(DataError::Limit));

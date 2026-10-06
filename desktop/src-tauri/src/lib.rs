@@ -31,6 +31,23 @@ compile_error!("resident image requires its isolated headless LP64 Mac ARM64/Int
 const _: () = assert!(mrk_macos_installed_native::RESIDENT_IMAGE_BUILD
     == cfg!(feature = "macos-installed-resident-image"));
 
+// A selected packaging example may reach a private key; ordinary apps,
+// Installers, helpers and qualification images must never feature-unify it.
+#[cfg(all(feature = "macos-package-producer", any(
+    not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
+    feature = "desktop-shell", feature = "custom-protocol", feature = "development-runtime",
+    feature = "ubuntu-runtime-publisher", feature = "windows-runtime-publisher",
+    feature = "macos-installed-installer", feature = "macos-installed-installer-fixture",
+    feature = "macos-android-registration-helper", feature = "macos-installed-resident-image",
+    feature = "macos-installed-desktop-image", feature = "macos-installed-observation",
+    feature = "windows-installed-observation"
+)))]
+compile_error!("package producer requires its isolated nonshipping LP64 Mac example graph");
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+const _: () = assert!(mrk_macos_installed_native::PACKAGE_PRODUCER_SIGNING_BUILD
+    == cfg!(feature = "macos-package-producer"),
+    "package signing and ordinary app/Installer/helper native roles must not unify");
+
 pub mod error;
 pub mod protocol;
 mod environment;

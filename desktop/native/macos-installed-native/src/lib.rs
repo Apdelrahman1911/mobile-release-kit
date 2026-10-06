@@ -50,6 +50,13 @@ mod android_service_lease;
 mod android_service_client_data;
 pub const DESKTOP_IMAGE_BUILD: bool = cfg!(feature = "desktop-image");
 pub const RESIDENT_IMAGE_BUILD: bool = cfg!(feature = "resident-image");
+pub const PACKAGE_PRODUCER_SIGNING_BUILD: bool = cfg!(feature = "package-producer-signing");
+#[cfg(all(feature = "package-producer-signing", any(
+    feature = "installed-observation", feature = "vault-helper", feature = "android-registration-helper",
+    feature = "desktop-image", feature = "resident-image", feature = "e2-native-fixture",
+    mrk_wrapping_keychain_qualification
+)))]
+compile_error!("package producer signing requires its isolated nonshipping native graph");
 #[cfg(all(feature = "resident-image", any(not(feature = "android-registration-helper"),
     feature = "desktop-image", feature = "vault-helper", feature = "installed-observation",
     mrk_wrapping_keychain_qualification)))]

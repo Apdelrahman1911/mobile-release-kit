@@ -77,6 +77,10 @@ fn main() {
     let desktop_image = std::env::var_os("CARGO_FEATURE_DESKTOP_IMAGE").is_some();
     let resident_image = std::env::var_os("CARGO_FEATURE_RESIDENT_IMAGE").is_some();
     let e2_fixture = std::env::var_os("CARGO_FEATURE_E2_NATIVE_FIXTURE").is_some();
+    let producer_signing = std::env::var_os("CARGO_FEATURE_PACKAGE_PRODUCER_SIGNING").is_some();
+    assert!(!producer_signing || !helper && !android_helper && !desktop_image && !resident_image
+        && !observation && !e2_fixture && !qualification,
+        "package signing requires the isolated nonshipping native graph");
     assert!(!e2_fixture || (desktop_image != resident_image) && !helper && !observation && !qualification,
         "E2 fixture requires exactly one isolated desktop or resident image graph");
     assert!(!resident_image || android_helper && !desktop_image && !helper && !observation && !qualification,
@@ -143,6 +147,9 @@ fn main() {
     println!("cargo:rerun-if-changed=src/vault_helper_auth.m");
     println!("cargo:rerun-if-changed=src/wrapping_keychain_fixture.m");
     let mut build = cc::Build::new();
+    // Rust's feature-only signer and this C branch are selected together. No
+    // ordinary app/Installer/helper build contains a Keychain signing route.
+    build.define("MRK_INSTALL_PRODUCER_SIGNING", Some(if producer_signing { "1" } else { "0" }));
     if !helper && !android_helper {
         let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo native output binding"));
         let selection = producer_selection::SourceSelection::parse(
@@ -183,10 +190,15 @@ fn main() {
                 ("mrk_install_producer_source_leaf_matches", "mrk_install_producer_compile_only_source_leaf_matches"),
                 ("mrk_install_producer_new", "mrk_install_producer_compile_only_new"),
                 ("mrk_install_producer_code_new", "mrk_install_producer_compile_only_code_new"),
+                ("mrk_install_producer_sign_new", "mrk_install_producer_compile_only_sign_new"),
+                ("mrk_install_producer_sign_copy", "mrk_install_producer_compile_only_sign_copy"),
                 ("mrk_install_producer_step", "mrk_install_producer_compile_only_step"),
                 ("mrk_install_producer_release", "mrk_install_producer_compile_only_release"),
                 ("mrk_install_producer_retire", "mrk_install_producer_compile_only_retire"),
             ] { syntax.define(from, Some(to)); }
+            // Type/API coverage of configured signing code only: all nine
+            // exports are renamed, and no Rust path can call this translation.
+            syntax.define("MRK_INSTALL_PRODUCER_SIGNING", Some("1"));
             syntax.include(&compile_only).file("src/install_producer.m")
                 .flag("-fno-objc-arc").flag("-fblocks").flag("-mmacosx-version-min=26.0")
                 .warnings(true).compile("mrk_install_producer_compile_only");

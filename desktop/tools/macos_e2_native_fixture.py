@@ -62,6 +62,17 @@ INSTALLER_WORKER_RUST_TESTS = (
     "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
     "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
 )
+INSTALLED_READER_RUST_TESTS = (
+    "installed_runtime::installation_observation::installation_roster_uses_fixed_app_name_and_global_inventory_bound",
+)
+PRODUCER_SIGNING_RUST_TESTS = (
+    "install_producer::tests::report_decoder_binds_slots_error_outputs_and_consuming_returns",
+    "install_producer::tests::signature_result_requires_same_owner_finality_and_late_gate_refuses",
+    "install_producer::tests::unknown_native_or_gate_custody_never_releases_or_publishes_success",
+)
+PACKAGE_PRODUCER_RUST_TESTS = (
+    "emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes",
+)
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
 LAYOUT_ARGUMENT = "--observe-service-layout"
 LAYOUT_CASES = ("single", "nested")
@@ -1343,24 +1354,209 @@ def context_distribution():
             + CONTEXT_PACKAGES[1] + '</pkg-ref></installer-gui-script>\n').encode("ascii")
 
 
+CONTEXT_DISTRIBUTION_ARTIFACT = "installer-context-distribution-refusal"
+CONTEXT_DISTRIBUTION_TAGS = ("installer-gui-script", "title", "options", "domains",
+                             "choices-outline", "line", "choice", "pkg-ref")
+CONTEXT_DISTRIBUTION_FIELDS = {
+    "root": {"minSpecVersion": ("1",)},
+    "title": {},
+    "options": {"customize": ("never", "allow", "always"), "require-scripts": ("false", "true"),
+                "allow-external-scripts": ("false", "true")},
+    "domains": {"enable_localSystem": ("true", "false"), "enable_currentUserHome": ("false", "true"),
+                "enable_anywhere": ("false", "true")},
+    "choices-outline": {},
+    "line": {"choice": ("expected",)},
+    "choice": {"id": ("expected",), "visible": ("false", "true")},
+    "choice-pkg-ref": {"id": ("expected",), "version": ("1",), "installKBytes": (),
+                       "onConclusion": ("None", "RequireLogout", "RequireRestart", "RequireShutdown"),
+                       "auth": ("none", "root"), "active": ("true", "false"),
+                       "onConclusionScript": ("present",), "archiveKBytes": (), "packageIdentifier": ("expected",)},
+    "product-pkg-ref": {"id": ("expected",), "version": ("1",), "installKBytes": (),
+                        "onConclusion": ("None", "RequireLogout", "RequireRestart", "RequireShutdown"),
+                        "auth": ("none", "root"), "active": ("true", "false"),
+                        "onConclusionScript": ("present",), "archiveKBytes": (), "packageIdentifier": ("expected",)},
+}
+
+
+def _context_distribution_scalar(role, name, raw):
+    if raw is None:
+        return None
+    if name in ("installKBytes", "archiveKBytes"):
+        return (int(raw) if re.fullmatch(r"0|[1-9][0-9]{0,9}", raw)
+                and int(raw) <= 2147483647 else "other")
+    if name in ("id", "choice", "packageIdentifier"):
+        expected = "context" if role in ("choice", "line") else CONTEXT_IDENTIFIERS[1]
+        return "expected" if raw == expected else "other"
+    if name == "onConclusionScript":
+        return "present"
+    return raw if raw in CONTEXT_DISTRIBUTION_FIELDS[role][name] else "other"
+
+
+def _context_distribution_observation(body, site, reference_index):
+    """Same bounded XML bytes after refusal; never export arbitrary XML text."""
+    root = context_xml(body, 65536)
+    outlines, choices, references = root.findall("choices-outline"), root.findall("choice"), root.findall("pkg-ref")
+    selected = {"root": [root], "title": root.findall("title"), "options": root.findall("options"),
+                "domains": root.findall("domains"), "choices-outline": outlines,
+                "line": [node for outline in outlines for node in outline if node.tag == "line"],
+                "choice": choices, "choice-pkg-ref": [node for choice in choices for node in choice if node.tag == "pkg-ref"],
+                "product-pkg-ref": references}
+    need(site in ("install-kbytes", "on-conclusion", "tree"), "context-distribution-observation")
+    if site == "tree":
+        need(reference_index is None, "context-distribution-observation")
+        failure_value = None
+    else:
+        need(type(reference_index) is int and 0 <= reference_index < len(references), "context-distribution-observation")
+        name = "installKBytes" if site == "install-kbytes" else "onConclusion"
+        failure_value = _context_distribution_scalar("product-pkg-ref", name, references[reference_index].get(name))
+    tag = lambda value: value if value in CONTEXT_DISTRIBUTION_TAGS else "other"
+    nodes, rows = list(root.iter()), {}
+    for role, entries in selected.items():
+        row = dict(count=len(entries), attributes=None, otherAttributes=None, children=None,
+                   childTags=None, childrenTruncated=None, text=None, tailPresent=None)
+        if len(entries) == 1:
+            node = entries[0]
+            fields = CONTEXT_DISTRIBUTION_FIELDS[role]
+            text = (node.text or "").strip()
+            text_class = ("empty" if not text else "expected-title" if role == "title" and text == "MRK Installer Context Observation"
+                          else "local-package" if role.endswith("pkg-ref") and text == CONTEXT_PACKAGES[1]
+                          else "fragment-local-package" if role.endswith("pkg-ref") and text == "#" + CONTEXT_PACKAGES[1] else "other")
+            row.update(attributes={name: _context_distribution_scalar(role, name, node.get(name)) for name in fields},
+                       otherAttributes=sum(name not in fields for name in node.attrib), children=len(node),
+                       childTags=[tag(child.tag) for child in list(node)[:8]], childrenTruncated=len(node) > 8,
+                       text=text_class, tailPresent=bool((node.tail or "").strip()))
+        rows[role] = row
+    return {"failureSite": site, "referenceIndex": reference_index, "failureValue": failure_value,
+            "nodeCount": len(nodes), "rootTag": tag(root.tag),
+            "tagCounts": {name: sum(tag(node.tag) == name for node in nodes) for name in (*CONTEXT_DISTRIBUTION_TAGS, "other")},
+            "roles": rows}
+
+
+def context_distribution_diagnostic_data(value, phase, failure, calls):
+    """Failure DATA only; the original owner outcome and finality stay separate."""
+    keys = {"schemaVersion", "type", "diagnosticOnly", "phase", "package", "packageSha256", "packageBytes",
+            "distributionSha256", "distributionBytes", "buildCallIndex", "distribution"}
+    if (type(value) is not dict or set(value) != keys or type(value["schemaVersion"]) is not int
+            or value["schemaVersion"] != 1 or value["type"] != "mrk-context-product-distribution-diagnostic-v1"
+            or value["diagnosticOnly"] is not True or failure != "context-product-distribution"
+            or phase != "context-product-audit" or value["phase"] != phase or value["package"] != "outer-product"
+            or not context_audit_call_data(value["package"], phase, value["buildCallIndex"], calls)):
+        return None
+    for prefix, low, high in (("package", 28, CONTEXT_PACKAGE_LIMIT), ("distribution", 1, 65536)):
+        if (type(value[prefix + "Bytes"]) is not int or not low <= value[prefix + "Bytes"] <= high
+                or not identity(value[prefix + "Sha256"], 64)):
+            return None
+    info, tags = value["distribution"], (*CONTEXT_DISTRIBUTION_TAGS, "other")
+    if (type(info) is not dict or set(info) != {"failureSite", "referenceIndex", "failureValue", "nodeCount", "rootTag", "tagCounts", "roles"}
+            or type(info["nodeCount"]) is not int or not 1 <= info["nodeCount"] <= 256
+            or type(info["rootTag"]) is not str or info["rootTag"] not in tags
+            or type(info["tagCounts"]) is not dict or set(info["tagCounts"]) != set(tags)
+            or any(type(count) is not int or not 0 <= count <= info["nodeCount"] for count in info["tagCounts"].values())
+            or sum(info["tagCounts"].values()) != info["nodeCount"] or info["tagCounts"][info["rootTag"]] < 1
+            or type(info["roles"]) is not dict or set(info["roles"]) != set(CONTEXT_DISTRIBUTION_FIELDS)):
+        return None
+    rows = info["roles"]
+    for role, fields in CONTEXT_DISTRIBUTION_FIELDS.items():
+        row = rows[role]
+        if (type(row) is not dict or set(row) != {"count", "attributes", "otherAttributes", "children", "childTags", "childrenTruncated", "text", "tailPresent"}
+                or type(row["count"]) is not int or not 0 <= row["count"] <= info["nodeCount"]):
+            return None
+        if row["count"] != 1:
+            if any(row[name] is not None for name in row if name != "count"):
+                return None
+            continue
+        text_classes = ("empty", "other", *( ("expected-title",) if role == "title" else
+                                            ("local-package", "fragment-local-package") if role.endswith("pkg-ref") else () ))
+        if (type(row["attributes"]) is not dict or set(row["attributes"]) != set(fields)
+                or type(row["otherAttributes"]) is not int or not 0 <= row["otherAttributes"] <= 16
+                or type(row["children"]) is not int or not 0 <= row["children"] < info["nodeCount"]
+                or type(row["childTags"]) is not list or len(row["childTags"]) != min(row["children"], 8)
+                or any(type(name) is not str or name not in tags for name in row["childTags"])
+                or type(row["childrenTruncated"]) is not bool or row["childrenTruncated"] != (row["children"] > 8)
+                or type(row["text"]) is not str or row["text"] not in text_classes or type(row["tailPresent"]) is not bool):
+            return None
+        for name, vocabulary in fields.items():
+            scalar = row["attributes"][name]
+            if name in ("installKBytes", "archiveKBytes"):
+                if scalar is not None and not (type(scalar) is int and 0 <= scalar <= 2147483647
+                                                or type(scalar) is str and scalar == "other"):
+                    return None
+            elif scalar is not None and (type(scalar) is not str or scalar not in (*vocabulary, "other")):
+                return None
+        if (sum(scalar is not None for scalar in row["attributes"].values()) + row["otherAttributes"] > 16
+                or any(row["childTags"].count(name) > info["tagCounts"][name] for name in tags)):
+            return None
+    if rows["root"]["count"] != 1 or sum(row["count"] for row in rows.values()) > info["nodeCount"]:
+        return None
+    for role in ("title", "options", "domains", "choices-outline", "line", "choice"):
+        if rows[role]["count"] > info["tagCounts"][role]:
+            return None
+    if rows["choice-pkg-ref"]["count"] + rows["product-pkg-ref"]["count"] > info["tagCounts"]["pkg-ref"]:
+        return None
+    for parent, children in (("root", (("title", "title"), ("options", "options"), ("domains", "domains"),
+                                      ("choices-outline", "choices-outline"), ("choice", "choice"), ("product-pkg-ref", "pkg-ref"))),
+                             ("choices-outline", (("line", "line"),)), ("choice", (("choice-pkg-ref", "pkg-ref"),))):
+        for child, child_tag in children:
+            if (rows[parent]["count"] == 0 and rows[child]["count"] != 0
+                    or rows[parent]["count"] == 1 and not rows[parent]["childrenTruncated"]
+                    and rows[child]["count"] != rows[parent]["childTags"].count(child_tag)):
+                return None
+    site, index, scalar = info["failureSite"], info["referenceIndex"], info["failureValue"]
+    if type(site) is not str or site not in ("install-kbytes", "on-conclusion", "tree"):
+        return None
+    if site == "tree":
+        if index is not None or scalar is not None:
+            return None
+    else:
+        if type(index) is not int or not 0 <= index < rows["product-pkg-ref"]["count"]:
+            return None
+        if site == "install-kbytes":
+            if not (type(scalar) is int and 1 <= scalar <= 2147483647 or type(scalar) is str and scalar == "other"):
+                return None
+        elif type(scalar) is not str or scalar not in ("RequireLogout", "RequireRestart", "RequireShutdown", "other"):
+            return None
+        field = "installKBytes" if site == "install-kbytes" else "onConclusion"
+        if rows["product-pkg-ref"]["count"] == 1 and rows["product-pkg-ref"]["attributes"][field] != scalar:
+            return None
+    return value if len(canonical(value)) <= 8192 else None
+
+
 def context_product(body, component, component_members):
     members = context_xar(body, product=True)
     def tree(element):
         return (element.tag, tuple(sorted(element.attrib.items())), (element.text or "").strip(),
                 tuple((tree(child), (child.tail or "").strip()) for child in element))
     distribution = context_xml(members["Distribution"], 65536)
-    # Apple documents productbuild's local URL and install-size completion.
-    # These closed non-action forms are equivalent; no arbitrary URL, script,
-    # alternate conclusion, package, destination or attribute is accepted.
-    for reference in distribution.findall("pkg-ref"):
-        if "installKBytes" in reference.attrib:
-            need(reference.attrib.pop("installKBytes") == "0", "context-product-distribution")
-        if "onConclusion" in reference.attrib:
-            need(reference.attrib.pop("onConclusion") == "None", "context-product-distribution")
-        if (reference.text or "").strip() == "#" + CONTEXT_PACKAGES[1]:
-            reference.text = CONTEXT_PACKAGES[1]
-    need(tree(distribution) == tree(context_xml(context_distribution(), 65536)),
-         "context-product-distribution")
+    site, reference_index = "tree", None
+    try:
+        # Apple documents productbuild's local URL and install-size completion.
+        # These closed non-action forms are equivalent; no arbitrary URL, script,
+        # alternate conclusion, package, destination or attribute is accepted.
+        for reference_index, reference in enumerate(distribution.findall("pkg-ref")):
+            if "installKBytes" in reference.attrib:
+                site = "install-kbytes"
+                need(reference.attrib.pop("installKBytes") == "0", "context-product-distribution")
+            if "onConclusion" in reference.attrib:
+                site = "on-conclusion"
+                need(reference.attrib.pop("onConclusion") == "None", "context-product-distribution")
+            if (reference.text or "").strip() == "#" + CONTEXT_PACKAGES[1]:
+                reference.text = CONTEXT_PACKAGES[1]
+        site, reference_index = "tree", None
+        need(tree(distribution) == tree(context_xml(context_distribution(), 65536)),
+             "context-product-distribution")
+    except Refused as error:
+        if type(error) is Refused and error.args == ("context-product-distribution",):
+            try:
+                error._context_distribution = {
+                    "packageSha256": digest(body), "packageBytes": len(body),
+                    "distributionSha256": digest(members["Distribution"]), "distributionBytes": len(members["Distribution"]),
+                    "distribution": _context_distribution_observation(members["Distribution"], site, reference_index),
+                }
+            except BaseException:
+                # No observation is preferable to invented facts or cleanup proof.
+                # Keep the SAME original parser refusal, including on cancellation.
+                pass
+        raise
     if CONTEXT_PACKAGES[1] in members:
         need(members[CONTEXT_PACKAGES[1]] == component, "context-product-component")
     else:
@@ -1488,10 +1684,28 @@ def installer_worker_rust_test_record():
             "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
 
 
+def installed_reader_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-installed-reader-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(INSTALLED_READER_RUST_TESTS),
+            "passed": 1, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def producer_signing_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-producer-signing-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(PRODUCER_SIGNING_RUST_TESTS),
+            "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def package_producer_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-package-producer-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(PACKAGE_PRODUCER_RUST_TESTS),
+            "passed": 1, "failed": 0, "ignored": 0, "measured": 0}
+
+
 def _rust_tests_data(value, expected, label):
-    """Only the two fixed wrappers supply this expected record; never output DATA."""
+    """Only fixed SOURCE wrappers supply this expected record; never output DATA."""
     count = len(expected["tests"])  # SOURCE-fixed wrapper record, not received DATA.
-    need(count in (3, 6) and expected["passed"] == count, label + "-record")
+    need(count in (1, 3, 6) and expected["passed"] == count, label + "-record")
     need(type(value) is dict and set(value) == set(expected)
          and all(type(value[key]) is int and value[key] == expected[key]
                  for key in ("schemaVersion", "passed", "failed", "ignored", "measured"))
@@ -1513,13 +1727,28 @@ def installer_worker_rust_tests_data(value):
     return _rust_tests_data(value, installer_worker_rust_test_record(), "installer-worker-rust-test")
 
 
+def installed_reader_rust_tests_data(value):
+    """Closed test-profile DATA only; no signing, installer or producer authority."""
+    return _rust_tests_data(value, installed_reader_rust_test_record(), "installed-reader-rust-test")
+
+
+def producer_signing_rust_tests_data(value):
+    """Closed test-profile DATA only; no signing, installer or producer authority."""
+    return _rust_tests_data(value, producer_signing_rust_test_record(), "producer-signing-rust-test")
+
+
+def package_producer_rust_tests_data(value):
+    """Closed test-profile DATA only; no signing, installer or producer authority."""
+    return _rust_tests_data(value, package_producer_rust_test_record(), "package-producer-rust-test")
+
+
 def _rust_test_output(stdout, expected_names, label):
     """Complete pinned libtest pretty output from an already-successful original."""
-    count = len(expected_names)  # Only the native6 and worker3 SOURCE tuples call this.
-    need(count in (3, 6), label + "-roster")
+    count = len(expected_names)  # Only the fixed SOURCE tuples call this.
+    need(count in (1, 3, 6), label + "-roster")
     need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), label + "-bound")
     lines = stdout.split(b"\n")
-    need(len(lines) == count + 6 and lines[:2] == [b"", ("running %d tests" % count).encode("ascii")]
+    need(len(lines) == count + 6 and lines[:2] == [b"", ("running 1 test" if count == 1 else "running %d tests" % count).encode("ascii")]
          and lines[count + 2] == b"" and lines[count + 4:] == [b"", b""], label + "-framing")
     names = []
     for line in lines[2:count + 2]:
@@ -1541,6 +1770,21 @@ def native_rust_tests_result(stdout):
 def installer_worker_rust_tests_result(stdout):
     _rust_test_output(stdout, INSTALLER_WORKER_RUST_TESTS, "installer-worker-rust-test")
     return installer_worker_rust_test_record()
+
+
+def installed_reader_rust_tests_result(stdout):
+    _rust_test_output(stdout, INSTALLED_READER_RUST_TESTS, "installed-reader-rust-test")
+    return installed_reader_rust_test_record()
+
+
+def producer_signing_rust_tests_result(stdout):
+    _rust_test_output(stdout, PRODUCER_SIGNING_RUST_TESTS, "producer-signing-rust-test")
+    return producer_signing_rust_test_record()
+
+
+def package_producer_rust_tests_result(stdout):
+    _rust_test_output(stdout, PACKAGE_PRODUCER_RUST_TESTS, "package-producer-rust-test")
+    return package_producer_rust_test_record()
 
 
 def cargo_artifact(messages, role, checkout, target):
@@ -2409,6 +2653,9 @@ class Operation:
         self.native = None
         self.native_rust_tests = None
         self.installer_worker_rust_tests = None
+        self.installed_reader_rust_tests = None
+        self.producer_signing_rust_tests = None
+        self.package_producer_rust_tests = None
         self.package = None
         self.installer_entered = False
         self.installed = False
@@ -2679,6 +2926,19 @@ class Operation:
                                             and context_package_info_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None)
                         if diagnostic_known:
                             self.artifacts[CONTEXT_PACKAGE_INFO_ARTIFACT] = value
+                    elif admitted and error.args == ("context-product-distribution",):
+                        self.artifacts.pop(CONTEXT_DISTRIBUTION_ARTIFACT, None)
+                        observed = getattr(error, "_context_distribution", None)
+                        diagnostic_known = (position == 2 and component is not None and type(observed) is dict
+                                            and set(observed) == {"packageSha256", "packageBytes", "distributionSha256", "distributionBytes", "distribution"}
+                                            and observed["packageSha256"] == digest(body) and observed["packageBytes"] == len(body))
+                        if diagnostic_known:
+                            value = {"schemaVersion": 1, "type": "mrk-context-product-distribution-diagnostic-v1",
+                                     "diagnosticOnly": True, "phase": self.phase, "package": package,
+                                     "buildCallIndex": call_index, **observed}
+                            diagnostic_known = context_distribution_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None
+                            if diagnostic_known:
+                                self.artifacts[CONTEXT_DISTRIBUTION_ARTIFACT] = value
                     if admitted and diagnostic_known:
                         # Not a serialized/input flag. execute must catch THIS
                         # exact pure Refused; every call/close still participates.
@@ -2689,6 +2949,7 @@ class Operation:
                 self._context_audit_refusal = None
                 self.artifacts.pop(CONTEXT_METADATA_ARTIFACT, None)
                 self.artifacts.pop(CONTEXT_PACKAGE_INFO_ARTIFACT, None)
+                self.artifacts.pop(CONTEXT_DISTRIBUTION_ARTIFACT, None)
             raise
 
 
@@ -2867,7 +3128,10 @@ class Operation:
         for relative in (NATIVE + "/examples/e2_maintenance_client.rs",
                          NATIVE + "/src/e2_native_fixture.rs",
                          NATIVE + "/src/e2_native_fixture_identity.m",
-                         NATIVE + "/src/e2_native_fixture_fixed.h"):
+                         NATIVE + "/src/e2_native_fixture_fixed.h",
+                         NATIVE + "/src/install_producer.rs",
+                         INSTALLER + "/src/installation_observation_macos.rs",
+                         INSTALLER + "/examples/macos_package_producer.rs"):
             self.source.read(relative)
 
     def retire_target(self, path):
@@ -2919,24 +3183,56 @@ class Operation:
         need(self.outputs.read(entry) == body, "compiler-copy-changed")
 
     def build_installer_worker_tests(self):
-        """One real ordinary Mac binary libtest; never a private writer invocation."""
-        target = self.scratch / "installer-worker-target"
-        entry = self.mkdir(target)
-        self.scratch_origins[target] = entry["identity"]
-        try:
-            cargo, environment = self.compiler_environment(target)
-            argv = [cargo, "test", "--manifest-path", str(CHECKOUT / INSTALLER / "Cargo.toml"),
-                    "--locked", "--offline", "--jobs", "1", "--target", TARGET,
-                    "--no-default-features", "--features", "macos-installed-installer",
-                    "--bin", "mrk-macos-install", "--message-format=short", "--color", "never",
-                    "--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
-                    *INSTALLER_WORKER_RUST_TESTS]
-            result = self.command("installer-worker-rust-tests", argv, environment, cwd=CHECKOUT,
-                                  timeout=480, limit=4 * 1024 * 1024)
-            self.installer_worker_rust_tests = installer_worker_rust_tests_result(result.stdout)
-        finally:
-            if all(call["returned"] for call in self.calls):
-                self.retire_target(target)
+        """Four fixed Mac DATA graphs; no executable main, signing or private writer."""
+        # This is one compile-group endpoint, not the separate native-run
+        # WORK990/HARD993 window or either native/Context transaction clock.
+        origin = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        need(type(origin) is int and 0 < origin <= MAX_RAW - WORK_SECONDS * 1_000_000_000,
+             "mac8-group-clock")
+        deadline, last = origin + WORK_SECONDS * 1_000_000_000, origin
+
+        def remaining():
+            nonlocal last
+            now = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+            need(type(now) is int and last <= now < deadline, "mac8-group-clock")
+            last = now
+            seconds = (deadline - now) // 1_000_000_000
+            need(seconds > 0, "mac8-group-deadline")
+            return min(480, seconds)  # Floor, never renew or round up.
+
+        batches = (
+            ("installer-worker", INSTALLER,
+             ("--features", "macos-installed-installer", "--bin", "mrk-macos-install"),
+             INSTALLER_WORKER_RUST_TESTS, installer_worker_rust_tests_result, "installer_worker_rust_tests"),
+            ("installed-reader", INSTALLER, ("--lib",),
+             INSTALLED_READER_RUST_TESTS, installed_reader_rust_tests_result, "installed_reader_rust_tests"),
+            ("producer-signing", NATIVE, ("--features", "package-producer-signing", "--lib"),
+             PRODUCER_SIGNING_RUST_TESTS, producer_signing_rust_tests_result, "producer_signing_rust_tests"),
+            ("package-producer", INSTALLER,
+             ("--features", "macos-package-producer", "--example", "macos_package_producer"),
+             PACKAGE_PRODUCER_RUST_TESTS, package_producer_rust_tests_result, "package_producer_rust_tests"),
+        )
+        for role, directory, flags, names, parser, field in batches:
+            remaining()
+            target = self.scratch / (role + "-target")
+            entry = self.mkdir(target)
+            self.scratch_origins[target] = entry["identity"]
+            try:
+                cargo, environment = self.compiler_environment(target)
+                argv = [cargo, "test", "--manifest-path", str(CHECKOUT / directory / "Cargo.toml"),
+                        "--locked", "--offline", "--jobs", "1", "--target", TARGET,
+                        "--no-default-features", *flags, "--message-format=short", "--color", "never",
+                        "--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *names]
+                result = self.command(role + "-rust-tests", argv, environment, cwd=CHECKOUT,
+                                      timeout=remaining(), limit=4 * 1024 * 1024)
+                remaining()  # Original return, source POST and both capture closes.
+                record = parser(result.stdout)
+                remaining()  # Complete fixed output, not a provisional partial pass.
+            finally:
+                if all(call["returned"] for call in self.calls):
+                    self.retire_target(target)  # Unknown originals still retain their target.
+                    remaining()  # Even successful compilation cannot claim late retirement.
+            setattr(self, field, record)  # Only after the exact target is retired in this group.
 
     def build_images(self):
         for role in ("client", "resident"):
@@ -3526,8 +3822,14 @@ class Operation:
         unit_passed = self.native_rust_tests is not None and native_rust_tests_data(self.native_rust_tests) is not None
         installer_unit_passed = (self.installer_worker_rust_tests is not None
                                 and installer_worker_rust_tests_data(self.installer_worker_rust_tests) is not None)
+        mac8_passed = (self.installed_reader_rust_tests is not None
+                       and installed_reader_rust_tests_data(self.installed_reader_rust_tests) is not None
+                       and self.producer_signing_rust_tests is not None
+                       and producer_signing_rust_tests_data(self.producer_signing_rust_tests) is not None
+                       and self.package_producer_rust_tests is not None
+                       and package_producer_rust_tests_data(self.package_producer_rust_tests) is not None)
         passed = (failure is None and native_passed and self.native_entered and self.native_returned
-                  and unit_passed and installer_unit_passed and self.installer_context["completed"]
+                  and unit_passed and installer_unit_passed and mac8_passed and self.installer_context["completed"]
                   and self.sources_closed and self.outputs_closed and self.protected_closed
                   and self.scratch_retired and not self.cleanup_errors
                   and all(call["returned"] and call["returncode"] == 0 for call in self.calls))
@@ -3549,6 +3851,9 @@ class Operation:
                 "receiptOriginals": getattr(self, "receipt_originals", []), "native": self.native,
                 "nativeRustTests": self.native_rust_tests,
                 "installerWorkerRustTests": self.installer_worker_rust_tests,
+                "installedReaderRustTests": self.installed_reader_rust_tests,
+                "producerSigningRustTests": self.producer_signing_rust_tests,
+                "packageProducerRustTests": self.package_producer_rust_tests,
                 "installerContext": self.installer_context,
                 "serviceLayoutObservation": self.service_layout,
                 "btmLogObservation": self.btm_log,

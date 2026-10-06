@@ -1,5 +1,6 @@
 // Fixed SOURCE detached-signature and two-App purpose facts, not package
 // authority, uniform child signers or a Keychain service. Caller retains files.
+// Private-key use below exists ONLY in the explicit packaging-example build.
 #include "install_producer.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
@@ -59,6 +60,9 @@ typedef struct {
     struct stat outer_identity,code_identity;
     CFTypeRef values[MRK_INSTALL_PRODUCER_SLOTS];
     mrk_install_producer_report report;
+#if MRK_INSTALL_PRODUCER_SIGNING
+    uint32_t signature_copied;
+#endif
 } producer_cell;
 _Static_assert(sizeof(producer_cell)<=MRK_INSTALL_PRODUCER_CELL_MAX,"bounded supplied originals, not framework heap");
 _Static_assert(MAXPATHLEN==MRK_INSTALL_PRODUCER_PATH_MAX,"fixed Darwin F_GETPATH output bound");
@@ -276,6 +280,132 @@ static unsigned phase_slot(uint32_t phase) {
         default:return MRK_INSTALL_PRODUCER_SLOTS;
     }
 }
+#if MRK_INSTALL_PRODUCER_SIGNING
+static unsigned sign_slot(uint32_t phase) {
+    if(phase>=1 && phase<=8) return phase-1;
+    switch(phase) {
+        case 9:return 8;case 10:return 10;case 11:return 11;case 12:return 13;
+        default:return MRK_INSTALL_PRODUCER_SLOTS;
+    }
+}
+// No arbitrary operation callback. UI suppression is local to each of these
+// fixed calls, and restored before any outer caller checkpoint. A known original
+// Boolean is restorative input, NEVER permission to adopt uncertain CF outputs.
+static void sign_keychain_phase(producer_cell *cell,uint32_t phase) {
+    Boolean original_state=0,current_state=0;
+    int restore_pending=0;
+    @try {
+        OSStatus status=SecKeychainGetUserInteractionAllowed(&original_state);
+        if(status!=errSecSuccess || (original_state!=0 && original_state!=1)) {failed(cell);return;}
+        restore_pending=1; // arm BEFORE dispatch, including an ambiguous Set
+        status=SecKeychainSetUserInteractionAllowed(false);
+        if(status!=errSecSuccess) {failed(cell);return;}
+        status=SecKeychainGetUserInteractionAllowed(&current_state);
+        if(status!=errSecSuccess || current_state!=0) {failed(cell);return;}
+        switch(phase) {
+            case 3: {
+                SecIdentityRef identity=NULL;
+                status=SecIdentityCreateWithCertificate(NULL,(SecCertificateRef)cell->values[1],&identity);
+                cell->values[2]=identity;break;
+            }
+            case 4: {
+                SecCertificateRef certificate=NULL;
+                status=SecIdentityCopyCertificate((SecIdentityRef)cell->values[2],&certificate);
+                cell->values[3]=certificate;break;
+            }
+            case 6: {
+                SecKeyRef key=NULL;
+                status=SecIdentityCopyPrivateKey((SecIdentityRef)cell->values[2],&key);
+                cell->values[5]=key;break;
+            }
+            case 7:cell->values[6]=SecKeyCopyPublicKey((SecKeyRef)cell->values[5]);break;
+            case 11: {
+                if(SecKeyGetBlockSize((SecKeyRef)cell->values[5])!=MRK_INSTALL_PRODUCER_RSA_BITS/8
+                    || !SecKeyIsAlgorithmSupported((SecKeyRef)cell->values[5],kSecKeyOperationTypeSign,
+                        kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256)) {failed(cell);break;}
+                CFErrorRef error=NULL;
+                CFDataRef signature=SecKeyCreateSignature((SecKeyRef)cell->values[5],
+                    kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256,(CFDataRef)cell->values[10],&error);
+                cell->values[11]=signature;cell->values[12]=error;
+                if(error) failed(cell);break;
+            }
+            default:failed(cell);break;
+        }
+        if(status!=errSecSuccess) failed(cell);
+    } @catch (...) {unknown(cell);}
+    @finally {
+        if(restore_pending) {
+            @try {
+                OSStatus status=SecKeychainSetUserInteractionAllowed(original_state);
+                Boolean actual=0;
+                OSStatus observed=SecKeychainGetUserInteractionAllowed(&actual);
+                if(status!=errSecSuccess || observed!=errSecSuccess || actual!=original_state) unknown(cell);
+            } @catch (...) {unknown(cell);}
+        }
+    }
+}
+static int sign_step(producer_cell *cell,uint32_t phase,mrk_install_producer_report *out) {
+    if(cell->report.reserved!=3 || cell->report.failed || cell->report.unknown || phase<1
+        || phase>MRK_INSTALL_PRODUCER_SIGN_STEPS || phase!=cell->report.phase+1) return 0;
+    unsigned slot=sign_slot(phase),error_slot=phase==9?9:phase==11?12:MRK_INSTALL_PRODUCER_SLOTS;
+    if(slot>=MRK_INSTALL_PRODUCER_SIGN_SLOTS || cell->values[slot] || cell->report.states[slot]) return 0;
+    if(error_slot<MRK_INSTALL_PRODUCER_SLOTS && (cell->values[error_slot] || cell->report.states[error_slot])) return 0;
+    cell->report.phase=phase;cell->report.calls++;
+    cell->report.states[slot]=1;
+    if(error_slot<MRK_INSTALL_PRODUCER_SLOTS) cell->report.states[error_slot]=1;
+    @try {
+        switch(phase) {
+            case 1:cell->values[0]=CFDataCreate(NULL,mrk_install_producer_leaf_der,sizeof(mrk_install_producer_leaf_der));break;
+            case 2:cell->values[1]=SecCertificateCreateWithData(NULL,(CFDataRef)cell->values[0]);break;
+            case 3:case 4:case 6:case 7:case 11:sign_keychain_phase(cell,phase);break;
+            case 5:cell->values[4]=SecCertificateCopyData((SecCertificateRef)cell->values[3]);break;
+            case 8:cell->values[7]=SecKeyCopyAttributes((SecKeyRef)cell->values[6]);break;
+            case 9: {
+                // Only the PUBLIC key can be exported; private attributes/data
+                // and external private representations are never requested.
+                CFErrorRef error=NULL;
+                CFDataRef key=SecKeyCopyExternalRepresentation((SecKeyRef)cell->values[6],&error);
+                cell->values[8]=key;cell->values[9]=error;
+                if(error) failed(cell);break;
+            }
+            case 10:cell->values[10]=CFDataCreate(NULL,cell->message,cell->message_size);break;
+            case 12: {
+                CFErrorRef error=NULL;
+                Boolean verified=SecKeyVerifySignature((SecKeyRef)cell->values[6],
+                    kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256,(CFDataRef)cell->values[10],
+                    (CFDataRef)cell->values[11],&error);
+                cell->values[13]=error;
+                if(!verified || error) failed(cell);break;
+            }
+            default:failed(cell);break;
+        }
+        if(!cell->report.unknown) {
+            received(cell,slot,phase!=12);
+            if(error_slot<MRK_INSTALL_PRODUCER_SLOTS) received(cell,error_slot,0);
+            if(!cell->report.failed && phase==5
+                && !data_equal(cell->values[4],mrk_install_producer_leaf_der,sizeof(mrk_install_producer_leaf_der))) failed(cell);
+            if(!cell->report.failed && phase==8 && !key_attributes(cell)) failed(cell);
+            if(!cell->report.failed && phase==9) {
+                CFDataRef key=(CFDataRef)cell->values[8];
+                if(CFGetTypeID(key)!=CFDataGetTypeID() || CFDataGetLength(key)<=0 || CFDataGetLength(key)>16384
+                    || !sha256_matches(CFDataGetBytePtr(key),(size_t)CFDataGetLength(key),mrk_install_producer_public_key_pkcs1_sha256)) failed(cell);
+            }
+            if(!cell->report.failed && phase==11) {
+                CFTypeRef value=cell->values[11];
+                if(CFGetTypeID(value)!=CFDataGetTypeID()
+                    || CFDataGetLength((CFDataRef)value)!=MRK_INSTALL_PRODUCER_RSA_BITS/8) failed(cell);
+                else {
+                    cell->signature_size=MRK_INSTALL_PRODUCER_RSA_BITS/8;
+                    memcpy(cell->signature,CFDataGetBytePtr((CFDataRef)value),cell->signature_size);
+                }
+            }
+            cell->report.returned++;
+            if(phase==MRK_INSTALL_PRODUCER_SIGN_STEPS && !cell->report.failed) cell->report.matched=1;
+        }
+    } @catch (...) {unknown(cell);}
+    *out=cell->report;return 1;
+}
+#endif
 #endif
 
 int mrk_install_producer_source(mrk_install_producer_signer *out) {
@@ -336,6 +466,9 @@ int mrk_install_producer_step(void *raw,uint32_t phase,mrk_install_producer_repo
 #if MRK_INSTALL_PRODUCER_CONFIGURED
     producer_cell *cell=raw;
     if(!original(cell) || !out) return 0;
+#if MRK_INSTALL_PRODUCER_SIGNING
+    if(cell->report.reserved==3) return sign_step(cell,phase,out);
+#endif
     if(cell->report.reserved) return code_step(cell,phase,out);
     if(cell->report.failed || cell->report.unknown || phase<1
         || phase>MRK_INSTALL_PRODUCER_STEPS || phase!=cell->report.phase+1) return 0;
@@ -454,3 +587,31 @@ int mrk_install_producer_retire(void *raw) {
     (void)raw;return 0;
 #endif
 }
+#if MRK_INSTALL_PRODUCER_SIGNING
+void *mrk_install_producer_sign_new(const uint8_t *descriptor,size_t size) {
+#if MRK_INSTALL_PRODUCER_CONFIGURED
+    if(!source_selected() || !descriptor || !size || size>MRK_INSTALL_PRODUCER_DESCRIPTOR_MAX
+        || getuid()!=geteuid() || getgid()!=getegid()) return NULL;
+    producer_cell *cell=calloc(1,sizeof(*cell));if(!cell) return NULL;
+    cell->magic=MRK_PRODUCER_MAGIC;cell->thread=pthread_self();cell->process=getpid();cell->uid=getuid();cell->gid=getgid();
+    cell->report.version=1;cell->report.reserved=3;cell->message_size=sizeof(message_domain)+size;
+    memcpy(cell->message,message_domain,sizeof(message_domain));memcpy(cell->message+sizeof(message_domain),descriptor,size);
+    return cell;
+#else
+    (void)descriptor;(void)size;return NULL;
+#endif
+}
+int mrk_install_producer_sign_copy(void *raw,uint8_t *out,size_t capacity,size_t *size) {
+#if MRK_INSTALL_PRODUCER_CONFIGURED
+    producer_cell *cell=raw;
+    if(!original(cell) || !out || !size || capacity!=sizeof(cell->signature) || cell->report.reserved!=3
+        || cell->signature_copied || cell->report.failed || cell->report.unknown || cell->report.matched!=1
+        || cell->report.phase!=MRK_INSTALL_PRODUCER_SIGN_STEPS || cell->report.calls!=cell->report.returned
+        || cell->signature_size!=MRK_INSTALL_PRODUCER_RSA_BITS/8) return 0;
+    cell->signature_copied=1;
+    memcpy(out,cell->signature,cell->signature_size);*size=cell->signature_size;return 1;
+#else
+    (void)raw;(void)out;(void)capacity;(void)size;return 0;
+#endif
+}
+#endif

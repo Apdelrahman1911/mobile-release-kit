@@ -27,6 +27,13 @@ name = "mrk-macos-install"
 path = "src/bin/macos_install.rs"
 required-features = ["macos-installed-installer"]
 
+# Explicit external packaging child only; never a packaged application target.
+[[example]]
+name = "macos_package_producer"
+path = "examples/macos_package_producer.rs"
+required-features = ["macos-package-producer"]
+bench = false
+
 [[bin]]
 name = "mrk-windows-runtime-publish"
 path = "src/bin/windows_runtime_publish.rs"
@@ -53,6 +60,8 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+# Private-key signing is isolated to the explicit nonshipping example graph.
+macos-package-producer = ["mrk-macos-installed-native/package-producer-signing"]
 # Separate fixed headless Android registration helper; never unified into UI.
 macos-android-registration-helper = ["mrk-macos-installed-native/android-registration-helper"]
 macos-installed-resident-image = ["macos-android-registration-helper", "mrk-macos-installed-native/resident-image"]

@@ -3,11 +3,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef MRK_INSTALL_PRODUCER_SIGNING
+#define MRK_INSTALL_PRODUCER_SIGNING 0
+#endif
+#if MRK_INSTALL_PRODUCER_SIGNING != 0 && MRK_INSTALL_PRODUCER_SIGNING != 1
+#error package signing is a closed nonshipping build selection
+#endif
+
 enum { MRK_INSTALL_PRODUCER_SLOTS=26, MRK_INSTALL_PRODUCER_STEPS=29,
     MRK_INSTALL_PRODUCER_RELEASE=64, MRK_INSTALL_PRODUCER_DESCRIPTOR_MAX=65536,
     MRK_INSTALL_PRODUCER_CERTIFICATE_MAX=16384, MRK_INSTALL_PRODUCER_CELL_MAX=131072,
     MRK_INSTALL_PRODUCER_PATH_MAX=1024, MRK_INSTALL_PRODUCER_CODE_STEPS=8,
-    MRK_INSTALL_PRODUCER_CODE_SLOTS=6, MRK_INSTALL_PRODUCER_CODE_STACK_MAX=8192 };
+    MRK_INSTALL_PRODUCER_CODE_SLOTS=6, MRK_INSTALL_PRODUCER_CODE_STACK_MAX=8192,
+    MRK_INSTALL_PRODUCER_SIGN_STEPS=12, MRK_INSTALL_PRODUCER_SIGN_SLOTS=14 };
 typedef struct {
     uint32_t version,phase,calls,returned,matched,failed,unknown,reserved;
     uint32_t states[MRK_INSTALL_PRODUCER_SLOTS];
@@ -30,4 +38,9 @@ void *mrk_install_producer_code_new(uint32_t role,int outer,int code,
 int mrk_install_producer_step(void *raw,uint32_t phase,mrk_install_producer_report *out);
 int mrk_install_producer_release(void *raw,uint32_t slot,mrk_install_producer_report *out);
 int mrk_install_producer_retire(void *raw);
+#if MRK_INSTALL_PRODUCER_SIGNING
+// Explicit packaging example only; no private key or arbitrary identity input.
+void *mrk_install_producer_sign_new(const uint8_t *descriptor,size_t size);
+int mrk_install_producer_sign_copy(void *raw,uint8_t *out,size_t capacity,size_t *size);
+#endif
 #endif

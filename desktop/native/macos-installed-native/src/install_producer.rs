@@ -1,8 +1,10 @@
-//! One fixed detached-signature original under the caller's existing W/H/F.
+//! Fixed producer signature/purpose originals under the caller's existing W/H/F.
 //! SignatureVerified means pinned-chain/signature correspondence AND settled
 //! native references, NOT Developer-ID Application purpose or release authority.
 //! The caller still owes strict current-product purpose/leaf checks, compiled
 //! release correspondence, original descriptor/package POST and ordinary GO.
+//! An explicitly feature-gated nonshipping signer shares this exact custody;
+//! SignatureCreated is only provisional public signature DATA, never authority.
 use std::{ffi::{c_int,c_void},os::{fd::{AsRawFd,BorrowedFd},unix::ffi::OsStrExt},path::Path,ptr::NonNull,time::Instant};
 use crate::android_service_management::{CellCustody,Decision};
 
@@ -18,6 +20,10 @@ const CODE_SLOTS:usize=6;
 // Same 320KiB supplied-resource ceiling; includes bounded C path/stat stack.
 const CODE_STACK_LIMIT:usize=8192;
 const DOMAIN:&[u8]=b"MobileReleaseKit-package-producer-v2\0";
+#[cfg(any(test,feature="package-producer-signing"))]
+const SIGN_STEPS:u8=12;
+#[cfg(any(test,feature="package-producer-signing"))]
+const SIGN_SLOTS:usize=14;
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum SignatureResult { SignatureVerified,Unavailable,Refused,Unknown }
@@ -36,14 +42,28 @@ impl CurrentProductRole {
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum CurrentProductResult { PurposeVerified,Unavailable,Refused,Unknown }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum ProducerOperation { DetachedSignature,CurrentProduct(CurrentProductRole) }
+pub enum ProducerOperation {
+    DetachedSignature,CurrentProduct(CurrentProductRole),
+    #[cfg(any(test,feature="package-producer-signing"))]
+    PackageSigning,
+}
 impl ProducerOperation {
     fn code(self)->u32 {match self {
         Self::DetachedSignature=>0,Self::CurrentProduct(CurrentProductRole::EntryApp)=>1,
         Self::CurrentProduct(CurrentProductRole::PayloadApp)=>2,
+        #[cfg(any(test,feature="package-producer-signing"))]
+        Self::PackageSigning=>3,
     }}
-    fn steps(self)->u8 {if self==Self::DetachedSignature{STEPS}else{CODE_STEPS}}
-    fn slots(self)->usize {if self==Self::DetachedSignature{SLOTS}else{CODE_SLOTS}}
+    fn steps(self)->u8 {match self {
+        Self::DetachedSignature=>STEPS,Self::CurrentProduct(_)=>CODE_STEPS,
+        #[cfg(any(test,feature="package-producer-signing"))]
+        Self::PackageSigning=>SIGN_STEPS,
+    }}
+    fn slots(self)->usize {match self {
+        Self::DetachedSignature=>SLOTS,Self::CurrentProduct(_)=>CODE_SLOTS,
+        #[cfg(any(test,feature="package-producer-signing"))]
+        Self::PackageSigning=>SIGN_SLOTS,
+    }}
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum VerificationResult { Matched,Unavailable,Refused,Unknown }
@@ -51,6 +71,8 @@ enum VerificationResult { Matched,Unavailable,Refused,Unknown }
 enum VerificationInput<'a> {
     Signature {descriptor:&'a [u8],signature:&'a [u8]},
     Current {outer:c_int,code:c_int,outer_path:&'a [u8]},
+    #[cfg(any(test,feature="package-producer-signing"))]
+    Signing {descriptor:&'a [u8]},
 }
 fn canonical_outer_path(path:&[u8],role:CurrentProductRole)->bool {
     path.len()>1 && path.len()<PATH_LIMIT && path[0]==b'/' && !path.contains(&0)
@@ -64,11 +86,17 @@ impl VerificationInput<'_> {
             !descriptor.is_empty()&&descriptor.len()<=DESCRIPTOR_LIMIT&&matches!(signature.len(),256|384|512),
         (Self::Current{outer,code,outer_path},ProducerOperation::CurrentProduct(role))=>
             outer>=0&&code>=0&&canonical_outer_path(outer_path,role),
+        #[cfg(any(test,feature="package-producer-signing"))]
+        (Self::Signing{descriptor},ProducerOperation::PackageSigning)=>!descriptor.is_empty()&&descriptor.len()<=DESCRIPTOR_LIMIT,
         _=>false,
     }}
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum ProducerPhase { SourceSelection,AllocateCell,Inspect(u8),Release(u8),RetireCell }
+pub enum ProducerPhase {
+    SourceSelection,AllocateCell,Inspect(u8),Release(u8),RetireCell,
+    #[cfg(any(test,feature="package-producer-signing"))]
+    CopySignature,
+}
 impl ProducerPhase {
     pub fn is_cleanup(self)->bool { matches!(self,Self::Release(_)|Self::RetireCell) }
 }
@@ -126,6 +154,11 @@ unsafe extern "C" {
     fn mrk_install_producer_release(cell:*mut c_void,slot:u32,out:*mut Report)->c_int;
     fn mrk_install_producer_retire(cell:*mut c_void)->c_int;
 }
+#[cfg(feature="package-producer-signing")]
+unsafe extern "C" {
+    fn mrk_install_producer_sign_new(descriptor:*const u8,size:usize)->*mut c_void;
+    fn mrk_install_producer_sign_copy(cell:*mut c_void,out:*mut u8,capacity:usize,size:*mut usize)->c_int;
+}
 pub fn source_signer_data()->Option<SourceSignerData> {
     let mut raw=SourceSigner::default();
     // SAFETY: fixed SOURCE query copies only the bounded record, no references,
@@ -141,6 +174,10 @@ pub fn source_leaf_matches_data(der:&[u8])->bool {
 }
 
 fn phase_slot(phase:u8,operation:ProducerOperation)->Option<usize> {
+    #[cfg(any(test,feature="package-producer-signing"))]
+    if operation==ProducerOperation::PackageSigning {return match phase {
+        1..=8=>Some(usize::from(phase-1)),9=>Some(8),10=>Some(10),11=>Some(11),12=>Some(13),_=>None,
+    };}
     if operation!=ProducerOperation::DetachedSignature {return match phase {
         1..=4=>Some(usize::from(phase-1)),6=>Some(4),7=>Some(5),_=>None,
     };}
@@ -149,6 +186,16 @@ fn phase_slot(phase:u8,operation:ProducerOperation)->Option<usize> {
         13=>Some(13),14=>Some(14),15=>Some(15),16=>Some(16),20=>Some(17),22=>Some(18),
         23=>Some(19),24=>Some(20),25=>Some(21),26=>Some(22),27=>Some(23),28=>Some(24),29=>Some(25),_=>None,
     }
+}
+fn second_slot(phase:u8,operation:ProducerOperation)->Option<usize> {
+    #[cfg(any(test,feature="package-producer-signing"))]
+    if operation==ProducerOperation::PackageSigning {return match phase{9=>Some(9),11=>Some(12),_=>None};}
+    (operation==ProducerOperation::DetachedSignature && phase==9).then_some(9)
+}
+fn error_slot(phase:u8,slot:usize,operation:ProducerOperation)->bool {
+    #[cfg(any(test,feature="package-producer-signing"))]
+    if operation==ProducerOperation::PackageSigning {return matches!((phase,slot),(9,9)|(11,12)|(12,13));}
+    operation==ProducerOperation::DetachedSignature && ((phase==9 && slot==9)||phase==22||phase==29)
 }
 fn transition(raw:Report,old:Report,phase:ProducerPhase,operation:ProducerOperation)->bool {
     let call_limit=u32::from(operation.steps())+operation.slots() as u32;
@@ -170,10 +217,10 @@ fn transition(raw:Report,old:Report,phase:ProducerPhase,operation:ProducerOperat
             if old.failed!=0 || old.matched!=0 || old.phase+1!=u32::from(n) {return false;}
             let slot=phase_slot(n,operation);
             for (index,(&before,&after)) in old.states.iter().zip(&raw.states).enumerate() {
-                if Some(index)==slot || operation==ProducerOperation::DetachedSignature && n==9 && index==9 {
+                if Some(index)==slot || Some(index)==second_slot(n,operation) {
                     if before!=0 || !matches!(after,2|4|5) || raw.unknown==0 && after==5 {return false;}
-                    let error_slot=operation==ProducerOperation::DetachedSignature && ((n==9 && index==9)||n==22||n==29);
-                    if raw.unknown==0 && ((error_slot && after==2)||(!error_slot && after==4)) && raw.failed!=1 {return false;}
+                    let is_error=error_slot(n,index,operation);
+                    if raw.unknown==0 && ((is_error && after==2)||(!is_error && after==4)) && raw.failed!=1 {return false;}
                 } else if before!=after {return false;}
             }
             raw.matched==u32::from(n==operation.steps() && raw.failed==0 && raw.unknown==0)
@@ -195,6 +242,8 @@ trait Native {
     fn step(&mut self,cell:*mut c_void,phase:u32,out:&mut Report)->c_int;
     fn release(&mut self,cell:*mut c_void,slot:u32,out:&mut Report)->c_int;
     fn retire(&mut self,cell:*mut c_void)->c_int;
+    #[cfg(any(test,feature="package-producer-signing"))]
+    fn signature_copy(&mut self,cell:*mut c_void,output:&mut [u8;512],size:&mut usize)->c_int;
 }
 struct Calls;
 impl Native for Calls {
@@ -207,19 +256,30 @@ impl Native for Calls {
                 unsafe{mrk_install_producer_new(descriptor.as_ptr(),descriptor.len(),signature.as_ptr(),signature.len())},
             (VerificationInput::Current{outer,code,outer_path},ProducerOperation::CurrentProduct(_))=>
                 unsafe{mrk_install_producer_code_new(operation.code(),outer,code,outer_path.as_ptr(),outer_path.len())},
+            #[cfg(feature="package-producer-signing")]
+            (VerificationInput::Signing{descriptor},ProducerOperation::PackageSigning)=>
+                unsafe{mrk_install_producer_sign_new(descriptor.as_ptr(),descriptor.len())},
             _=>std::ptr::null_mut(),
         }
     }
     fn step(&mut self,cell:*mut c_void,phase:u32,out:&mut Report)->c_int {unsafe{mrk_install_producer_step(cell,phase,out)}}
     fn release(&mut self,cell:*mut c_void,slot:u32,out:&mut Report)->c_int {unsafe{mrk_install_producer_release(cell,slot,out)}}
     fn retire(&mut self,cell:*mut c_void)->c_int {unsafe{mrk_install_producer_retire(cell)}}
+    #[cfg(feature="package-producer-signing")]
+    fn signature_copy(&mut self,cell:*mut c_void,output:&mut [u8;512],size:&mut usize)->c_int {
+        unsafe{mrk_install_producer_sign_copy(cell,output.as_mut_ptr(),output.len(),size)}
+    }
+    // Portable report DATA tests must never acquire a real Keychain signer.
+    #[cfg(all(test,not(feature="package-producer-signing")))]
+    fn signature_copy(&mut self,_:*mut c_void,_:&mut [u8;512],_:&mut usize)->c_int {0}
 }
 
 /// Inert construction, one original operation, explicit consuming close only.
-/// No Drop cleanup, background work, private keys or independent deadline.
+/// No Drop cleanup, background work, exported keys or independent deadline.
 pub struct ProducerVerifier {
     operation:ProducerOperation,pointer:Option<NonNull<c_void>>,report:Report,phase:Option<ProducerPhase>,cell:CellCustody,
     entered:bool,in_call:bool,in_gate:bool,unknown:bool,closed:bool,first:Option<Instant>,
+    signature_size:usize,
 }
 // SAFETY: exclusively borrowed calls never dereference a native pointer in Rust.
 // Every native operation checks the original process/pthread/UID/GID. Moving the
@@ -231,7 +291,7 @@ impl ProducerVerifier {
     pub fn new()->Self {Self::new_for(ProducerOperation::DetachedSignature)}
     fn new_for(operation:ProducerOperation)->Self {Self{operation,pointer:None,
         report:Report{version:1,reserved:operation.code(),..Report::default()},phase:None,
-        cell:CellCustody::Absent,entered:false,in_call:false,in_gate:false,unknown:false,closed:false,first:None}}
+        cell:CellCustody::Absent,entered:false,in_call:false,in_gate:false,unknown:false,closed:false,first:None,signature_size:0}}
     /// Bound supplied buffers/copies plus wrapper/report stack, not Security's
     /// private framework heap. Caller retains its EXISTING aggregate heap floor.
     pub fn project_owned_upper_bound()->Option<usize> {
@@ -298,6 +358,7 @@ impl ProducerVerifier {
         };
         if !self.work_point(phase,Some(at),gate)||self.unknown{return self.stopped();}
         let Some(signer)=signer else{return VerificationResult::Unavailable;};
+        self.signature_size=signer.rsa_bits_data() as usize/8;
         if let VerificationInput::Signature{signature,..}=input {
             if signature.len()!=signer.rsa_bits_data() as usize/8 {self.note(at);return VerificationResult::Refused;}
         }
@@ -380,15 +441,81 @@ impl CurrentProductVerifier {
     pub fn settled(&self)->bool {self.inner.settled()}
 }
 
+/// Public signature bytes only. Creation does not authenticate Developer-ID
+/// purpose, a completed package, or any ReleaseSet authority.
+#[cfg(any(test,feature="package-producer-signing"))]
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct PackageSignatureData {bytes:[u8;512],size:usize}
+#[cfg(any(test,feature="package-producer-signing"))]
+impl PackageSignatureData {pub fn as_bytes(&self)->&[u8] {&self.bytes[..self.size]}}
+#[cfg(any(test,feature="package-producer-signing"))]
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub enum PackageSignResult {SignatureCreated(PackageSignatureData),Unavailable,Refused,Unknown}
+
+/// Explicit nonshipping packaging caller, same original CF engine and clock.
+/// Only Calls can reach the feature-gated native signer. Tests substitute return
+/// DATA privately; neither CONFIGURED0 nor synthetic DATA can sign a package.
+#[cfg(any(test,feature="package-producer-signing"))]
+pub struct PackageProducerSigner {inner:ProducerVerifier,copy_entered:bool,copy_returned:bool}
+#[cfg(any(test,feature="package-producer-signing"))]
+impl Default for PackageProducerSigner {fn default()->Self {Self::new()}}
+#[cfg(any(test,feature="package-producer-signing"))]
+impl PackageProducerSigner {
+    pub fn new()->Self {Self{inner:ProducerVerifier::new_for(ProducerOperation::PackageSigning),copy_entered:false,copy_returned:false}}
+    pub fn project_owned_upper_bound()->Option<usize> {
+        ProducerVerifier::project_owned_upper_bound()?.checked_add(512+std::mem::size_of::<Self>()+1024)
+    }
+    pub fn custody(&self)->ProducerCustody {self.inner.custody()}
+    pub fn settled(&self)->bool {self.inner.settled()&&(!self.copy_entered||self.copy_returned)}
+    pub fn close(&mut self,gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->bool {
+        self.inner.close(gate)&&self.settled()
+    }
+    pub fn sign_and_close(&mut self,descriptor:&[u8],gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->PackageSignResult {
+        self.sign_with(descriptor,gate,&mut Calls)
+    }
+    fn sign_with(&mut self,descriptor:&[u8],gate:&mut dyn FnMut(ProducerCheckpoint)->Decision,native:&mut impl Native)->PackageSignResult {
+        if self.inner.entered||self.inner.closed||self.inner.pointer.is_some()||self.inner.in_call
+            ||self.inner.in_gate||self.inner.unknown||self.copy_entered {
+            self.inner.poison(Instant::now());return PackageSignResult::Unknown;
+        }
+        self.inner.entered=true;
+        let observed=self.inner.inspect(VerificationInput::Signing{descriptor},gate,native);
+        let mut output=[0;512];let mut size=0;
+        if observed==VerificationResult::Matched && self.inner.first.is_none() {
+            let phase=ProducerPhase::CopySignature;
+            if self.inner.work_point(phase,None,gate) {
+                if let Some(pointer)=self.inner.pointer {
+                    self.copy_entered=true;self.inner.in_call=true;
+                    let returned=native.signature_copy(pointer.as_ptr(),&mut output,&mut size);
+                    let at=Instant::now();self.inner.in_call=false;self.copy_returned=true;
+                    if returned!=1 || !matches!(size,256|384|512) || size!=self.inner.signature_size
+                        || output[size..].iter().any(|b|*b!=0) {self.inner.poison(at);}
+                    self.inner.work_point(phase,Some(at),gate);
+                } else {self.inner.poison(Instant::now());}
+            }
+        }
+        if !self.inner.close_with(gate,native)||!self.settled() {return PackageSignResult::Unknown;}
+        match observed {
+            VerificationResult::Matched if self.copy_entered&&self.copy_returned&&self.inner.first.is_none()
+                &&self.inner.report.failed==0&&self.inner.report.matched==1=>
+                    PackageSignResult::SignatureCreated(PackageSignatureData{bytes:output,size}),
+            VerificationResult::Unavailable=>PackageSignResult::Unavailable,
+            VerificationResult::Unknown=>PackageSignResult::Unknown,_=>PackageSignResult::Refused,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     // Bounded synthetic return DATA only; never a Security/purpose certificate
     // or a native passing receipt. The private trait is not a production API.
     struct DataCalls {report:Report,unavailable:bool,failed_at:Option<u8>,bad_at:Option<u8>,
-        unknown_at:Option<u8>,release_unknown:bool,allocated:bool,releases:Vec<u8>,retired:bool}
+        unknown_at:Option<u8>,release_unknown:bool,allocated:bool,releases:Vec<u8>,retired:bool,
+        copy_bad:bool,copied:bool,failed_without_output:bool}
     impl DataCalls {fn new()->Self{Self{report:Report{version:1,..Report::default()},unavailable:false,
-        failed_at:None,bad_at:None,unknown_at:None,release_unknown:false,allocated:false,releases:Vec::new(),retired:false}}}
+        failed_at:None,bad_at:None,unknown_at:None,release_unknown:false,allocated:false,releases:Vec::new(),retired:false,
+        copy_bad:false,copied:false,failed_without_output:false}}}
     impl Native for DataCalls {
         fn source(&mut self,out:&mut SourceSigner)->c_int{
             if self.unavailable{return 0;}
@@ -402,14 +529,18 @@ mod tests {
             self.report.phase=n;self.report.calls+=1;
             // Independently literal fixture layout, not transition() as oracle.
             let code=matches!(self.report.reserved,1|2);
-            let slot=if code {match n{1..=4=>Some((n-1)as usize),6=>Some(4),7=>Some(5),_=>None}}
+            let sign=self.report.reserved==3;
+            let slot=if sign {match n{1..=8=>Some((n-1)as usize),9=>Some(8),10=>Some(10),11=>Some(11),12=>Some(13),_=>None}}
+                else if code {match n{1..=4=>Some((n-1)as usize),6=>Some(4),7=>Some(5),_=>None}}
                 else {match n{1..=8=>Some((n-1)as usize),9=>Some(8),10..=16=>Some(n as usize),
                     20=>Some(17),22=>Some(18),23..=29=>Some((n-4)as usize),_=>None}};
-            if let Some(slot)=slot{assert_eq!(self.report.states[slot],0);self.report.states[slot]=if !code&&matches!(n,22|29){4}else{2};}
+            if let Some(slot)=slot{assert_eq!(self.report.states[slot],0);self.report.states[slot]=if sign&&n==12 || !sign&&!code&&matches!(n,22|29){4}else{2};}
             if !code&&n==9{self.report.states[9]=4;}
+            if sign&&n==11{self.report.states[12]=4;}
             if self.failed_at==Some(n as u8){self.report.failed=1;if !code&&matches!(n,22|29){self.report.states[slot.unwrap()]=2;}}
+            if sign&&self.failed_at==Some(n as u8)&&self.failed_without_output {self.report.states[slot.unwrap()]=4;}
             if self.unknown_at==Some(n as u8){self.report.failed=1;self.report.unknown=1;}
-            else{self.report.returned+=1;if n==(if code{8}else{29})&&self.report.failed==0{self.report.matched=1;}}
+            else{self.report.returned+=1;if n==(if sign{12}else if code{8}else{29})&&self.report.failed==0{self.report.matched=1;}}
             *out=self.report;if self.bad_at==Some(n as u8){out.phase+=1;}1
         }
         fn release(&mut self,_:*mut c_void,slot:u32,out:&mut Report)->c_int{
@@ -420,6 +551,10 @@ mod tests {
             *out=self.report;1
         }
         fn retire(&mut self,_:*mut c_void)->c_int{assert!(self.report.states.iter().all(|s|matches!(*s,0|4)));self.retired=true;1}
+        fn signature_copy(&mut self,_:*mut c_void,output:&mut [u8;512],size:&mut usize)->c_int {
+            assert_eq!(self.report.reserved,3);assert_eq!(self.report.matched,1);assert!(!self.copied);
+            self.copied=true;*size=if self.copy_bad{513}else{256};output[..256].fill(7);1
+        }
     }
     #[test]
     fn report_decoder_binds_slots_error_outputs_and_consuming_returns() {
@@ -460,8 +595,33 @@ mod tests {
             assert!(transition(raw,old,ProducerPhase::Release(5),operation));
             assert!(!transition(raw,old,ProducerPhase::Release(6),operation));
         }
+        let operation=ProducerOperation::PackageSigning;
+        let mut native=DataCalls::new();native.report.reserved=3;
+        let mut old=Report{version:1,reserved:3,..Report::default()};
+        for n in 1..=12 {
+            native.step(std::ptr::null_mut(),n,&mut raw);
+            assert!(transition(raw,old,ProducerPhase::Inspect(n as u8),operation));
+            for mode in 0..=2 {let mut wrong=raw;wrong.reserved=mode;
+                assert!(!transition(wrong,old,ProducerPhase::Inspect(n as u8),operation));}
+            let mut extra=raw;extra.states[14]=2;
+            assert!(!transition(extra,old,ProducerPhase::Inspect(n as u8),operation));
+            if let Some(error)=match n {9=>Some(9),11=>Some(12),12=>Some(13),_=>None} {
+                let mut lost=raw;lost.states[error]=0;
+                assert!(!transition(lost,old,ProducerPhase::Inspect(n as u8),operation));
+                let mut false_success=raw;false_success.states[error]=2;
+                assert!(!transition(false_success,old,ProducerPhase::Inspect(n as u8),operation));
+            }
+            if n<12 {let mut early=raw;early.matched=1;
+                assert!(!transition(early,old,ProducerPhase::Inspect(n as u8),operation));}
+            old=raw;
+        }
+        assert_eq!(raw.matched,1);
+        assert_eq!(&raw.states[..14],&[2,2,2,2,2,2,2,2,2,4,2,2,4,4]);
+        assert!(!transition(raw,old,ProducerPhase::CopySignature,operation));
+        assert!(!transition(raw,old,ProducerPhase::Inspect(13),operation));
         assert_eq!(std::mem::size_of::<Report>(),136);assert_eq!(std::mem::size_of::<SourceSigner>(),104);
         assert!(ProducerVerifier::project_owned_upper_bound().unwrap()<=320*1024);
+        assert!(PackageProducerSigner::project_owned_upper_bound().unwrap()<=320*1024);
     }
     #[test]
     fn signature_result_requires_same_owner_finality_and_late_gate_refuses() {
@@ -521,6 +681,41 @@ mod tests {
         assert!(!canonical_outer_path(&overlong,CurrentProductRole::PayloadApp));
         assert!(!input.valid_for(ProducerOperation::DetachedSignature));
         assert!(!VerificationInput::Signature{descriptor:b"{}",signature:&[0;256]}.valid_for(ProducerOperation::CurrentProduct(CurrentProductRole::EntryApp)));
+        let mut native=DataCalls::new();let mut signer=PackageProducerSigner::new();
+        let result=signer.sign_with(b"original descriptor DATA",&mut |_|Decision::Proceed,&mut native);
+        let PackageSignResult::SignatureCreated(signature)=result else {panic!("DATA signature result");};
+        assert_eq!(signature.as_bytes(),&[7;256]);
+        assert!(signer.settled()&&native.retired&&native.copied);
+        assert_eq!(native.releases,vec![11,10,8,7,6,5,4,3,2,1,0]);
+        assert!(!signer.custody().signature_matched&&signer.custody().purpose_matched.is_none());
+        assert_eq!(signer.sign_with(b"{}",&mut |_|Decision::Proceed,&mut native),PackageSignResult::Unknown);
+        // Known failed headless Get/disable/key operation with proven restore is
+        // represented by a normal failed phase; NOT an actual Keychain test.
+        for phase in [3,4,6,7,11] {
+            for absent in [false,true] {
+                let mut native=DataCalls::new();native.failed_at=Some(phase);native.failed_without_output=absent;
+                let mut signer=PackageProducerSigner::new();
+                assert_eq!(signer.sign_with(b"{}",&mut |_|Decision::Proceed,&mut native),PackageSignResult::Refused);
+                assert!(signer.settled()&&native.retired&&!native.copied);
+            }
+        }
+        let mut native=DataCalls::new();native.unavailable=true;let mut signer=PackageProducerSigner::new();
+        assert_eq!(signer.sign_with(b"{}",&mut |_|Decision::Proceed,&mut native),PackageSignResult::Unavailable);
+        assert!(signer.settled()&&!native.allocated&&!native.copied);
+        for descriptor in [b"".as_slice(),&vec![0;DESCRIPTOR_LIMIT+1]] {
+            let mut native=DataCalls::new();let mut signer=PackageProducerSigner::new();
+            assert_eq!(signer.sign_with(descriptor,&mut |_|Decision::Proceed,&mut native),PackageSignResult::Refused);
+            assert!(signer.settled()&&!native.allocated);
+        }
+        for returned in [false,true] {
+            let mut native=DataCalls::new();let mut signer=PackageProducerSigner::new();
+            let result=signer.sign_with(b"{}",&mut |point| match point {
+                ProducerCheckpoint::Before{phase:ProducerPhase::CopySignature,..} if !returned=>Decision::Stop,
+                ProducerCheckpoint::Returned{phase:ProducerPhase::CopySignature,..} if returned=>Decision::Stop,
+                _=>Decision::Proceed},&mut native);
+            assert_eq!(result,PackageSignResult::Refused);assert!(signer.settled()&&native.retired);
+            assert_eq!(native.copied,returned);
+        }
     }
     #[test]
     fn unknown_native_or_gate_custody_never_releases_or_publishes_success() {
@@ -562,5 +757,35 @@ mod tests {
             assert!(panic.is_err()&&verifier.custody().gate_entered&&verifier.custody().unknown);
             assert!(!verifier.inner.close_with(&mut |_|Decision::Proceed,&mut native)&&native.releases.is_empty()&&!native.retired);
         }
+        // Returned-unknown restoration, thrown key calls and malformed mode3
+        // reports all veto CF cleanup and copied signature publication.
+        for phase in [3,4,6,7,11] {
+            for malformed in [false,true] {
+                let mut native=DataCalls::new();let mut signer=PackageProducerSigner::new();
+                if malformed {native.bad_at=Some(phase);} else {native.unknown_at=Some(phase);}
+                assert_eq!(signer.sign_with(b"{}",&mut |_|Decision::Proceed,&mut native),PackageSignResult::Unknown);
+                assert!(!signer.settled()&&!native.retired&&!native.copied&&native.releases.is_empty());
+            }
+        }
+        let mut native=DataCalls::new();native.copy_bad=true;let mut signer=PackageProducerSigner::new();
+        assert_eq!(signer.sign_with(b"{}",&mut |_|Decision::Proceed,&mut native),PackageSignResult::Unknown);
+        assert!(native.copied&&!native.retired&&native.releases.is_empty()&&!signer.settled());
+        for release_unknown in [false,true] {
+            let mut native=DataCalls::new();native.release_unknown=release_unknown;
+            let mut signer=PackageProducerSigner::new();
+            let result=signer.sign_with(b"{}",&mut |point| match point {
+                ProducerCheckpoint::Returned{phase:ProducerPhase::RetireCell,..}=>Decision::Stop,
+                _=>Decision::Proceed},&mut native);
+            assert_eq!(result,PackageSignResult::Unknown);assert!(native.copied&&!signer.settled());
+            assert_eq!(native.retired,!release_unknown);
+        }
+        let mut native=DataCalls::new();let mut signer=PackageProducerSigner::new();
+        let panic=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            signer.sign_with(b"{}",&mut |point| match point {
+                ProducerCheckpoint::Returned{phase:ProducerPhase::CopySignature,..}=>panic!("local copy gate DATA"),
+                _=>Decision::Proceed},&mut native)
+        }));
+        assert!(panic.is_err()&&signer.custody().gate_entered&&signer.custody().unknown);
+        assert!(!signer.inner.close_with(&mut |_|Decision::Proceed,&mut native)&&native.releases.is_empty()&&!native.retired);
     }
 }

@@ -15,6 +15,8 @@ pub const STATE_LIMIT: usize = 16 * 1024;
 pub const INTENT_LIMIT: usize = 16 * 1024;
 pub const CAPSULE_LIMIT: usize = 64 * 1024;
 pub const REQUEST_EXPORT_LIMIT: usize = 64 * 1024;
+pub const PRODUCER_CONTROL_LIMIT: usize = crate::macos_install_producer::DESCRIPTOR_LIMIT
+    + crate::macos_install_producer::SIGNATURE_LIMIT;
 pub const INVOCATION_LIMIT: usize = 64;
 pub const STATE_NAME: &str = "installation-v2.json";
 /// A request ID correlates one exact original Installer invocation with a
@@ -582,7 +584,13 @@ impl BudgetData {
         // because their fixed parent is Application Support, not install root.
         let evidence_bound = (invocation_count as u64).checked_mul((INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64)
             .ok_or(TransactionDataError::Limit)?;
-        require(evidence_bytes <= evidence_bound && payload_bytes.checked_add(evidence_bytes).is_some_and(|n| n <= PAYLOAD_LIMIT)
+        // The pair is persisted outside payload/record hashes, but occupies
+        // actual storage in every current/retained generation. Reserve its full
+        // bounded extent even before an incoming original pair is published.
+        let producer_bound = (generations.len() as u64).checked_mul(PRODUCER_CONTROL_LIMIT as u64)
+            .ok_or(TransactionDataError::Limit)?;
+        require(evidence_bytes <= evidence_bound && payload_bytes.checked_add(evidence_bytes)
+                .and_then(|n| n.checked_add(producer_bound)).is_some_and(|n| n <= PAYLOAD_LIMIT)
             && payload_files <= (PREDECESSOR_LIMIT as u64 + 1) * FILE_LIMIT as u64, TransactionDataError::Limit)?;
         Ok(Self { payload_bytes, payload_files })
     }
@@ -1189,11 +1197,21 @@ mod tests {
         let admitted = BudgetData::checked_data(&[one, one], 2, 4096, 4096, 100, 12).unwrap();
         assert_eq!(admitted.payload_totals_data(), (20, 2048));
         let record_and_result = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64;
-        let payload = GenerationCostData { files:1, bytes:PAYLOAD_LIMIT-record_and_result };
+        let payload = GenerationCostData { files:1, bytes:PAYLOAD_LIMIT-record_and_result-PRODUCER_CONTROL_LIMIT as u64 };
         assert!(BudgetData::checked_data(&[payload],1,record_and_result,0,2,2).is_ok());
         let too_large = GenerationCostData { files:1, bytes:payload.bytes+1 };
         assert!(BudgetData::checked_data(&[too_large],1,record_and_result,0,2,2).is_err());
         assert!(BudgetData::checked_data(&[one],1,record_and_result+1,0,2,2).is_err());
+        // Signed control bytes cannot evade the aggregate merely by living
+        // outside versions/<release>. The payload-only accessor stays truthful.
+        let nine = PREDECESSOR_LIMIT + 1;
+        let remaining = PAYLOAD_LIMIT-record_and_result-(nine as u64)*PRODUCER_CONTROL_LIMIT as u64;
+        let mut costs = vec![GenerationCostData { files:1, bytes:0 }; nine];
+        costs[0].bytes = remaining;
+        assert_eq!(BudgetData::checked_data(&costs,1,record_and_result,0,24576,96).unwrap().payload_totals_data(),
+            (nine as u64, remaining));
+        costs[0].bytes += 1;
+        assert!(BudgetData::checked_data(&costs,1,record_and_result,0,24576,96).is_err());
         for (count, evidence, control, records, fds) in [(0,0,0,0,0),(INVOCATION_LIMIT+1,0,0,0,0),
             (1,u64::MAX,0,0,0),(1,0,16*1024*1024+1,0,0),(1,0,0,24577,0),(1,0,0,0,97)] {
             assert!(BudgetData::checked_data(&[one], count, evidence, control, records, fds).is_err());
