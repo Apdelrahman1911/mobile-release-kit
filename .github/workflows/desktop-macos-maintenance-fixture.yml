@@ -16,7 +16,7 @@ jobs:
   e2_fixture:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'
     runs-on: macos-26
-    timeout-minutes: 75
+    timeout-minutes: 100
     env:
       # No shell startup file, inherited compiler switch or credential reaches
       # a preparation/native child. Child environments below are reconstructed.
@@ -93,14 +93,14 @@ jobs:
           source_ordinal = 0
 
           PREPARATION_COMMANDS = (
-              "git-tree", "git-roster", "rustc-version", "cargo-version", "fetch-0", "fetch-1",
+              "git-tree", "git-roster", "rustc-version", "cargo-version", "fetch-0", "fetch-1", "fetch-2",
           )
           PREPARATION_PHASES = (
               "route", "source-inventory", "git-tree", "git-roster", "source-roster-decode",
               "source-roster-entry", "source-file-inventory", "source-required-roster",
               "cargo-home-admission", "cargo-configuration", "locked-manifests",
               "repository-toolchain", "rust-tool-admission",
-              "rustc-version", "cargo-version", "fetch-0", "fetch-1", "source-recheck",
+              "rustc-version", "cargo-version", "fetch-0", "fetch-1", "fetch-2", "source-recheck",
               "input-publication",
           )
           PREPARATION_REFUSALS = (
@@ -377,7 +377,7 @@ jobs:
                    and by_name["desktop/tools/macos_aqua_qualification.py"]["sha256"] == qualification_hash,
                    "source-bootstrap-roster")
 
-              manifests = ("desktop/native/macos-installed-native", "desktop/helpers/macos-android-register")
+              manifests = ("desktop/native/macos-installed-native", "desktop/helpers/macos-android-register", "desktop/src-tauri")
               cargo_home, rustup_home = HOME / ".cargo", HOME / ".rustup"
               phase = "cargo-home-admission"
               book.directory(cargo_home)
@@ -535,9 +535,9 @@ jobs:
           print("Locked fixture inputs prepared; source/input originals closed. No native qualification is claimed.")
           PY_PREPARE
 
-      - name: Observe physical service layouts through the reviewed owner (no registration)
+      - name: Verify installer worker DATA, context and normal native fixture
         id: native
-        timeout-minutes: 55
+        timeout-minutes: 70
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail
@@ -560,7 +560,7 @@ jobs:
             RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
             DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-service-layout
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py
 
       - name: Publish only the closed source-bound fixture summary
         id: publication
@@ -643,6 +643,7 @@ jobs:
           if not bootstrap_ok:
               raise SystemExit("E2 summary DATA source admission refused.")
           OWNER_DIAGNOSTIC_ROLES = (
+              'fixture-btm-log',
               'service-layout-build', 'service-layout-single', 'service-layout-nested',
               'sign-5', 'sign-6', 'sign-7', 'sign-8', 'sign-9',
               'verify-sign-5', 'verify-sign-6', 'verify-sign-7', 'verify-sign-8', 'verify-sign-9',
@@ -652,7 +653,7 @@ jobs:
               'context-product-build', 'context-component-empty-bom', 'context-product-empty-bom',
               'context-component-receipt-census', 'context-product-receipt-census', 'context-component-installer',
               'context-product-installer', 'context-component-receipt-query', 'context-product-receipt-query',
-              "metadata-observer-build", "metadata-initial", "initial-receipt-query", "native-rust-tests", "client-build",
+              "metadata-observer-build", "metadata-initial", "initial-receipt-query", "native-rust-tests", "installer-worker-rust-tests", "client-build",
               "resident-build", "entry-build", "client-facade-build", "resident-facade-build", "sign-0",
               "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0", "verify-sign-1", "verify-sign-2",
               "verify-sign-3", "verify-sign-4", "package-analyze", "package-build", "metadata-before-install",
@@ -662,6 +663,7 @@ jobs:
           )
 
           OWNER_DIAGNOSTIC_PHASES = (
+              'fixture-btm-log',
               'service-layout-build', 'service-layout-single', 'service-layout-nested',
               'sign-5', 'sign-6', 'sign-7', 'sign-8', 'sign-9',
               'verify-sign-5', 'verify-sign-6', 'verify-sign-7', 'verify-sign-8', 'verify-sign-9',
@@ -675,7 +677,7 @@ jobs:
               'context-prepare', 'context-component-audit', 'context-product-audit',
               'context-component-record', 'context-product-record',
               "prepare", "bundle-staging", "package-components", "metadata-observer-build", "metadata-initial",
-              "initial-receipt-query", "native-rust-tests", "client-build", "resident-build", "entry-build", "client-facade-build",
+              "initial-receipt-query", "native-rust-tests", "installer-worker-rust-tests", "client-build", "resident-build", "entry-build", "client-facade-build",
               "resident-facade-build", "sign-0", "sign-1", "sign-2", "sign-3", "sign-4", "verify-sign-0",
               "verify-sign-1", "verify-sign-2", "verify-sign-3", "verify-sign-4", "package-analyze",
               "package-build", "metadata-before-install", "before-install-receipt-query", "standard-installer",
@@ -685,6 +687,10 @@ jobs:
           )
 
           OWNER_DIAGNOSTIC_REFUSALS = (
+              "installer-worker-rust-test-record", "installer-worker-rust-test-bound",
+              "installer-worker-rust-test-framing", "installer-worker-rust-test-roster",
+              "installer-worker-rust-test-result",
+              'btm-log-window', 'btm-log-data', 'btm-log-original', 'btm-log-tool',
               'layout-original-result', 'layout-record-shape', 'layout-record-binding',
               'layout-record-finality', 'layout-record-deadline', 'layout-public-shape',
               'layout-public-binding', 'layout-public-order', 'layout-public-unselected',
@@ -820,8 +826,10 @@ jobs:
               "ownerResultAdmitted": False, "ownerResultSha256": None, "tree": None,
               "bindingSha256": None, "sourceInventorySha256": None, "sourceReleaseId": None,
               "ownerOutcome": None, "originalCallCount": 0, "ownerFinality": None, "native": None,
-              "ownerDiagnostic": None, "nativeRustTests": None, "installerContext": None,
+              "ownerDiagnostic": None, "nativeRustTests": None, "installerWorkerRustTests": None,
+              "installerContext": None,
               "serviceLayoutObservation": None,
+              "btmLogObservation": None,
               "failure": "owner-result-missing-or-refused", "accepted": False,
               "syntheticIdentity": True, "productionIdentityQualified": False,
               "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -862,7 +870,7 @@ jobs:
               expected_keys = set("""schemaVersion type source tree workflowSource workflow runId runAttempt platform toolchain
                   sourceInventorySha256 sourceOriginalHandleCount sourceOriginalHandleReserve bindingSha256 sourceReleaseId
                   outcome failure phase originalCalls workTimeoutSeconds hardTimeoutSeconds auxiliaryBudgetNanoseconds
-                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests installerContext serviceLayoutObservation
+                  artifacts protectedMetadataObservations package installedArtifactRoster receiptOriginals native nativeRustTests installerWorkerRustTests installerContext serviceLayoutObservation btmLogObservation
                   installerEntered installationReturnedSuccess nativeEntered nativeOwnerReturned sourceClosesKnown
                   protectedClosesKnown outputClosesKnown cleanupErrors scratchRetired protectedRootRetired exactReceiptRetired
                   protectedRetentionRequired administrativeDomain arbitraryConcurrentPrivilegedWriterResistance flatPayloadAtomicNoReplace
@@ -928,32 +936,12 @@ jobs:
                   installer_context = context_record
               service_layout = None
               layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
-              fixture.need(layout_record["selected"] and result["passed"] is False
-                           and result["native"] is None and not result["nativeEntered"] and not result["nativeOwnerReturned"]
-                           and not context_record["started"]
-                           and all(call["role"] != "native-run" and call["role"] not in fixture.CONTEXT_ROLES
-                                   for call in calls), "summary-layout-route")
-              if layout_record["observerSourceSha256"] is not None:
-                  fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
-                               "summary-layout-source")
-              for case in layout_record["enteredCases"]:
-                  layout_calls = [call for call in calls if call["role"] == "service-layout-" + case]
-                  fixture.need(len(layout_calls) == 1, "summary-layout-entered-call")
-              for case in layout_record["cases"]:
-                  layout_calls = [call for call in calls if call["role"] == "service-layout-" + case["case"]]
-                  fixture.need(len(layout_calls) == 1 and layout_calls[0]["returned"]
-                               and layout_calls[0]["returncode"] == 0
-                               and layout_calls[0]["stdoutSha256"] == case["stdoutSha256"]
-                               and layout_calls[0]["stderrSha256"] == fixture.digest(b"")
-                               and type(layout_calls[0].get("workTimeoutSeconds")) is int
-                               and 0 < layout_calls[0]["workTimeoutSeconds"] <= 15
-                               and layout_calls[0].get("outputLimitBytes") == 2048,
-                               "summary-layout-original-call")
+              fixture.need(not layout_record["selected"]
+                           and all(not call["role"].startswith("service-layout-") for call in calls),
+                           "summary-layout-route")
               if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
-                      and all(call["returned"] for call in calls) and not result["cleanupErrors"]
-                      and result["scratchRetired"] and result["installationReturnedSuccess"]):
-                  # Factory/status results are useful diagnostic evidence only.
-                  # Neither NotFound nor a complete comparison proves absence or ownership.
+                      and all(call["returned"] for call in calls)):
+                  # The normal route reports unselected DATA, including an honest pre-Context failure.
                   service_layout = layout_record
               native_rust_tests = None
               if result["nativeRustTests"] is not None:
@@ -965,6 +953,21 @@ jobs:
                   if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                           and all(call["returned"] for call in calls)):
                       native_rust_tests = unit_record
+              installer_worker_rust_tests = None
+              if result["installerWorkerRustTests"] is not None:
+                  worker_calls = [call for call in calls if call["role"] == "installer-worker-rust-tests"]
+                  fixture.need(len(worker_calls) == 1 and worker_calls[0]["returned"]
+                               and worker_calls[0]["returncode"] == 0 and result["sourceReleaseId"] == release
+                               and type(worker_calls[0].get("workTimeoutSeconds")) is int
+                               and worker_calls[0]["workTimeoutSeconds"] == 480
+                               and type(worker_calls[0].get("outputLimitBytes")) is int
+                               and worker_calls[0]["outputLimitBytes"] == 4 * 1024 * 1024,
+                               "summary-installer-worker-rust-tests-call")
+                  worker_record = fixture.installer_worker_rust_tests_data(result["installerWorkerRustTests"])
+                  if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                          and all(call["returned"] for call in calls)):
+                      # Actual Mac test-profile compilation, not a shipping-release build.
+                      installer_worker_rust_tests = worker_record
               native = None
               if result["native"] is not None:
                   native_calls = [call for call in calls if call["role"] == "native-run"]
@@ -973,12 +976,18 @@ jobs:
                                and result["sourceReleaseId"] == release, "summary-native-call")
                   native = fixture.native_result(fixture.canonical(result["native"]),
                                                   native_calls[0]["returncode"], source, release)
+              btm_log = None
+              btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
+              if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
+                      and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
+                  # Filtered mentions are not causal findings, native finality or service authority.
+                  btm_log = btm_record
               known_pass = (
                   outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
                   and result["failure"] is None and all(result[key] for key in flags)
                   and result["cleanupErrors"] == [] and calls
                   and all(call["returned"] and call["returncode"] == 0 for call in calls)
-                  and native_rust_tests is not None
+                  and native_rust_tests is not None and installer_worker_rust_tests is not None
                   and installer_context is not None and installer_context["completed"]
                   and native is not None and native["outcome"] == "passed" and native["nativeFinalityKnown"] is True
               )
@@ -989,23 +998,29 @@ jobs:
                   bindingSha256=fixture.digest(binding_body), sourceInventorySha256=fixture.digest(inventory_body),
                   sourceReleaseId=release, ownerOutcome=result["outcome"], originalCallCount=len(calls),
                   ownerFinality={key: result[key] for key in flags}, native=native, accepted=bool(known_pass),
-                  nativeRustTests=native_rust_tests, installerContext=installer_context,
+                  nativeRustTests=native_rust_tests, installerWorkerRustTests=installer_worker_rust_tests,
+                  installerContext=installer_context,
                   serviceLayoutObservation=service_layout,
+                  btmLogObservation=btm_log,
                   ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
                   failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
               book.check()
           except BaseException:
               summary["accepted"] = False
               summary["nativeRustTests"] = None
+              summary["installerWorkerRustTests"] = None
               summary["installerContext"] = None
               summary["serviceLayoutObservation"] = None
+              summary["btmLogObservation"] = None
               summary["failure"] = "owner-result-missing-or-refused"
           finally:
               if not book.finish():
                   summary["accepted"] = False
                   summary["nativeRustTests"] = None
+                  summary["installerWorkerRustTests"] = None
                   summary["installerContext"] = None
                   summary["serviceLayoutObservation"] = None
+                  summary["btmLogObservation"] = None
                   summary["failure"] = "summary-input-close-unknown"
           publisher = fixture.Originals()
           try:

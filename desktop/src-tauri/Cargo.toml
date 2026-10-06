@@ -85,9 +85,9 @@ rfd = { version = "=0.15.4", optional = true, default-features = false, features
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["fs", "poll"] }
 
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+[target.'cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))'.dependencies]
 # Read Darwin's actual per-descriptor mount flags; no mount operation is used.
-nix = { version = "=0.30.1", default-features = false, features = ["fs", "mount", "user"] }
+nix = { version = "=0.30.1", default-features = false, features = ["fs", "mount", "user", "process", "time", "uio"] }
 mrk-macos-installed-native = { path = "../native/macos-installed-native" }
 # Bounded SAME-original DATA ZIP member streaming; neither executes a vendor.
 miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
@@ -117,7 +117,7 @@ mrk-linux-mount-observation = { path = "../native/linux-mount-observation" }
 secret-service = { version = "=5.2.0", path = "../vendor/secret-service-5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 ordered-stream = "=0.2.0"
-[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))'.dependencies]
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))'.dependencies]
 # Private durable-vault primitive only; no RNG defaults or provider activation.
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 # chacha20poly1305/zeroize does not forward this internal-state Drop feature.

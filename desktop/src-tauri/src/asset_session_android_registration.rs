@@ -96,7 +96,7 @@ impl DocumentBinding {
 }
 
 impl DocumentBinding {
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn bind_android_service_dispatcher(&self,dispatcher:crate::saved_command_owner::AndroidServiceDispatcher)->bool{
         self.inner.bridge.android_build.bind_service_dispatcher(&self.inner.session_identity,dispatcher)
     }

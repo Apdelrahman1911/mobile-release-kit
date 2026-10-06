@@ -126,7 +126,7 @@ pub(super) fn settlement_hold(inner: &Inner, owner: &Session, book: &Resources) 
 }
 
 impl SavedCommandOwner {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn observe_installed_recovery_selection(&self) -> Result<(), BridgeError> {
         let r = self.inner.lock();
         if self.inner.domain != SavedCommandDomain::ProjectRecovery || r.revision != 0 || r.active.is_some()

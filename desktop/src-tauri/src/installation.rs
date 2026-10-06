@@ -1,11 +1,11 @@
-//! Installation location DATA and one fixed Finder request. No maintenance,
-//! runtime selection, package execution, filesystem mutation or signing claim.
+//! Installation presentation and closed requests. Preparation status is not
+//! Installer permission, runtime selection, filesystem or signing authority.
 use serde::Serialize;
 use serde_json::Value;
 use crate::error::BridgeError;
 
 pub(crate) const NORMAL_MAC_PROFILE: bool = cfg!(all(
-    target_os = "macos", target_arch = "aarch64",
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
     feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
     not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")
@@ -26,7 +26,7 @@ pub(crate) fn reveal_profile_available(runtime_profile: bool) -> bool {
     NORMAL_MAC_PROFILE && runtime_profile
 }
 pub(crate) fn description(reveal_available: bool) -> Option<Description> {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if NORMAL_MAC_PROFILE {
         return Some(Description {
             layout: "fixed-macos", expected_location: crate::macos_install_paths::APP,
@@ -213,3 +213,84 @@ pub(crate) fn assert_installation_inspection_wire_contract() {
 #[cfg(test)]
 #[test]
 fn installation_inspection_rejects_paths_and_ambiguous_results() { assert_installation_inspection_wire_contract(); }
+
+// Local consent only. The real Document/Saved/native owners independently
+// admit and settle preparation; none of these DATA types can create Completion.
+pub(crate) const PREPARE_QUIT_CONFIRMATION: &str =
+    "Stop the installed Android helper and prepare this application to quit";
+pub(crate) fn preparation_profile_available() -> bool {
+    NORMAL_MAC_PROFILE && cfg!(feature = "macos-installed-desktop-image")
+        && !cfg!(feature = "macos-installed-observation")
+        && !cfg!(feature = "macos-android-registration-helper")
+}
+pub(crate) fn preparation_request(value: &Value) -> Result<&str, BridgeError> {
+    let body = value.as_object().filter(|body| body.len() == 1).ok_or_else(BridgeError::invalid)?;
+    body.get("confirmation").and_then(Value::as_str)
+        .filter(|text| *text == PREPARE_QUIT_CONFIRMATION).ok_or_else(BridgeError::invalid)
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PreparationPhase { NotStarted, Preparing, Unregistering, Settling, Prepared, Refused, Unknown }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PreparationReason {
+    None, UnavailableProfile, Busy, DocumentUnavailable, ContextChanged, Cancelled, Deadline, Native, CleanupUnknown,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreparationStatus {
+    pub(crate) schema_version: u8,
+    pub(crate) available: bool,
+    pub(crate) can_start: bool,
+    pub(crate) operation_id: Option<String>,
+    pub(crate) generation: Option<u32>,
+    pub(crate) phase: PreparationPhase,
+    pub(crate) reason: PreparationReason,
+    pub(crate) new_work_closed: bool,
+    pub(crate) assurance: &'static str,
+}
+impl PreparationStatus {
+    pub(crate) fn initial(available: bool, ready: bool, reason: PreparationReason) -> Self {
+        Self { schema_version: 1, available, can_start: available && ready && reason == PreparationReason::None,
+            operation_id: None, generation: None, phase: PreparationPhase::NotStarted,
+            reason, new_work_closed: false, assurance: "preparation-status-only" }
+    }
+}
+pub(crate) fn preparation_reason(reason: crate::android_registration_app_protocol::Reason) -> PreparationReason {
+    use crate::android_registration_app_protocol::Reason as R;
+    match reason {
+        R::None => PreparationReason::None,
+        R::Cancelled => PreparationReason::Cancelled,
+        R::TimedOut | R::ReviewExpired => PreparationReason::Deadline,
+        R::DocumentLost | R::Shutdown => PreparationReason::DocumentUnavailable,
+        R::ContextChanged | R::SourceChanged => PreparationReason::ContextChanged,
+        R::Busy => PreparationReason::Busy,
+        R::CleanupUnknown => PreparationReason::CleanupUnknown,
+        _ => PreparationReason::Native,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn preparation_wire_requires_exact_consent_and_never_conveys_installer_authority() {
+    use serde_json::json;
+    assert_eq!(preparation_request(&json!({"confirmation": PREPARE_QUIT_CONFIRMATION})).unwrap(), PREPARE_QUIT_CONFIRMATION);
+    for value in [Value::Null, json!([]), json!({}), json!({"confirmation": true}), json!({"confirmation": "yes"}),
+        json!({"confirmation": format!("{PREPARE_QUIT_CONFIRMATION} ")}),
+        json!({"confirmation": PREPARE_QUIT_CONFIRMATION, "path": "/other"}),
+        json!({"confirmation": PREPARE_QUIT_CONFIRMATION, "verified": true})] {
+        assert_eq!(preparation_request(&value).unwrap_err().code, "invalid_request");
+    }
+    let unavailable = PreparationStatus::initial(false, true, PreparationReason::UnavailableProfile);
+    assert!(!unavailable.can_start);
+    assert!(!PreparationStatus::initial(true, true, PreparationReason::CleanupUnknown).can_start);
+    let value = serde_json::to_value(PreparationStatus::initial(true, true, PreparationReason::None)).unwrap();
+    assert_eq!(value, json!({"schemaVersion": 1, "available": true, "canStart": true,
+        "operationId": null, "generation": null, "phase": "not-started", "reason": "none",
+        "newWorkClosed": false, "assurance": "preparation-status-only"}));
+    assert!(!preparation_profile_available() || NORMAL_MAC_PROFILE);
+    use crate::android_registration_app_protocol::Reason as R;
+    assert_eq!(preparation_reason(R::TimedOut), PreparationReason::Deadline);
+    assert_eq!(preparation_reason(R::CleanupUnknown), PreparationReason::CleanupUnknown);
+    assert_eq!(preparation_reason(R::ServiceUnavailable), PreparationReason::Native);
+}

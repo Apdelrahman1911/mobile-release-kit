@@ -14,7 +14,7 @@ pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, g
 impl DirectoryIdentity {
     // Only a private store's actual held Linux/macOS directory observation calls
     // this bridge. It is not renderer input, a synthetic source or write lease.
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     pub(crate) fn vault_original(dev: u64, ino: u64, mode: u32, uid: u32, gid: u32) -> Self {
         Self { dev, ino, mode, uid, gid }
     }
@@ -68,16 +68,16 @@ pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity
 /// Produced only by a completed original project-directory roster probe. When
 /// the vault does not exist yet, its owner must additionally compare these
 /// roots with its held existing ancestors before creating either private edge.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) struct VaultAbsentExclusion { project_roots: Vec<DirectoryIdentity> }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 impl VaultAbsentExclusion { pub(crate) fn roots(&self) -> &[DirectoryIdentity] { &self.project_roots } }
 
 /// Test-only registration from an actually held fixture directory. This is not
 /// a ProjectProbe or a picker/asset qualification, and no synthetic identity is
 /// accepted. The caller retains this original directory through native joins.
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<RegisteredRoot, Reason> {
     use std::os::unix::fs::MetadataExt;
     let actual = held.metadata().map_err(|_| Reason::SourceRefused)?;
@@ -94,11 +94,11 @@ pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<
 
 // Native-only metadata hint. Not serialized, hashed into an ID, or a capability
 // to recapture bytes. Every later registration probe must match fresh originals.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[derive(Clone, PartialEq, Eq)]
 struct OriginAlias { name: Vec<u8>, target: Vec<u8>, identity: FileIdentity }
 pub(crate) struct PosixOriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity,
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     alias: Option<OriginAlias>,
 }
 #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
@@ -136,7 +136,7 @@ impl CapturedPublicImageBatch {
                 .checked_add(image.bytes.capacity())?.checked_add(image.sha256.capacity())?
                 .checked_add(image.origin.path.capacity())?
                 .checked_add(image.origin.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)?;
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             if let Some(alias) = &image.origin.alias {
                 bytes = bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?;
             }
@@ -145,13 +145,13 @@ impl CapturedPublicImageBatch {
         Some(bytes)
     }
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 impl OriginWitness {
     // Pure retained DATA accounting; this neither reopens nor qualifies a path.
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         let bytes = std::mem::size_of::<Self>().checked_add(self.path.capacity())?
             .checked_add(self.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)?;
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let bytes = match &self.alias { Some(alias) => bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?, None => bytes };
         Some(bytes)
     }
@@ -1101,14 +1101,14 @@ pub(crate) use linux::{probe_project_excluding_vault, probe_vault_exclusion};
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::assert_project_path_source_contracts;
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "asset_source_macos.rs"]
 mod macos;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::assert_installed_macos_images_source_contract;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
@@ -1117,7 +1117,7 @@ mod windows;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 pub(crate) use windows::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
-#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 mod unsupported {
     use super::*;
@@ -1129,13 +1129,13 @@ mod unsupported {
     pub(crate) fn probe_project(_: &mut SourceBook, _: PathBuf, _: &[Arc<OriginWitness>], _: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> { Err(Reason::UnsupportedPlatform) }
     pub(crate) fn probe_project_path(_: &mut SourceBook, _: &RegisteredRoot, _: PathBuf, _: ProjectPathField, _: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> { Err(Reason::UnsupportedPlatform) }
 }
-#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
 // Public-image platform adapters are purpose-specific. A Mac/Windows project
 // probe or a credential picker never qualifies this new multi-file operation.
-#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) fn capture_public_images(_: &mut SourceBook, _: Vec<PathBuf>, _: &RegisteredRoot, _: usize,
     _: &mut dyn FnMut() -> bool, _: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> { Err(Reason::UnsupportedPlatform) }
 

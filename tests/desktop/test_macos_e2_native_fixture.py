@@ -362,9 +362,16 @@ class BindingAndOriginalTests(unittest.TestCase):
         operation.outputs = SimpleNamespace(directory=observed.append)
         target = Path("/synthetic/target")
         direct = Path("/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin")
-        with patch.object(fixture.os, "stat", side_effect=FileNotFoundError()), \
+        named = []
+        def absent(path, *, follow_symlinks):
+            self.assertFalse(follow_symlinks)
+            named.append(path)
+            raise FileNotFoundError()
+        with patch.object(fixture.os, "stat", side_effect=absent), \
                 patch.object(fixture.Path, "resolve", side_effect=AssertionError("no runtime path resolution")):
             cargo_path, environment = operation.compiler_environment(target)
+        for name in ("config", "config.toml", "credentials", "credentials.toml"):
+            self.assertIn(fixture.CHECKOUT / "desktop/src-tauri/.cargo" / name, named)
         self.assertEqual(observed, [direct])
         self.assertEqual(cargo_path, str(direct / "cargo"))
         self.assertEqual(environment["PATH"], str(direct) + ":/usr/bin:/bin:/usr/sbin:/sbin")
@@ -376,6 +383,16 @@ class BindingAndOriginalTests(unittest.TestCase):
         self.assertNotIn("RUSTUP_DIST_SERVER", environment)
         self.assertNotIn("RUSTUP_UPDATE_ROOT", environment)
         self.assertEqual(fixture.RUST_COMMIT, "48a229ceaefd4985c50990b14116b6d856af0985")
+        observed.clear()
+        def forbidden_app_config(path, *, follow_symlinks):
+            self.assertFalse(follow_symlinks)
+            if path == fixture.CHECKOUT / "desktop/src-tauri/.cargo/config.toml":
+                return SimpleNamespace()
+            raise FileNotFoundError()
+        with patch.object(fixture.os, "stat", side_effect=forbidden_app_config):
+            with self.assertRaisesRegex(fixture.Refused, "^ambient-cargo-configuration$"):
+                operation.compiler_environment(target)
+        self.assertEqual(observed, [])  # Refuse before borrowing the direct compiler directory.
 
     def test_missing_or_unadmitted_direct_image_bin_has_no_fallback(self):
         operation = object.__new__(fixture.Operation)
@@ -472,6 +489,13 @@ NATIVE_TEST_NAMES = (
     "tests::compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts",
     "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
     "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
+)
+
+
+INSTALLER_WORKER_TEST_NAMES = (
+    "installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",
+    "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
+    "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
 )
 
 
@@ -606,10 +630,101 @@ class CargoTests(unittest.TestCase):
                         setattr(value, key, True)
                     self.assertFalse(value.receipt(None)["passed"])  # New context phase cannot be omitted.
                     value.installer_context = InstallerContextTests.public()
-                    self.assertTrue(value.receipt(None)["passed"])
+                    self.assertFalse(value.receipt(None)["passed"])  # Installer bin3 is independently required.
+                    value.installer_worker_rust_tests = fixture.installer_worker_rust_test_record()
+                    self.assertTrue(value.receipt(None)["passed"])  # Inert receipt DATA only, not an executed Mac test.
                     self.assertEqual(value.receipt(None)["nativeRustTests"], value.native_rust_tests)
+                    self.assertEqual(value.receipt(None)["installerWorkerRustTests"], value.installer_worker_rust_tests)
+                    value.installer_worker_rust_tests = None
+                    self.assertFalse(value.receipt(None)["passed"])
+                    value.installer_worker_rust_tests = fixture.installer_worker_rust_test_record()
                     value.native_rust_tests = None
                     self.assertFalse(value.receipt(None)["passed"])
+
+        # The current real bin/feature/build script are SOURCE, not substitutes.
+        app = PATH.parents[1] / "src-tauri"
+        manifest = (app / "Cargo.toml").read_text(encoding="utf-8")
+        installer = (app / "src/bin/macos_install.rs").read_text(encoding="utf-8")
+        build = (app / "build.rs").read_text(encoding="utf-8")
+        self.assertIn('name = "mrk-macos-install"\npath = "src/bin/macos_install.rs"\nrequired-features = ["macos-installed-installer"]', manifest)
+        self.assertIn('macos-installed-installer = []', manifest)
+        self.assertIn('#[path = "src/macos_build_release.rs"]', build)
+        for name in ("platforms-v1.json", "build-release.json", "build-release-intel.json"):
+            self.assertIn("../macos-installed-inputs/" + name, build)
+        self.assertEqual(fixture.INSTALLER_WORKER_RUST_TESTS, INSTALLER_WORKER_TEST_NAMES)
+        for name in INSTALLER_WORKER_TEST_NAMES:
+            self.assertIn("fn " + name.rsplit("::", 1)[1] + "(", installer)
+
+        for mode in ("success", "nonzero", "unknown", "malformed", "source-before-entry", "compiler-refused"):
+            with self.subTest(installer_bin=mode):
+                invocations, created, retired, published, events = [], [], [], [], []
+                def source_check():
+                    if mode == "source-before-entry":
+                        raise fixture.Refused("original-changed")
+                source = SimpleNamespace(book=SimpleNamespace(check=source_check),
+                                         binding={"tree": "b" * 40}, inventory_digest="c" * 64,
+                                         source_handle_count=1, source_handle_reserve=192, binding_digest="d" * 64)
+                environment = {"GITHUB_SHA": SOURCE, "GITHUB_WORKFLOW_SHA": SOURCE,
+                               "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+                value = fixture.Operation(None, source, None, Path("/synthetic/installer-bin"), environment)
+                value.release = RELEASE
+                value.outputs.directories[value.scratch] = {"identity": WORK[:5]}
+                value.begin = lambda: events.append("begin")
+                value.mkdir = lambda path: created.append(path) or {"identity": WORK[:5]}
+                value.retire_target = retired.append
+                value.publish = lambda name, body: published.append((name, body))
+                value.finish = lambda: events.append("finish")  # Real finish custody has its existing selected tests.
+                def compiler_environment(target):
+                    if mode == "compiler-refused":
+                        raise fixture.Refused("ambient-cargo-configuration")
+                    return "/synthetic/cargo", {"CARGO_TARGET_DIR": str(target)}
+                value.compiler_environment = compiler_environment
+                def context():
+                    events.append("context")
+                    raise fixture.Refused("inert-context-stop")  # Never enter a real Installer from this DATA test.
+                value.observe_installer_context = context
+                def owned(argv, **options):
+                    invocations.append((list(argv), options))
+                    if mode == "unknown":
+                        raise UnknownOriginal("inert unknown original")
+                    body = b"\nrunning 0 tests\n" if mode == "malformed" else native_test_stdout(INSTALLER_WORKER_TEST_NAMES)
+                    return subprocess.CompletedProcess(argv, 1 if mode == "nonzero" else 0, body, b"")
+                value.owner = SimpleNamespace(run_owned=owned, ProcessOutcomeUnknown=UnknownOriginal)
+                receipt = value.execute()  # Real ordering, build method, call and command; no external originals.
+                target = value.scratch / "installer-worker-target"
+                self.assertEqual(created, [target])
+                self.assertEqual(retired, [] if mode == "unknown" else [target])
+                self.assertEqual(events, ["begin", "context", "finish"] if mode == "success" else ["begin", "finish"])
+                self.assertEqual(receipt["failure"], {
+                    "success": "inert-context-stop", "nonzero": "original-command-failed",
+                    "unknown": "original-operation-refused-or-unknown", "malformed": "installer-worker-rust-test-framing",
+                    "source-before-entry": "original-changed", "compiler-refused": "ambient-cargo-configuration",
+                }[mode])
+                self.assertFalse(receipt["passed"])
+                self.assertFalse(receipt["installerEntered"] or receipt["nativeEntered"])
+                self.assertFalse(receipt["installerContext"]["started"])
+                self.assertIsNone(receipt["nativeRustTests"])
+                self.assertEqual(receipt["installerWorkerRustTests"] is not None, mode == "success")
+                if mode in ("source-before-entry", "compiler-refused"):
+                    self.assertEqual(invocations, [])
+                    self.assertEqual(receipt["originalCalls"], [])
+                    self.assertEqual(published, [])
+                    continue
+                self.assertEqual([row["role"] for row in receipt["originalCalls"]], ["installer-worker-rust-tests"])
+                self.assertEqual(receipt["originalCalls"][0]["returned"], mode != "unknown")
+                self.assertEqual(len(published), 0 if mode == "unknown" else 2)
+                self.assertEqual(invocations, [([
+                    "/synthetic/cargo", "test", "--manifest-path", str(fixture.CHECKOUT / "desktop/src-tauri/Cargo.toml"),
+                    "--locked", "--offline", "--jobs", "1", "--target", "aarch64-apple-darwin",
+                    "--no-default-features", "--features", "macos-installed-installer", "--bin", "mrk-macos-install",
+                    "--message-format=short", "--color", "never", "--", "--exact", "--test-threads=1",
+                    "--format", "pretty", "--color", "never", *INSTALLER_WORKER_TEST_NAMES,
+                ], {"environ": {"CARGO_TARGET_DIR": str(target)}, "cwd": fixture.CHECKOUT,
+                    "timeout": 480, "capture": True, "text": False, "output_limit": 4 * 1024 * 1024})])
+                self.assertNotIn("--release", invocations[0][0])  # Ordinary test profile, not shipping compilation.
+                if mode == "unknown":
+                    self.assertEqual(receipt["originalCalls"][0]["errorType"], "ProcessOutcomeUnknown")
+                    self.assertFalse(receipt["originalCalls"][0]["cleanup_complete"])
 
     def test_native_rust_results_require_three_actual_successes_and_exact_closed_record(self):
         expected = {"schemaVersion": 1, "type": "mrk-macos-native-rust-tests-v1", "target": "aarch64-apple-darwin",
@@ -645,6 +760,38 @@ class CargoTests(unittest.TestCase):
         for data in (None, [], {key: item for key, item in expected.items() if key != "failed"}):
             with self.assertRaises(fixture.Refused):
                 fixture.native_rust_tests_data(data)
+
+        worker_expected = {"schemaVersion": 1, "type": "mrk-macos-installer-worker-rust-tests-v1",
+                           "target": "aarch64-apple-darwin", "cargoProfile": "test",
+                           "tests": list(INSTALLER_WORKER_TEST_NAMES), "passed": 3, "failed": 0,
+                           "ignored": 0, "measured": 0}
+        worker_body = native_test_stdout(INSTALLER_WORKER_TEST_NAMES)
+        for data in (worker_body, native_test_stdout(tuple(reversed(INSTALLER_WORKER_TEST_NAMES)))):
+            self.assertEqual(fixture.installer_worker_rust_tests_result(data), worker_expected)
+        projected = fixture.installer_worker_rust_tests_data(worker_expected)
+        self.assertEqual(projected, worker_expected)
+        self.assertIsNot(projected, worker_expected)
+        self.assertIsNot(projected["tests"], worker_expected["tests"])
+        for parser, data in ((fixture.native_rust_tests_result, worker_body),
+                             (fixture.installer_worker_rust_tests_result, body),
+                             (fixture.native_rust_tests_data, worker_expected),
+                             (fixture.installer_worker_rust_tests_data, expected)):
+            with self.assertRaises(fixture.Refused):
+                parser(data)  # A different actual three-test batch cannot satisfy this role.
+        for data in (worker_body.replace(b"0 ignored", b"1 ignored"),
+                     worker_body.replace(b"0.01s", b"480.01s"),
+                     native_test_stdout((INSTALLER_WORKER_TEST_NAMES[0],) * 3),
+                     worker_body + b"private trailing output\n"):
+            with self.assertRaises(fixture.Refused):
+                fixture.installer_worker_rust_tests_result(data)
+        for change in ({"cargoProfile": "release"}, {"cargoProfile": None}, {"target": "x86_64-apple-darwin"},
+                       {"passed": True}, {"ignored": 1}, {"tests": list(NATIVE_TEST_NAMES)},
+                       {"tests": [INSTALLER_WORKER_TEST_NAMES[0]] * 3}, {"futureWorkerFinality": True}):
+            with self.subTest(worker_record=change), self.assertRaises(fixture.Refused):
+                fixture.installer_worker_rust_tests_data(dict(worker_expected, **change))
+        with self.assertRaises(fixture.Refused):
+            fixture.installer_worker_rust_tests_data({key: value for key, value in worker_expected.items()
+                                                       if key != "cargoProfile"})
 
 
 def cpio(entries):
@@ -1244,6 +1391,7 @@ class ServiceLayoutObservationTests(unittest.TestCase):
                 op.outputs.directory = lambda _path: {"fd": 90}
                 op.publish = lambda name, body: captures.append((name, body))
                 op.begin = lambda: events.append("begin")
+                op.build_installer_worker_tests = lambda: events.append("installer-bin")
                 op.observe_installer_context = lambda: events.append("context")
                 op.compile_metadata_observer = lambda: events.append("metadata")
                 op.absence = lambda _role: events.append("absence")
@@ -1304,11 +1452,13 @@ class ServiceLayoutObservationTests(unittest.TestCase):
                                 and receipt["outputClosesKnown"])
                 self.assertEqual(receipt["scratchRetired"], mode in ("complete", "ordinary", "source-before-entry"))
                 if mode == "ordinary":
+                    self.assertLess(events.index("installer-bin"), events.index("context"))
                     self.assertIn("context", events)
                     self.assertIn("native", events)
                     self.assertNotIn("observer-build", events)
                     self.assertEqual(calls, [])
                     continue
+                self.assertNotIn("installer-bin", events)
                 if mode == "source-before-entry":
                     self.assertEqual(calls, [])
                     self.assertEqual(receipt["originalCalls"], [])
@@ -1414,6 +1564,225 @@ class ServiceLayoutObservationTests(unittest.TestCase):
         ):
             with self.subTest(label=label), self.assertRaisesRegex(fixture.Refused, "^" + label + "$"):
                 fixture.service_observer_macho(bad, stager)
+
+
+class BTMLogObservationTests(unittest.TestCase):
+    def test_only_own_bounded_log_events_produce_finite_diagnostics(self):
+        wall = 1_700_000_000_250_000_000
+        start, end = (wall, 1_000_000_000), (wall + 4_000_000_000, 5_000_000_000)
+        window = fixture.btm_window(start, end)
+        argv = fixture.btm_argv(window)
+        self.assertEqual(window, {"startSeconds": 1699999999, "endSeconds": 1700000006})
+        self.assertEqual(argv, ["/usr/bin/log", "show", "--style", "json", "--start", "2023-11-14 22:13:19+0000",
+                              "--end", "2023-11-14 22:13:26+0000", "--timezone", "UTC", "--info", "--debug",
+                              "--no-pager", "--predicate", 'subsystem == "com.apple.backgroundtaskmanagement" '
+                              'AND eventMessage CONTAINS "dev.mobile-release-kit.fixture.e2"'])
+        for left, right in ((None, end), (start, [*end]), ((True, start[1]), end), (end, start),
+                            (start, (wall + 10_000_000_000, 2_000_000_000)),
+                            (start, (wall + 994_000_000_000, 995_000_000_000))):
+            with self.subTest(invalid_window=(left, right)), self.assertRaises(fixture.Refused):
+                fixture.btm_window(left, right)
+        for invalid in ({}, dict(window, path="/private/CANARY"), dict(window, endSeconds=True),
+                        dict(window, endSeconds=window["startSeconds"] + 999)):
+            with self.subTest(window_shape=invalid), self.assertRaises(fixture.Refused):
+                fixture.btm_argv(invalid)
+
+        rows = [{"subsystem": fixture.BTM_SUBSYSTEM,
+                 "eventMessage": fixture.IDENTIFIER + ".client: NotFound plist signature team identifier "
+                                 "responsibility approval permission registration launch constraint requirement "
+                                 "Domain=SMAppServiceErrorDomain Code=3 /private/BTM-PRIVATE-CANARY",
+                 "processImagePath": "/private/BTM-PRIVATE-CANARY", "arbitraryMetric": 1.25},
+                {"subsystem": fixture.BTM_SUBSYSTEM, "eventMessage": fixture.IDENTIFIER + ".foreign: signature CANARY"}]
+        body = fixture.canonical(rows)
+        parsed = fixture.btm_events(body)
+        self.assertEqual((parsed["eventCount"], parsed["ownEventCount"], parsed["unmatchedEventCount"]), (2, 1, 1))
+        self.assertEqual(parsed["markerCounts"], {**{name: 1 for name, _ in fixture.BTM_MARKERS}, "other": 0})
+        self.assertEqual(parsed["errorCodes"], [{"domain": "smappservice", "code": 3}])
+        public = fixture.canonical(parsed)
+        for private in (b"CANARY", b"/private/", b"processImagePath", b"eventMessage", b"arbitraryMetric"):
+            self.assertNotIn(private, public)
+        for message in ("x." + fixture.IDENTIFIER, fixture.SERVICE + ".foreign", "unrelated signature"):
+            self.assertEqual(fixture.btm_events(fixture.canonical([
+                {"subsystem": fixture.BTM_SUBSYSTEM, "eventMessage": message}]))["ownEventCount"], 0)
+        unknown = fixture.btm_events(fixture.canonical([{"subsystem": fixture.BTM_SUBSYSTEM,
+            "eventMessage": fixture.SERVICE + " Domain=PrivateErrorDomain Code=4 "
+                            "Domain=NSCocoaErrorDomain Code=-0 Domain=NSOSStatusErrorDomain Code=2147483648"}]))
+        self.assertEqual(unknown["errorCodes"], [])
+        malformed = [b"", b"{}", b"[", b"\xff", bytearray(body), body.decode(),
+                     b" " * (fixture.BTM_LIMIT + 1), fixture.canonical(rows * 129),
+                     b'[{"subsystem":"x","subsystem":"x","eventMessage":"x"}]',
+                     fixture.canonical([{"subsystem": "foreign", "eventMessage": fixture.IDENTIFIER}]),
+                     fixture.canonical([{"subsystem": fixture.BTM_SUBSYSTEM, "eventMessage": "x" * 8193}]),
+                     b'[{"eventMessage":NaN}]', fixture.canonical([None]),
+                     fixture.canonical([{"subsystem": fixture.BTM_SUBSYSTEM,
+                        "eventMessage": fixture.IDENTIFIER + " Domain=SMAppServiceErrorDomain Code=" + str(i)}
+                                        for i in range(9)])]
+        for number, invalid in enumerate(malformed):
+            with self.subTest(invalid_log=number), self.assertRaises(fixture.Refused):
+                fixture.btm_events(invalid)
+        empty = fixture.btm_events(b"[]")
+        self.assertEqual((empty["eventCount"], empty["ownEventCount"], empty["errorCodes"]), (0, 0, []))
+
+        calls = [{"role": "native-run", "entered": True, "returned": True},
+                 {"role": fixture.BTM_ROLE, "entered": True, "returned": True, "returncode": 0,
+                  "workTimeoutSeconds": 10, "outputLimitBytes": 262144,
+                  "stdoutSha256": fixture.digest(body), "stderrSha256": fixture.digest(b"")}]
+        value = fixture.btm_record(SOURCE)
+        value.update(parsed, state="observed", window=window, commandIndex=1, toolSha256="c" * 64,
+                     stdoutSha256=fixture.digest(body), stderrSha256=fixture.digest(b""))
+        self.assertIs(fixture.btm_log_data(value, SOURCE, calls), value)
+        self.assertLessEqual(len(fixture.canonical(value)), 4096)
+        for mutation in ({"nativeLifecycleQualified": True}, {"ownEventCount": True}, {"ownEventCount": 3},
+                         {"state": "not-requested"}, {"commandIndex": True}, {"commandIndex": 0},
+                         {"stdoutSha256": "f" * 64}, {"toolSha256": None},
+                         {"markerCounts": {"raw": "CANARY"}},
+                         {"markerCounts": {key: 0 for key in parsed["markerCounts"]}},
+                         {"errorCodes": [{"domain": "private", "code": 0}]},
+                         {"state": "empty", "ownEventCount": 0, "unmatchedEventCount": 2,
+                          "markerCounts": {key: 0 for key in parsed["markerCounts"]}}):
+            changed = copy.deepcopy(value)
+            changed.update(mutation)
+            with self.subTest(forged_public=list(mutation)), self.assertRaises(fixture.Refused):
+                fixture.btm_log_data(changed, SOURCE, calls)
+        for forged in (calls + [calls[1]], [{**calls[0], "returned": False}, calls[1]],
+                       [calls[0], {**calls[1], "workTimeoutSeconds": 11}]):
+            with self.assertRaises(fixture.Refused):
+                fixture.btm_log_data(value, SOURCE, forged)
+
+    def test_log_call_preserves_primary_failure_originals_and_native_acceptance(self):
+        class UnknownOriginal(Exception):
+            dispatched, contained, cleanup_complete = True, False, False
+
+        native = result()
+        row = unexecuted(fixture.CASES[0])
+        row.update(outcome="unavailable", startedNs="1", finishedNs="2")
+        native.update(outcome="unavailable", cases=[row, unexecuted(fixture.CASES[1]), unexecuted(fixture.CASES[2])])
+        expected_native = parse(native, 77)
+        wall = 1_700_000_000_250_000_000
+        sample = ((wall, 1_000_000_000), (wall + 4_000_000_000, 5_000_000_000))
+        info = SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                                           "st_size", "st_mtime_ns", "st_ctime_ns"), WORK)))
+        modes = ("observed", "empty", "unparseable", "nonzero-log", "unknown-native", "unknown-log",
+                 "primary-and-log-unknown", "native-data-refused", "bad-window", "tool-refused", "logrc-present",
+                 "source-before-log", "source-after-log", "call-cap")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                dispatches, captures, tool_checks, scratch_checks = [], [], [], []
+                book = lambda: SimpleNamespace(check=lambda: None, finish=lambda: True, errors=[])
+                source = SimpleNamespace(book=book(), binding={"tree": "c" * 40}, inventory_digest="d" * 64,
+                                         binding_digest="e" * 64, source_handle_count=1, source_handle_reserve=192)
+                env = {"GITHUB_SHA": SOURCE, "GITHUB_WORKFLOW_SHA": SOURCE, "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+                op = fixture.Operation(None, source, None, Path("/inert-btm-data"), env)
+                op.outputs, op.protected = book(), book()
+                op.outputs.directories = {op.scratch: {"identity": WORK[:5]}}
+                op.outputs.directory = lambda _path: {"fd": 90}
+                op.protected.check_one = lambda _entry: None
+                def tool(path, limit, **options):
+                    tool_checks.append((path, limit, options))
+                    if mode == "tool-refused":
+                        raise fixture.Refused("btm-log-tool")
+                    return {"fd": 91}, b"inert protected tool DATA"
+                op.protected.file = tool
+                op.publish = lambda name, body: captures.append((name, body))
+                op.begin = lambda: None
+                op.build_installer_worker_tests = lambda: None
+                op.observe_installer_context = lambda: None
+                op.compile_metadata_observer = lambda: None
+                op.absence = lambda _role: None
+                op.build_images = lambda: None
+                op.compile_facades = lambda: None
+                op.sign = lambda: None
+                op.package_fixture = lambda: None
+                def install():
+                    op.installed = op.installer_entered = True
+                    op.package, op.stage_roster, op.release = {}, {"inert": "roster"}, RELEASE
+                op.install_fixture = install
+                def roster(_root, *, installed):
+                    if mode == "primary-and-log-unknown":
+                        raise fixture.Refused("native-filesystem-postcondition")
+                    return op.stage_roster
+                op.payload_roster = roster
+                op.observe_metadata = lambda _phase, *, present: None
+                def check_source():
+                    if op.phase == fixture.BTM_ROLE and ((mode == "source-before-log" and len(op.calls) == 1)
+                                                        or (mode == "source-after-log" and len(op.calls) == 2)):
+                        raise fixture.Refused("original-changed")
+                source.book.check = check_source
+                def run_owned(argv, **options):
+                    dispatches.append((argv, options))
+                    if argv == [str(fixture.ROOT / fixture.ENTRY)]:
+                        if mode == "unknown-native":
+                            raise UnknownOriginal()
+                        return subprocess.CompletedProcess(argv, 77, b"{}" if mode == "native-data-refused"
+                                                           else fixture.canonical(native), b"")
+                    self.assertEqual(argv, fixture.btm_argv(fixture.btm_window(*sample)))
+                    if mode in ("unknown-log", "primary-and-log-unknown"):
+                        raise UnknownOriginal()
+                    if mode == "nonzero-log":
+                        return subprocess.CompletedProcess(argv, 69, b"", b"PRIVATE-LOG-ERROR")
+                    body = b"[]" if mode == "empty" else b"{" if mode == "unparseable" else fixture.canonical([
+                        {"subsystem": fixture.BTM_SUBSYSTEM, "eventMessage": fixture.SERVICE + " NotFound"}])
+                    return subprocess.CompletedProcess(argv, 0, body, b"")
+                op.owner = SimpleNamespace(run_owned=run_owned)
+                if mode == "call-cap":
+                    op.calls = [{"role": "inert", "entered": True, "returned": True, "returncode": 0} for _ in range(63)]
+                def named(path, *, dir_fd, follow_symlinks):
+                    self.assertFalse(follow_symlinks)
+                    if path == ".logrc":
+                        if mode == "logrc-present":
+                            return info
+                        raise FileNotFoundError()
+                    self.assertEqual(path, op.scratch.name)
+                    scratch_checks.append(path)
+                    if len(scratch_checks) == 1:
+                        return info
+                    raise FileNotFoundError()
+                cleanup = SimpleNamespace(directory=lambda _path: {"fd": 93}, finish=lambda: True)
+                samples = [sample[0], None if mode == "bad-window" else sample[1]]
+                with patch.object(fixture, "btm_clock_sample", side_effect=samples), \
+                     patch.object(fixture.os, "listdir", return_value=[]), \
+                     patch.object(fixture.os, "stat", side_effect=named), \
+                     patch.object(fixture, "Originals", return_value=cleanup) as originals, \
+                     patch.object(fixture.shutil, "rmtree") as retire:
+                    retire.avoids_symlink_attacks = True
+                    receipt = op.execute()
+                    unknown = mode in ("unknown-native", "unknown-log", "primary-and-log-unknown", "native-data-refused")
+                    self.assertEqual(receipt["scratchRetired"], not unknown)
+                    if unknown:
+                        originals.assert_not_called()
+                        retire.assert_not_called()
+                    else:
+                        retire.assert_called_once_with(op.scratch.name, dir_fd=93)
+                self.assertFalse(receipt["passed"])
+                self.assertFalse(receipt["actualAppIntegrationQualified"])
+                value = receipt["btmLogObservation"]
+                self.assertIs(fixture.btm_log_data(value, SOURCE, receipt["originalCalls"]), value)
+                if mode not in ("unknown-native", "native-data-refused"):
+                    self.assertEqual(receipt["native"], expected_native)
+                else:
+                    self.assertIsNone(receipt["native"])
+                no_log = mode in ("unknown-native", "bad-window", "tool-refused", "logrc-present", "source-before-log", "call-cap")
+                self.assertEqual(len(dispatches), 1 if no_log else 2)
+                if not no_log:
+                    self.assertEqual(dispatches[-1][1]["timeout"], 10)
+                    self.assertEqual(dispatches[-1][1]["output_limit"], 262144)
+                    self.assertEqual(dispatches[-1][1]["environ"], op.native_environment())
+                    self.assertEqual(dispatches[-1][1]["cwd"], op.scratch)
+                if tool_checks:
+                    self.assertEqual(tool_checks, [(Path("/usr/bin/log"), fixture.IMAGE_LIMIT, {"uid": 0, "modes": (0o555, 0o755)})])
+                if mode == "primary-and-log-unknown":
+                    self.assertEqual(receipt["failure"], "native-filesystem-postcondition")
+                    self.assertEqual(receipt["phase"], "native-run")
+                if mode == "source-before-log":
+                    self.assertEqual(len(receipt["originalCalls"]), 1)
+                    self.assertIsNone(value["commandIndex"])
+                if mode in ("unknown-log", "primary-and-log-unknown"):
+                    self.assertEqual(value["state"], "call-unknown")
+                    self.assertFalse(receipt["originalCalls"][-1]["returned"])
+                if mode in ("observed", "empty", "unparseable"):
+                    self.assertEqual(value["state"], mode)
+                    self.assertIsNone(receipt["failure"])
+                self.assertNotIn(b"PRIVATE-LOG-ERROR", fixture.canonical(value))
 
 
 class InstallerContextTests(unittest.TestCase):

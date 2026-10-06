@@ -1151,7 +1151,7 @@ mod tests {
             assert_eq!(state.vault.as_ref().unwrap().bound[0].as_deref().map(std::ptr::from_ref), old);
         }
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]
     fn explicit_vault_loans_supply_two_signing_inputs_and_preserve_actual_borrowed_backing_on_lock() {
         let mut state = loan_state();
@@ -1208,7 +1208,7 @@ mod tests {
     }
     #[test]
     fn bound_loan_publication_refuses_changed_lineage_or_unsettled_original_without_taking_payload() {
-        let kind = if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Kind::AppleP12 } else { Kind::GoogleWif };
+        let kind = if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) { Kind::AppleP12 } else { Kind::GoogleWif };
         for changed in 0..8 {
             let mut state = loan_state(); drop(state.slot.take());
             let (mut slot, assignment) = loan_slot(&mut state, kind, 3);
@@ -1229,7 +1229,7 @@ mod tests {
     }
     #[test]
     fn loan_currentness_rejects_equal_counter_replacement_new_context_registry_and_reassignment() {
-        let kind = if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Kind::AppleP12 } else { Kind::GoogleWif };
+        let kind = if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) { Kind::AppleP12 } else { Kind::GoogleWif };
         for changed in 0..6 {
             let mut state = loan_state(); let key = publish_loan_data(&mut state, kind, 3);
             let native = state.context.as_ref().unwrap().clone();

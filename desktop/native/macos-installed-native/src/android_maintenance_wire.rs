@@ -7,6 +7,12 @@ pub const HARD_NS:u64=310_000_000_000;
 pub const CLEANUP_NS:u64=10_000_000_000;
 pub const MAX_RAW:u64=(1_u64<<61)-1;
 const MAGIC:&[u8;8]=b"MRKMNT01";
+#[cfg(all(target_os="macos",any(not(any(target_arch="aarch64",target_arch="x86_64")),not(target_pointer_width="64"))))]
+compile_error!("the installed maintenance wire requires a supported 64-bit Mac target");
+#[cfg(all(target_os="macos",target_arch="x86_64"))]
+const TARGET:&[u8]=b"x86_64-apple-darwin";
+// Non-Mac DATA/test users retain the old declaration, never a native profile.
+#[cfg(not(all(target_os="macos",target_arch="x86_64")))]
 const TARGET:&[u8]=b"aarch64-apple-darwin";
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct Bounds{pub origin:u64,pub work:u64,pub hard:u64}
@@ -38,7 +44,8 @@ impl Identity{
         out.release[..release.len()].copy_from_slice(release);out.target[..TARGET.len()].copy_from_slice(TARGET);
         (source_valid(&out.source) && release_valid(&out.release)).then_some(out)
     }
-    pub fn same_build(self,other:Self)->bool{self.source==other.source && self.release==other.release && self.target==other.target}
+    pub fn same_build(self,other:Self)->bool{target_valid(&self.target) && target_valid(&other.target)
+        && self.source==other.source && self.release==other.release && self.target==other.target}
 }
 /// Native fixed POD too; it carries DATA only, never FD/callback/native custody.
 /// Encoding below is explicit BE, not a copy of this native representation.
@@ -50,7 +57,10 @@ pub struct Binding{
     pub origin:u64,pub work:u64,pub hard:u64,pub cut:u64,pub cutoff:u64,
     pub source:[u8;40],pub release:[u8;64],pub target:[u8;24],pub reserved:[u8;8],
 }
-const _:()=assert!(std::mem::size_of::<Binding>()==256);
+// Match the first-party C schema in image_abi.h, independently on each target.
+const _:()=assert!(std::mem::size_of::<Binding>()==256
+    && std::mem::offset_of!(Binding,number)==56 && std::mem::offset_of!(Binding,acceptance)==72
+    && std::mem::offset_of!(Binding,source)==120 && std::mem::offset_of!(Binding,reserved)==248);
 impl Binding{
     pub fn request(identity:Identity,operation:[u8;16],bounds:Bounds)->Option<Self>{
         let value=Self{version:1,bytes:256,instance:[0;16],operation,nonce:[0;16],number:0,account:0,slot:0,
@@ -161,6 +171,41 @@ mod tests{
         let mut b=Binding::request(identity(),[2;16],Bounds{origin:100,work:100+WORK_NS,hard:100+HARD_NS}).unwrap();
         b.instance=identity().instance;b.number=9;b.account=501;b.slot=2;b.acceptance=110;
         b.nonce[..8].copy_from_slice(b"MRKACTX1");b.nonce[8..].copy_from_slice(&b.number.to_be_bytes());b
+    }
+    #[test]
+    fn compiled_target_is_canonical_and_same_build_preserves_zero_instance_requests(){
+        #[cfg(all(target_os="macos",target_arch="x86_64"))]
+        let (selected,foreign):(&[u8],&[u8])=(b"x86_64-apple-darwin",b"aarch64-apple-darwin");
+        #[cfg(not(all(target_os="macos",target_arch="x86_64")))]
+        let (selected,foreign):(&[u8],&[u8])=(b"aarch64-apple-darwin",b"x86_64-apple-darwin");
+        assert_eq!(TARGET,selected);
+        let native=identity();
+        assert!(native.valid());assert!(target_valid(&native.target));
+        assert_eq!(&native.target[..selected.len()],selected);
+        assert!(native.target[selected.len()..].iter().all(|byte|*byte==0));
+        // Build/request identities intentionally have no resident instance yet.
+        let request_identity=Identity{instance:[0;16],..native};
+        assert!(!request_identity.valid());
+        assert!(native.same_build(request_identity) && request_identity.same_build(native));
+        let binding=bound();
+        let request=Binding::request(request_identity,[2;16],binding.bounds()).unwrap();
+        assert!(binding.matches_request(request,binding.account));
+        let frame=Frame{kind:Kind::ChallengeAReply,code:Code::Accepted,binding,tail:None};
+        let bytes=frame.encode().unwrap();assert_eq!(Frame::decode(&bytes),Some(frame));
+        let mut opposite=[0;24];opposite[..foreign.len()].copy_from_slice(foreign);
+        let mut corrupt=native.target;corrupt[0]^=1;
+        let mut padding=native.target;padding[23]=1;
+        for (name,target) in [("foreign",opposite),("empty",[0;24]),("corrupt",corrupt),("padding",padding)]{
+            let invalid=Identity{target,..native};
+            assert!(!target_valid(&target) && !invalid.valid(),"{name}");
+            assert!(!native.same_build(invalid) && !invalid.same_build(native),"{name}");
+            assert!(!invalid.same_build(invalid),"{name}: two equally invalid targets");
+            assert!(Binding::request(invalid,[2;16],binding.bounds()).is_none(),"{name}");
+            assert!(Frame{binding:Binding{target,..binding},..frame}.encode().is_none(),"{name}");
+            // Mutate only the encoded target, not an independently invalid field.
+            let mut changed=bytes;changed[248..272].copy_from_slice(&target);
+            assert!(Frame::decode(&changed).is_none(),"{name}");
+        }
     }
     #[test]
     fn stage_binding_zero_fields_and_closed_codes_are_not_interchangeable(){

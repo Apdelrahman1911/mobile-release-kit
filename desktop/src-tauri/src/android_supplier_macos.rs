@@ -3166,7 +3166,7 @@ pub(crate) fn assert_macos_supplier_builder_data_contract() {
     tests::checked_ordinals_preserve_selection_failure_and_duplicate_semantics_data();
     tests::catalogue_phase_budget_preserves_validity_without_phantom_payload_copy_data();
     tests::compiled_six_component_catalogue_roundtrips_and_rejects_mismatches_data();
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     crate::saved_command_owner::SavedCommandOwner::assert_android_catalogue_whole_owner_data_contract();
     tests::implicit_archive_parents_bind_complete_source_closure_data();
     tests::implicit_archive_parent_component_prefix_and_bounds_refuse_data();

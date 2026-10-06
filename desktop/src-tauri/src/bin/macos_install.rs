@@ -1,12 +1,12 @@
 //! One-shot scripts-only standard Installer entry. Installer never lays files
 //! into the final app/runtime destinations. This process alone owns all copy
 //! writers; no Python, app, copy helper, daemon or general publisher runs as root.
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn main() { eprintln!("This Installer supports macOS 26 ARM64 only."); std::process::exit(1); }
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+fn main() { eprintln!("This Installer requires LP64 ARM64 or Intel macOS 26."); std::process::exit(1); }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn main() { std::process::exit(installer::run()); }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod installer {
     use std::{collections::{BTreeMap, BTreeSet}, os::fd::{AsFd, AsRawFd, OwnedFd}, path::Path, time::{Duration, Instant}};
     use nix::{errno::Errno, fcntl::{self, AtFlags, OFlag}, mount::MntFlags,
@@ -47,12 +47,20 @@ mod installer {
     }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
+        // `end` remains the original legacy-entry clock. The private B2 path
+        // never uses it: both processes receive this same absolute deadline.
+        worker_deadline: Option<worker::Deadline>, worker_stderr_is_gate: bool, worker_go_eof: bool,
+        payload_written: u64, payload_write_calls: u64,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
         metadata: installation_record::Progress,
         gate: MaintenanceGate,
         #[cfg(feature = "macos-installed-installer-fixture")]
         fixture: Option<fixture::Context>,
+    }
+    struct PreparedFresh {
+        input: usize, inventory: Inventory, inventory_bytes: Vec<u8>,
+        destination: usize, versions: usize,
     }
     fn check(ok: bool, why: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(why) } }
     fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
@@ -74,7 +82,10 @@ mod installer {
     struct FinalResult { state: &'static str, reason: Option<&'static str>, exit: i32, deadline_met: bool }
     fn final_result(result: Result<()>, originals_settled: bool, unknown: bool, runtime: &str, app: &str,
         end: Instant, observed_after_closes: Instant) -> FinalResult {
-        let deadline_met = observed_after_closes < end;
+        final_result_after_deadline(result, originals_settled, unknown, runtime, app, observed_after_closes < end)
+    }
+    fn final_result_after_deadline(result: Result<()>, originals_settled: bool, unknown: bool,
+        runtime: &str, app: &str, deadline_met: bool) -> FinalResult {
         // Preserve an earlier failure; otherwise record actual final close
         // uncertainty before the final time veto. Late known closes stay Closed.
         let reason = result.err().or_else(|| (!originals_settled).then_some("original-close-unknown"))
@@ -311,18 +322,26 @@ mod installer {
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
+                worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
                 gate:MaintenanceGate::new(),
                 #[cfg(feature = "macos-installed-installer-fixture")]
                 fixture: None }
         }
-        fn clock(&self) -> Result<()> { check(Instant::now() < self.end && !self.unknown, "deadline-or-unknown") }
+        fn clock(&self) -> Result<()> {
+            check(!self.unknown, "deadline-or-unknown")?;
+            match self.worker_deadline.as_ref() {
+                Some(deadline) => deadline.check_work().map(|_| ()),
+                None => check(Instant::now() < self.end, "deadline-or-unknown"),
+            }
+        }
         fn fd(&self, n: usize) -> Result<&OwnedFd> { self.originals.get(n).and_then(|r| r.fd.as_ref()).ok_or("original-missing") }
         fn identity(&self, n: usize) -> Result<Identity> { self.originals.get(n).and_then(|r| r.identity).ok_or("identity-missing") }
         fn reserve(&mut self, parent: Option<usize>, name: &str, role: Role) -> Result<usize> {
             self.clock()?;
-            check(self.originals.len() < 24576 && self.originals.iter().filter(|r| r.fd.is_some()).count() < 96, "original-bound")?;
+            let extra = if self.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 };
+            check(self.originals.len() < 24576 && self.originals.iter().filter(|r| r.fd.is_some()).count() + extra < 96, "original-bound")?;
             let n = self.originals.len(); self.originals.push(Original { fd: None, state: State::Reserved, role, parent, name: name.into(), identity: None }); Ok(n)
         }
         fn named(&self, parent: Option<usize>, name: &str) -> nix::Result<FileStat> {
@@ -396,7 +415,9 @@ mod installer {
             check(fs.filesystem_type_name() == "apfs" && fs.flags().contains(MntFlags::MNT_LOCAL)
                 && !fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP), "mount-refused")?;
             native::empty_acl_observed(fd.as_fd()).map_err(|failure| {
-                acl_diagnostic(role, &failure); "acl-refused"
+                // The private worker's fd2 is the read-only, process-lifetime
+                // gate, not a log. Its bounded result reports the refusal.
+                if !self.worker_stderr_is_gate { acl_diagnostic(role, &failure); } "acl-refused"
             })
         }
         fn persist(&mut self, n: usize, file: bool) -> Result<()> {
@@ -482,6 +503,12 @@ mod installer {
                 self.clock()?;
                 let count = unistd::write(self.fd(n)?, bytes).map_err(|_| "write-refused")?;
                 check(count != 0 && count <= bytes.len(), "write-zero-or-bound")?;
+                if self.originals[n].role == Role::PayloadWriter {
+                    // Record a returned write before any following deadline
+                    // veto. This is not a promise about a future close.
+                    self.payload_written = self.payload_written.checked_add(count as u64).ok_or("payload-write-count")?;
+                    self.payload_write_calls = self.payload_write_calls.checked_add(1).ok_or("payload-write-count")?;
+                }
                 if self.originals[n].role == Role::MetadataWriter { self.metadata.wrote(count)?; }
                 if self.originals[n].role == Role::GateWriter {
                     self.gate.written = self.gate.written.checked_add(count as u64).ok_or("gate-write-bound")?;
@@ -714,14 +741,23 @@ mod installer {
                 "cleanup":"original-closes-only-permanent-gate-retained"})
         }
         fn install(&mut self, source: &str) -> Result<()> {
+            let prepared = self.prepare_fresh(source)?;
+            let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "stage-identity")?;
+            check(nonce.iter().any(|byte| *byte != 0), "stage-identity")?;
+            let invocation = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            self.install_prepared(prepared, &invocation)
+        }
+        fn prepare_fresh(&mut self, source: &str) -> Result<PreparedFresh> {
             let (input, inventory, inventory_bytes) = self.input(source)?;
+            self.prepare_fresh_input(input, inventory, inventory_bytes)
+        }
+        fn prepare_fresh_input(&mut self, input: usize, inventory: Inventory, inventory_bytes: Vec<u8>) -> Result<PreparedFresh> {
             let indexed = inventory.index()?;
             check(indexed.payload_bytes.checked_add(inventory_bytes.len() as u64)
                 .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64))
                 .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
                 .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT), "inventory-bound")?;
             check(indexed.files.len().checked_add(3).is_some_and(|n| n <= installation_record::FILE_LIMIT), "installed-file-bound")?;
-            let files = indexed.files; let directories = indexed.directories;
             let support = self.support_root()?;
             #[cfg(not(feature = "macos-installed-installer-fixture"))]
             let destination = self.directory(support, "MobileReleaseKit", false, 0o755)?;
@@ -733,9 +769,15 @@ mod installer {
             self.fixture_before_release_absence(versions)?;
             self.absent(versions, paths::RELEASE)?;
             self.maintenance_gate(destination)?;
-            let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "stage-identity")?;
-            check(nonce.iter().any(|byte| *byte != 0), "stage-identity")?;
-            let name = format!(".install-{}", nonce.iter().map(|b| format!("{b:02x}")).collect::<String>());
+            Ok(PreparedFresh { input, inventory, inventory_bytes, destination, versions })
+        }
+        fn install_prepared(&mut self, prepared: PreparedFresh, invocation: &str) -> Result<()> {
+            check(!self.worker_stderr_is_gate || self.worker_go_eof, "worker-go-eof-required")?;
+            check(worker::invocation_valid(invocation), "stage-identity")?;
+            let PreparedFresh { input, inventory, inventory_bytes, destination, versions } = prepared;
+            let indexed = inventory.index()?;
+            let files = indexed.files; let directories = indexed.directories;
+            let name = format!(".install-{invocation}");
             self.stage_name = Some(name.clone()); // Reserve the effect identity before mkdir.
             let stage = self.directory(destination, &name, true, 0o700)?; self.stage = Some(stage);
             self.receipt("staging-created")?;
@@ -845,13 +887,22 @@ mod installer {
         fn finish(&mut self, mut result: Result<()>) -> FinalResult {
             if result.is_ok() {
                 result = match self.gate.participant {
-                    Some(reader) if self.gate.verified && self.gate.exclusive_acquired => self.gate_protected(reader),
+                    Some(reader) if self.gate.verified && (self.gate.exclusive_acquired
+                        || self.worker_stderr_is_gate && self.worker_go_eof && self.worker_deadline.is_some()
+                            && !self.gate.lock_attempted) => self.gate_protected(reader),
                     _ => Err("gate-finality-missing"),
                 };
             }
             let settled = self.settle_originals();
             // Sample AFTER every final close; an earlier Ok is not timely finality.
-            final_result(result, settled, self.unknown, self.runtime_publication, self.app_publication, self.end, Instant::now())
+            match self.worker_deadline.as_ref() {
+                Some(deadline) => {
+                    let timely = deadline.check_total().is_ok();
+                    final_result_after_deadline(result, settled, self.unknown || deadline.is_unknown(),
+                        self.runtime_publication, self.app_publication, timely)
+                }
+                None => final_result(result, settled, self.unknown, self.runtime_publication, self.app_publication, self.end, Instant::now()),
+            }
         }
         fn result_record(&self, result: &FinalResult) -> serde_json::Value {
             serde_json::json!({"schemaVersion":1,"state":result.state,"reason":result.reason,"release":paths::RELEASE,
@@ -862,6 +913,879 @@ mod installer {
                 "deadlineMetAfterFinalCloses":result.deadline_met,"createdAncestors":self.creation_summary(),"cleanup":"original-closes-only-no-deletion",
                 "sourceCommit":option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),"inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256"),
                 "runtimeManifestSha256":option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")})
+        }
+    }
+    // B2 is deliberately private and is not selected by either run() below.
+    // B3 must bind genuine package/context admission and the outer parent's
+    // result/export finality before wiring this fixed role into an entry.
+    #[allow(dead_code)]
+    mod worker {
+        use super::*;
+        use std::{cell::Cell, mem::ManuallyDrop, os::fd::BorrowedFd,
+            process::{Child, Command, ExitStatus, Stdio}};
+        use nix::{poll::{poll, PollFd, PollFlags}, sys::uio::pread,
+            time::{clock_gettime, ClockId}};
+        use serde_json::{json, Map, Value};
+        use mobile_release_desktop::protocol::strict_json;
+
+        const SECOND: u64 = 1_000_000_000;
+        const TOTAL: u64 = 120 * SECOND;
+        const SETTLEMENT: u64 = 10 * SECOND;
+        const ROLE: &str = "--mrk-installer-private-writer-v2";
+        const INIT_LIMIT: usize = 16 * 1024;
+        const CONTROL_LIMIT: usize = 2 * 1024;
+        const RESULT_LIMIT: usize = 64 * 1024;
+        const SELF_LIMIT: u64 = 64 * 1024 * 1024;
+        // Three inherited standard descriptors and one transferred Command
+        // gate reference are accounted independently of the existing book.
+        pub(super) const EXTRA_LIVE: usize = 4;
+
+        pub(super) fn invocation_valid(value: &str) -> bool {
+            value.len() == 32 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && value.bytes().any(|b| b != b'0')
+        }
+        fn monotonic() -> Result<u64> {
+            let value = clock_gettime(ClockId::CLOCK_MONOTONIC).map_err(|_| "worker-clock-call")?;
+            let seconds = u64::try_from(value.tv_sec()).map_err(|_| "worker-clock-value")?;
+            let nanos = u64::try_from(value.tv_nsec()).map_err(|_| "worker-clock-value")?;
+            check(nanos < SECOND, "worker-clock-value")?;
+            seconds.checked_mul(SECOND).and_then(|n| n.checked_add(nanos)).ok_or("worker-clock-value")
+        }
+        fn time_data(start: u64, end: u64, last: u64, now: u64, work: bool) -> Result<u64> {
+            check(start.checked_add(TOTAL) == Some(end) && last >= start && now >= last, "worker-clock-regressed")?;
+            let limit = if work { end.checked_sub(SETTLEMENT).ok_or("worker-clock-value")? } else { end };
+            check(now < limit, if work { "worker-work-deadline" } else { "worker-final-deadline" })?;
+            Ok(now)
+        }
+        pub(super) struct Deadline { start: u64, end: u64, last: Cell<u64>, unknown: Cell<bool> }
+        impl Deadline {
+            fn start() -> Result<Self> {
+                let start = monotonic()?;
+                let end = start.checked_add(TOTAL).ok_or("worker-clock-value")?;
+                Ok(Self { start, end, last: Cell::new(start), unknown: Cell::new(false) })
+            }
+            fn inherit(end: u64) -> Result<Self> {
+                let start = end.checked_sub(TOTAL).ok_or("worker-clock-value")?;
+                let now = monotonic()?;
+                time_data(start, end, start, now, true)?;
+                Ok(Self { start, end, last: Cell::new(now), unknown: Cell::new(false) })
+            }
+            fn observe(&self, work: bool) -> Result<u64> {
+                check(!self.unknown.get(), "worker-clock-unknown")?;
+                let now = match monotonic() {
+                    Ok(now) => now,
+                    Err(error) => { self.unknown.set(true); return Err(error); }
+                };
+                if now < self.last.get() || now < self.start {
+                    self.unknown.set(true); return Err("worker-clock-regressed");
+                }
+                // Expiry never rewrites the last real returned observation.
+                self.last.set(now);
+                time_data(self.start, self.end, now, now, work)
+            }
+            pub(super) fn check_work(&self) -> Result<u64> { self.observe(true) }
+            pub(super) fn check_total(&self) -> Result<u64> { self.observe(false) }
+            pub(super) fn is_unknown(&self) -> bool { self.unknown.get() }
+            fn poll_ms(&self, work: bool) -> Result<u16> {
+                let now = self.observe(work)?;
+                let end = if work { self.end - SETTLEMENT } else { self.end };
+                Ok(((end - now).div_ceil(1_000_000).min(20)) as u16)
+            }
+        }
+        impl Install {
+            fn with_worker_deadline(deadline: Deadline, stderr_is_gate: bool) -> Self {
+                // Do not call new(): that would create a second 120s budget.
+                // The legacy-only Instant field is an inert marker here and
+                // cannot select a worker clock or its private result transport.
+                Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
+                    worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
+                    payload_written:0,payload_write_calls:0,
+                    stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
+                    app_publication:"not-attempted",payload_verified:false,
+                    metadata:installation_record::Progress::default(),gate:MaintenanceGate::new(),
+                    #[cfg(feature = "macos-installed-installer-fixture")]
+                    fixture:None }
+            }
+            fn shared_deadline(&self) -> Result<&Deadline> { self.worker_deadline.as_ref().ok_or("worker-clock-missing") }
+            fn worker_reserve(&mut self, name: &str) -> Result<usize> {
+                check(self.originals.iter().filter(|r| r.fd.is_some()).count() + EXTRA_LIVE < 96, "worker-original-bound")?;
+                self.reserve(None, name, Role::Reader)
+            }
+            fn control_original(&mut self, n: usize, fd: Option<OwnedFd>) -> Result<()> {
+                // The slot was reserved before spawn/taking the returned pipe.
+                // Install BOTH returned handles before any fallible validation,
+                // so a rejected first pipe cannot hide the second in Child.
+                self.originals[n].state = State::Acquiring;
+                let Some(fd) = fd else {
+                    self.originals[n].state = State::NoHandle;
+                    return Err("worker-control-pipe-missing");
+                };
+                self.adopt(n, Ok(fd)).map(|_| ())
+            }
+            fn validate_control_original(&self, n: usize, write: bool) -> Result<()> {
+                pipe_data(self.fd(n)?.as_fd(), write, self.shared_deadline()?)?;
+                nonblocking(self.fd(n)?.as_fd(), self.shared_deadline()?)?;
+                Ok(())
+            }
+        }
+        fn identity_data(id: Identity) -> Value {
+            json!({"device":id.dev,"inode":id.ino,"mode":id.mode,"uid":id.uid,"gid":id.gid,
+                "links":id.links,"bytes":id.size,"mtime":id.mtime,"mtimeNanos":id.mtime_ns,
+                "ctime":id.ctime,"ctimeNanos":id.ctime_ns})
+        }
+        fn object<'a>(value: &'a Value, keys: &[&str]) -> Result<&'a Map<String, Value>> {
+            let map = value.as_object().ok_or("worker-frame-shape")?;
+            check(map.len() == keys.len() && keys.iter().all(|key| map.contains_key(*key)), "worker-frame-shape")?;
+            Ok(map)
+        }
+        fn packet(bytes: &[u8], limit: usize) -> Result<Value> {
+            check(!bytes.is_empty() && bytes.len() <= limit, "worker-frame-bound")?;
+            strict_json(bytes).map_err(|_| "worker-frame-json")
+        }
+        fn frame(value: &Value, limit: usize) -> Result<Vec<u8>> {
+            let bytes = serde_json::to_vec(value).map_err(|_| "worker-frame-json")?;
+            check(!bytes.is_empty() && bytes.len() <= limit, "worker-frame-bound")?;
+            let size = u32::try_from(bytes.len()).map_err(|_| "worker-frame-bound")?;
+            let mut result = Vec::with_capacity(bytes.len() + 4);
+            result.extend_from_slice(&size.to_be_bytes()); result.extend_from_slice(&bytes); Ok(result)
+        }
+        fn frame_size(prefix: &[u8], limit: usize) -> Result<usize> {
+            check(prefix.len() == 4, "worker-frame-size")?;
+            let size = u32::from_be_bytes(prefix.try_into().map_err(|_| "worker-frame-size")?) as usize;
+            check(size > 0 && size <= limit, "worker-frame-bound")?; Ok(size)
+        }
+        fn pipe_data(fd: BorrowedFd<'_>, write: bool, deadline: &Deadline) -> Result<Value> {
+            deadline.check_work()?;
+            let value = stat::fstat(fd).map_err(|_| "worker-pipe-stat")?;
+            deadline.check_work()?;
+            let access = OFlag::from_bits_truncate(fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL).map_err(|_| "worker-pipe-flags")?);
+            deadline.check_work()?;
+            check(value.st_mode & SFlag::S_IFMT.bits() == SFlag::S_IFIFO.bits()
+                && value.st_uid == 0 && value.st_gid == 0
+                && access & OFlag::O_ACCMODE == if write { OFlag::O_WRONLY } else { OFlag::O_RDONLY },
+                "worker-pipe-kind")?;
+            Ok(json!({"device":i64::from(value.st_dev),"inode":value.st_ino,
+                "mode":u32::from(value.st_mode),"uid":value.st_uid,"gid":value.st_gid}))
+        }
+        fn pipe_shape(value: &Value) -> Result<()> {
+            object(value,&["device","inode","mode","uid","gid"])?;
+            let mode = value["mode"].as_u64().and_then(|n| u32::try_from(n).ok()).ok_or("worker-pipe-shape")?;
+            check(value["device"].as_i64().is_some() && value["inode"].as_u64().is_some()
+                && value["uid"].as_u64() == Some(0) && value["gid"].as_u64() == Some(0)
+                && mode & 0o170000 == 0o010000, "worker-pipe-shape")
+        }
+        fn nonblocking(fd: BorrowedFd<'_>, deadline: &Deadline) -> Result<()> {
+            deadline.check_work()?;
+            let before = fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL).map_err(|_| "worker-pipe-flags")?;
+            deadline.check_work()?;
+            fcntl::fcntl(fd, fcntl::FcntlArg::F_SETFL(OFlag::from_bits_truncate(before) | OFlag::O_NONBLOCK))
+                .map_err(|_| "worker-pipe-flags")?;
+            deadline.check_work()?;
+            let after = fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL).map_err(|_| "worker-pipe-flags")?;
+            deadline.check_work()?;
+            check(OFlag::from_bits_truncate(after).contains(OFlag::O_NONBLOCK), "worker-pipe-flags")
+        }
+        fn wait_ready(fd: BorrowedFd<'_>, write: bool, deadline: &Deadline, work: bool) -> Result<()> {
+            let flags = if write { PollFlags::POLLOUT } else { PollFlags::POLLIN };
+            let mut items = [PollFd::new(fd, flags)];
+            loop {
+                let timeout = deadline.poll_ms(work)?;
+                match poll(&mut items, timeout) {
+                    Ok(_) => { deadline.observe(work)?; return Ok(()); }
+                    Err(Errno::EINTR) => (),
+                    Err(_) => return Err("worker-pipe-poll"),
+                }
+            }
+        }
+        fn write_frame(fd: BorrowedFd<'_>, value: &Value, limit: usize, deadline: &Deadline, work: bool) -> Result<()> {
+            let bytes = frame(value, limit)?; let mut used = 0;
+            while used < bytes.len() {
+                deadline.observe(work)?;
+                match unistd::write(fd, &bytes[used..]) {
+                    Ok(n) if n > 0 && n <= bytes.len() - used => { used += n; deadline.observe(work)?; }
+                    Ok(_) => return Err("worker-pipe-write-bound"),
+                    Err(Errno::EINTR) => (),
+                    Err(Errno::EAGAIN) => wait_ready(fd, true, deadline, work)?,
+                    Err(_) => return Err("worker-pipe-write"),
+                }
+            }
+            Ok(())
+        }
+        fn read_exact(fd: BorrowedFd<'_>, bytes: &mut [u8], deadline: &Deadline) -> Result<()> {
+            let mut used = 0;
+            while used < bytes.len() {
+                deadline.check_work()?;
+                match unistd::read(fd, &mut bytes[used..]) {
+                    Ok(0) => return Err("worker-command-early-eof"),
+                    Ok(n) if n <= bytes.len() - used => { used += n; deadline.check_work()?; }
+                    Ok(_) => return Err("worker-pipe-read-bound"),
+                    Err(Errno::EINTR) => (),
+                    Err(Errno::EAGAIN) => wait_ready(fd, false, deadline, true)?,
+                    Err(_) => return Err("worker-pipe-read"),
+                }
+            }
+            Ok(())
+        }
+        fn read_frame(fd: BorrowedFd<'_>, limit: usize, deadline: &Deadline) -> Result<(Value, Vec<u8>)> {
+            let mut prefix = [0;4]; read_exact(fd, &mut prefix, deadline)?;
+            let mut bytes = vec![0;frame_size(&prefix, limit)?]; read_exact(fd, &mut bytes, deadline)?;
+            Ok((packet(&bytes, limit)?, bytes))
+        }
+        fn command_eof(fd: BorrowedFd<'_>, deadline: &Deadline) -> Result<()> {
+            let mut extra = [0u8;1];
+            loop {
+                deadline.check_work()?;
+                match unistd::read(fd, &mut extra) {
+                    Ok(0) => { deadline.check_work()?; return Ok(()); }
+                    Ok(_) => return Err("worker-command-trailing"),
+                    Err(Errno::EINTR) => (),
+                    Err(Errno::EAGAIN) => wait_ready(fd, false, deadline, true)?,
+                    Err(_) => return Err("worker-pipe-read"),
+                }
+            }
+        }
+        fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+        fn target() -> &'static str {
+            if cfg!(target_arch = "aarch64") { "aarch64-apple-darwin" } else { "x86_64-apple-darwin" }
+        }
+        fn compile_binding() -> Result<Value> {
+            let source = option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or("worker-compile-binding")?;
+            let inventory = option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256").ok_or("worker-compile-binding")?;
+            let runtime = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").ok_or("worker-compile-binding")?;
+            check(source.len() == 40 && source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && sha(inventory) && sha(runtime)
+                && option_env!("MRK_BUNDLED_PROTOCOL_SHA256") == Some(paths::PROTOCOL_SHA), "worker-compile-binding")?;
+            Ok(json!({"target":target(),"release":paths::RELEASE,"sourceCommit":source,
+                "inventorySha256":inventory,"runtimeManifestSha256":runtime,"protocolSha256":paths::PROTOCOL_SHA}))
+        }
+        struct Source {
+            script: usize, image: usize, input: usize, image_sha: String,
+            executable: String, directory: String, source: String,
+        }
+        impl Install {
+            fn worker_source(&mut self, source: &str, input: usize) -> Result<Source> {
+                self.clock()?;
+                let script = self.originals.get(input).and_then(|r| r.parent).ok_or("worker-script-parent")?;
+                check(self.originals[input].name == "input", "worker-script-input")?;
+                self.protected(script, true, Some(0o755))?;
+                native::no_xattrs(self.fd(script)?.as_fd()).map_err(|_| "worker-script-attributes")?;
+                let directory = source.strip_suffix("/input").filter(|s| !s.is_empty()).ok_or("worker-script-input")?;
+                let executable = format!("{directory}/mrk-macos-install");
+                let actual = std::env::current_exe().map_err(|_| "worker-self-image")?;
+                check(actual.as_os_str() == std::ffi::OsStr::new(&executable), "worker-self-image")?;
+                let image = self.open(Some(script), "mrk-macos-install", false)?;
+                self.protected(image, false, Some(0o555))?;
+                native::no_xattrs(self.fd(image)?.as_fd()).map_err(|_| "worker-self-attributes")?;
+                let size = u64::try_from(self.identity(image)?.size).map_err(|_| "worker-self-bound")?;
+                check(size > 0 && size <= SELF_LIMIT, "worker-self-bound")?;
+                let image_sha = self.read(image, size, false)?.0;
+                Ok(Source { script,image,input,image_sha,executable,directory:directory.into(),source:source.into() })
+            }
+            fn source_post(&self, source: &Source) -> Result<()> {
+                self.clock()?;
+                for index in [source.script,source.image,source.input] { self.check_name(index, true)?; }
+                self.protected(source.script, true, Some(0o755))?;
+                self.protected(source.image, false, Some(0o555))?;
+                self.protected(source.input, true, Some(0o555))?;
+                self.clock()
+            }
+        }
+        fn source_data(book: &Install, source: &Source) -> Result<Value> {
+            Ok(json!({"script":identity_data(book.identity(source.script)?),"image":identity_data(book.identity(source.image)?),
+                "input":identity_data(book.identity(source.input)?),"imageSha256":source.image_sha}))
+        }
+        fn control(kind: &str, invocation: &str, init_sha: &str, end: u64, parent: u32, child: u32,
+            worker_command: &Value, worker_result: &Value) -> Value {
+            json!({"schemaVersion":2,"kind":kind,"invocation":invocation,"initSha256":init_sha,
+                "endNanos":end,"parent":parent,"child":child,
+                "writerCommandEndpoint":worker_command,"writerResultEndpoint":worker_result})
+        }
+        fn valid_control(value: &Value, expected: &Value) -> Result<()> {
+            check(value == expected, "worker-control-binding")
+        }
+        // Compile-literal diagnostic vocabulary only. Unmapped downstream
+        // errors stay a fixed refusal, never a raw path or returned private text.
+        const FAILURE_LABELS: &[&str] = &[
+            "aarch64-apple-darwin", "acl-refused", "administrator-required", "both-publications-confirmed",
+            "copy-bound", "copy-hash", "copy-original-correspondence", "copy-read",
+            "copy-readback", "copy-size", "created-directory-mode", "created-directory-name",
+            "created-directory-normalized-identity", "created-directory-owner", "created-directory-protection", "created-directory-stat",
+            "created-stat", "deadline", "deadline-or-unknown", "destination-observation-refused",
+            "destination-occupied", "directory-attributes", "directory-bound", "directory-close",
+            "directory-depth", "directory-duplicate-or-bound", "directory-name", "directory-occupied-or-refused",
+            "directory-record", "directory-roster", "directory-seal", "earlier-persistence-failure",
+            "exclusive-publication-refused-or-unknown", "existing-not-modified", "export-acl-refused", "export-attributes",
+            "export-binding", "export-byte-bound", "export-close-unknown", "export-closed-leaf-correspondence",
+            "export-deadline", "export-deadline-or-unknown", "export-identity-missing", "export-inventory-binding",
+            "export-json-bound", "export-manifest-binding", "export-mode", "export-mount-refused",
+            "export-name", "export-named-refused", "export-open-refused", "export-original-bound",
+            "export-original-correspondence", "export-original-missing", "export-owner", "export-parent-type",
+            "export-persistence-refused", "export-private-original", "export-protection-refused", "export-sealed-size-or-identity",
+            "export-source-binding", "export-stat-refused", "export-write-progress", "export-write-refused",
+            "export-writer-close-unknown", "export-written-size-or-identity", "file-attributes", "file-close-unknown",
+            "file-component", "file-mode", "file-owner", "first-copy-refusal",
+            "first-publication-second-refusal", "fixed-scripts-input-required", "fixture-base-identity", "fixture-context-missing",
+            "fixture-fixed-source-input-or-policy-table", "fixture-occupant-attributes", "fixture-occupant-before", "fixture-occupant-changed",
+            "fixture-occupant-close", "fixture-occupant-final-close", "fixture-reported-persistence-failure", "fixture-source-binding",
+            "fixture-witness-missing", "gate-already-entered", "gate-attributes", "gate-busy-or-refused",
+            "gate-content", "gate-created-correspondence", "gate-finality-missing", "gate-name-refused",
+            "gate-shape", "gate-stat", "gate-write-bound", "identity-missing",
+            "inert-close-error-result", "inert-close-result", "input-attributes", "input-directory",
+            "input-exact-roster", "input-inventory", "input-type", "installation-directory-attributes",
+            "installation-directory-changed", "installation-directory-correspondence", "installation-directory-name", "installation-directory-policy",
+            "installation-directory-stat", "installation-file-attributes", "installation-file-flags", "installation-file-original",
+            "installation-file-readback", "installation-metadata-plan", "installation-readback-close", "installation-release-roster",
+            "installation-runtime-binding", "installation-source-binding", "installed-file-bound", "inventory-anchor",
+            "inventory-attributes", "inventory-binding", "inventory-bound", "inventory-close",
+            "inventory-size", "kernel-exit-retained", "macos-installed-installer-fixture", "macos26-arm64-required",
+            "metadata-descriptor-collision", "mount-refused", "mrk-macos-install", "named-refused",
+            "native-installer-collisions-and-injected-policy-only", "no-handle", "not-attempted", "occupied-app",
+            "occupied-refused", "occupied-release", "open-refused", "original-bound",
+            "original-close-unknown", "original-closes-only-no-deletion", "original-closes-only-permanent-gate-retained", "original-correspondence",
+            "original-installation-failed", "original-missing", "original-name", "original-stat",
+            "original-write-failure", "other-original-refusal", "other-protected-object", "partial-installation-retained",
+            "payload-attributes", "payload-file-before-any-publication", "payload-write-count", "pending-final-closes",
+            "pending-original-export-finalization", "persistence-refused", "postruntime-persistence-report", "pre-exit-writer-result",
+            "prepublication-persistence-report", "private-writer-init", "protection-refused", "published-original",
+            "published-stat", "read-bound", "read-refused", "readback-close",
+            "receipt-shape", "refused-staging-retained", "runtime-publication-collision", "runtime-publication-confirmed",
+            "sealed-directory-stat", "size-changed", "source-attributes", "source-close",
+            "source-directory-close", "source-exact-roster", "source-identity-size", "source-spelling",
+            "stage-directory-after-runtime-rename", "stage-identity", "stage-missing", "staging-created",
+            "staging-exact-roster", "staging-file-collision", "stat-refused", "system-library",
+            "system-root", "system-support", "unexpected-native-case-result", "unknown-retained",
+            "worker-clock-call", "worker-clock-missing", "worker-clock-regressed", "worker-clock-unknown",
+            "worker-clock-value", "worker-command-close-unknown", "worker-command-early-eof", "worker-command-original",
+            "worker-command-trailing", "worker-compile-binding", "worker-control-binding", "worker-control-pipe-missing",
+            "worker-exited-before-go", "worker-final-deadline", "worker-fixture-route-unavailable", "worker-frame-bound",
+            "worker-frame-json", "worker-frame-shape", "worker-frame-size", "worker-gate-binding",
+            "worker-gate-bytes", "worker-gate-duplicate", "worker-gate-flags", "worker-gate-original",
+            "worker-gate-read", "worker-gate-readonly", "worker-gate-stat", "worker-go-eof-required",
+            "worker-init-binding", "worker-invocation", "worker-joined-result-refused", "worker-original-bound",
+            "worker-original-child", "worker-original-termination-refused", "worker-original-wait-unknown", "worker-parent",
+            "worker-parent-changed", "worker-parent-exclusive-required", "worker-parent-once", "worker-pipe-flags",
+            "worker-pipe-kind", "worker-pipe-poll", "worker-pipe-post", "worker-pipe-read",
+            "worker-pipe-read-bound", "worker-pipe-shape", "worker-pipe-stat", "worker-pipe-write",
+            "worker-pipe-write-bound", "worker-platform", "worker-result-binding", "worker-result-bound",
+            "worker-result-close-unknown", "worker-result-incomplete", "worker-result-original", "worker-result-read",
+            "worker-result-reason", "worker-result-shape", "worker-result-trailing", "worker-role",
+            "worker-script-attributes", "worker-script-input", "worker-script-parent", "worker-self-attributes",
+            "worker-self-bound", "worker-self-image", "worker-source-binding", "worker-source-original",
+            "worker-source-post", "worker-spawn-unknown", "worker-work-deadline", "write-refused",
+            "write-zero-or-bound", "writer-finality",
+        ];
+        fn closed_reason(label: &str) -> &'static str {
+            FAILURE_LABELS.iter().copied().find(|known| *known == label).unwrap_or("other-original-refusal")
+        }
+        fn outcome_data(exit: i32, state: &str, originals: bool, payload: bool, verified: bool,
+            runtime: &str, app: &str, timely: bool, unknown: bool, writes: u64, bytes: u64) -> bool {
+            let published = runtime == "confirmed" || app == "confirmed";
+            matches!(exit, 0 | 1 | 20)
+                && matches!(state, "installed" | "partial-installation-retained" | "unknown-retained" | "refused-staging-retained")
+                && bytes <= installation_record::PAYLOAD_LIMIT
+                && (writes == 0) == (bytes == 0) && bytes >= writes
+                && (!originals || payload)
+                && (exit != 20 || state == "partial-installation-retained" && published)
+                && (state != "partial-installation-retained" || exit == 20 && published)
+                && (exit != 1 || !published && if unknown { state == "unknown-retained" } else { state == "refused-staging-retained" })
+                && (exit != 0 || state == "installed" && originals && payload && verified && timely && !unknown
+                    && runtime == "confirmed" && app == "confirmed" && writes > 0)
+                && (state != "installed" || exit == 0)
+        }
+        struct PreExit {
+            exit: i32, state: String, originals: bool, payload: bool, verified: bool,
+            runtime: String, app: String, timely: bool, unknown: bool, writes: u64, bytes: u64,
+            reason: Option<String>,
+        }
+        impl PreExit {
+            fn from_original(book: &Install, result: &FinalResult) -> Self {
+                Self { exit:result.exit,state:result.state.into(),originals:book.originals_settled(),
+                    payload:book.payload_writers_settled(),verified:book.payload_verified,
+                    runtime:book.runtime_publication.into(),app:book.app_publication.into(),
+                    timely:result.deadline_met,unknown:book.unknown || book.worker_deadline.as_ref().is_some_and(Deadline::is_unknown),
+                    writes:book.payload_write_calls,bytes:book.payload_written,
+                    reason:result.reason.map(|label| closed_reason(label).to_owned()) }
+            }
+            fn data(&self, invocation: &str, init_sha: &str) -> Value {
+                json!({"schemaVersion":2,"kind":"pre-exit-writer-result","invocation":invocation,"initSha256":init_sha,
+                    "exitCode":self.exit,"state":self.state,"reason":self.reason,"originalsClosed":self.originals,"payloadClosed":self.payload,
+                    "payloadVerified":self.verified,"runtimePublication":self.runtime,"appPublication":self.app,
+                    "withinOriginalDeadline":self.timely,"unknown":self.unknown,
+                    "payloadWriteCount":self.writes,"payloadWriteBytes":self.bytes,
+                    "stdoutClosed":false,"inheritedGateClosed":false,"selfJoined":false})
+            }
+            fn parse(value: &Value, invocation: &str, init_sha: &str) -> Result<Self> {
+                object(value, &["schemaVersion","kind","invocation","initSha256","exitCode","state","reason","originalsClosed",
+                    "payloadClosed","payloadVerified","runtimePublication","appPublication","withinOriginalDeadline",
+                    "unknown","payloadWriteCount","payloadWriteBytes","stdoutClosed","inheritedGateClosed","selfJoined"])?;
+                check(value["schemaVersion"] == 2 && value["kind"] == "pre-exit-writer-result"
+                    && value["invocation"] == invocation && value["initSha256"] == init_sha
+                    && value["stdoutClosed"] == false && value["inheritedGateClosed"] == false && value["selfJoined"] == false,
+                    "worker-result-binding")?;
+                let boolean = |key: &str| value[key].as_bool().ok_or("worker-result-shape");
+                let text = |key: &str| value[key].as_str().map(str::to_owned).ok_or("worker-result-shape");
+                let result = Self { exit:value["exitCode"].as_i64().and_then(|n| i32::try_from(n).ok()).ok_or("worker-result-shape")?,
+                    state:text("state")?,originals:boolean("originalsClosed")?,payload:boolean("payloadClosed")?,
+                    verified:boolean("payloadVerified")?,runtime:text("runtimePublication")?,app:text("appPublication")?,
+                    timely:boolean("withinOriginalDeadline")?,unknown:boolean("unknown")?,
+                    writes:value["payloadWriteCount"].as_u64().ok_or("worker-result-shape")?,
+                    bytes:value["payloadWriteBytes"].as_u64().ok_or("worker-result-shape")?,
+                    reason:if value["reason"].is_null() { None } else { Some(text("reason")?) } };
+                check(result.reason.as_deref().is_none_or(|label| closed_reason(label) == label)
+                    && (result.exit != 0 || result.reason.is_none()), "worker-result-reason")?;
+                for publication in [&result.runtime,&result.app] {
+                    check(matches!(publication.as_str(), "not-attempted" | "attempting" | "confirmed" | "occupied-refused" | "unknown"),
+                        "worker-result-shape")?;
+                }
+                check(outcome_data(result.exit,&result.state,result.originals,result.payload,result.verified,
+                    &result.runtime,&result.app,result.timely,result.unknown,result.writes,result.bytes), "worker-result-shape")?;
+                Ok(result)
+            }
+        }
+        // Private native fact: deliberately not Serialize/Deserialize, not a
+        // bool supplied by a package, and not the outer parent's finality.
+        struct JoinedWriter { invocation: String, child: u32, outcome: PreExit, observed_at: u64 }
+        impl JoinedWriter {
+            fn successful(&self) -> bool { self.outcome.exit == 0 }
+        }
+        fn joined_data(frame: bool, eof: bool, output_close: bool, command_close: bool,
+            wait: Option<i32>, reported: i32, source_post: bool, timely: bool, uncertainty: bool) -> bool {
+            frame && eof && output_close && command_close && wait == Some(reported)
+                && source_post && timely && !uncertainty
+        }
+        struct Parent {
+            book: Install, entered: bool, command: Option<ManuallyDrop<Command>>, child: Option<Child>,
+            source: Option<Source>, invocation: String, init_sha: String,
+            command_original: Option<usize>, output_original: Option<usize>,
+            command_close: bool, output_close: bool, output_eof: bool, output_admitted: bool,
+            wait: Option<ExitStatus>, wait_unknown: bool, termination_attempted: bool,
+            errors: Vec<&'static str>, command_gate_kernel_retained: bool, parent_book_settled: bool,
+        }
+        impl Parent {
+            fn new() -> Result<Self> {
+                // This sample precedes input/gate/file admission.
+                Ok(Self { book:Install::with_worker_deadline(Deadline::start()?,false),entered:false,
+                    command:None,child:None,source:None,invocation:String::new(),init_sha:String::new(),
+                    command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
+                    wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
+                    command_gate_kernel_retained:false,parent_book_settled:false })
+            }
+            fn note(&mut self, error: &'static str) {
+                if !self.errors.contains(&error) && self.errors.len() < 16 { self.errors.push(error); }
+            }
+            fn settlement_time(&mut self) -> bool {
+                match self.book.shared_deadline().and_then(Deadline::check_total) {
+                    Ok(_) => true,
+                    Err(error) => { self.note(error); false }
+                }
+            }
+            fn original_wait(&mut self) {
+                if self.wait.is_some() || self.wait_unknown { return; }
+                if !self.settlement_time() { return; }
+                match self.child.as_mut().map(Child::try_wait) {
+                    Some(Ok(Some(value))) => self.wait = Some(value),
+                    Some(Ok(None)) => (),
+                    _ => { self.wait_unknown = true; self.note("worker-original-wait-unknown"); }
+                }
+                // Retain a genuinely returned wait even if the next sample is
+                // late; it is a known join, never a timely-success claim.
+                self.settlement_time();
+            }
+            fn terminate_original(&mut self) {
+                self.original_wait();
+                if self.wait.is_some() || self.wait_unknown || self.termination_attempted { return; }
+                if !self.settlement_time() { return; }
+                // One retained, not-reaped Child; never find/adopt by PID.
+                self.termination_attempted = true;
+                if !matches!(self.child.as_mut().map(Child::kill), Some(Ok(()))) {
+                    self.note("worker-original-termination-refused");
+                }
+                self.settlement_time();
+            }
+            fn close_command(&mut self) {
+                if let Some(n) = self.command_original.take() {
+                    self.command_close = self.book.close(n);
+                    if !self.command_close { self.note("worker-command-close-unknown"); }
+                    self.settlement_time();
+                }
+            }
+            fn admit_and_go(&mut self, source: &str) -> Result<()> {
+                check(!self.entered, "worker-parent-once")?; self.entered = true;
+                // Existing fixture destinations have their own original owner.
+                // B3 will integrate a reviewed fixed fixture route, not a path flag.
+                check(!cfg!(feature = "macos-installed-installer-fixture"), "worker-fixture-route-unavailable")?;
+                let (input,inventory,inventory_bytes) = self.book.input(source)?;
+                let actual = self.book.worker_source(source,input)?;
+                // Authenticate fixed self/source before even the parent's fixed
+                // ancestor/gate creation; the child remains the sole payload writer.
+                self.book.source_post(&actual)?;
+                let _prepared = self.book.prepare_fresh_input(input,inventory,inventory_bytes)?;
+                let gate = self.book.gate.participant.ok_or("worker-gate-original")?;
+                check(self.book.gate.exclusive_acquired && self.book.gate.lock_attempted, "worker-parent-exclusive-required")?;
+                self.book.gate_protected(gate)?; self.book.source_post(&actual)?;
+                let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "worker-invocation")?;
+                self.invocation = nonce.iter().map(|b| format!("{b:02x}")).collect();
+                check(invocation_valid(&self.invocation), "worker-invocation")?;
+                let end = self.book.shared_deadline()?.end;
+                // Include temporary ends of two pipes and the standard spawn
+                // error channel as headroom, not extra permitted live book FDs.
+                check(self.book.originals.iter().filter(|r| r.fd.is_some()).count() + EXTRA_LIVE + 2 + 6 < 96
+                    && self.book.originals.len() + 2 < 24576, "worker-original-bound")?;
+                let command_n = self.book.worker_reserve("<private-command>")?;
+                self.command_original = Some(command_n);
+                let output_n = self.book.worker_reserve("<private-result>")?;
+                self.output_original = Some(output_n);
+                // Each source/gate original remains held before this transfer.
+                let duplicate = self.book.fd(gate)?.as_fd().try_clone_to_owned().map_err(|_| "worker-gate-duplicate")?;
+                let mut command = Command::new(&actual.executable);
+                command.arg(ROLE).arg(end.to_string()).arg(&self.invocation)
+                    .current_dir(&actual.directory).env_clear()
+                    .env("LANG","C").env("LC_ALL","C").env("TZ","UTC")
+                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(duplicate));
+                self.command = Some(ManuallyDrop::new(command));
+                self.command_gate_kernel_retained = true;
+                self.source = Some(actual);
+                self.book.shared_deadline()?.check_work()?;
+                // Original call is made once. On Err there is no adoption/retry
+                // and no assertion that an unobserved child never existed.
+                let child = self.command.as_mut().ok_or("worker-command-original")?.spawn();
+                match child {
+                    Ok(child) => self.child = Some(child),
+                    Err(_) => { self.wait_unknown = true; return Err("worker-spawn-unknown"); }
+                }
+                let input = self.child.as_mut().and_then(|c| c.stdin.take()).map(OwnedFd::from);
+                let output = self.child.as_mut().and_then(|c| c.stdout.take()).map(OwnedFd::from);
+                let input_owned = self.book.control_original(command_n, input);
+                let output_owned = self.book.control_original(output_n, output);
+                input_owned?; output_owned?;
+                self.book.validate_control_original(command_n, true)?;
+                self.book.validate_control_original(output_n, false)?;
+                self.output_admitted = true;
+                let parent = std::process::id();
+                let child = self.child.as_ref().ok_or("worker-original-child")?.id();
+                let actual = self.source.as_ref().ok_or("worker-source-original")?;
+                let command_before = pipe_data(self.book.fd(command_n)?.as_fd(),true,self.book.shared_deadline()?)?;
+                let result_before = pipe_data(self.book.fd(output_n)?.as_fd(),false,self.book.shared_deadline()?)?;
+                let init = json!({"schemaVersion":2,"kind":"private-writer-init","invocation":self.invocation,"endNanos":end,
+                    "parent":parent,"child":child,"compile":compile_binding()?,"source":source_data(&self.book,actual)?,
+                    "gate":identity_data(self.book.identity(gate)?),
+                    "parentCommandEndpoint":command_before,"parentResultEndpoint":result_before});
+                let bytes = serde_json::to_vec(&init).map_err(|_| "worker-frame-json")?;
+                self.init_sha = hash(&bytes);
+                write_frame(self.book.fd(command_n)?.as_fd(), &init, INIT_LIMIT, self.book.shared_deadline()?, true)?;
+                let ready = read_frame(self.book.fd(output_n)?.as_fd(), CONTROL_LIMIT, self.book.shared_deadline()?)?.0;
+                let worker_command = &ready["writerCommandEndpoint"];
+                let worker_result = &ready["writerResultEndpoint"];
+                pipe_shape(worker_command)?; pipe_shape(worker_result)?;
+                valid_control(&ready,&control("ready",&self.invocation,&self.init_sha,end,parent,child,worker_command,worker_result))?;
+                self.book.source_post(actual)?; self.book.gate_protected(gate)?;
+                // XNU gives opposite pipe endpoints different inode facts.
+                // Recheck each OWN original; remote endpoint numbers confer no authority.
+                check(command_before == pipe_data(self.book.fd(command_n)?.as_fd(),true,self.book.shared_deadline()?)?
+                    && result_before == pipe_data(self.book.fd(output_n)?.as_fd(),false,self.book.shared_deadline()?)?,
+                    "worker-pipe-post")?;
+                self.original_wait(); check(self.wait.is_none() && !self.wait_unknown, "worker-exited-before-go")?;
+                write_frame(self.book.fd(command_n)?.as_fd(),&control("go",&self.invocation,&self.init_sha,end,parent,child,worker_command,worker_result),
+                    CONTROL_LIMIT,self.book.shared_deadline()?,true)?;
+                // Actual EOF is part of the child's pre-mutation barrier.
+                self.close_command();
+                check(self.command_close, "worker-command-close-unknown")
+            }
+            fn collect(&mut self) -> Result<Vec<u8>> {
+                let mut bytes = Vec::new(); let mut length = None; let mut readable = self.output_admitted;
+                loop {
+                    if let Err(error) = self.book.shared_deadline().and_then(Deadline::check_total) {
+                        self.note(error); break;
+                    }
+                    if let Err(error) = self.book.shared_deadline().and_then(Deadline::check_work) { self.note(error); }
+                    if !self.errors.is_empty() {
+                        self.close_command(); self.terminate_original();
+                    }
+                    if readable {
+                        let mut block = [0u8;4096];
+                        let read = self.output_original.ok_or("worker-result-original")
+                            .and_then(|n| self.book.fd(n)).map(|fd| unistd::read(fd,&mut block));
+                        match read {
+                            Err(error) => { self.note(error); readable = false; }
+                            Ok(Ok(0)) => { self.output_eof = true; readable = false; }
+                            Ok(Ok(used)) => {
+                                if bytes.len().checked_add(used).is_none_or(|n| n > RESULT_LIMIT + 4) {
+                                    self.note("worker-result-bound"); readable = false;
+                                } else {
+                                    bytes.extend_from_slice(&block[..used]);
+                                    if length.is_none() && bytes.len() >= 4 {
+                                        match frame_size(&bytes[..4],RESULT_LIMIT) {
+                                            Ok(size) => length = Some(size + 4),
+                                            Err(error) => { self.note(error); readable = false; }
+                                        }
+                                    }
+                                    if length.is_some_and(|size| bytes.len() > size) {
+                                        self.note("worker-result-trailing"); readable = false;
+                                    }
+                                }
+                            }
+                            Ok(Err(Errno::EINTR | Errno::EAGAIN)) => (),
+                            Ok(Err(_)) => { self.note("worker-result-read"); readable = false; }
+                        }
+                        self.settlement_time();
+                    }
+                    if !readable {
+                        if let Some(n) = self.output_original.take() {
+                            self.output_close = self.book.close(n);
+                            if !self.output_close { self.note("worker-result-close-unknown"); }
+                        }
+                    }
+                    self.original_wait();
+                    if self.wait_unknown || self.wait.is_some() && !readable { break; }
+                    let timeout = match self.book.shared_deadline().and_then(|clock| clock.poll_ms(false)) {
+                        Ok(timeout) => timeout, Err(error) => { self.note(error); break; }
+                    };
+                    let mut descriptors = if let Some(n) = self.output_original {
+                        match self.book.fd(n) {
+                            Ok(fd) => vec![PollFd::new(fd.as_fd(), PollFlags::POLLIN)],
+                            Err(_) => Vec::new(),
+                        }
+                    } else { Vec::new() };
+                    let polled = poll(&mut descriptors,timeout);
+                    drop(descriptors); // No borrowed book FD across mutable result recording.
+                    match polled {
+                        Ok(_) | Err(Errno::EINTR) => (),
+                        Err(_) => self.note("worker-pipe-poll"),
+                    }
+                    self.settlement_time();
+                }
+                // No new grace period. These are original consuming closes,
+                // never a claim of timely completion after the endpoint.
+                self.close_command();
+                if let Some(n) = self.output_original.take() {
+                    self.output_close = self.book.close(n);
+                    if !self.output_close { self.note("worker-result-close-unknown"); }
+                }
+                check(self.output_eof && length == Some(bytes.len()), "worker-result-incomplete")?;
+                Ok(bytes[4..].to_vec())
+            }
+            fn run_fresh(&mut self, source: &str) -> Result<JoinedWriter> {
+                check(!self.entered, "worker-parent-once")?;
+                if let Err(error) = self.admit_and_go(source) { self.note(error); }
+                if self.child.is_none() { return Err(self.errors.first().copied().unwrap_or("worker-original-child")); }
+                let bytes = match self.collect() {
+                    Ok(bytes) => bytes, Err(error) => { self.note(error); return Err(error); }
+                };
+                let value = packet(&bytes,RESULT_LIMIT)?;
+                let outcome = PreExit::parse(&value,&self.invocation,&self.init_sha)?;
+                let source_post = self.source.as_ref().is_some_and(|source| self.book.source_post(source).is_ok());
+                if !source_post { self.note("worker-source-post"); }
+                let observed_at = self.book.shared_deadline()?.check_total()?;
+                let status = self.wait.as_ref().and_then(ExitStatus::code);
+                check(joined_data(true,self.output_eof,self.output_close,self.command_close,status,outcome.exit,
+                    source_post,true,self.wait_unknown || !self.errors.is_empty()), "worker-joined-result-refused")?;
+                let child = self.child.as_ref().ok_or("worker-original-child")?.id();
+                Ok(JoinedWriter { invocation:self.invocation.clone(),child,outcome,observed_at })
+            }
+            fn settle_parent_originals(&mut self) -> bool {
+                // B3 invokes this only after its parent's evidence writers.
+                // The one-use Command/config OFD remains KernelExitRetained:
+                // its Drop would not provide an errno-observed close receipt.
+                self.close_command();
+                if let Some(n) = self.output_original.take() {
+                    if !self.book.close(n) { self.note("worker-result-close-unknown"); }
+                }
+                if self.wait_unknown || self.child.is_some() && self.wait.is_none() { self.book.unknown = true; }
+                self.parent_book_settled = self.book.settle_originals();
+                self.settlement_time();
+                self.parent_book_settled
+            }
+        }
+        fn gate_bytes(fd: BorrowedFd<'_>, deadline: &Deadline) -> Result<()> {
+            let mut bytes = [0u8;31]; let mut used = 0;
+            loop {
+                deadline.check_work()?;
+                match pread(fd,&mut bytes[used..],used as i64) {
+                    Ok(0) => break,
+                    Ok(n) if n <= bytes.len() - used => {
+                        used += n;
+                        check(used <= paths::MAINTENANCE_GATE_BYTES.len(), "worker-gate-bytes")?;
+                        deadline.check_work()?;
+                    }
+                    Ok(_) => return Err("worker-gate-bytes"),
+                    Err(Errno::EINTR) => (),
+                    Err(_) => return Err("worker-gate-read"),
+                }
+            }
+            deadline.check_work()?;
+            check(&bytes[..used] == paths::MAINTENANCE_GATE_BYTES, "worker-gate-bytes")
+        }
+        fn worker_input_path() -> Result<String> {
+            let executable = std::env::current_exe().map_err(|_| "worker-self-image")?;
+            check(executable.file_name() == Some(std::ffi::OsStr::new("mrk-macos-install")), "worker-self-image")?;
+            let directory = executable.parent().and_then(Path::to_str).ok_or("worker-script-parent")?;
+            Ok(format!("{directory}/input"))
+        }
+        fn prepare_worker(book: &mut Install, init: &Value, gate_fd: BorrowedFd<'_>, invocation: &str, end: u64) -> Result<PreparedFresh> {
+            object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate","parentCommandEndpoint","parentResultEndpoint"])?;
+            check(init["schemaVersion"] == 2 && init["kind"] == "private-writer-init" && init["invocation"] == invocation
+                && init["endNanos"].as_u64() == Some(end)
+                && init["parent"].as_u64() == Some(unistd::getppid().as_raw() as u64)
+                && init["parent"].as_u64().is_some_and(|p| p > 1)
+                && init["child"].as_u64() == Some(u64::from(std::process::id()))
+                && init["compile"] == compile_binding()?, "worker-init-binding")?;
+            // Only observations of the parent's own endpoints. Its opposite
+            // ends need not share inode numbers with our inherited originals.
+            pipe_shape(&init["parentCommandEndpoint"])?; pipe_shape(&init["parentResultEndpoint"])?;
+            let source_path = worker_input_path()?;
+            let (input,inventory,inventory_bytes) = book.input(&source_path)?;
+            let index = inventory.index()?;
+            check(index.payload_bytes.checked_add(inventory_bytes.len() as u64)
+                .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64))
+                .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
+                .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT)
+                && index.files.len().checked_add(3).is_some_and(|n| n <= installation_record::FILE_LIMIT), "inventory-bound")?;
+            let source = book.worker_source(&source_path,input)?;
+            check(init["source"] == source_data(book,&source)?, "worker-source-binding")?;
+            let support = book.support_root()?;
+            let destination = book.open(Some(support),"MobileReleaseKit",true)?;
+            book.protected(destination,true,Some(0o755))?;
+            let versions = book.open(Some(destination),"versions",true)?;
+            book.protected(versions,true,Some(0o755))?;
+            book.absent(destination,paths::APP_NAME)?; book.absent(versions,paths::RELEASE)?;
+            let access = fcntl::fcntl(gate_fd,fcntl::FcntlArg::F_GETFL).map_err(|_| "worker-gate-flags")?;
+            check(OFlag::from_bits_truncate(access) & OFlag::O_ACCMODE == OFlag::O_RDONLY, "worker-gate-readonly")?;
+            let original = Identity::of(&stat::fstat(gate_fd).map_err(|_| "worker-gate-stat")?);
+            check(init["gate"] == identity_data(original), "worker-gate-binding")?;
+            let n = book.reserve(Some(destination),paths::MAINTENANCE_GATE_NAME,Role::GateParticipant)?;
+            book.originals[n].state = State::Acquiring;
+            let duplicated = gate_fd.try_clone_to_owned().map_err(|_| "worker-gate-duplicate");
+            match duplicated {
+                Ok(fd) => { book.adopt(n,Ok(fd))?; }
+                Err(error) => { book.originals[n].state = State::NoHandle; return Err(error); }
+            }
+            book.originals[n].identity = Some(original);
+            book.gate.entered = true; book.gate.parent = Some(destination); book.gate.participant = Some(n);
+            book.gate_protected(n)?; gate_bytes(book.fd(n)?.as_fd(),book.shared_deadline()?)?;
+            // Shape and bytes do not prove EX. Only the original parent's
+            // admission/GO supplies that handoff; the worker never flocks.
+            book.gate.verified = true;
+            book.source_post(&source)?;
+            Ok(PreparedFresh { input,inventory,inventory_bytes,destination,versions })
+        }
+        fn dispatch_private(args: &[String]) -> i32 {
+            // Intentionally not called by the current ordinary or fixture run.
+            // The deadline is decoded BEFORE the first potentially blocking read.
+            let admitted = (|| {
+                check(args.len() == 4 && args[1] == ROLE && invocation_valid(&args[3]), "worker-role")?;
+                let end = args[2].parse::<u64>().map_err(|_| "worker-clock-value")?;
+                check(args[2] == end.to_string(), "worker-clock-value")?;
+                let clock = Deadline::inherit(end)?;
+                check(unistd::getuid().is_root() && unistd::geteuid().is_root()
+                    && unistd::getgid().as_raw() == 0 && unistd::getegid().as_raw() == 0, "administrator-required")?;
+                native::platform().map_err(|_| "worker-platform")?;
+                Ok((clock,end))
+            })();
+            let Ok((clock,end)) = admitted else { return 1; };
+            let mut book = Install::with_worker_deadline(clock,true);
+            let stdin = std::io::stdin(); let stdout = std::io::stdout(); let stderr = std::io::stderr();
+            let mut init_sha = String::new();
+            let attempt = (|| {
+                let command_endpoint = pipe_data(stdin.as_fd(),false,book.shared_deadline()?)?;
+                let result_endpoint = pipe_data(stdout.as_fd(),true,book.shared_deadline()?)?;
+                nonblocking(stdin.as_fd(),book.shared_deadline()?)?; nonblocking(stdout.as_fd(),book.shared_deadline()?)?;
+                let (init,bytes) = read_frame(stdin.as_fd(),INIT_LIMIT,book.shared_deadline()?)?;
+                init_sha = hash(&bytes);
+                let prepared = prepare_worker(&mut book,&init,stderr.as_fd(),&args[3],end)?;
+                let parent = u32::try_from(unistd::getppid().as_raw()).map_err(|_| "worker-parent")?;
+                let child = std::process::id();
+                write_frame(stdout.as_fd(),&control("ready",&args[3],&init_sha,end,parent,child,&command_endpoint,&result_endpoint),
+                    CONTROL_LIMIT,book.shared_deadline()?,true)?;
+                let go = read_frame(stdin.as_fd(),CONTROL_LIMIT,book.shared_deadline()?)?.0;
+                valid_control(&go,&control("go",&args[3],&init_sha,end,parent,child,&command_endpoint,&result_endpoint))?;
+                command_eof(stdin.as_fd(),book.shared_deadline()?)?;
+                check(command_endpoint == pipe_data(stdin.as_fd(),false,book.shared_deadline()?)?
+                    && result_endpoint == pipe_data(stdout.as_fd(),true,book.shared_deadline()?)?, "worker-pipe-post")?;
+                check(unistd::getppid().as_raw() == parent as i32, "worker-parent-changed")?;
+                book.worker_go_eof = true; // Actual complete GO and EOF, not parsed permission DATA alone.
+                book.install_prepared(prepared,&args[3])
+            })();
+            let result = book.finish(attempt);
+            let outcome = PreExit::from_original(&book,&result);
+            // No claim to have closed fd1/fd2 or joined ourselves. The parent's
+            // actual EOF and original wait can later establish those facts.
+            let sent = book.shared_deadline().and_then(|deadline|
+                write_frame(stdout.as_fd(),&outcome.data(&args[3],&init_sha),RESULT_LIMIT,deadline,false));
+            if sent.is_ok() { result.exit } else if result.exit == 0 { 1 } else { result.exit }
+        }
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            #[test]
+            fn same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow() {
+                let start = 20 * SECOND; let end = start + TOTAL;
+                assert_eq!(time_data(start,end,start,start,true),Ok(start));
+                assert!(time_data(start,end,start,end-SETTLEMENT,true).is_err());
+                assert!(time_data(start,end,start,end-SETTLEMENT,false).is_ok());
+                assert!(time_data(start,end,start,end,false).is_err());
+                assert!(time_data(start,end,start+2,start+1,true).is_err());
+                assert!(time_data(u64::MAX-10,5,u64::MAX-10,u64::MAX-10,false).is_err());
+                assert!(time_data(start,end+1,start,start,true).is_err());
+            }
+            #[test]
+            fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
+                let invocation = "11111111111111111111111111111111"; let sha = "a".repeat(64);
+                assert!(invocation_valid(invocation)); assert!(!invocation_valid(&"0".repeat(32)));
+                let endpoint = json!({"device":0,"inode":14,"mode":0o010660,"uid":0,"gid":0});
+                let opposite = json!({"device":0,"inode":15,"mode":0o010660,"uid":0,"gid":0});
+                assert!(pipe_shape(&endpoint).is_ok() && pipe_shape(&opposite).is_ok());
+                assert_ne!(endpoint,opposite); // Different Darwin endpoints are not equality evidence.
+                let expected = control("go",invocation,&sha,TOTAL,10,11,&endpoint,&opposite);
+                let encoded = frame(&expected,CONTROL_LIMIT).unwrap();
+                assert_eq!(frame_size(&encoded[..4],CONTROL_LIMIT).unwrap(),encoded.len()-4);
+                assert!(valid_control(&packet(&encoded[4..],CONTROL_LIMIT).unwrap(),&expected).is_ok());
+                for field in ["invocation","initSha256","parent","child","endNanos","kind","writerCommandEndpoint","writerResultEndpoint"] {
+                    let mut changed = expected.clone(); changed[field] = Value::Null;
+                    assert!(valid_control(&changed,&expected).is_err());
+                }
+                assert!(packet(br#"{"kind":"go","kind":"go"}"#,CONTROL_LIMIT).is_err());
+                assert!(frame_size(&0u32.to_be_bytes(),CONTROL_LIMIT).is_err());
+                assert!(frame_size(&(CONTROL_LIMIT as u32+1).to_be_bytes(),CONTROL_LIMIT).is_err());
+                let result = PreExit { exit:0,state:"installed".into(),originals:true,payload:true,verified:true,
+                    runtime:"confirmed".into(),app:"confirmed".into(),timely:true,unknown:false,writes:1,bytes:1,reason:None };
+                let data = result.data(invocation,&sha);
+                assert!(PreExit::parse(&data,invocation,&sha).is_ok());
+                for field in ["stdoutClosed","inheritedGateClosed","selfJoined"] {
+                    let mut changed = data.clone(); changed[field] = json!(true);
+                    assert!(PreExit::parse(&changed,invocation,&sha).is_err());
+                }
+                let mut extra = data.clone(); extra["trusted"] = json!(true);
+                assert!(PreExit::parse(&extra,invocation,&sha).is_err());
+                let mut private = data.clone(); private["reason"] = json!("/private/unexpected/value");
+                assert!(PreExit::parse(&private,invocation,&sha).is_err());
+                assert_eq!(closed_reason("/private/unexpected/value"),"other-original-refusal");
+                assert!(PreExit::parse(&json!([]),invocation,&sha).is_err());
+            }
+            #[test]
+            fn original_join_requires_eof_closes_matching_return_and_timely_sources() {
+                assert!(joined_data(true,true,true,true,Some(0),0,true,true,false));
+                for failed in 0..8 {
+                    let mut facts = [true;7]; let mut wait = Some(0);
+                    if failed < 7 { facts[failed] = false; } else { wait = None; }
+                    assert!(!joined_data(facts[0],facts[1],facts[2],facts[3],wait,0,facts[4],facts[5],!facts[6]));
+                }
+                assert!(!joined_data(true,true,true,true,Some(1),0,true,true,false));
+                // A known failure can be a genuinely joined failure, but never
+                // becomes an applied/successful operation by joining alone.
+                assert!(joined_data(true,true,true,true,Some(1),1,true,true,false));
+                // Successful short writes count syscalls, not descriptor records.
+                assert!(outcome_data(0,"installed",true,true,true,"confirmed","confirmed",true,false,24577,24577));
+                assert!(!outcome_data(0,"installed",true,true,true,"confirmed","confirmed",true,false,24577,24576));
+                assert!(!outcome_data(0,"installed",true,true,true,"confirmed","confirmed",true,false,
+                    installation_record::PAYLOAD_LIMIT + 1, installation_record::PAYLOAD_LIMIT + 1));
+                assert!(!outcome_data(1,"installed",true,true,true,"confirmed","confirmed",true,false,1,1));
+                assert!(!outcome_data(20,"refused-staging-retained",true,true,false,"not-attempted","not-attempted",true,false,0,0));
+                assert!(!outcome_data(1,"refused-staging-retained",true,false,false,"not-attempted","not-attempted",true,false,0,0));
+                for (closed,timely,unknown,writes) in [(false,true,false,1),(true,false,false,1),
+                    (true,true,true,1),(true,true,false,0)] {
+                    assert!(!outcome_data(0,"installed",closed,true,true,"confirmed","confirmed",timely,unknown,writes,1));
+                }
+            }
         }
     }
     #[cfg(not(feature = "macos-installed-installer-fixture"))]

@@ -9,23 +9,23 @@
 //! retained; late positive settlement cannot restore successful admission.
 use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use std::process::Stdio;
 use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore}, task::JoinHandle};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use tokio::process::Command;
 use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
     github_preflight_protocol as preflight_protocol, github_release_protocol as release_protocol,
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use crate::installed_runtime::{AdmissionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use crate::installed_runtime::GitHubReadOnlyRuntimeSlots;
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use crate::installed_runtime::{GitHubPreflightRuntimeSlots, GitHubReleaseRuntimeSlots};
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 use crate::installed_runtime_windows::{InspectionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
@@ -154,7 +154,7 @@ struct Owner {
 struct OwnerState {
     endpoint: Instant, cleanup_endpoint: Option<Instant>, error: Option<BridgeError>,
     terminal: bool, unknown: bool,
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_unknown_pending: bool,
     reply: Option<PassiveReply>,
     driver_join: ManagementJoin, watchdog_join: ManagementJoin,
@@ -348,7 +348,7 @@ impl OwnerState {
     }
     fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
         Self { endpoint, cleanup_endpoint: None, error: None, terminal: false, unknown: false, reply,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_unknown_pending: false,
             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
             driver_end: None, watchdog_end: None,
@@ -409,7 +409,7 @@ impl OwnerState {
     }
 }
 
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) fn common_acl_owner_data_check() -> bool {
     // Original OwnerState DATA only; no native book, owner tasks or handles.
     let now = Instant::now(); let endpoint = now + Duration::from_secs(20);
@@ -431,17 +431,17 @@ pub(crate) fn common_acl_owner_data_check() -> bool {
 #[derive(Debug)]
 struct AcquisitionError {
     original: std::io::Error,
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     detected_at: Instant,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     cause: Option<crate::error::LinuxPassiveCause>,
 }
 impl From<std::io::Error> for AcquisitionError {
     fn from(original: std::io::Error) -> Self {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let detected_at = Instant::now();
         Self { original,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             detected_at,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             cause: None,
@@ -450,20 +450,20 @@ impl From<std::io::Error> for AcquisitionError {
 }
 impl AcquisitionError {
     fn unsupported(message: &'static str) -> Self {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let detected_at = Instant::now();
             Self { original: std::io::Error::new(std::io::ErrorKind::Unsupported, message), detected_at }
         }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { std::io::Error::new(std::io::ErrorKind::Unsupported, message).into() }
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn with_macos_first_failure(mut self, first: Option<(PassiveAdmissionFailure, Instant)>) -> Self {
         if let Some((_, at)) = first { self.detected_at = self.detected_at.min(at); }
         self
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn macos_action_failure(&self) -> (BridgeError, Instant) {
         // A closed BORROWED projection; no new time or consumption of the
         // original acquisition error before the original join.
@@ -473,7 +473,7 @@ impl AcquisitionError {
     fn with_cause(mut self, cause: crate::error::LinuxPassiveCause) -> Self {
         self.cause = Some(cause); self
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     fn capability(failure: PassiveAdmissionFailure) -> Self {
         let error = Self::unsupported("passive installed custody is unavailable");
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -482,7 +482,7 @@ impl AcquisitionError {
         let _ = failure;
         error
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     fn preparation(failure: PassiveAdmissionFailure) -> Self {
         let error = Self::unsupported("passive installed preparation refused");
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -491,7 +491,7 @@ impl AcquisitionError {
         let _ = failure;
         error
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     fn final_claim(failure: PassiveAdmissionFailure) -> Self {
         let error = Self::unsupported("passive installed custody is unavailable");
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -501,7 +501,7 @@ impl AcquisitionError {
         error
     }
     fn returned_spawn(original: std::io::Error) -> Self {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let detected_at = Instant::now();
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let cause = {
@@ -519,7 +519,7 @@ impl AcquisitionError {
             }
         };
         Self { original,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             detected_at,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             cause: Some(crate::error::LinuxPassiveCause::ReturnedSpawn(cause)),
@@ -554,19 +554,19 @@ struct Resources {
     native_snapshots: Vec<installed_native_fixture::ChildObservation>,
     acquisition: Option<JoinHandle<Result<Child, AcquisitionError>>>, child: Option<Child>,
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     github_readonly: Option<Arc<Mutex<GitHubReadOnlyRuntimeSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     github_preflight: Option<Arc<Mutex<GitHubPreflightRuntimeSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     github_release: Option<Arc<Mutex<GitHubReleaseRuntimeSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_started: bool,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     failed_writer: Option<JoinHandle<WriteEnd>>, failed_stdout: Option<JoinHandle<ReadEnd>>, failed_stderr: Option<JoinHandle<ReadEnd>>,
@@ -578,7 +578,7 @@ struct ReadEnd { bytes: Vec<u8>, eof: bool, overflow: bool }
 struct WriteEnd { complete: bool }
 
 impl Owner {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn observe_native_failure(&self, first: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) {
         use crate::installed_runtime::AdmissionFailure;
         let Some((failure, at)) = first else { return; };
@@ -597,7 +597,7 @@ impl Owner {
         drop(state);
         self.stop.send_replace(true); self.changed.notify_waiters();
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn native_cleanup_expired(&self, first: Option<(crate::installed_runtime::AdmissionFailure, Instant)>) -> bool {
         self.observe_native_failure(first);
         let mut state = lock(&self.state); let now = Instant::now();
@@ -611,7 +611,7 @@ impl Owner {
         if expired { self.changed.notify_waiters(); }
         expired
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn fail_at(&self, error: BridgeError, detected_at: Instant) {
         // The original return supplies F BEFORE this possibly delayed lock.
         // OwnerState keeps the earlier cause/deadline and sticky Unknown.
@@ -621,7 +621,7 @@ impl Owner {
         drop(state);
         self.stop.send_replace(true); self.changed.notify_waiters();
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn observe_macos_action_acquisition_failure(&self, original: &AcquisitionError) {
         let (error, detected_at) = original.macos_action_failure();
         self.fail_at(error, detected_at);
@@ -700,9 +700,9 @@ impl Owner {
         if timed_out { state.fail_at(BridgeError::timeout(), now); }
         let endpoint = state.cleanup_endpoint.unwrap_or(state.endpoint);
         let expired = state.cleanup_endpoint.is_some() && now >= endpoint;
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let native_unknown = std::mem::take(&mut state.native_unknown_pending);
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let native_unknown = false;
         let newly_unknown = (expired && !state.unknown) || native_unknown;
         drop(state);
@@ -960,19 +960,19 @@ impl Supervisor {
             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate,
             preflight_go_claimed: AtomicBool::new(false), state: Mutex::new(OwnerState::with_reply(endpoint, reply)),
             resources: AsyncMutex::new(Resources {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 passive: if passive_selected(profile) {
                     Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())))
                 } else { None },
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 github_readonly: if github_installed_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())))
                 } else { None },
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 github_preflight: if github_preflight_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubPreflightRuntimeSlots::new())))
                 } else { None },
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 github_release: if github_release_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubReleaseRuntimeSlots::new())))
                 } else { None },
@@ -1424,20 +1424,20 @@ impl OriginalBorrow {
     fn positive(self) -> bool { matches!(self.returned, None | Some(ManagementJoin::Returned)) && self.returned() }
 }
 fn passive_selected(profile: Profile) -> bool {
-    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")), not(all(feature = "development-runtime", debug_assertions))))
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")), not(all(feature = "development-runtime", debug_assertions))))
         && matches!(profile, Profile::Passive(_))
 }
 fn github_installed_selected(profile: Profile) -> bool {
-    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
         not(all(feature = "development-runtime", debug_assertions))))
         && matches!(profile, Profile::GitHubReadOnly)
 }
 fn github_preflight_selected(profile: Profile) -> bool {
-    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
         not(all(feature = "development-runtime", debug_assertions)))) && matches!(profile, Profile::GitHubPreflight)
 }
 fn github_release_selected(profile: Profile) -> bool {
-    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
         not(all(feature = "development-runtime", debug_assertions)))) && matches!(profile, Profile::GitHubRelease)
 }
 fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
@@ -1473,34 +1473,34 @@ fn passive_never_started_clear(inspection: OriginalBorrow, acquisition: Original
     empty_unstarted_book && inspection.positive() && acquisition.returned.is_none() && acquisition.positive()
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn passive_borrows(resources: &Resources) -> (OriginalBorrow, OriginalBorrow) {
     (OriginalBorrow { returned: resources.inspection_return, handle: resources.inspection.is_some(), error: resources.inspection_error.is_some() },
      OriginalBorrow { returned: resources.acquisition_return, handle: resources.acquisition.is_some(), error: resources.acquisition_error.is_some() })
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn passive_worker_lost(resources: &Resources) {
     // Only called AFTER this original inspection/acquisition/settlement worker
     // returned JoinError. Never race a pending borrower because a clock expired.
     if let Some(native) = &resources.passive {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if let Some(native) = &resources.github_readonly {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if let Some(native) = &resources.github_preflight {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if let Some(native) = &resources.github_release {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
     let Some(native) = &resources.passive else {
         return if passive_selected(owner.profile) { Err(BridgeError::cleanup_unknown()) } else { Ok(()) };
@@ -1518,19 +1518,19 @@ fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) ->
     slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 struct PreparedPassiveSpawn<'a> {
     runtime: &'a mut PassiveInstalledRuntime,
     #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
     command: Command,
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 impl<'a> PreparedPassiveSpawn<'a> {
     fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>, _inner: &Inner, _owner: &Owner) -> Result<Self, AcquisitionError> {
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let selected = runtime.prepare_once(end, stop).map_err(AcquisitionError::preparation)?;
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let selected = runtime.prepare_once_observed(end, stop, &mut |first| _owner.observe_native_failure(first))
             .map_err(AcquisitionError::preparation)?;
         // All native checks and fixed argument/environment allocations precede
@@ -1545,7 +1545,7 @@ impl<'a> PreparedPassiveSpawn<'a> {
             command.arg(&selected.bootstrap).arg(&selected.core);
             command.current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             crate::runtime::macos_installed_environment(&mut command)?;
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             command.env("SystemRoot", runtime.system_root().map_err(|_| std::io::Error::new(
@@ -1561,7 +1561,7 @@ impl<'a> PreparedPassiveSpawn<'a> {
     }
 }
 
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
     not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))))]
 fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> Result<Child, AcquisitionError> {
     // Unsupported profiles remain unconditional. Only this no-effect stub has
@@ -1570,7 +1570,7 @@ fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> Result<Child, A
     Err(AcquisitionError::unsupported("packaged runtime execution is not qualified"))
 }
 
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
 fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> Result<Child, AcquisitionError> {
     // Opaque creation errors provide NO no-child/pipe-close proof. The claimed
@@ -1578,7 +1578,7 @@ fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> Result<Chil
     prepared.command.spawn().map_err(AcquisitionError::returned_spawn)
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<PassiveRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     let refused = || AcquisitionError::unsupported("passive installed custody is unavailable");
     let mut slots = native.lock().map_err(|_| {
@@ -1620,30 +1620,30 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
 
 // Closed dispatch over the same registered originals, NOT another owner or
 // settlement task. The passive and GitHub books cannot stand in for each other.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 enum InstalledSettlementSlots {
     Passive(Arc<Mutex<PassiveRuntimeSlots>>),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     GitHubReadOnly(Arc<Mutex<GitHubReadOnlyRuntimeSlots>>),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     GitHubPreflight(Arc<Mutex<GitHubPreflightRuntimeSlots>>),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     GitHubRelease(Arc<Mutex<GitHubReleaseRuntimeSlots>>),
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         if github_installed_selected(profile) {
             if resources.passive.is_some() { return Err(BridgeError::cleanup_unknown()); }
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             if resources.github_preflight.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
             return resources.github_readonly.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubReadOnly(slots.clone())))
                 .ok_or_else(BridgeError::cleanup_unknown);
         }
         if resources.github_readonly.is_some() { return Err(BridgeError::cleanup_unknown()); }
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         if github_preflight_selected(profile) {
             if resources.passive.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
@@ -1665,20 +1665,20 @@ fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result
     if resources.passive.is_some() { return Err(BridgeError::cleanup_unknown()); }
     Ok(None) // Explicitly unselected domain; never a missing required book.
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 impl InstalledSettlementSlots {
     fn no_child_state(&self) -> Option<(bool, bool)> {
         match self {
             Self::Passive(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubReadOnly(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubPreflight(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubRelease(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
         }
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn settle_originals(&self, owner: &Owner) -> CloseOutcome {
         match self {
             Self::Passive(native) => {
@@ -1703,24 +1703,24 @@ impl InstalledSettlementSlots {
             },
         }
     }
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn settle_originals(&self) -> CloseOutcome {
         match self {
             Self::Passive(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubReadOnly(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubPreflight(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubRelease(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
@@ -1730,20 +1730,20 @@ impl InstalledSettlementSlots {
     fn settled(&self) -> bool {
         match self {
             Self::Passive(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubReadOnly(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubPreflight(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             Self::GitHubRelease(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
         }
     }
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
     match installed_settlement_slots(resources, owner.profile)? {
         Some(InstalledSettlementSlots::Passive(_)) => transfer_passive(resources, inner, owner),
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Some(InstalledSettlementSlots::GitHubReadOnly(native)) => {
             let (inspection, acquisition) = passive_borrows(resources);
             if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
@@ -1756,7 +1756,7 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             }
             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
         },
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Some(InstalledSettlementSlots::GitHubPreflight(native)) => {
             let (inspection, acquisition) = passive_borrows(resources);
             if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
@@ -1770,7 +1770,7 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
         },
 
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Some(InstalledSettlementSlots::GitHubRelease(native)) => {
             let (inspection, acquisition) = passive_borrows(resources);
             if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
@@ -1786,7 +1786,7 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
         None => Ok(()),
     }
 }
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell", feature = "custom-protocol",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))), feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubReadOnlyRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     // THIS retained original acquisition borrows the domain-fixed book. Nothing
@@ -1794,9 +1794,9 @@ fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex
     let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub read-only original custody is unavailable"))?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let selected = runtime.prepare_once_observed(owner.endpoint(), &stop, &mut |first| owner.observe_native_failure(first))
         .map_err(AcquisitionError::preparation)?;
     let mut command = Command::new(&selected.python);
@@ -1805,7 +1805,7 @@ fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
     // Fixed Darwin environment preparation precedes the serialized original
     // claim; no native call or environment allocation is added after it.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !github_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
@@ -1818,27 +1818,27 @@ fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex
     // opaque spawn error is NOT proof no child/pipe existed: retain Unknown.
     command.spawn().map_err(AcquisitionError::returned_spawn)
 }
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_github_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubReadOnlyRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub read-only runtime is unavailable in this profile"))
 }
 
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell", feature = "custom-protocol",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))), feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 fn acquire_preflight_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubPreflightRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub preflight original custody is unavailable"))?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let mut preparation_first = None;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let prepared = runtime.prepare_once_observed(owner.endpoint(), &stop, &mut |first| {
         preparation_first = first; owner.observe_native_failure(first);
     });
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let selected = prepared.map_err(|failure| AcquisitionError::preparation(failure)
         .with_macos_first_failure(preparation_first))?;
     let mut command = Command::new(&selected.python);
@@ -1847,7 +1847,7 @@ fn acquire_preflight_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mu
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
     // Fixed Darwin preparation is before the original serialized claim;
     // no environment/native call is added between claim and child creation.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
@@ -1858,27 +1858,27 @@ fn acquire_preflight_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mu
     drop(state); drop(owners);
     command.spawn().map_err(AcquisitionError::returned_spawn)
 }
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_preflight_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubPreflightRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub preflight runtime is unavailable in this profile"))
 }
 
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell", feature = "custom-protocol",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))), feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 fn acquire_release_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubReleaseRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub release original custody is unavailable"))?;
     let runtime = slots.capability().map_err(AcquisitionError::capability)?;
     let stop = owner.stop.subscribe();
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let mut preparation_first = None;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let prepared = runtime.prepare_once_observed(owner.endpoint(), &stop, &mut |first| {
         preparation_first = first; owner.observe_native_failure(first);
     });
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let selected = prepared.map_err(|failure| AcquisitionError::preparation(failure)
         .with_macos_first_failure(preparation_first))?;
     let mut command = Command::new(&selected.python);
@@ -1887,7 +1887,7 @@ fn acquire_release_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
     // Fixed Darwin preparation is before the original serialized claim;
     // no environment/native call is added between claim and child creation.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
@@ -1898,16 +1898,16 @@ fn acquire_release_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
     drop(state); drop(owners);
     command.spawn().map_err(AcquisitionError::returned_spawn)
 }
-#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))),
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_release_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubReleaseRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub release runtime is unavailable in this profile"))
 }
 
 async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
     { let _ = (resources, inner, owner); true }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     {
         #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
         if resources.native_observation.is_some() { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
@@ -1949,7 +1949,7 @@ async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let entering = delayed.as_ref().map(|witness| (witness.clone(), owner.clone()));
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             let original_owner = owner.clone();
             resources.native_started = true;
             resources.native_settlement = Some(tokio::task::spawn_blocking(move || {
@@ -1958,9 +1958,9 @@ async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<
                     target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if let Some((witness, owner)) = entering { witness.settlement_entered(&owner); }
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { closing.settle_originals(&original_owner) }
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { closing.settle_originals() }
             }));
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
@@ -2069,15 +2069,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let config = inner.runtime.clone();
     let endpoint = owner.endpoint();
     let profile = owner.profile;
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_native = resources.passive.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let inspection_github = resources.github_readonly.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let inspection_preflight = resources.github_preflight.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let inspection_release = resources.github_release.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime"))]
     let inspection_gate = inner.test.inspection.clone();
@@ -2087,7 +2087,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let github_fixture = lock(&inner.test.github_fixture).clone();
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let github_tls = lock(&inner.test.github_tls).clone();
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let inspection_owner = owner.clone();
     let (inspect_start, inspect_enter) = oneshot::channel();
     resources.inspection_return = Some(ManagementJoin::Pending);
@@ -2097,36 +2097,36 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         inspection_gate.wait();
         let runtime = match profile {
             Profile::Passive(_method) => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 if passive_selected(profile) {
                     let native = inspection_native.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         let armed = originals.arm_acl_once(endpoint, &inspection_stop);
                         inspection_owner.observe_native_failure(originals.first_failure());
                         armed.map_err(|_| BridgeError::unavailable("The original Mac ACL inspection could not be armed."))?;
                     }
                     let result = config.resolve_passive_installed(_method, &mut originals, endpoint, &inspection_stop);
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     inspection_owner.observe_native_failure(originals.first_failure());
                     return result;
                 }
                 config.resolve(endpoint)?
             },
             Profile::GitHubReadOnly => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 if github_installed_selected(profile) {
                     let native = inspection_github.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         let armed = originals.arm_acl_once(endpoint, &inspection_stop);
                         inspection_owner.observe_native_failure(originals.first_failure());
                         armed.map_err(|_| BridgeError::unavailable("The original Mac ACL inspection could not be armed."))?;
                     }
                     let result = config.resolve_github_readonly_installed(&mut originals, endpoint, &inspection_stop);
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     inspection_owner.observe_native_failure(originals.first_failure());
                     return result;
                 }
@@ -2150,25 +2150,25 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 config.resolve_github_readonly(endpoint)?
             },
             Profile::GitHubPreflight => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 if github_preflight_selected(profile) {
                     let native = inspection_preflight.ok_or_else(|| {
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         let detected_at = Instant::now();
                         let error = BridgeError::cleanup_unknown();
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         inspection_owner.fail_at(error.clone(), detected_at);
                         error
                     })?;
                     let mut originals = native.lock().map_err(|_| {
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         let detected_at = Instant::now();
                         let error = BridgeError::cleanup_unknown();
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         inspection_owner.fail_at(error.clone(), detected_at);
                         error
                     })?;
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         let armed = originals.arm_acl_once(endpoint, &inspection_stop);
                         let detected_at = Instant::now();
@@ -2180,7 +2180,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                         }
                     }
                     let result = config.resolve_github_preflight_installed(&mut originals, endpoint, &inspection_stop);
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         let detected_at = Instant::now();
                         inspection_owner.observe_native_failure(originals.first_failure());
@@ -2191,25 +2191,25 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 return Err(BridgeError::unavailable("The GitHub preflight action runtime is not qualified."));
             },
             Profile::GitHubRelease => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 if github_release_selected(profile) {
                     let native = inspection_release.ok_or_else(|| {
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         let detected_at = Instant::now();
                         let error = BridgeError::cleanup_unknown();
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         inspection_owner.fail_at(error.clone(), detected_at);
                         error
                     })?;
                     let mut originals = native.lock().map_err(|_| {
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         let detected_at = Instant::now();
                         let error = BridgeError::cleanup_unknown();
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         inspection_owner.fail_at(error.clone(), detected_at);
                         error
                     })?;
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         let armed = originals.arm_acl_once(endpoint, &inspection_stop);
                         let detected_at = Instant::now();
@@ -2221,7 +2221,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                         }
                     }
                     let result = config.resolve_github_release_installed(&mut originals, endpoint, &inspection_stop);
-                    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     {
                         let detected_at = Instant::now();
                         inspection_owner.observe_native_failure(originals.first_failure());
@@ -2253,7 +2253,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
         Err(error) => {
             resources.inspection_error = Some(error);
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             passive_worker_lost(&resources);
             owner_unknown!(owner, &inner, Some(&resources), Inspection);
             let _ = settle_installed(&mut resources, &inner, &owner).await;
@@ -2264,7 +2264,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         owner.fail(BridgeError::timeout());
         return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     if let Err(error) = transfer_installed(&resources, &inner, &owner) {
         if error.code == "cleanup_unknown" { owner_unknown!(owner, &inner, Some(&resources), Transfer); }
         owner.fail(error.clone());
@@ -2273,15 +2273,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // Blocking startup cannot starve the independent deadline watchdog. Its
     // original result/Child remains in this retained acquisition handle.
     let acquiring_owner = owner.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let acquiring_inner = inner.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let acquisition_native = resources.passive.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let acquisition_github = resources.github_readonly.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let acquisition_preflight = resources.github_preflight.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let acquisition_release = resources.github_release.clone();
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
@@ -2290,7 +2290,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     resources.acquisition = Some(tokio::task::spawn_blocking(move || {
         if acquire_enter.blocking_recv().is_err() {
             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease) {
                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
             }
@@ -2302,7 +2302,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         // before spawn_original's two final creation checks. No new deadline.
         #[cfg(all(test, feature = "development-runtime"))]
         acquisition_gate.wait();
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
         if passive_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_native else {
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
@@ -2313,7 +2313,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             };
             return acquire_passive_original(&acquiring_inner, &acquiring_owner, &native);
         }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if github_installed_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_github else {
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
@@ -2321,37 +2321,37 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             };
             return acquire_github_original(&acquiring_inner, &acquiring_owner, &native);
         }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if github_preflight_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_preflight else {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 let error = AcquisitionError::unsupported("original GitHub preflight custody is missing");
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 let error = AcquisitionError::unsupported("original GitHub preflight custody is missing");
                 return Err(error);
             };
             let result = acquire_preflight_original(&acquiring_inner, &acquiring_owner, &native);
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
             return result;
         }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if github_release_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_release else {
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 let error = AcquisitionError::unsupported("original GitHub release custody is missing");
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
-                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 let error = AcquisitionError::unsupported("original GitHub release custody is missing");
                 return Err(error);
             };
             let result = acquire_release_original(&acquiring_inner, &acquiring_owner, &native);
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
             return result;
         }
@@ -2372,7 +2372,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
         Err(error) => {
             resources.acquisition_error = Some(error);
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             passive_worker_lost(&resources);
             owner_unknown!(owner, &inner, Some(&resources), Acquisition);
             let _ = settle_installed(&mut resources, &inner, &owner).await;
@@ -2611,7 +2611,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     DriverEnd::Ready(result)
 }
 
-#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 mod github_installed_contract_tests {
     use super::*;
     pub(super) fn original_claim_contract() {
@@ -2671,7 +2671,7 @@ mod github_installed_contract_tests {
 
 // Explicit inert Mac observer entry. Empty Books and original state DATA only;
 // mark_interrupted below represents a returned worker error, not a native call.
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) fn macos_github_readonly_original_contract() {
     github_installed_contract_tests::original_claim_contract();
     assert_eq!(github_installed_selected(Profile::GitHubReadOnly),
@@ -2684,13 +2684,13 @@ pub(crate) fn macos_github_readonly_original_contract() {
     #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
     github_installed_contract_tests::exact_original_book_contract();
 }
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[test]
 fn macos_github_readonly_original_data_contract() { macos_github_readonly_original_contract(); }
 
 // DATA only: original gate decisions and fresh empty books, never a
 // Supervisor registration, native ACL frame, child, credential or dispatch.
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) fn macos_github_actions_original_contract() {
     // The original error is still owned while its closed projection publishes.
     // Fixed later DATA simulates a delayed owner borrow/join, not a new clock.
@@ -2795,7 +2795,7 @@ pub(crate) fn macos_github_actions_original_contract() {
             github_preflight, GitHubPreflightRuntimeSlots);
     }
 }
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[test]
 fn macos_github_actions_original_data_contract() { macos_github_actions_original_contract(); }
 

@@ -10,7 +10,7 @@ const HEARTBEAT:Duration=Duration::from_millis(5);
 pub(super) struct State {
     generation:u32,active:Option<Arc<SetupOriginal>>,last:Option<Completed>,
     capability:Option<Availability>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     retirement:Option<Arc<Retirement>>,
 }
 struct Completed {
@@ -47,7 +47,7 @@ struct SetupOriginal {
     worker_joined:AtomicBool,coordinator:Mutex<Option<JoinHandle<bool>>>,
     coordinator_return:Mutex<Option<Result<bool,tokio::task::JoinError>>>,coordinator_joined:AtomicBool,
     joined_at:std::sync::OnceLock<Instant>,accepted:AtomicBool,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     preparation:Preparation,
 }
 pub(crate) struct Finalization {original:Arc<SetupOriginal>}
@@ -67,20 +67,20 @@ impl Drop for Admitted {
     fn drop(&mut self){if self.release.is_some(){self.original.control.stop_at(wire::Reason::ServiceUnavailable,Instant::now());}}
 }
 
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 use mrk_macos_installed_native::{self as installed_native,android_service_management as management,
     android_maintenance_client as maintenance_native,android_registration as registration_native};
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 use crate::installed_runtime::AndroidServiceIdentitySlots;
 
 /// Constructed once by the actual shell for the original local main window.
 /// Headless/unsupported adapters have no constructor and cannot install one.
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) struct Dispatcher {
     #[cfg(feature="desktop-shell")]
     window:tauri::WebviewWindow,
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl Dispatcher {
     #[cfg(feature="desktop-shell")]
     pub(crate) fn original_main(window:tauri::WebviewWindow)->Option<Self>{
@@ -95,23 +95,23 @@ impl Dispatcher {
     }
 }
 
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 const PENDING:u8=0;
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 const CALLBACK_RETIRED:u8=1;
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 const OWNER_FINALIZED:u8=2;
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 struct Retirement {
     original:Arc<Control>,action:management::Action,require_enabled:bool,phase:std::sync::atomic::AtomicU8,
     retired_serial:std::sync::atomic::AtomicU32,maintenance:Option<MaintenanceTail>,
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 struct MaintenanceTail {
     operation:[u8;16],cutoff:std::sync::OnceLock<Instant>,original:Mutex<Option<maintenance_native::TailAdmission>>,
     retired:AtomicBool,
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl MaintenanceTail {
     fn new(operation:[u8;16])->Self{Self{operation,cutoff:std::sync::OnceLock::new(),original:Mutex::new(None),retired:AtomicBool::new(false)}}
     /// Only the actual extracted final callback or proved never-requested path
@@ -123,7 +123,7 @@ impl MaintenanceTail {
         self.retired.store(true,Ordering::SeqCst);true
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl Retirement {
     fn retained_bytes(&self)->Option<usize>{arc_bytes::<Self>()?.checked_add(self.original.retained_bytes()?)?
         .checked_add(arc_bytes::<()>()?)} // The completed original still retains its own cohort allocation.
@@ -139,31 +139,31 @@ impl Retirement {
         self.phase.compare_exchange(CALLBACK_RETIRED,OWNER_FINALIZED,Ordering::SeqCst,Ordering::SeqCst).is_ok()
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy,Default)]
 struct CapturedFailure {first:Option<(wire::Reason,Instant)>,unknown:bool}
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl CapturedFailure {
     fn note(&mut self,reason:wire::Reason,at:Instant){
         if self.first.is_none_or(|(_,old)|at<old){self.first=Some((reason,at));}
         self.unknown|=reason==wire::Reason::CleanupUnknown;
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy)]
 struct CallbackReturned {native:Option<(management::Progress,management::Custody)>,failure:CapturedFailure,at:Instant}
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 struct CallbackOriginal {
     gate:WorkGate,action:management::Action,serial:u32,retirement:Arc<Retirement>,
     returned:Mutex<Option<CallbackReturned>>,
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 enum ExtractedCallback {
     Pending(Arc<CallbackOriginal>),Returned(u32,CallbackReturned),Unknown(Option<CallbackReturned>),
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 struct MainBinding {retirement:Arc<Retirement>,serial:u32}
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl MainBinding {
     fn reusable(&self)->bool{self.retirement.phase.load(Ordering::SeqCst)==OWNER_FINALIZED
         && !self.retirement.original.unknown.load(Ordering::SeqCst)}
@@ -178,25 +178,25 @@ impl MainBinding {
             && management_deferred(custody,original.action)
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 struct MainSlot {manager:management::ServiceManager,binding:Option<MainBinding>}
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 thread_local! {static MAIN:std::cell::RefCell<MainSlot>=std::cell::RefCell::new(MainSlot{
     manager:management::ServiceManager::new(),binding:None});}
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn management_settled(custody:management::Custody)->bool{
     !custody.unknown && !custody.in_call && !custody.gate_entered && custody.action.is_none()
         && matches!(custody.cell,management::CellCustody::Absent|management::CellCustody::Consumed)
         && matches!(custody.service,management::ServiceCustody::NotAcquired|management::ServiceCustody::Settled)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn management_deferred(custody:management::Custody,action:management::Action)->bool{
     custody.action==Some(action) && custody.phase==Some(management::Phase::AdmitAction)
         && custody.cell==management::CellCustody::Owned && custody.service==management::ServiceCustody::NotAcquired
         && !custody.action_admitted && !custody.in_call && !custody.gate_entered && !custody.unknown
         && !custody.stopped && custody.first_failure.is_none()
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn management_reason(custody:management::Custody)->wire::Reason{
     if custody.unknown{return wire::Reason::CleanupUnknown;}
     match custody.observation.map(|observation|observation.outcome){
@@ -204,7 +204,7 @@ fn management_reason(custody:management::Custody)->wire::Reason{
         _=>wire::Reason::ServiceUnavailable,
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl CallbackOriginal {
     /// Actual exclusive extraction, not a strong-count observation or a return
     /// slot peek. This consumes no native custody and grants no finality stamp.
@@ -338,30 +338,30 @@ impl CallbackOriginal {
     }
 }
 
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 enum MainState {Dormant,Queued(Arc<CallbackOriginal>),Deferred(u32),Finished(CallbackReturned),Skipped,Unknown(Option<CallbackReturned>),Transition}
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(super) struct Preparation {
     gate:WorkGate,identity:Mutex<AndroidServiceIdentitySlots>,dispatcher:Arc<Dispatcher>,
     retirement:Arc<Retirement>,requested:AtomicBool,main:Mutex<MainState>,
     returned:Mutex<Option<PreparationReturn>>,
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy)]
 struct PreparationReturn {known:bool,checked:bool,observation:Option<wire::ServiceObservation>,retained:Option<usize>,maintenance:Option<MaintenanceRun>}
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy,Default)]
 pub(super) struct MaintenanceRun {
     pub(super) known:bool,pub(super) checked:bool,pub(super) started_or_uncertain:bool,
     pub(super) tail_received:bool,pub(super) unregister_accepted:bool,pub(super) not_registered:bool,
     pub(super) callback_retired:bool,pub(super) peer_ended:bool,pub(super) retained:Option<usize>,
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl MaintenanceRun {
     pub(super) fn prepared(self)->bool{self.known && self.checked && self.started_or_uncertain && self.tail_received
         && self.unregister_accepted && self.not_registered && self.callback_retired && self.peer_ended && self.retained.is_some()}
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl Preparation {
     // Enforced on the ACTUAL settled identity ledger before Register can begin
     // its client/source phase. Peak inspector storage never overlaps sources.
@@ -742,14 +742,14 @@ fn completed_state_allocation_bytes(last:Option<&wire::ServiceOperation>)->Optio
     if let Some(last)=last{bytes=bytes.checked_add(service_operation_bytes(last)?)?;}
     Some(bytes)
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn persistent_manager_allocation_bytes(retirement:&Retirement)->Option<usize>{
     retirement.retained_bytes()?.checked_add(std::mem::size_of::<MainSlot>())?
         .checked_add(management::ServiceManager::project_owned_upper_bound()?)
 }
-#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(super) struct CatalogueServiceData {data:wire::ServiceOperation,retirement:Arc<Retirement>}
-#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl CatalogueServiceData {
     pub(super) fn new(data:wire::ServiceOperation,control:Arc<Control>)->Self{
         assert!(control.lane==ControlLane::Service);
@@ -781,7 +781,11 @@ fn setup_prerequisite(observation:Option<wire::ServiceObservation>,failure:Optio
 }
 impl State {
     pub(super) fn prerequisite(&self)->wire::Prerequisite{
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        if !android_wire::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports) {
+            return wire::Prerequisite::ServiceUnavailable;
+        }
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if !management::signing_profile_configured(){return wire::Prerequisite::SigningUnavailable;}
         self.last.as_ref().map_or(wire::Prerequisite::ServiceUnavailable,|last|last.prerequisite)
     }
@@ -789,7 +793,7 @@ impl State {
     pub(super) fn unknown(&self)->bool{self.active.as_ref().is_some_and(|original|original.control.unknown.load(Ordering::SeqCst))}
     pub(super) fn empty(&self)->bool{
         if self.active.is_some() || self.last.is_some(){return false;}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if self.retirement.is_some(){return false;}
         true
     }
@@ -821,7 +825,7 @@ impl State {
     pub(super) fn retained_bytes(&self)->Option<usize>{
         if self.active.is_some(){return None;}
         let mut bytes=completed_state_allocation_bytes(self.last.as_ref().map(|last|&last.data))?;
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if let Some(retirement)=&self.retirement{
             if retirement.phase.load(Ordering::SeqCst)!=OWNER_FINALIZED{return None;}
             // The persistent settled TLS manager survives Preparation itself.
@@ -830,7 +834,7 @@ impl State {
         }
         Some(bytes)
     }
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn adopt_finalized_preparation(&mut self,preparation:&Preparation)->bool{
         if !preparation.finalize(){return false;}
         if preparation.retirement.phase.load(Ordering::SeqCst)==OWNER_FINALIZED{
@@ -858,7 +862,7 @@ impl State {
         let at=Instant::now();original.control.advance(at);
         let mut changed=original.control.dirty.swap(false,Ordering::SeqCst);
         if original.coordinator_joined.load(Ordering::SeqCst){
-            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             original.preparation.tick(false);
             if !original.worker_joined.load(Ordering::SeqCst){
                 if let Ok(mut slot)=original.worker.try_lock(){
@@ -915,7 +919,7 @@ impl State {
                 drop(book);original.control.poisoned();return true;}
             if gate!=android_wire::Availability::Available || !current.is_some_and(|current|original.saved.same_binding(current)){return false;}
         }
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if !self.adopt_finalized_preparation(&original.preparation){drop(book);original.control.poisoned();return true;}
         let reason=first.map_or(wire::Reason::None,|(reason,_)|reason);
         let phase=match reason{wire::Reason::None=>wire::ServicePhase::Complete,wire::Reason::Cancelled=>wire::ServicePhase::Cancelled,_=>wire::ServicePhase::Refused};
@@ -948,7 +952,7 @@ fn poll_worker(original:&SetupOriginal,slot:&mut Option<JoinHandle<WorkerReturn>
     let at=Instant::now();if !known || at>=original.control.endpoint(){original.control.mark_unknown(at);}
     Poll::Ready(known && !original.control.unknown.load(Ordering::SeqCst))
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn setup_worker(original:Arc<SetupOriginal>,mut enter:oneshot::Receiver<()>)->WorkerReturn{
     loop{
         original.control.advance(Instant::now());
@@ -959,7 +963,7 @@ fn setup_worker(original:Arc<SetupOriginal>,mut enter:oneshot::Receiver<()>)->Wo
     original.preparation.run_once();original.settling.store(true,Ordering::SeqCst);original.control.changed();
     original.preparation.worker_return().unwrap_or(WorkerReturn{known:false,first:original.control.failure(),observation:None,retained:None})
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 async fn coordinate(original:Arc<SetupOriginal>,mut release:oneshot::Receiver<()>,worker_enter:oneshot::Sender<()>)->bool{
     let mut worker_enter=Some(worker_enter);let mut released=false;
     let mut worker=original.worker.lock().await;
@@ -988,7 +992,7 @@ async fn coordinate(original:Arc<SetupOriginal>,mut release:oneshot::Receiver<()
 }
 
 impl SavedCommandOwner {
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn bind_android_service_dispatcher(&self,document:&Arc<()>,dispatcher:Dispatcher)->bool{
         self.inner.domain==SavedCommandDomain::AndroidBuild && self.inner.android_original_document_matches(Some(document))
             && self.inner.android_service_dispatcher.set(Arc::new(dispatcher)).is_ok()
@@ -996,7 +1000,7 @@ impl SavedCommandOwner {
     fn service_gate(&self,registry:&Registry,gate:android_wire::Availability)->Availability{
         let availability=self.registration_gate(registry,Availability::from_android(gate));
         if availability!=Availability::Available{return availability;}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if self.inner.android_service_dispatcher.get().is_some(){return availability;}
         Availability::RuntimeUnqualified
     }
@@ -1034,13 +1038,14 @@ impl SavedCommandOwner {
             || snapshot.registration!=registration || &snapshot.project!=project
             || snapshot.request.setup_generation!=registry.android_registration.service.generation
             || !current.matches(document,registration,project,&snapshot.request.context) || !snapshot.saved.same_binding(&current){return Err(wire::service_invalid());}
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {let _=(checked,census);Err(wire::service_unavailable())}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {
             // Missing shipping identity is an external prerequisite, not a
             // reason to allocate native originals or use ad-hoc signing.
-            if !management::signing_profile_configured(){return Err(wire::service_unavailable());}
+            if !android_wire::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports)
+                || !management::signing_profile_configured(){return Err(wire::service_unavailable());}
             let dispatcher=self.inner.android_service_dispatcher.get().cloned().ok_or_else(wire::service_unavailable)?;
             let work=snapshot.at.checked_add(WORK).ok_or_else(wire::service_unavailable)?;
             let hard=snapshot.at.checked_add(HARD).ok_or_else(wire::service_unavailable)?;
@@ -1117,7 +1122,7 @@ impl SavedCommandOwner {
         self.service_status_locked(&mut registry,gate).map_err(|_|wire::service_unconfirmed())
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn setup_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>,checked:&Checked,census:&crate::asset_session::AndroidServiceSetupCensus<'_>)->Option<usize>{
     if registry.active.is_some() || registry.prepared.is_some() || registry.recovery_review.is_some() || registry.recovery.is_some()
         || inner.toolchain.is_some() || registry.android_registration.active.is_some() || registry.android_registration.review.is_some(){return None;}
@@ -1153,7 +1158,7 @@ fn setup_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>,checke
     (bytes<=OWNED_LIMIT).then_some(bytes)
 }
 
-#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 mod callback_lifecycle_tests {
     // Inert copied custody/control DATA only. No Dispatcher, ServiceManager,
     // native identity, callback route, service operation or worker is entered.

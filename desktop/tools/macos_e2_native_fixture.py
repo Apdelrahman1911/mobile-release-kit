@@ -45,6 +45,7 @@ GATE = "maintenance-gate-v1"
 TARGET = "aarch64-apple-darwin"
 NATIVE = "desktop/native/macos-installed-native"
 HELPER = "desktop/helpers/macos-android-register"
+INSTALLER = "desktop/src-tauri"
 TOOLCHAIN = "1.98.1"
 RUST_COMMIT = "48a229ceaefd4985c50990b14116b6d856af0985"
 CASES = ("missing-b-refused", "local-f-before-admission", "genuine-tail-unregister")
@@ -52,6 +53,11 @@ NATIVE_RUST_TESTS = (
     "tests::compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts",
     "e2_native_fixture::fixture_data_tests::empty_and_unexecuted_resources_do_not_become_closes_or_joins",
     "e2_native_fixture::fixture_data_tests::result_is_bounded_one_line_with_truthful_empty_resource_projection",
+)
+INSTALLER_WORKER_RUST_TESTS = (
+    "installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",
+    "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
+    "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
 )
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
 LAYOUT_ARGUMENT = "--observe-service-layout"
@@ -88,6 +94,23 @@ IMAGE_LIMIT = 32 * 1024 * 1024
 RECEIPT_CENSUS_LIMIT = 1024 * 1024
 MAX_RAW = (1 << 61) - 1
 AUXILIARY_NS = 60_000_000_000
+BTM_ROLE, BTM_SUBSYSTEM = "fixture-btm-log", "com.apple.backgroundtaskmanagement"
+BTM_LIMIT, BTM_SECONDS = 262144, 10
+BTM_IDS = (IDENTIFIER, IDENTIFIER + ".client", SERVICE)
+BTM_STATES = ("not-requested", "window-unavailable", "tool-unavailable", "call-failed",
+              "call-unknown", "unparseable", "empty", "observed")
+BTM_MARKERS = (
+    ("mentions-not-found", ("not found", "notfound")), ("mentions-plist", ("plist",)),
+    ("mentions-signature", ("signature", "codesign")),
+    ("mentions-team", ("team identifier", "teamid", "team id")),
+    ("mentions-requirement", ("requirement",)), ("mentions-responsibility", ("responsib",)),
+    ("mentions-approval", ("approval", "approved")),
+    ("mentions-permission", ("permission", "not permitted")),
+    ("mentions-registration", ("register", "registration")),
+    ("mentions-launch-constraint", ("launch constraint",)),
+)
+BTM_DOMAINS = (("SMAppServiceErrorDomain", "smappservice"),
+               ("NSOSStatusErrorDomain", "osstatus"), ("NSCocoaErrorDomain", "cocoa"))
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 CLOSE_FLAGS = ("mainReturned", "mainClosed", "clientClosed", "workerJoined", "identityClosed")
 CASE_FLAGS = ("registered", "watchRegistered", "refused", "tailAdmissionIssued",
@@ -160,6 +183,154 @@ def decimal(value):
 def identity(value, size, *, empty=False):
     return type(value) is str and ((empty and value == "") or
                                    re.fullmatch("[0-9a-f]{" + str(size) + "}", value) is not None)
+
+
+def btm_clock_sample():
+    """A diagnostic clock failure cannot prevent the original native call."""
+    try:
+        values = (time.time_ns(), time.clock_gettime_ns(time.CLOCK_MONOTONIC))
+    except (OSError, OverflowError, ValueError):
+        return None
+    return values if all(type(value) is int and 0 < value <= MAX_RAW for value in values) else None
+
+
+def btm_window(start, end):
+    need(type(start) is tuple and type(end) is tuple and len(start) == len(end) == 2
+         and all(type(value) is int and 0 < value <= MAX_RAW for value in (*start, *end)), "btm-log-window")
+    wall, monotonic = end[0] - start[0], end[1] - start[1]
+    need(0 <= wall and 0 <= monotonic <= HARD_SECONDS * 1_000_000_000
+         and abs(wall - monotonic) <= 2_000_000_000, "btm-log-window")
+    value = {"startSeconds": start[0] // 1_000_000_000 - 1,
+             "endSeconds": (end[0] + 999_999_999) // 1_000_000_000 + 1}
+    btm_argv(value)
+    return value
+
+
+def btm_argv(window):
+    need(type(window) is dict and set(window) == {"startSeconds", "endSeconds"}
+         and all(type(value) is int and 0 < value < 253402300800 for value in window.values())
+         and 0 < window["endSeconds"] - window["startSeconds"] <= 998, "btm-log-window")
+    dates = [time.strftime("%Y-%m-%d %H:%M:%S+0000", time.gmtime(window[key]))
+             for key in ("startSeconds", "endSeconds")]
+    need(all(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\+0000", value)
+             for value in dates), "btm-log-window")
+    predicate = 'subsystem == "' + BTM_SUBSYSTEM + '" AND eventMessage CONTAINS "' + IDENTIFIER + '"'
+    return ["/usr/bin/log", "show", "--style", "json", "--start", dates[0], "--end", dates[1],
+            "--timezone", "UTC", "--info", "--debug", "--no-pager", "--predicate", predicate]
+
+
+def btm_events(body):
+    """Closed mentions/codes, not arbitrary logs, causal findings or authority."""
+    need(type(body) is bytes and 0 < len(body) <= BTM_LIMIT, "btm-log-data")
+    def constant(_value):
+        raise Refused("btm-log-data")
+    try:
+        rows = json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+    except (UnicodeError, ValueError, RecursionError) as error:
+        raise Refused("btm-log-data") from error
+    need(type(rows) is list and len(rows) <= 256, "btm-log-data")
+    counts = {name: 0 for name, _words in BTM_MARKERS}
+    counts["other"] = 0
+    codes, matched = set(), 0
+    own = r"(?<![\w.-])(?:" + "|".join(re.escape(value) for value in BTM_IDS) + r")(?![\w.-])"
+    domains = dict(BTM_DOMAINS)
+    error_pattern = (r"(?<![\w])Domain=(SMAppServiceErrorDomain|NSOSStatusErrorDomain|NSCocoaErrorDomain)"
+                     r" Code=(-?(?:0|[1-9][0-9]{0,9}))(?=$|[^\w.+-])")
+    for row in rows:
+        need(type(row) is dict and row.get("subsystem") == BTM_SUBSYSTEM
+             and type(row.get("eventMessage")) is str and len(row["eventMessage"]) <= 8192, "btm-log-data")
+        message = row["eventMessage"]
+        if re.search(own, message) is None:
+            continue  # Report only the count; never export or classify a foreign message.
+        matched += 1
+        lower, found = message.lower(), False
+        for name, words in BTM_MARKERS:
+            if any(word in lower for word in words):
+                counts[name] += 1
+                found = True
+        if not found:
+            counts["other"] += 1
+        for domain, raw in re.findall(error_pattern, message):
+            code = int(raw)
+            if str(code) == raw and -(1 << 31) <= code < 1 << 31:
+                codes.add((domains[domain], code))
+        need(len(codes) <= 8, "btm-log-data")
+    return {"eventCount": len(rows), "ownEventCount": matched, "unmatchedEventCount": len(rows) - matched,
+            "markerCounts": counts, "errorCodes": [{"domain": domain, "code": code} for domain, code in sorted(codes)]}
+
+
+def btm_record(source):
+    return {"schemaVersion": 1, "type": "mrk-e2-fixture-btm-log-observation-v1", "sourceCommit": source,
+            "diagnosticOnly": True, "state": "not-requested", "window": None, "commandIndex": None,
+            "toolSha256": None, "stdoutSha256": None, "stderrSha256": None, "eventCount": None,
+            "ownEventCount": None, "unmatchedEventCount": None, "markerCounts": None, "errorCodes": None,
+            "rawOutputIncluded": False, "absenceEstablished": False, "ownershipEstablished": False,
+            "nativeLifecycleQualified": False}
+
+
+def btm_log_data(value, source, calls):
+    need(type(value) is dict and set(value) == set(btm_record(source))
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["type"] == "mrk-e2-fixture-btm-log-observation-v1" and value["sourceCommit"] == source
+         and identity(source, 40) and value["diagnosticOnly"] is True
+         and all(value[key] is False for key in ("rawOutputIncluded", "absenceEstablished",
+                                                "ownershipEstablished", "nativeLifecycleQualified"))
+         and type(value["state"]) is str and value["state"] in BTM_STATES
+         and type(calls) is list and len(calls) <= 64, "btm-log-data")
+    window, index, state = value["window"], value["commandIndex"], value["state"]
+    if window is not None:
+        btm_argv(window)
+    need(value["toolSha256"] is None or identity(value["toolSha256"], 64), "btm-log-data")
+    indices = [i for i, call in enumerate(calls) if type(call) is dict and call.get("role") == BTM_ROLE]
+    if index is None:
+        need(not indices and state in ("not-requested", "window-unavailable", "tool-unavailable")
+             and value["stdoutSha256"] is None and value["stderrSha256"] is None, "btm-log-data")
+        need((window is not None) == (state == "tool-unavailable")
+             and (state == "tool-unavailable" or value["toolSha256"] is None), "btm-log-data")
+    else:
+        need(type(index) is int and indices == [index] and 0 <= index < len(calls)
+             and window is not None and identity(value["toolSha256"], 64), "btm-log-data")
+        call = calls[index]
+        need(call.get("entered") is True and type(call.get("returned")) is bool
+             and type(call.get("workTimeoutSeconds")) is int and call["workTimeoutSeconds"] == BTM_SECONDS
+             and type(call.get("outputLimitBytes")) is int and call["outputLimitBytes"] == BTM_LIMIT, "btm-log-data")
+        native = [row for row in calls[:index] if type(row) is dict and row.get("role") == "native-run"]
+        need(len(native) == 1 and native[0].get("entered") is True and native[0].get("returned") is True
+             and all(type(row) is dict and row.get("returned") is True for row in calls[:index]), "btm-log-data")
+        if call["returned"]:
+            need(type(call.get("returncode")) is int and 0 <= call["returncode"] <= 255
+                 and identity(value["stdoutSha256"], 64) and identity(value["stderrSha256"], 64)
+                 and value["stdoutSha256"] == call.get("stdoutSha256")
+                 and value["stderrSha256"] == call.get("stderrSha256")
+                 and state in ("call-failed", "unparseable", "empty", "observed"), "btm-log-data")
+        else:
+            need(state == "call-unknown" and value["stdoutSha256"] is None
+                 and value["stderrSha256"] is None, "btm-log-data")
+    fields = ("eventCount", "ownEventCount", "unmatchedEventCount", "markerCounts", "errorCodes")
+    if state not in ("empty", "observed"):
+        need(all(value[key] is None for key in fields), "btm-log-data")
+    else:
+        need(index is not None and calls[index]["returned"] and calls[index]["returncode"] == 0
+             and value["stderrSha256"] == digest(b"")
+             and all(type(value[key]) is int and 0 <= value[key] <= 256 for key in fields[:3])
+             and value["ownEventCount"] + value["unmatchedEventCount"] == value["eventCount"]
+             and (state == "observed") == (value["ownEventCount"] > 0), "btm-log-data")
+        markers = value["markerCounts"]
+        need(type(markers) is dict and set(markers) == {"other", *(name for name, _ in BTM_MARKERS)}
+             and all(type(count) is int and 0 <= count <= value["ownEventCount"] for count in markers.values())
+             and sum(markers.values()) >= value["ownEventCount"],
+             "btm-log-data")
+        codes = value["errorCodes"]
+        need(type(codes) is list and len(codes) <= 8
+             and (value["ownEventCount"] > 0 or not codes)
+             and all(type(row) is dict and set(row) == {"domain", "code"}
+                     and type(row["domain"]) is str and row["domain"] in dict(BTM_DOMAINS).values()
+                     and type(row["code"]) is int
+                     and -(1 << 31) <= row["code"] < 1 << 31 for row in codes), "btm-log-data")
+        need([(row["domain"], row["code"]) for row in codes]
+             == sorted({(row["domain"], row["code"]) for row in codes}), "btm-log-data")
+    need(len(canonical(value)) <= 4096, "btm-log-data")
+    return value
 
 
 def service_status_record(body, returncode, source, observer_sha, case, started, deadline):
@@ -820,36 +991,61 @@ def native_rust_test_record():
             "tests": list(NATIVE_RUST_TESTS), "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
 
 
-def native_rust_tests_data(value):
-    """A closed projection, never authority to execute a test or native action."""
-    expected = native_rust_test_record()
+def installer_worker_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-installer-worker-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(INSTALLER_WORKER_RUST_TESTS),
+            "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def _rust_tests_data(value, expected, label):
+    """Only the two fixed wrappers supply this expected record; never output DATA."""
     need(type(value) is dict and set(value) == set(expected)
          and all(type(value[key]) is int and value[key] == expected[key]
                  for key in ("schemaVersion", "passed", "failed", "ignored", "measured"))
-         and all(type(value[key]) is str and value[key] == expected[key] for key in ("type", "target"))
+         and all(type(value[key]) is str and value[key] == item
+                 for key, item in expected.items() if type(item) is str)
          and type(value["tests"]) is list and len(value["tests"]) == 3
          and all(type(name) is str for name in value["tests"])
-         and value["tests"] == expected["tests"], "native-rust-test-record")
+         and value["tests"] == expected["tests"], label + "-record")
     return expected
 
 
-def native_rust_tests_result(stdout):
+def native_rust_tests_data(value):
+    """A closed projection, never authority to execute a test or native action."""
+    return _rust_tests_data(value, native_rust_test_record(), "native-rust-test")
+
+
+def installer_worker_rust_tests_data(value):
+    """Test-profile DATA, not shipping compilation or a joined worker transaction."""
+    return _rust_tests_data(value, installer_worker_rust_test_record(), "installer-worker-rust-test")
+
+
+def _rust_test_output(stdout, expected_names, label):
     """Complete pinned libtest pretty output from an already-successful original."""
-    need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), "native-rust-test-bound")
+    need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), label + "-bound")
     lines = stdout.split(b"\n")
     need(len(lines) == 9 and lines[:2] == [b"", b"running 3 tests"]
-         and lines[5] == b"" and lines[7:] == [b"", b""], "native-rust-test-framing")
+         and lines[5] == b"" and lines[7:] == [b"", b""], label + "-framing")
     names = []
     for line in lines[2:5]:
         match = re.fullmatch(rb"test ([A-Za-z0-9_:]+) +\.\.\. ok", line)
-        need(match is not None, "native-rust-test-roster")
+        need(match is not None, label + "-roster")
         names.append(match[1].decode("ascii"))
-    need(len(set(names)) == 3 and set(names) == set(NATIVE_RUST_TESTS), "native-rust-test-roster")
+    need(len(set(names)) == 3 and set(names) == set(expected_names), label + "-roster")
     finish = re.fullmatch(
         rb"test result: ok\. 3 passed; 0 failed; 0 ignored; 0 measured; (0|[1-9][0-9]{0,3}) filtered out; "
         rb"finished in (0|[1-9][0-9]{0,2})\.([0-9]{2})s", lines[6])
-    need(finish is not None and int(finish[2]) * 100 + int(finish[3]) <= 48000, "native-rust-test-result")
+    need(finish is not None and int(finish[2]) * 100 + int(finish[3]) <= 48000, label + "-result")
+
+
+def native_rust_tests_result(stdout):
+    _rust_test_output(stdout, NATIVE_RUST_TESTS, "native-rust-test")
     return native_rust_test_record()
+
+
+def installer_worker_rust_tests_result(stdout):
+    _rust_test_output(stdout, INSTALLER_WORKER_RUST_TESTS, "installer-worker-rust-test")
+    return installer_worker_rust_test_record()
 
 
 def cargo_artifact(messages, role, checkout, target):
@@ -1412,13 +1608,16 @@ def binding_data(environment, binding, inventory, rust, work_identity):
 
 
 def source_names(rows):
-    """Actual two-graph inputs, including core compile-time DATA and owner imports."""
+    """Actual three-graph inputs, including core compile-time DATA and owner imports."""
     explicit = {
         ".github/workflows/desktop-macos-maintenance-fixture.yml",
         "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
         "desktop/packaging/macos-android-service-signing.profile",
         "desktop/tools/macos_e2_native_fixture.py", "desktop/tools/macos_aqua_qualification.py",
         "desktop/tools/stage_macos_installed.py", CONTEXT_SOURCE, LAYOUT_SOURCE,
+        "desktop/tools/macos_android_sdk_metadata.py",
+        "src/mobile_release/api/data/metadata-images-v1.json",
+        "src/mobile_release/api/data/metadata-image-help-v1.json",
         *("src/mobile_release/" + name for name in (
             "__init__.py", "owned_process.py", "_command_process.py", "_native_process.py",
             "cancellation.py", "errors.py", "_lifetime_evidence.py",
@@ -1709,11 +1908,14 @@ class Operation:
         self.phase = "prepare"
         self.native = None
         self.native_rust_tests = None
+        self.installer_worker_rust_tests = None
         self.package = None
         self.installer_entered = False
         self.installed = False
         self.native_entered = False
         self.native_returned = False
+        self.btm_started, self.btm_finished = None, None
+        self.btm_log = btm_record(environment["GITHUB_SHA"])
         self.artifacts = {}
         self.observer_entry, self.observer_digest, self.metadata = None, None, []
         self.release = None
@@ -2048,7 +2250,7 @@ class Operation:
         # The workflow admits these preinstalled direct tools by actual version
         # outputs. No auto-install, inherited flags/wrappers, credentials, or online fetch.
         for parent in (cargo_home, *CHECKOUT.parents, CHECKOUT, CHECKOUT / "desktop",
-                       CHECKOUT / NATIVE, CHECKOUT / HELPER):
+                       CHECKOUT / NATIVE, CHECKOUT / HELPER, CHECKOUT / INSTALLER):
             directory = parent if parent == cargo_home else parent / ".cargo"
             for name in ("config", "config.toml", "credentials", "credentials.toml"):
                 try:
@@ -2136,6 +2338,26 @@ class Operation:
         self.artifacts[role] = {"compilerSha256": digest(body), "compilerBytes": len(body),
                                 "cargoTarget": str(binary.relative_to(target)), "graphSeparated": True}
         need(self.outputs.read(entry) == body, "compiler-copy-changed")
+
+    def build_installer_worker_tests(self):
+        """One real ordinary Mac binary libtest; never a private writer invocation."""
+        target = self.scratch / "installer-worker-target"
+        entry = self.mkdir(target)
+        self.scratch_origins[target] = entry["identity"]
+        try:
+            cargo, environment = self.compiler_environment(target)
+            argv = [cargo, "test", "--manifest-path", str(CHECKOUT / INSTALLER / "Cargo.toml"),
+                    "--locked", "--offline", "--jobs", "1", "--target", TARGET,
+                    "--no-default-features", "--features", "macos-installed-installer",
+                    "--bin", "mrk-macos-install", "--message-format=short", "--color", "never",
+                    "--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
+                    *INSTALLER_WORKER_RUST_TESTS]
+            result = self.command("installer-worker-rust-tests", argv, environment, cwd=CHECKOUT,
+                                  timeout=480, limit=4 * 1024 * 1024)
+            self.installer_worker_rust_tests = installer_worker_rust_tests_result(result.stdout)
+        finally:
+            if all(call["returned"] for call in self.calls):
+                self.retire_target(target)
 
     def build_images(self):
         for role in ("client", "resident"):
@@ -2598,9 +2820,11 @@ class Operation:
         cwd = self.outputs.directory(self.scratch / "cwd")
         need(os.listdir(cwd["fd"]) == [], "native-empty-cwd")
         self.native_entered = True
+        self.btm_started = btm_clock_sample()
         result = self.call("native-run", [str(ROOT / ENTRY)], {}, cwd=self.scratch / "cwd",
-                           timeout=WORK_SECONDS, limit=CAPTURE_LIMIT)
+                            timeout=WORK_SECONDS, limit=CAPTURE_LIMIT)
         self.native_returned = True
+        self.btm_finished = btm_clock_sample()
         self.native = native_result(result.stdout, result.returncode, self.environment["GITHUB_SHA"], self.release)
         # Actual source, installed originals, capture custody and native finality
         # all participate. A native JSON assertion alone can never pass.
@@ -2608,6 +2832,69 @@ class Operation:
              "native-filesystem-postcondition")
         self.protected.check()
         self.observe_metadata("after-native", present=True)
+
+    def observe_btm_logs(self):
+        """One read-only diagnostic after a known original, never a service action."""
+        value = self.btm_log
+        need(value["state"] == "not-requested", "btm-log-original")
+        native = [row for row in self.calls if row.get("role") == "native-run"]
+        if (self.service_layout["selected"] or not self.native_returned or not self.native_entered
+                or len(native) != 1 or native[0].get("entered") is not True or native[0].get("returned") is not True
+                or any(row.get("returned") is not True for row in self.calls)):
+            return
+        if len(self.calls) >= 64:
+            value["state"] = "window-unavailable"
+            return
+        try:
+            value["window"] = btm_window(self.btm_started, self.btm_finished)
+        except (Refused, OSError, OverflowError, ValueError):
+            value["state"] = "window-unavailable"
+            return
+        value["state"] = "tool-unavailable"
+        try:
+            original, body = self.protected.file(Path("/usr/bin/log"), IMAGE_LIMIT, uid=0, modes=(0o555, 0o755))
+            need(body, "btm-log-tool")
+            value["toolSha256"] = digest(body)
+            del body
+            home = self.outputs.directory(self.scratch / "home")
+            try:
+                os.stat(".logrc", dir_fd=home["fd"], follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Refused("btm-log-tool")
+            self.outputs.check()
+            self.protected.check_one(original)
+            self.protected.check()
+        except (Refused, OSError):
+            return  # No tool call or diagnostic authority; original closes still participate.
+        count = len(self.calls)
+        try:
+            result = self.call(BTM_ROLE, btm_argv(value["window"]), self.native_environment(),
+                               cwd=self.scratch, timeout=BTM_SECONDS, limit=BTM_LIMIT)
+        finally:
+            # Derive entry from the original record, not from an intended call.
+            if len(self.calls) > count:
+                need(len(self.calls) == count + 1 and self.calls[count]["role"] == BTM_ROLE
+                     and self.calls[count]["entered"] is True, "btm-log-original")
+                record = self.calls[count]
+                value["commandIndex"] = count
+                value["state"] = "call-failed" if record["returned"] else "call-unknown"
+                if record["returned"]:
+                    value.update(stdoutSha256=record["stdoutSha256"], stderrSha256=record["stderrSha256"])
+        self.outputs.check()
+        self.protected.check_one(original)
+        self.protected.check()
+        need(result.returncode == 0, "original-command-failed")
+        value["state"] = "unparseable"
+        if result.stderr:
+            return
+        try:
+            parsed = btm_events(result.stdout)
+        except (Refused, ValueError, TypeError, RecursionError):
+            return
+        value.update(parsed, state="observed" if parsed["ownEventCount"] else "empty")
+        btm_log_data(value, self.environment["GITHUB_SHA"], self.calls)
 
     def finish(self):
         self.protected_closed = self.protected.finish()
@@ -2651,8 +2938,10 @@ class Operation:
     def receipt(self, failure):
         native_passed = self.native is not None and self.native["outcome"] == "passed"
         unit_passed = self.native_rust_tests is not None and native_rust_tests_data(self.native_rust_tests) is not None
+        installer_unit_passed = (self.installer_worker_rust_tests is not None
+                                and installer_worker_rust_tests_data(self.installer_worker_rust_tests) is not None)
         passed = (failure is None and native_passed and self.native_entered and self.native_returned
-                  and unit_passed and self.installer_context["completed"]
+                  and unit_passed and installer_unit_passed and self.installer_context["completed"]
                   and self.sources_closed and self.outputs_closed and self.protected_closed
                   and self.scratch_retired and not self.cleanup_errors
                   and all(call["returned"] and call["returncode"] == 0 for call in self.calls))
@@ -2673,8 +2962,10 @@ class Operation:
                 "package": self.package, "installedArtifactRoster": getattr(self, "stage_roster", None),
                 "receiptOriginals": getattr(self, "receipt_originals", []), "native": self.native,
                 "nativeRustTests": self.native_rust_tests,
+                "installerWorkerRustTests": self.installer_worker_rust_tests,
                 "installerContext": self.installer_context,
                 "serviceLayoutObservation": self.service_layout,
+                "btmLogObservation": self.btm_log,
                 "installerEntered": self.installer_entered, "installationReturnedSuccess": self.installed,
                 "nativeEntered": self.native_entered, "nativeOwnerReturned": self.native_returned,
                 "sourceClosesKnown": self.sources_closed, "protectedClosesKnown": self.protected_closed,
@@ -2695,6 +2986,7 @@ class Operation:
             self.begin()
             self.scratch_identity = self.outputs.directories[self.scratch]["identity"]
             if not self.service_layout["selected"]:
+                self.build_installer_worker_tests()
                 self.observe_installer_context()
             self.compile_metadata_observer()
             self.absence("initial")
@@ -2714,6 +3006,18 @@ class Operation:
                        and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])
                        else "original-operation-refused-or-unknown")
         finally:
+            original_phase = self.phase
+            try:
+                self.observe_btm_logs()
+            except BaseException as error:
+                if failure is None:
+                    failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
+                               and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])
+                               else "original-operation-refused-or-unknown")
+                else:
+                    self.phase = original_phase
+            else:
+                self.phase = original_phase
             self.finish()
         return self.receipt(failure)
 

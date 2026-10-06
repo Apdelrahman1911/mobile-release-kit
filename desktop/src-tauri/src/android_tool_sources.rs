@@ -42,6 +42,15 @@ pub(crate) struct Cancel {
 pub(crate) fn invalid() -> BridgeError {
     BridgeError::new("android_sources_invalid", "The request does not identify the original Android tool selection.")
 }
+// Refine only the effective Document/publisher gate before the existing owner
+// snapshots its capability/revision. A selector cannot promote any denial, and
+// returned Status DATA is never patched into a new capability afterwards.
+pub(crate) fn status_availability(gate: Availability, source_selection_available: bool) -> Availability {
+    match (gate, source_selection_available) {
+        (Availability::Available, false) => Availability::RuntimeUnqualified,
+        _ => gate,
+    }
+}
 pub(crate) fn unavailable() -> BridgeError {
     BridgeError::new("android_sources_unavailable", "Android tool folder selection is unavailable in this document and desktop profile.")
 }
@@ -97,6 +106,26 @@ mod tests {
         }
         assert!(parse_empty(br#"{"schemaVersion":1,"schemaVersion":1}"#).is_err());
         assert!(Cancel::parse(br#"{"schemaVersion":1,"sourceGeneration":0,"operationId":1}"#).is_err());
+    }
+    #[test]
+    fn status_selector_only_demotes_available_with_an_unqualified_source_picker() {
+        use Availability::*;
+        // Independent 8 x 2 oracle: all seven existing denials survive BOTH
+        // selector values. The one available/unqualified cell alone changes.
+        let cases = [
+            (Available, RuntimeUnqualified, Available),
+            (Busy, Busy, Busy),
+            (Shutdown, Shutdown, Shutdown),
+            (CleanupUnknown, CleanupUnknown, CleanupUnknown),
+            (DocumentLost, DocumentLost, DocumentLost),
+            (UnsupportedPlatform, UnsupportedPlatform, UnsupportedPlatform),
+            (RuntimeUnqualified, RuntimeUnqualified, RuntimeUnqualified),
+            (ToolchainUnqualified, ToolchainUnqualified, ToolchainUnqualified),
+        ];
+        for (gate, unqualified, qualified) in cases {
+            assert_eq!(status_availability(gate, false), unqualified);
+            assert_eq!(status_availability(gate, true), qualified);
+        }
     }
     #[test]
     fn display_data_never_contains_parent_path_or_control_direction_text() {

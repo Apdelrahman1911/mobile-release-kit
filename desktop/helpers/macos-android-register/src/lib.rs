@@ -1,7 +1,7 @@
 //! Fixed returning resident image; never a second CLI/scheduler.
 #![deny(unsafe_op_in_unsafe_fn)]
-#[cfg(not(all(target_os="macos",target_arch="aarch64")))]
-compile_error!("the resident image requires native macOS ARM64");
+#[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+compile_error!("the resident image requires native LP64 ARM64 or Intel macOS");
 #[cfg(not(panic="unwind"))]
 compile_error!("the image boundary requires contained unwinding");
 use mrk_macos_installed_native::installed_image::{self,Host,Return};

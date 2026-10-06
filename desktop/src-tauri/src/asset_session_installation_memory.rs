@@ -8,7 +8,7 @@
 //! refused, never measured as zero, disposed, polled, reconciled or retried here.
 use super::*;
 
-#[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use known::catalogue_census_data;
 
 pub(super) fn admitted(state: &DocumentState, control: usize) -> Result<(), Reason> {
@@ -16,15 +16,15 @@ pub(super) fn admitted(state: &DocumentState, control: usize) -> Result<(), Reas
     // 64MiB session quota. A smaller caller value cannot create payload credit.
     if control != 16 * 1024 * 1024 { return Err(Reason::Capacity); }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64")))]
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { known::admitted(state, control) }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64"))))]
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = state; Err(Reason::Capacity) }
 }
 
 #[cfg(all(test, debug_assertions, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "macos", target_arch = "aarch64"))))]
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(super) fn tally_data(state: &DocumentState) -> Result<usize, Reason> { known::tally_data(state) }
 
 /// Borrowed, allocation-free M2 census under the SAME Document guard. Not B1B
@@ -49,11 +49,11 @@ impl AndroidServiceSetupCensus<'_> {
 }
 /// Same original Document/zero-to-three-picker census, with no project/edit or
 /// credential-copy prerequisite. The borrow cannot outlive admission's mutex.
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) struct MacosMaintenanceCensus<'a>{
     bytes:usize,document:&'a Arc<()>,pickers:&'a [Option<Arc<OriginalWork>>;3],_state:&'a DocumentState,
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl MacosMaintenanceCensus<'_>{
     pub(crate) fn for_originals(&self,document:&Arc<()>,pickers:&[Option<Arc<OriginalWork>>;3])->Option<usize>{
         (Arc::ptr_eq(self.document,document) && self.pickers.iter().zip(pickers).all(|(before,after)|
@@ -61,7 +61,7 @@ impl MacosMaintenanceCensus<'_>{
             .then_some(self.bytes)
     }
 }
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(super) fn macos_maintenance_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
     pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<MacosMaintenanceCensus<'a>,Reason>{
     if !state.maintenance.data_only() || !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
@@ -82,12 +82,12 @@ fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
 pub(super) fn android_service_setup_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
     pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<AndroidServiceSetupCensus<'a>,Reason>{
     if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     {
         let bytes=known::android_service_setup_bytes(state,pickers)?;
         Ok(AndroidServiceSetupCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
     }
-    #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+    #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
     {let _=(document,state,pickers);Err(Reason::Capacity)}
 }
 impl AndroidRegistrationCensus<'_> {
@@ -101,17 +101,17 @@ pub(super) fn android_registration_census<'a>(document: &'a DocumentBinding, sta
     // All four existing fixture-Inner histories remain exclusions. This path
     // neither changes nor reuses installation::Admission or its empty-source gate.
     if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
-    #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper")))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
     {
         let bytes = known::android_registration_bytes(state, pickers)?;
         Ok(AndroidRegistrationCensus { bytes, document: &document.inner.session_identity, pickers, _state: state })
     }
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64", not(feature = "macos-android-registration-helper"))))]
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
     { let _ = (document, state, pickers); Err(Reason::Capacity) }
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "macos", target_arch = "aarch64")))]
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod known {
     use super::*;
     use std::{alloc::Layout, mem::size_of};
@@ -430,15 +430,15 @@ mod known {
             Ok(())
         }
     }
-    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     struct SavedFieldAllocationData {project_id:String,root:asset_source::RegisteredRoot}
-    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) struct CatalogueCensusData {
         pub(crate) bytes:usize,pub(crate) rows:[(&'static str,usize);8],
         pub(crate) pickers:[Arc<OriginalWork>;3],
         _state:DocumentState,_saved:[Arc<SavedFieldAllocationData>;2],
     }
-    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn catalogue_census_data(project_id:&str,project:&asset_source::RegisteredRoot,
         roots:&[asset_source::RegisteredRoot;3])->CatalogueCensusData{
         // Deliberately never an AndroidRegistrationCensus, SavedInputBinding or

@@ -13,7 +13,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 type WrappingKeyCandidate = secret_service::checked_lookup::WrappingKeyCandidate;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 type WrappingKeyCandidate = crate::vault_keyring_macos::WrappingKeyCandidate;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 type WrappingKeyCandidate = mrk_windows_installed_native::vault_dpapi::KeyCandidate;
@@ -504,9 +504,9 @@ mod tests {
         for (kind, values) in [
             (commands::Kind::AndroidFirebase, serde_json::json!({})),
             (commands::Kind::IosFirebase, serde_json::json!({})),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             (commands::Kind::AppleP12, serde_json::json!({"password":" ORIGINAL_P12_PASSWORD_CANARY\0é "})),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             (commands::Kind::AppleProfile, serde_json::json!({})),
         ] {
             let fields = commands::own_fields(kind, &values).unwrap_or_else(|_| panic!("fixed fields"));
@@ -520,7 +520,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn asc_file() -> Vec<u8> {
         use der_07::{asn1::ObjectIdentifier, Any, Encode, Tag};
         // Deliberately not an EC scalar. Authentication/envelope recognition
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn asc_authenticated_round_trip_retains_original_bytes_and_requires_fresh_observation() {
         use crate::credential_format::{inspect, FileKind};
         let key = key(); let der = asc_file();
@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     fn asc_payload_refuses_wrong_kind_presence_duplicate_companions_and_over_cap_before_entropy() {
         let key = key(); let kind = commands::Kind::AscP8; let file = asc_file();
         let descriptor = Descriptor::new(kind, None, vec![true, true], true).unwrap();

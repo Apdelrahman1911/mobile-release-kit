@@ -1,16 +1,17 @@
 //! Private maintenance admission belongs to the original Document mutex.
 //! Closing NEW work is separate from STOP and from the later ordinary Quit.
-//! No public IPC command, installer capability or alternate scheduler is added.
+//! Normal IPC delegates to this original path; it adds no Installer capability
+//! or alternate scheduler. Only the private Completion can request Quit.
 use super::*;
 
 #[derive(Default)]
 pub(super) struct Closure {
     closed:bool,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     original:Option<crate::saved_command_owner::MacosMaintenanceHandle>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     completion:Option<crate::saved_command_owner::MacosMaintenanceCompletion>,
-    #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     last:Option<crate::saved_command_owner::MacosMaintenanceStatus>,
 }
 impl Closure {
@@ -18,16 +19,16 @@ impl Closure {
     /// A retained native original is never zero-byte census credit, even if a
     /// future erroneous transition were to clear only the presentation flag.
     pub(super) fn data_only(&self)->bool{
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         { !self.closed && self.original.is_none() && self.completion.is_none() }
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         { !self.closed }
     }
     pub(super) fn can_exit(&self)->bool{
         if self.data_only(){return true;}
-        #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {self.closed && self.original.as_ref().is_some_and(|original|original.can_exit())}
-        #[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {false}
     }
 }
@@ -37,7 +38,7 @@ pub(super) fn unavailable()->BridgeError{
         "Installed maintenance needs the original installed application and fully settled work.")
 }
 
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl DocumentBinding {
     fn macos_maintenance_gate(&self,state:&DocumentState)->Result<(),BridgeError>{
         passive_document_gate(state)?;
@@ -64,6 +65,7 @@ impl DocumentBinding {
 
     pub(crate) fn start_macos_maintenance(&self,confirmation:&str)
         ->Result<crate::saved_command_owner::MacosMaintenanceStatus,BridgeError>{
+        if !crate::installation::preparation_profile_available(){return Err(unavailable());}
         // Consent, original T and entropy exist before the first Document wait.
         let request=crate::saved_command_owner::MacosMaintenanceRequest::confirmed(confirmation)?;
         self.reconcile();
@@ -88,8 +90,18 @@ impl DocumentBinding {
             state.maintenance.completion=None;state.maintenance.last=None;
             self.bump(&mut state);admitted
         };
+        let original=admitted.handle();
         admitted.release()?;
-        self.macos_maintenance_status().ok_or_else(unavailable)
+        self.reconcile();let state=self.lock();
+        // An immediately refused/reopened operation may race another explicit
+        // caller. Never return that later caller's acknowledgement as this one.
+        let own=self.inner.bridge.android_build.maintenance_status(&original);
+        if let Some(current)=state.maintenance.original.as_ref(){
+            if !current.same(&original){return Err(unavailable());}
+            return Ok(state.maintenance.last.unwrap_or(own));
+        }
+        state.maintenance.last.filter(|last|last.operation==own.operation && last.generation==own.generation)
+            .ok_or_else(unavailable)
     }
 
     pub(super) fn reconcile_macos_maintenance_locked(&self,state:&mut DocumentState){
@@ -130,6 +142,56 @@ impl DocumentBinding {
         if let Some(completion)=completion {
             if completion.request_quit(){self.request_quit(app);}
         }
+    }
+}
+
+impl DocumentBinding {
+    pub(crate) fn installation_preparation_status(&self)->Result<crate::installation::PreparationStatus,BridgeError>{
+        self.installation_preparation_view(None)
+    }
+    fn installation_preparation_view(&self,expected:Option<(&str,u32)>)->Result<crate::installation::PreparationStatus,BridgeError>{
+        if !crate::installation::preparation_profile_available(){return Err(unavailable());}
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image",not(feature="macos-android-registration-helper")))]
+        {
+            use crate::installation::{PreparationStatus,PreparationPhase as P,PreparationReason as R};
+            use crate::saved_command_owner::MacosMaintenancePhase as N;
+            self.reconcile();let state=self.lock();
+            let (available,ready)=self.inner.bridge.android_build.maintenance_readiness(&self.inner.session_identity);
+            let ready=ready && self.macos_maintenance_gate(&state).is_ok();
+            let original=state.maintenance.last.or_else(||state.maintenance.original.as_ref()
+                .map(|original|self.inner.bridge.android_build.maintenance_status(original)));
+            let Some(original)=original else {
+                if expected.is_some() || state.maintenance.closed(){return Err(unavailable());}
+                let reason=if !available{R::UnavailableProfile}else if state.unknown || state.exhausted{R::CleanupUnknown}
+                    else if !state.lifetime.original_bound() || state.lost_observed || state.stopping || state.quit_pending{R::DocumentUnavailable}
+                    else if !ready{R::Busy}else{R::None};
+                return Ok(PreparationStatus::initial(available,ready,reason));
+            };
+            let phase=match original.phase {N::Preparing=>P::Preparing,N::Unregistering=>P::Unregistering,
+                N::Settling=>P::Settling,N::Prepared=>P::Prepared,N::Refused=>P::Refused,N::Unknown=>P::Unknown};
+            let id:String=original.operation.iter().map(|byte|format!("{byte:02x}")).collect();
+            // Both the current original and closure are observed under this
+            // SAME Document lock. A Start reply may not substitute a later one.
+            if expected.is_some_and(|expected|expected!=(id.as_str(),original.generation)){return Err(unavailable());}
+            Ok(PreparationStatus{schema_version:1,available,
+                can_start:ready && phase==P::Refused && !state.maintenance.closed(),
+                operation_id:Some(id),
+                generation:Some(original.generation),phase,reason:crate::installation::preparation_reason(original.reason),
+                new_work_closed:state.maintenance.closed(),assurance:"preparation-status-only"})
+        }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image",not(feature="macos-android-registration-helper"))))]
+        {let _=expected;Err(unavailable())}
+    }
+    pub(crate) fn prepare_installation_quit(&self,confirmation:&str)->Result<crate::installation::PreparationStatus,BridgeError>{
+        if !crate::installation::preparation_profile_available(){return Err(unavailable());}
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image",not(feature="macos-android-registration-helper")))]
+        {
+            let original=self.start_macos_maintenance(confirmation)?;
+            let id:String=original.operation.iter().map(|byte|format!("{byte:02x}")).collect();
+            self.installation_preparation_view(Some((id.as_str(),original.generation)))
+        }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image",not(feature="macos-android-registration-helper"))))]
+        {let _=confirmation;Err(unavailable())}
     }
 }
 

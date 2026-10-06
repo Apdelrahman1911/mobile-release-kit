@@ -28,8 +28,8 @@ impl Kind {
     pub(crate) fn enabled(self) -> bool {
         matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken)
             || (cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-                all(target_os = "macos", target_arch = "aarch64"))) && self == Self::AscP8)
-            || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && matches!(self, Self::AppleP12 | Self::AppleProfile))
+                all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))) && self == Self::AscP8)
+            || (cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && matches!(self, Self::AppleP12 | Self::AppleProfile))
     }
     pub(crate) fn file(self) -> Option<crate::credential_format::FileKind> {
         use crate::credential_format::FileKind;
@@ -207,7 +207,7 @@ pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
 // The target-selected durable codec reuses these exact scalar semantics. Wipe the strings
 // actually owned here on retirement, including copies made during bounded
 // authenticated decoding. This does not claim erasure of renderer/OS copies.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 impl Drop for Fields {
     fn drop(&mut self) {
         use zeroize::Zeroize;
@@ -236,11 +236,11 @@ impl Fields {
         }
         Value::Object(object)
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     pub(crate) fn vault_kind(&self) -> Kind { self.kind }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     pub(crate) fn vault_presence(&self) -> Vec<bool> { self.values.iter().map(Option::is_some).collect() }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     pub(crate) fn write_vault_scalars(&self, writer: impl io::Write) -> Result<(), serde_json::Error> {
         // Borrow original field strings; do not allocate another secret Value
         // tree merely to serialize the fixed scalar map.
@@ -628,7 +628,7 @@ mod tests {
         assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"ios-firebase","replacement":null},"fields":{}})).is_err());
         assert!(Kind::AscP8.file() == Some(crate::credential_format::FileKind::AscP8));
         for kind in [Kind::AppleP12, Kind::AppleProfile] {
-            assert_eq!(kind.enabled(), cfg!(all(target_os = "macos", target_arch = "aarch64")));
+            assert_eq!(kind.enabled(), cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))));
             assert!(kind.file().is_some());
         }
     }
@@ -641,7 +641,7 @@ mod tests {
         let values = [json!({"password":null}), json!({"password":" \0 private-canary "})];
         for input in &values {
             let fields = own_fields(Kind::AppleP12, input);
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            if cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) {
                 let fields = fields.ok().unwrap();
                 assert_eq!(fields.into_value(), *input);
                 assert_eq!(fields.borrow_value("password"), input["password"].as_str());
@@ -649,14 +649,14 @@ mod tests {
                 assert!(fields.borrow_value("private-canary").is_none());
             } else { assert!(fields.is_err()); }
         }
-        assert_eq!(own_fields(Kind::AppleProfile, &json!({})).is_ok(), cfg!(all(target_os = "macos", target_arch = "aarch64")));
+        assert_eq!(own_fields(Kind::AppleProfile, &json!({})).is_ok(), cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))));
         for input in [json!({}), json!({"password":false}), json!({"password":"x".repeat(4097)}),
             json!({"password":null,"path":"private-canary"}), json!({"storePassword":null})] {
             assert!(validate_fields(Kind::AppleP12, &input).is_err());
         }
         assert!(validate_fields(Kind::AppleProfile, &json!({"password":null})).is_err());
         assert_eq!(Kind::AscP8.enabled(), cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64"))));
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))));
     }
     #[test]
     fn asc_uses_the_original_file_selection_and_exact_write_only_identifiers() {

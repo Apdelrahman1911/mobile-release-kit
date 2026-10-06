@@ -400,7 +400,7 @@ impl DesktopBridge {
     /// Fixture DATA only, called under the original DocumentBinding lock. It
     /// grants no ProjectProbe, picker, filesystem identity, asset or GitHub gate.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn environment_fixture_registration(&self,
         permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
         let (id, root, generation) = permit.validate(&self.diagnostics)?;
@@ -420,7 +420,7 @@ impl DesktopBridge {
     /// Separate offline fixture permit and actual held-root identity. Never
     /// upgrade the diagnostics fixture's identity:None registration in place.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     pub(crate) fn offline_fixture_registration(&self,
         permit: &crate::offline_preflight_owner::OfflineRegistrationPermit) -> Result<(), BridgeError> {
         let (id, root, generation) = permit.validate(&self.preflight)?;

@@ -1,13 +1,13 @@
 //! Private installed maintenance on the SAME saved registration ControlSlot.
 //! One IPC worker, one existing-kind async coordinator, one main Preparation.
-//! This module is not public UI activation or Installer permission.
+//! The normal UI delegates here; status/consent never grant Installer permission.
 use super::*;
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use selected::{State,Request,Checked,Snapshot,Handle,Admitted,Completion,Status,Phase,OriginalClock};
-#[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+#[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
 #[derive(Default)]
 pub(super) struct State;
-#[cfg(not(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper"))))]
+#[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
 impl State{
     pub(super) fn busy(&self)->bool{false}
     pub(super) fn unknown(&self)->bool{false}
@@ -19,7 +19,7 @@ impl State{
     pub(super) fn invalidation_failure(&self)->Option<(wire::Reason,Instant)>{None}
 }
 
-#[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 mod selected{
     use super::super::*;
     use mrk_macos_installed_native::{android_registration as native,android_maintenance_client as transport,
@@ -27,11 +27,11 @@ mod selected{
     use std::sync::OnceLock;
     const HEARTBEAT:Duration=Duration::from_millis(5);
     const TASK_STORAGE:usize=64*1024;
-    pub(crate) const CONFIRMATION:&str="Stop the installed Android helper and prepare this application to quit";
+    pub(crate) const CONFIRMATION:&str=crate::installation::PREPARE_QUIT_CONFIRMATION;
 
     /// Fixed explicit application-level consent, not arbitrary project/copy input.
-    /// The native shell is the only production caller; this is not in its IPC
-    /// handler table until the complete integrated/native path is activated.
+    /// The admitted native shell is the only production entry. This value is
+    /// not ownership, native qualification, or permission to install/remove files.
     pub(crate) struct Request{at:Instant,operation:[u8;16],id:String}
     impl Request{
         pub(crate) fn confirmed(value:&str)->Result<Self,BridgeError>{
@@ -321,16 +321,25 @@ mod selected{
         }
         Some(bytes)
     }
-    impl SavedCommandOwner{
-        pub(crate) fn maintenance_snapshot(&self,document:&Arc<()>,request:Request)->Result<Snapshot,BridgeError>{
-            let registry=self.inner.lock();
-            if !cfg!(feature="macos-installed-desktop-image") || !management::signing_profile_configured()
-                || !self.inner.android_original_document_matches(Some(document)) || self.inner.android_service_dispatcher.get().is_none()
-                || registry.disabled || registry.exhausted || registry.stopping || registry.document_lost
+    // The very same predicate is used for the UI hint and real snapshot.
+    // No epoch/claim, source census, entropy, native call or task is acquired here.
+    fn maintenance_readiness(inner:&Inner,registry:&Registry,document:&Arc<()>)->(bool,bool){
+        let available=cfg!(feature="macos-installed-desktop-image") && management::signing_profile_configured()
+            && inner.android_original_document_matches(Some(document)) && inner.android_service_dispatcher.get().is_some();
+        let ready=available && !(registry.disabled || registry.exhausted || registry.stopping || registry.document_lost
                 || registry.active.is_some() || registry.prepared.is_some() || registry.recovery_review.is_some() || registry.recovery.is_some()
                 || registry.android_catalog.busy() || registry.android_sources.busy() || registry.android_registration.busy()
                 || registry.android_registration.review.is_some() || registry.android_registration.unknown()
-                || self.inner.android_registration_control.is_unknown() || self.inner.poisoned.load(Ordering::SeqCst){return Err(unavailable());}
+                || inner.android_registration_control.is_unknown() || inner.poisoned.load(Ordering::SeqCst));
+        (available,ready)
+    }
+    impl SavedCommandOwner{
+        pub(crate) fn maintenance_readiness(&self,document:&Arc<()>)->(bool,bool){
+            maintenance_readiness(&self.inner,&self.inner.lock(),document)
+        }
+        pub(crate) fn maintenance_snapshot(&self,document:&Arc<()>,request:Request)->Result<Snapshot,BridgeError>{
+            let registry=self.inner.lock();
+            if !maintenance_readiness(&self.inner,&registry,document).1{return Err(unavailable());}
             let epoch=self.inner.android_registration_control.epoch()?;
             let pickers=registry.android_sources.census_originals().ok_or_else(unavailable)?;
             let source_generation=registry.android_sources.census_generation();

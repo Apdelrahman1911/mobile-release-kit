@@ -181,6 +181,20 @@ fn cancel_installation(webview: Webview, request: tauri::ipc::Request<'_>, state
     state.document.cancel_installation(id)
 }
 #[tauri::command]
+fn installation_preparation_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::PreparationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    crate::installation::inspect_request(request_body(&request)?)?;
+    state.document.installation_preparation_status()
+}
+#[tauri::command]
+fn prepare_installation_quit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::PreparationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let confirmation = crate::installation::preparation_request(request_body(&request)?)?;
+    state.document.prepare_installation_quit(confirmation)
+}
+#[tauri::command]
 async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=catalog-enter\n");
     fixture_command!(state, Catalog, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -1352,14 +1366,14 @@ async fn vault_open(webview: Webview, app: tauri::AppHandle, request: tauri::ipc
         match asset_commands::open(asset_body(&request)?)? {
             asset_commands::OpenMode::Session => state.document.open_session(),
             asset_commands::OpenMode::Encrypted => {
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 {
                     // Native application-data resolution only. No renderer
                     // filename/path or project location chooses the vault root.
                     let location = app.path().app_local_data_dir().map_err(|_| AssetError::new(Reason::ExclusionUnconfirmed))?;
                     state.document.open_encrypted(&location)
                 }
-                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+                #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
                 { let _ = &app; Err(AssetError::new(Reason::UnsupportedPlatform)) }
             },
         }
@@ -1371,17 +1385,17 @@ async fn vault_open(webview: Webview, app: tauri::AppHandle, request: tauri::ipc
 #[tauri::command]
 async fn vault_prepare_initialize(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { state.document.prepare_vault_initialize() }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = &state; Err(AssetError::new(Reason::UnsupportedPlatform)) }
 }
 #[tauri::command]
 async fn vault_unlock(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { state.document.unlock_vault() }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = &state; Err(AssetError::new(Reason::UnsupportedPlatform)) }
 }
 #[tauri::command]
@@ -1615,7 +1629,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut ios_archive_relay_failed = false;
         loop {
             if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; return; }
-            #[cfg(all(target_os="macos",target_arch="aarch64",feature="macos-installed-desktop-image"))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
@@ -1867,10 +1881,10 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
     (handle, start)
 }
 
-/// Native-owned callable seam only. It is intentionally absent from
-/// generate_handler/public IPC and from observer/bin layouts. Public maintenance
-/// remains unavailable pending integrated review and actual native qualification.
-#[cfg(all(target_os="macos",target_arch="aarch64",feature="macos-installed-desktop-image"))]
+/// Existing native-owned callable seam. The UI delegates through the same
+/// Document path, which independently refuses observer/non-image profiles.
+/// Preparation status does not authorize Installer changes or claim qualification.
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
 pub(crate) fn begin_installed_macos_maintenance(app:&tauri::AppHandle,confirmation:&str)
     ->Result<crate::saved_command_owner::MacosMaintenanceStatus,BridgeError>{
     let state=app.try_state::<ShellState>().ok_or_else(||BridgeError::new(
@@ -1931,7 +1945,7 @@ fn request_shutdown(app: &tauri::AppHandle) {
 
 #[derive(Clone, Copy)]
 pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit,
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     AndroidToolSource(crate::android_tool_sources::Role),
 }
 
@@ -1942,20 +1956,20 @@ fn requires_recent_files_suppression(choice: DialogChoice) -> bool {
 
 // Public-image selection is separately qualified. The existing private-file
 // or project chooser capability is never an image adapter receipt.
-#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(crate) async fn run_owned_images_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<std::path::PathBuf>>, Reason> {
     owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
 
-#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) async fn run_owned_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>, _: DialogChoice, _: Option<std::path::PathBuf>) -> Result<Option<std::path::PathBuf>, Reason> {
     owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "shell_macos_dialog.rs"]
 mod owned_macos;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use owned_macos::{run_owned_dialog, run_owned_images_dialog};
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
@@ -2979,12 +2993,12 @@ pub struct InitializationFailed;
 pub fn run() -> Result<(), InitializationFailed> {
     // Installer is the only privileged entry. Do not even construct a native
     // window/document/project picker in a root or incompatible Mac process.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if mrk_macos_installed_native::real_user().is_err() { return Err(InitializationFailed); }
     // Only the exact ordinary installed role consumes the C/exec handoff. The
     // explicitly instrumented Aqua main keeps its original case/environment
     // route and makes no M2/shared-gate claim. No runtime environment bypass.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "desktop-shell", feature = "custom-protocol",
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "desktop-shell", feature = "custom-protocol",
         not(test), not(feature = "development-runtime"), not(feature = "macos-installed-observation"),
         not(feature = "windows-installed-observation"), not(feature = "macos-installed-installer"),
         not(feature = "macos-installed-installer-fixture"), not(feature = "macos-android-registration-helper"),
@@ -2996,7 +3010,7 @@ pub fn run() -> Result<(), InitializationFailed> {
 /// The separate fixed image facade already consumed argv admission and owns its
 /// actual pre-dlopen SH. Never rerun the duplicate linked gate static here.
 /// No renderer/CLI/env selector reaches this compile-time role.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-desktop-image"))]
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-desktop-image"))]
 pub fn run_installed_image() -> Result<(), InitializationFailed> {
     if mrk_macos_installed_native::real_user().is_err() { return Err(InitializationFailed); }
     run_builder(builder()).map(|_| ())
@@ -3182,7 +3196,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             owned_windows::before_webview(&startup)?;
             let window = window.build()?;
-            #[cfg(all(target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+            #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             if let Some(dispatcher)=crate::saved_command_owner::AndroidServiceDispatcher::original_main(window.clone()){
                 let _=document.bind_android_service_dispatcher(dispatcher);
             }
@@ -3259,7 +3273,9 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
                 tauri::generate_handler![
-            app_info, reveal_installation, installation_status, inspect_installation, cancel_installation, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
+            app_info, reveal_installation, installation_status, inspect_installation, cancel_installation,
+            installation_preparation_status, prepare_installation_quit,
+            choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             release_evidence_choose, release_evidence_status, release_evidence_observe, release_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,

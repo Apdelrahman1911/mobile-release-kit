@@ -647,7 +647,7 @@ impl Book {
         if Some(hash.as_str()) != option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256") { return Err(AdmissionFailure::Inventory); }
         let manifest: Manifest = serde_json::from_value(strict_json(&bytes).map_err(native_error)?).map_err(native_error)?;
         if manifest.schema_version != 1 || manifest.protocol != PROTOCOL || manifest.core_version != runtime::CORE_VERSION
-            || manifest.target != "aarch64-apple-darwin" || manifest.protocol_sha256 != PROTOCOL_SHA
+            || !crate::macos_build_profile::MacBuildTarget::matches_compiled(&manifest.target) || manifest.protocol_sha256 != PROTOCOL_SHA
             || option_env!("MRK_BUNDLED_PROTOCOL_SHA256") != Some(PROTOCOL_SHA)
             || manifest.files.is_empty() || manifest.files.len() > 2048
             || digest(&serde_json::to_vec(&manifest.files).map_err(native_error)?) != manifest.inventory_sha256 { return Err(AdmissionFailure::Inventory); }
@@ -1199,7 +1199,7 @@ impl IOSXcodeSlots {
         let root = |id: Identity| RootIdentity { device: id.dev.to_string(), inode: id.ino.to_string(),
             mode: u32::from(id.mode), uid: id.uid, gid: id.gid };
         let developer = identity(self.developer)?; let sdk = identity(self.sdk)?;
-        ToolchainBinding::new_data(self.developer_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(developer),
+        ToolchainBinding::new_data(crate::ios_archive_protocol::Profile::current().ok_or(AdmissionFailure::Inventory)?,self.developer_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(developer),
             self.tool_data(self.executable)?, self.sdk_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(sdk))
             .map_err(|_| AdmissionFailure::Inventory)
     }

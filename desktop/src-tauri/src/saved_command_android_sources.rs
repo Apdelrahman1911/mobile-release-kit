@@ -50,7 +50,7 @@ impl Default for Sources {
         active: None, last: None, phase: wire::Phase::Idle, reason: wire::Reason::NotInspected } }
 }
 impl Sources {
-    #[cfg(all(test,target_os="macos",target_arch="aarch64",not(feature="macos-android-registration-helper")))]
+    #[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn catalogue_allocation_data(project_id:&str,project:&RegisteredRoot,roots:&[RegisteredRoot;3],
         originals:&[Arc<OriginalWork>;3])->(Self,Arc<SourceSnapshot>,Arc<SourceSnapshot>){
         // Comparison/allocation DATA only. The SAME picker Arcs remain New;
@@ -171,7 +171,7 @@ impl SavedCommandOwner {
             || self.inner.poisoned.load(Ordering::SeqCst) || gate == Availability::CleanupUnknown { return Availability::CleanupUnknown; }
         if registry.stopping || gate == Availability::Shutdown { return Availability::Shutdown; }
         if registry.document_lost || gate == Availability::DocumentLost { return Availability::DocumentLost; }
-        if self.inner.domain != SavedCommandDomain::AndroidBuild || !cfg!(all(target_os="macos",target_arch="aarch64")) {
+        if self.inner.domain != SavedCommandDomain::AndroidBuild || !cfg!(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) {
             return Availability::UnsupportedPlatform;
         }
         if !self.inner.android_runtime_selected(None) { return Availability::RuntimeUnqualified; }
