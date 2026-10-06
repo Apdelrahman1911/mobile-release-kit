@@ -39,7 +39,6 @@ jobs:
             supplier_run: '37467019389'
             supplier_artifact: '11415902210'
     env:
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
@@ -50,6 +49,8 @@ jobs:
     steps:
       - name: Admit only this native source and explicit signing purpose
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == "$MRK_RUNNER_ARCH" ]] || exit 1
@@ -105,6 +106,7 @@ jobs:
         timeout-minutes: 7
         shell: bash
         env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
