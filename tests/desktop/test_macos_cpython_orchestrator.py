@@ -145,6 +145,11 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
         digest = "70c5239ad2d62925d2947e46921d0ddd3d35be3d2f0a2d50db33da507dbcb419"
         self.assertEqual(PREP.PACKAGE_URL, "https://www.python.org/ftp/python/3.14.7/python-3.14.7-macos11.pkg")
         self.assertEqual(PREP.PACKAGE_SHA256, digest)
+        self.assertEqual(PREP.INTEL_AUX_RELATIVE, "Versions/3.14/bin/python3.14-intel64")
+        self.assertEqual(PREP.INTEL_AUX_SIZE, 49712)
+        self.assertEqual(PREP.INTEL_AUX_SHA256,
+                         "abcc6dc44fbaf4695699ab8d584892b7f5936e03c1986da1098c93d02ba7a771")
+        self.assertNotEqual(PREP.INTEL_AUX_RELATIVE, PREP.ENTRY_RELATIVE)
         self.assertIsNone(PREP.package_binding(PREP.PACKAGE_LIMIT, digest))
         for size, value in ((0, digest), (True, digest), (1.0, digest),
                             (PREP.PACKAGE_LIMIT + 1, digest), (1, "0" * 64)):
@@ -687,6 +692,46 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
         with mock.patch.object(BUILD, "read", return_value=archives):
             with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-header$"):
                 PREP.native_image_bytes(Path("not-an-archive.dylib"), "arm64")
+        self.assertIs(BUILD.read, original_read)
+
+        # One documented Intel-only launcher is retained on ARM, never granted
+        # loader/execution authority. Synthetic pin substitutions are local to
+        # these parser tests; actual public-package correspondence needs Mac CI.
+        executable = bytearray(intel)
+        struct.pack_into("<I", executable, 12, 2)
+        executable = bytes(executable)
+        header = struct.pack(">2I", 0xCAFEBABE, 1) + struct.pack(">5I", INTEL, 3, 64, len(executable), 6)
+        auxiliary = header + bytes(64 - len(header)) + executable
+        original_pins = (PREP.INTEL_AUX_SIZE, PREP.INTEL_AUX_SHA256)
+        auxiliary_path = Path("/private/framework") / PREP.INTEL_AUX_RELATIVE
+        with mock.patch.object(BUILD, "read", return_value=auxiliary):
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^intel-auxiliary-bytes$"):
+                PREP.native_image_bytes(auxiliary_path, "arm64", relative=PREP.INTEL_AUX_RELATIVE)
+            with mock.patch.object(PREP, "INTEL_AUX_SIZE", len(auxiliary)), \
+                 mock.patch.object(PREP, "INTEL_AUX_SHA256", PREP.hashlib.sha256(auxiliary).hexdigest()):
+                self.assertIsNone(PREP.native_image_bytes(auxiliary_path, "arm64", relative=PREP.INTEL_AUX_RELATIVE))
+                self.assertEqual(PREP.native_image_bytes(auxiliary_path, "x86_64", relative=PREP.INTEL_AUX_RELATIVE), executable)
+                for other_name in (None, "Versions/3.14/bin/other-intel64", PREP.ENTRY_RELATIVE):
+                    with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-native-missing$"):
+                        PREP.native_image_bytes(auxiliary_path, "arm64", relative=other_name)
+                for damaged in (auxiliary[:-1], auxiliary[:-1] + bytes([auxiliary[-1] ^ 1])):
+                    with mock.patch.object(BUILD, "read", return_value=damaged), \
+                         self.assertRaisesRegex(PREP.PreparationRefused, "^intel-auxiliary-bytes$"):
+                        PREP.native_image_bytes(auxiliary_path, "arm64", relative=PREP.INTEL_AUX_RELATIVE)
+        # Repin malformed synthetic inputs only to reach structural boundaries.
+        malformed = []
+        for offset, fmt, value in ((0, ">I", 0xCAFEBABF), (4, ">I", 2), (8, ">I", ARM),
+                                   (64, "<I", 0), (76, "<I", 6), (80, "<I", 0)):
+            damaged = bytearray(auxiliary); struct.pack_into(fmt, damaged, offset, value)
+            malformed.append(bytes(damaged))
+        for number, damaged in enumerate(malformed):
+            with self.subTest(intel_auxiliary_boundary=number), \
+                 mock.patch.object(BUILD, "read", return_value=damaged), \
+                 mock.patch.object(PREP, "INTEL_AUX_SIZE", len(damaged)), \
+                 mock.patch.object(PREP, "INTEL_AUX_SHA256", PREP.hashlib.sha256(damaged).hexdigest()), \
+                 self.assertRaises(PREP.PreparationRefused):
+                PREP.native_image_bytes(auxiliary_path, "arm64", relative=PREP.INTEL_AUX_RELATIVE)
+        self.assertEqual((PREP.INTEL_AUX_SIZE, PREP.INTEL_AUX_SHA256), original_pins)
         self.assertIs(BUILD.read, original_read)
 
         with self.assertRaises(PREP.PreparationRefused):

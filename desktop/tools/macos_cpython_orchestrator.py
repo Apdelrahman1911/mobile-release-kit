@@ -33,6 +33,11 @@ PACKAGE_LIMIT = 96 * MIB
 FRAMEWORK_ORIGINAL = "/Library/Frameworks/Python.framework"
 VERSION_RELATIVE = "Versions/3.14"
 ENTRY_RELATIVE = VERSION_RELATIVE + "/Resources/Python.app/Contents/MacOS/Python"
+# The official universal2 package also includes this Rosetta-only auxiliary.
+# It is never an orchestration tool or an ARM loader dependency.
+INTEL_AUX_RELATIVE = VERSION_RELATIVE + "/bin/python3.14-intel64"
+INTEL_AUX_SIZE = 49712
+INTEL_AUX_SHA256 = "abcc6dc44fbaf4695699ab8d584892b7f5936e03c1986da1098c93d02ba7a771"
 CPUS = {"arm64": 0x0100000C, "x86_64": 0x01000007}
 PREP_SECONDS, SETTLE_SECONDS = 600, 60
 FILE_LIMIT, SELECTED_LIMIT, EXPANDED_LIMIT = 256 * MIB, 768 * MIB, 2 * 1024 * MIB
@@ -1121,9 +1126,20 @@ def enter_build(ctx):
     raise PreparationRefused("prepared-exec-unexpected-return")
 
 
-def native_image_bytes(path, machine):
+def native_image_bytes(path, machine, *, relative=None):
+    """Select a native runtime image, not retained foreign auxiliary code."""
     b = build_data()
     data = b.read(path, FILE_LIMIT)
+    if machine == "arm64" and relative == INTEL_AUX_RELATIVE:
+        # Preserve only the exact authenticated Intel-only launcher. The fixed
+        # ENTRY is elsewhere; this auxiliary receives no execution/loader grant.
+        need(len(data) == INTEL_AUX_SIZE and hashlib.sha256(data).hexdigest() == INTEL_AUX_SHA256,
+             "intel-auxiliary-bytes")
+        need(struct.unpack_from(">II", data) == (0xCAFEBABE, 1), "intel-auxiliary-envelope")
+        thin = native_slice(data, "x86_64")
+        need(struct.unpack_from("<I", thin, 12)[0] == 2, "intel-auxiliary-executable")
+        macho_records(thin, "x86_64")
+        return None  # Retained unchanged, not an admitted ARM native image.
     if data[:4] not in {b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"}:
         return None
     return native_slice(data, machine, archive_data=path.suffix == ".a")
@@ -1363,7 +1379,7 @@ def prepare(ctx):
                     continue
                 path = framework / name
                 try:
-                    body = native_image_bytes(path, ctx["machine"])
+                    body = native_image_bytes(path, ctx["machine"], relative=name)
                 except PreparationRefused as error:
                     if (len(error.args) == 1 and type(error.args[0]) is str
                             and error.args[0] in ("fat-slice-header", "fat-native-missing", "macho-input",
@@ -1405,7 +1421,8 @@ def prepare(ctx):
             member_phase = None
             # Signing each Mach-O path is not bundle signing. It may update
             # that image's signature blob but cannot add unrelated resources,
-            # replace aliases, or change any authenticated non-image file.
+            # replace aliases, or change any authenticated nontransformed file
+            # (including the explicit Intel-only auxiliary retained on ARM).
             need(set(signed_rows) == set(copied), "signing-inventory-changed")
             for name, row in copied.items():
                 current = signed_rows[name]
