@@ -2757,6 +2757,91 @@ class InstallerContextTests(unittest.TestCase):
         value.update(completed=False, enteredCases=["component"], cases=[])
         self.assertEqual(fixture.installer_context_data(value, SOURCE), value)  # Honest failure, no completion.
 
+        # Separate receipt observations can be complete while normal receipt
+        # admission stays refused. All bodies here are inert DATA, not Installer.
+        observed = copy.deepcopy(self.public()["cases"][0])
+        observed.pop("receiptOriginals")
+        query_body, query_error = b"", b"inert query status, not absence authority"
+        census_body = fixture.plistlib.dumps([])
+        def command(role, code, stdout, stderr):
+            return {"role": role, "returncode": code, "stdoutBytes": len(stdout), "stderrBytes": len(stderr),
+                    "stdoutSha256": fixture.digest(stdout), "stderrSha256": fixture.digest(stderr)}
+        diagnostic = {"schemaVersion": 1, "type": "mrk-e2-context-receipt-diagnostic-v1", "sourceCommit": SOURCE,
+                      "case": "component", "observerSourceSha256": "b" * 64, "deadlineNs": "100000000000",
+                      "observer": observed,
+                      "receiptSlots": [{"suffix": suffix, "present": False, "bytes": None, "sha256": None}
+                                       for suffix in ("plist", "bom")],
+                      "query": dict(command(fixture.CONTEXT_RECEIPT_ROLES[0], 1, query_body, query_error), classification="nonzero"),
+                      "census": dict(command(fixture.CONTEXT_RECEIPT_ROLES[1], 0, census_body, b""), count=0, identifierListed=False),
+                      "slotPostKnown": True, "packagePostKnown": True, "deadlineKnown": True,
+                      "receiptAbsenceAdmitted": False, "nativeAccepted": False, "maintenanceQualified": False}
+        roles = ("context-helper-build", "context-component-build", "context-product-component-build",
+                 "context-product-build", "context-component-receipt-census", "context-component-installer",
+                 *fixture.CONTEXT_RECEIPT_ROLES)
+        calls = [dict(command(role, 0, b"", b""), entered=True, returned=True,
+                      outputLimitBytes=65536, workTimeoutSeconds=15) for role in roles]
+        for key, call, limit in zip(("query", "census"), calls[-2:], (65536, fixture.RECEIPT_CENSUS_LIMIT)):
+            call.update({name: diagnostic[key][name] for name in ("returncode", "stdoutSha256", "stderrSha256")},
+                        outputLimitBytes=limit)
+        report = {"contextReceiptDiagnostic": diagnostic, "installerContext": value,
+                  "failure": "context-receipt-missing", "phase": "context-component-record", "passed": False,
+                  "outcome": "failed", "sourceClosesKnown": True, "outputClosesKnown": True, "protectedClosesKnown": True,
+                  "cleanupErrors": [], "scratchRetired": False, "installerEntered": False,
+                  "installationReturnedSuccess": False, "nativeEntered": False, "nativeOwnerReturned": False,
+                  "serviceLayoutObservation": {"selected": False}, "originalCalls": calls,
+                  **{key: None for key in ("native", "nativeRustTests", "installerWorkerRustTests", "installedReaderRustTests",
+                                          "producerSigningRustTests", "packageProducerRustTests", "package")}}
+        self.assertIs(fixture.context_receipt_diagnostic_result(report, SOURCE), diagnostic)
+        self.assertIsNone(fixture.context_receipt_diagnostic_result({"contextReceiptDiagnostic": None}, SOURCE))
+        self.assertEqual(fixture.context_receipt_query_classification(query_body, query_error, 1), "nonzero")
+        bound = fixture.plistlib.dumps({"pkgid": fixture.CONTEXT_IDENTIFIERS[0], "pkg-version": "1",
+                                       "volume": "/", "install-location": "/"})
+        self.assertEqual(fixture.context_receipt_query_classification(bound, b"", 0), "bound-receipt")
+        for body, error, code in ((b"", b"", 0), (b"not a plist", b"", 0), (bound, b"unexpected", 0),
+                                  (fixture.plistlib.dumps({"pkgid": "other"}), b"", 0)):
+            self.assertEqual(fixture.context_receipt_query_classification(body, error, code), "invalid-plist")
+        for body, error, code in ((b"x" * 65537, b"", 1), (b"", b"", True), (b"", b"", -1)):
+            with self.assertRaises(fixture.Refused):
+                fixture.context_receipt_query_classification(body, error, code)
+        alternate = copy.deepcopy(report)
+        alternate["contextReceiptDiagnostic"]["query"].update(command(fixture.CONTEXT_RECEIPT_ROLES[0], 0, bound, b""),
+                                                              classification="bound-receipt")
+        listed_body = fixture.plistlib.dumps([fixture.CONTEXT_IDENTIFIERS[0]])
+        alternate["contextReceiptDiagnostic"]["census"].update(command(fixture.CONTEXT_RECEIPT_ROLES[1], 0, listed_body, b""),
+                                                               count=1, identifierListed=True)
+        alternate["originalCalls"][-2].update(returncode=0, stdoutSha256=fixture.digest(bound), stderrSha256=fixture.digest(b""))
+        alternate["originalCalls"][-1].update(stdoutSha256=fixture.digest(listed_body))
+        self.assertFalse(fixture.context_receipt_diagnostic_result(alternate, SOURCE)["receiptAbsenceAdmitted"])
+        for index, mutate in enumerate((
+            lambda row: row.update(passed=True), lambda row: row.update(failure=None),
+            lambda row: row.update(phase="context-product-record"), lambda row: row.update(scratchRetired=True),
+            lambda row: row.update(sourceClosesKnown=False), lambda row: row.update(outputClosesKnown=False),
+            lambda row: row.update(protectedClosesKnown=False), lambda row: row.update(cleanupErrors=["unknown"]),
+            lambda row: row.update(native={}), lambda row: row.update(installerWorkerRustTests={}),
+            lambda row: row["installerContext"].update(completed=True),
+            lambda row: row["contextReceiptDiagnostic"].update(sourceCommit="c" * 40),
+            lambda row: row["contextReceiptDiagnostic"].update(nativeAccepted=True),
+            lambda row: row["contextReceiptDiagnostic"].update(receiptAbsenceAdmitted=True),
+            lambda row: row["contextReceiptDiagnostic"].update(deadlineKnown=False),
+            lambda row: row["contextReceiptDiagnostic"].update(slotPostKnown=False),
+            lambda row: row["contextReceiptDiagnostic"].update(packagePostKnown=False),
+            lambda row: row["contextReceiptDiagnostic"]["observer"].update(outputOriginalClosed=False),
+            lambda row: row["contextReceiptDiagnostic"]["observer"]["argumentOne"].update(rawPath="/inert/foreign"),
+            lambda row: row["contextReceiptDiagnostic"]["receiptSlots"][0].update(present=True, bytes=1, sha256="a" * 64),
+            lambda row: row["contextReceiptDiagnostic"]["query"].update(returncode=0, classification="invalid-plist"),
+            lambda row: row["contextReceiptDiagnostic"]["census"].update(returncode=1),
+            lambda row: row["contextReceiptDiagnostic"]["census"].update(count=4097),
+            lambda row: row["originalCalls"][-1].update(returned=False),
+            lambda row: row["originalCalls"][-2].update(stdoutSha256="e" * 64),
+            lambda row: row["originalCalls"][-2].update(outputLimitBytes=65537),
+            lambda row: row["originalCalls"].append(dict(row["originalCalls"][-1])),
+            lambda row: row["originalCalls"].__setitem__(0, dict(row["originalCalls"][0], role="native-run")),
+        )):
+            changed = copy.deepcopy(report)
+            mutate(changed)
+            with self.subTest(receipt_diagnostic=index), self.assertRaises(fixture.Refused):
+                fixture.context_receipt_diagnostic_result(changed, SOURCE)
+
     def test_common_deadline_is_checked_before_and_after_the_original_owner_return(self):
         self.assertEqual(fixture.context_timeout(100_000_000_000, 40_100_000_000, 60), 59)
         with self.assertRaises(fixture.Refused):
@@ -2852,10 +2937,11 @@ class InstallerContextTests(unittest.TestCase):
 
         # Exercise the real route with inert per-instance work. This is order
         # DATA, not a compiler/native/cleanup success or a fabricated receipt.
-        for layout in (False, True):
-            with self.subTest(early_images_layout=layout):
+        for layout, receipts in ((False, False), (True, False), (False, True)):
+            with self.subTest(early_images_layout=layout, receipt_diagnostic=receipts):
                 op = OwnerRetirementAndModeTests.operation(b"", 0)
                 op.service_layout["selected"] = layout
+                op.context_receipts_selected = receipts
                 op.outputs.directories = {op.scratch: {"identity": WORK[:5]}}
                 route = []
                 def step(name):
@@ -2871,12 +2957,121 @@ class InstallerContextTests(unittest.TestCase):
                     setattr(op, method, step(event))
                 op.receipt = lambda failure: failure
                 self.assertIsNone(op.execute())
-                expected = (["begin", "metadata", "absence", "images", "facades", "layout-compile",
+                expected = (["begin", "context", "finish"] if receipts else
+                            ["begin", "metadata", "absence", "images", "facades", "layout-compile",
                              "sign", "package", "install", "layout-observe", "btm", "finish"] if layout else
                             ["begin", "worker3", "images", "context", "metadata", "absence", "facades",
                              "sign", "package", "install", "native", "btm", "finish"])
                 self.assertEqual(route, expected)
-                self.assertEqual(route.count("images"), 1)
+                self.assertEqual(route.count("images"), 0 if receipts else 1)
+
+        # Fixed receipt capture uses the real context_command/call code with
+        # original-return DATA and finite stat/book doubles. No FS/process use.
+        scenarios = ("missing", "query-zero", "census-listed", "bom-present", "permission", "slot-changed",
+                     "bom-changed", "query-malformed", "census-nonzero", "census-duplicate", "late",
+                     "unknown", "package-changed", "unselected")
+        known = {"missing", "query-zero", "census-listed", "bom-present"}
+        original_stat, original_time = fixture.os.stat, fixture.time
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for scenario in scenarios:
+            with self.subTest(receipt_original=scenario):
+                op = OwnerRetirementAndModeTests.operation(b"", 0)
+                op.context_receipts_selected = scenario != "unselected"
+                op.installed = False
+                op.environment["DEVELOPER_DIR"] = "/inert/sdk"
+                op.installer_context.update(started=True, observerSourceSha256="b" * 64, deadlineNs="100000000000",
+                                            enteredCases=["component"], cases=[])
+                op.phase = "context-component-record"
+                op.calls = [{"role": "context-component-installer", "entered": True, "returned": True, "returncode": 0}]
+                observed = self.public()["cases"][0]
+                observed.pop("receiptOriginals")
+                package_entries = [{"identity": (8, i + 1, 0o100600, 501, 20, 1, 1, 0, 0), "body": bytes([i])}
+                                   for i in range(3)]
+                packages = {label: {"original": list(entry["identity"]), "sha256": fixture.digest(entry["body"])}
+                            for label, entry in zip(fixture.CONTEXT_PACKAGE_LABELS, package_entries)}
+                op.outputs.read = lambda entry: b"changed" if scenario == "package-changed" else entry["body"]
+                bom = b"inert BOM DATA"
+                bom_original = (7, 8, 0o100644, 0, 0, 1, len(bom), 1, 1)
+                bom_entry = {"identity": bom_original}
+                op.protected.directory = lambda _path: {"fd": 90}
+                op.protected.file = lambda *_args, **_kwargs: (bom_entry, bom)
+                checked = []
+                op.protected.check_one = lambda entry: checked.append(entry)
+                stats = []
+                def named(name, *, dir_fd, follow_symlinks):
+                    self.assertEqual(dir_fd, 90)
+                    self.assertIs(follow_symlinks, False)
+                    self.assertIn(name, [fixture.CONTEXT_IDENTIFIERS[0] + "." + suffix for suffix in ("plist", "bom")])
+                    stats.append(name)
+                    if scenario == "permission":
+                        raise PermissionError("inert")
+                    present = name.endswith(".bom") and scenario in ("bom-present", "bom-changed")
+                    if scenario == "slot-changed" and len(stats) > 2:
+                        present = True
+                    if not present:
+                        raise FileNotFoundError("inert")
+                    identity = bom_original
+                    if scenario == "bom-changed" and len(stats) > 2:
+                        identity = (7, 9, *bom_original[2:])
+                    return SimpleNamespace(**dict(zip(fields, identity)))
+                clock = [1]
+                fixed_time = SimpleNamespace(CLOCK_MONOTONIC=17, clock_gettime_ns=lambda selected:
+                                             clock[0] if selected == 17 else self.fail("different clock"))
+                invocations = []
+                def owner(argv, **kwargs):
+                    invocations.append((list(argv), kwargs))
+                    self.assertEqual(kwargs["timeout"], 15)
+                    if "--pkg-info-plist" in argv:
+                        self.assertEqual(argv, ["/usr/sbin/pkgutil", "--pkg-info-plist", fixture.CONTEXT_IDENTIFIERS[0]])
+                        self.assertEqual(kwargs["output_limit"], 65536)
+                        if scenario in ("query-zero", "query-malformed"):
+                            data = (b"invalid" if scenario == "query-malformed" else
+                                    fixture.plistlib.dumps({"pkgid": fixture.CONTEXT_IDENTIFIERS[0], "pkg-version": "1",
+                                                           "volume": "/", "install-location": "/"}))
+                            return subprocess.CompletedProcess(argv, 0, data, b"")
+                        return subprocess.CompletedProcess(argv, 1, b"", b"inert nonzero")
+                    self.assertEqual(argv, ["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"])
+                    self.assertEqual(kwargs["output_limit"], fixture.RECEIPT_CENSUS_LIMIT)
+                    if scenario == "unknown":
+                        raise KeyboardInterrupt()
+                    if scenario == "late":
+                        clock[0] = 100_000_000_000
+                    ids = ([fixture.CONTEXT_IDENTIFIERS[0]] if scenario == "census-listed" else
+                           ["inert", "inert"] if scenario == "census-duplicate" else [])
+                    return subprocess.CompletedProcess(argv, 1 if scenario == "census-nonzero" else 0,
+                                                       fixture.plistlib.dumps(ids), b"")
+                op.owner = SimpleNamespace(run_owned=owner)
+                with patch.object(fixture.os, "stat", named), patch.object(fixture, "time", fixed_time):
+                    if scenario in known:
+                        op.observe_missing_context_receipt(observed, package_entries, packages)
+                    else:
+                        with self.assertRaises((fixture.Refused, PermissionError, KeyboardInterrupt)):
+                            op.observe_missing_context_receipt(observed, package_entries, packages)
+                self.assertIs(fixture.os.stat, original_stat)
+                self.assertIs(fixture.time, original_time)
+                if scenario in known:
+                    data = fixture.context_receipt_diagnostic_data(op.context_receipt_diagnostic, SOURCE)
+                    self.assertEqual(data["query"]["classification"], "bound-receipt" if scenario == "query-zero" else "nonzero")
+                    self.assertEqual(data["census"]["identifierListed"], scenario == "census-listed")
+                    self.assertEqual(data["receiptSlots"][1]["present"], scenario == "bom-present")
+                    self.assertFalse(data["receiptAbsenceAdmitted"] or data["nativeAccepted"] or data["maintenanceQualified"])
+                    self.assertEqual(len(stats), 4)
+                    self.assertEqual(len(checked), 1 if scenario == "bom-present" else 0)
+                else:
+                    self.assertIsNone(op.context_receipt_diagnostic)
+                self.assertEqual(op.installer_context["enteredCases"], ["component"])
+                self.assertEqual(op.installer_context["cases"], [])
+                self.assertFalse(op.installer_context["completed"])
+                if scenario == "unknown":
+                    self.assertFalse(op.calls[-1]["returned"])
+                self.assertEqual(len(invocations), 0 if scenario in ("permission", "unselected") else 2)
+                with patch.object(fixture, "Originals") as cleanup, patch.object(fixture.shutil, "rmtree") as retire:
+                    op.finish()
+                    cleanup.assert_not_called()
+                    retire.assert_not_called()
+                self.assertFalse(op.scratch_retired)
+        with self.assertRaises(fixture.Refused):
+            fixture.Operation(None, None, None, Path("/inert"), {"GITHUB_SHA": SOURCE}, service_layout=True, context_receipts=True)
 
         # These are inert original-read/process/book DATA. The actual pure
         # parser and execute/finish run; no native process or deletion occurs.

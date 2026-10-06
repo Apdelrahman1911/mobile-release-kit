@@ -4,8 +4,9 @@
 Import is DATA-only. The native entry authenticates its original hosted source,
 loads the existing process owner, builds two separate images, and invokes one
 installed fixture. The explicit layout diagnostic observes two public statuses
-instead and never enters registration. Parsed DATA never authorizes a service
-operation. Neither route qualifies publisher identity, the desktop UI or distribution.
+instead and never enters registration. The receipt diagnostic runs only the
+scripts-only Context observation. Parsed DATA never authorizes a service
+operation. These routes do not qualify publisher identity, the UI or distribution.
 """
 from __future__ import annotations
 
@@ -97,11 +98,13 @@ CONTEXT_PACKAGES = ("context-direct.pkg", "context-wrapped.pkg", "context-produc
 CONTEXT_PACKAGE_LABELS = ("direct-component", "wrapped-component", "outer-product")
 CONTEXT_SOURCE = NATIVE + "/src/e2_installer_context.c"
 CONTEXT_SECONDS, CONTEXT_PACKAGE_LIMIT = 120, 8 * 1024 * 1024
+CONTEXT_RECEIPT_ARGUMENT = "--observe-context-receipts"
+CONTEXT_RECEIPT_ROLES = ("context-component-receipt-diagnostic-query", "context-component-receipt-diagnostic-census")
 CONTEXT_ROLES = ("context-helper-build", "context-component-build", "context-product-component-build",
                  "context-product-build", "context-component-empty-bom", "context-product-empty-bom",
                  "context-component-receipt-census", "context-product-receipt-census",
                  "context-component-installer", "context-product-installer",
-                 "context-component-receipt-query", "context-product-receipt-query")
+                 "context-component-receipt-query", "context-product-receipt-query") + CONTEXT_RECEIPT_ROLES
 WORK_SECONDS, HARD_SECONDS = 990, 993
 CAPTURE_LIMIT, RESULT_LIMIT = 65536, 32768
 IMAGE_LIMIT = 32 * 1024 * 1024
@@ -1693,6 +1696,132 @@ def installer_context_data(value, source):
     return value
 
 
+def context_receipt_query_classification(stdout, stderr, returncode):
+    """Diagnostic DATA only. A normal nonzero result does not prove absence."""
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= 65536
+         and type(returncode) is int and 0 <= returncode <= 255, "context-receipt-diagnostic-query")
+    if returncode != 0:
+        return "nonzero"
+    try:
+        receipt = plistlib.loads(stdout)
+    except Exception:
+        return "invalid-plist"
+    return ("bound-receipt" if not stderr and type(receipt) is dict
+            and receipt.get("pkgid") == CONTEXT_IDENTIFIERS[0] and receipt.get("pkg-version") == "1"
+            and receipt.get("volume") == "/" and receipt.get("install-location") in ("/", "")
+            else "invalid-plist")
+
+
+def context_receipt_diagnostic_data(value, source):
+    """Separate observations, never a substitute for required receipt originals."""
+    keys = {"schemaVersion", "type", "sourceCommit", "case", "observerSourceSha256", "deadlineNs", "observer",
+            "receiptSlots", "query", "census", "slotPostKnown", "packagePostKnown", "deadlineKnown",
+            "receiptAbsenceAdmitted", "nativeAccepted", "maintenanceQualified"}
+    need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and value["type"] == "mrk-e2-context-receipt-diagnostic-v1"
+         and value["sourceCommit"] == source and value["case"] == "component"
+         and identity(value["observerSourceSha256"], 64) and decimal(value["deadlineNs"]) > 0
+         and all(value[key] is True for key in ("slotPostKnown", "packagePostKnown", "deadlineKnown"))
+         and all(value[key] is False for key in ("receiptAbsenceAdmitted", "nativeAccepted", "maintenanceQualified")),
+         "context-receipt-diagnostic-shape")
+    row = value["observer"]
+    need(type(row) is dict and set(row) == {"case", "recordSha256", "installerReturnedZero", "outputOriginalClosed",
+         "scriptArgumentCount", "secondArgumentIsRoot", "thirdArgumentIsRoot", "argumentOne", "packagePath"}
+         and row["case"] == "component" and identity(row["recordSha256"], 64)
+         and row["installerReturnedZero"] is row["outputOriginalClosed"] is True
+         and type(row["scriptArgumentCount"]) is int and 0 <= row["scriptArgumentCount"] <= 16
+         and all(type(row[key]) is bool for key in ("secondArgumentIsRoot", "thirdArgumentIsRoot"))
+         and (not row["secondArgumentIsRoot"] or row["scriptArgumentCount"] >= 2)
+         and (not row["thirdArgumentIsRoot"] or row["scriptArgumentCount"] >= 3), "context-receipt-diagnostic-observer")
+    for key in ("argumentOne", "packagePath"):
+        item = row[key]
+        need(type(item) is dict and set(item) == {"kind", "match", "originalMatched"}
+             and type(item["kind"]) is str and item["kind"] in ("missing", "empty", "other", "nominated"),
+             "context-receipt-diagnostic-observer")
+        if item["kind"] == "nominated":
+            need(type(item["match"]) is str and item["match"] in CONTEXT_PACKAGE_LABELS
+                 and item["originalMatched"] is True, "context-receipt-diagnostic-observer")
+        else:
+            need(item["match"] is None and item["originalMatched"] is None, "context-receipt-diagnostic-observer")
+        need(key != "argumentOne" or (item["kind"] == "missing") is (row["scriptArgumentCount"] == 0),
+             "context-receipt-diagnostic-observer")
+    slots = value["receiptSlots"]
+    need(type(slots) is list and len(slots) == 2, "context-receipt-diagnostic-slots")
+    for suffix, slot in zip(("plist", "bom"), slots):
+        need(type(slot) is dict and set(slot) == {"suffix", "present", "bytes", "sha256"}
+             and slot["suffix"] == suffix and type(slot["present"]) is bool, "context-receipt-diagnostic-slots")
+        if slot["present"]:
+            need(type(slot["bytes"]) is int and 0 < slot["bytes"] <= (65536 if suffix == "plist" else 1024 * 1024)
+                 and identity(slot["sha256"], 64), "context-receipt-diagnostic-slots")
+        else:
+            need(slot["bytes"] is None and slot["sha256"] is None, "context-receipt-diagnostic-slots")
+    need(slots[0]["present"] is False, "context-receipt-diagnostic-trigger")
+    for key, role in zip(("query", "census"), CONTEXT_RECEIPT_ROLES):
+        item = value[key]
+        extra = {"classification"} if key == "query" else {"count", "identifierListed"}
+        need(type(item) is dict and set(item) == {"role", "returncode", "stdoutBytes", "stderrBytes",
+             "stdoutSha256", "stderrSha256"} | extra and item["role"] == role
+             and type(item["returncode"]) is int and 0 <= item["returncode"] <= 255
+             and all(type(item[name]) is int and item[name] >= 0 for name in ("stdoutBytes", "stderrBytes"))
+             and item["stdoutBytes"] + item["stderrBytes"] <= (65536 if key == "query" else RECEIPT_CENSUS_LIMIT)
+             and all(identity(item[name], 64) for name in ("stdoutSha256", "stderrSha256")),
+             "context-receipt-diagnostic-command")
+        if key == "query":
+            need(type(item["classification"]) is str and item["classification"] in
+                 (("bound-receipt", "invalid-plist") if item["returncode"] == 0 else ("nonzero",)),
+                 "context-receipt-diagnostic-query")
+            need(item["classification"] != "bound-receipt" or item["stdoutBytes"] > 0 and item["stderrBytes"] == 0,
+                 "context-receipt-diagnostic-query")
+        else:
+            need(item["returncode"] == 0 and item["stdoutBytes"] > 0 and item["stderrBytes"] == 0
+                 and type(item["count"]) is int and 0 <= item["count"] <= 4096
+                 and type(item["identifierListed"]) is bool, "context-receipt-diagnostic-census")
+    need(len(canonical(value)) <= 8192, "context-receipt-diagnostic-bound")
+    return value
+
+
+def context_receipt_diagnostic_result(result, source):
+    """Require actual original finality; the writer's later return still matters."""
+    value = result.get("contextReceiptDiagnostic")
+    if value is None:
+        return None
+    value = context_receipt_diagnostic_data(value, source)
+    need(value["query"]["classification"] != "invalid-plist", "context-receipt-diagnostic-query")
+    context = installer_context_data(result["installerContext"], source)
+    need(result["failure"] == "context-receipt-missing" and result["phase"] == "context-component-record"
+         and result["passed"] is False and result["outcome"] == "failed"
+         and context["started"] is True and context["completed"] is False
+         and context["enteredCases"] == ["component"] and context["cases"] == []
+         and context["observerSourceSha256"] == value["observerSourceSha256"]
+         and context["deadlineNs"] == value["deadlineNs"], "context-receipt-diagnostic-original")
+    need(all(result[key] is True for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown"))
+         and result["cleanupErrors"] == [] and result["scratchRetired"] is False
+         and all(result[key] is False for key in ("installerEntered", "installationReturnedSuccess", "nativeEntered",
+                                                 "nativeOwnerReturned"))
+         and all(result[key] is None for key in ("native", "nativeRustTests", "installerWorkerRustTests",
+                  "installedReaderRustTests", "producerSigningRustTests", "packageProducerRustTests", "package"))
+         and result["serviceLayoutObservation"]["selected"] is False, "context-receipt-diagnostic-finality")
+    calls = result["originalCalls"]
+    allowed = {"context-helper-build", "context-component-build", "context-product-component-build",
+               "context-product-build", "context-component-empty-bom", "context-product-empty-bom",
+               "context-component-receipt-census", "context-component-installer", *CONTEXT_RECEIPT_ROLES}
+    required = allowed - {"context-component-empty-bom", "context-product-empty-bom"}
+    need(type(calls) is list and 3 <= len(calls) <= 10
+         and all(type(call) is dict and call.get("role") in allowed and call.get("entered") is True
+                 and call.get("returned") is True and type(call.get("returncode")) is int
+                 and (call["returncode"] == 0 or call["role"] == CONTEXT_RECEIPT_ROLES[0]) for call in calls)
+         and len({call["role"] for call in calls}) == len(calls)
+         and required <= {call["role"] for call in calls}
+         and [call["role"] for call in calls[-3:]] == ["context-component-installer", *CONTEXT_RECEIPT_ROLES],
+         "context-receipt-diagnostic-calls")
+    for key, call, limit in zip(("query", "census"), calls[-2:], (65536, RECEIPT_CENSUS_LIMIT)):
+        item = value[key]
+        need(call.get("outputLimitBytes") == limit
+             and all(call.get(name) == item[name] for name in ("role", "returncode", "stdoutSha256", "stderrSha256")),
+             "context-receipt-diagnostic-calls")
+    return value
+
+
 def native_rust_test_record():
     return {"schemaVersion": 1, "type": "mrk-macos-native-rust-tests-v1", "target": TARGET,
             "tests": list(NATIVE_RUST_TESTS), "passed": 6, "failed": 0, "ignored": 0, "measured": 0}
@@ -2477,7 +2606,7 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -2662,8 +2791,9 @@ def bundle_info(identifier, executable):
 class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
-    def __init__(self, owner, source, stager, work, environment, *, service_layout=False):
-        need(type(service_layout) is bool, "layout-operation-selector")
+    def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False):
+        need(type(service_layout) is bool and type(context_receipts) is bool
+             and not (service_layout and context_receipts), "layout-operation-selector")
         self.owner, self.source, self.stager = owner, source, stager
         self.work, self.environment = work, environment
         self.scratch = work / "e2-native-fixture"
@@ -2686,6 +2816,8 @@ class Operation:
         self.artifacts = {}
         self._context_audit_refusal = None
         self.context_pure_audit_refused = False
+        self.context_receipts_selected = context_receipts
+        self.context_receipt_diagnostic = None
         self.observer_entry, self.observer_digest, self.metadata = None, None, []
         self.release = None
         self.sources_closed = self.outputs_closed = self.protected_closed = False
@@ -2782,6 +2914,14 @@ class Operation:
 
     def context_command(self, role, argv, cap, *, limit=65536):
         need(role in CONTEXT_ROLES, "context-command-role")
+        need(role not in CONTEXT_RECEIPT_ROLES or self.context_receipts_selected is True,
+             "context-receipt-diagnostic-route")
+        if role in CONTEXT_RECEIPT_ROLES:
+            expected = (["/usr/sbin/pkgutil", "--pkg-info-plist", CONTEXT_IDENTIFIERS[0]]
+                        if role == CONTEXT_RECEIPT_ROLES[0] else ["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"])
+            need(argv == expected and cap == 15
+                 and limit == (65536 if role == CONTEXT_RECEIPT_ROLES[0] else RECEIPT_CENSUS_LIMIT),
+                 "context-receipt-diagnostic-route")
         deadline = decimal(self.installer_context["deadlineNs"])
         timeout = context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), cap)
         self.outputs.check()
@@ -2801,7 +2941,9 @@ class Operation:
         context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), cap)
         self.outputs.check()
         self.protected.check()
-        need(result.returncode == 0, "original-command-failed")
+        # Only this fixed diagnostic query records normal nonzero status as
+        # DATA. All ordinary Context commands keep their exact zero requirement.
+        need(result.returncode == 0 or role == CONTEXT_RECEIPT_ROLES[0], "original-command-failed")
         return result
 
     def context_output(self, path):
@@ -2884,6 +3026,83 @@ class Operation:
              "context-receipt-binding")
         self.protected.check()
         return rows  # Actual root-owned receipt originals remain held until finish().
+
+    def observe_missing_context_receipt(self, observed, package_entries, packages):
+        """Called only after the original output read and missing-plist refusal."""
+        need(self.context_receipts_selected is True and self.installer_context["enteredCases"] == ["component"]
+             and self.installer_context["cases"] == [] and self.phase == "context-component-record"
+             and self.calls and self.calls[-1]["role"] == "context-component-installer"
+             and self.calls[-1]["returned"] is True and self.calls[-1]["returncode"] == 0
+             and observed["case"] == "component" and observed["outputOriginalClosed"] is True,
+             "context-receipt-diagnostic-trigger")
+        deadline = decimal(self.installer_context["deadlineNs"])
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        self.source.book.check()
+        self.outputs.check()
+        self.protected.check()
+        directory = Path("/private/var/db/receipts")
+        parent = self.protected.directory(directory)
+        identifier = CONTEXT_IDENTIFIERS[0]
+        slots, originals = [], []
+        for suffix in ("plist", "bom"):
+            name = identifier + "." + suffix
+            try:
+                before = os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)
+            except FileNotFoundError:
+                slots.append({"suffix": suffix, "present": False, "bytes": None, "sha256": None})
+                originals.append(None)
+            else:
+                entry, body = self.protected.file(directory / name, 65536 if suffix == "plist" else 1024 * 1024,
+                                                 uid=0, modes=(0o644,))
+                need(signature(before) == entry["identity"] and entry["identity"][4] == 0 and body,
+                     "context-receipt-owner")
+                slots.append({"suffix": suffix, "present": True, "bytes": len(body), "sha256": digest(body)})
+                originals.append(entry)
+        need(slots[0]["present"] is False, "context-receipt-diagnostic-slot-changed")
+        query = self.context_command(CONTEXT_RECEIPT_ROLES[0],
+                                     ["/usr/sbin/pkgutil", "--pkg-info-plist", identifier], 15)
+        classification = context_receipt_query_classification(query.stdout, query.stderr, query.returncode)
+        census = self.context_command(CONTEXT_RECEIPT_ROLES[1],
+                                      ["/usr/sbin/pkgutil", "--volume", "/", "--pkgs-plist"], 15,
+                                      limit=RECEIPT_CENSUS_LIMIT)
+        receipt_census_absent(census.stdout, census.stderr)
+        identifiers = plistlib.loads(census.stdout)
+        need(classification != "invalid-plist", "context-receipt-diagnostic-query")
+        for slot, entry in zip(slots, originals):
+            try:
+                after = os.stat(identifier + "." + slot["suffix"], dir_fd=parent["fd"], follow_symlinks=False)
+            except FileNotFoundError:
+                need(entry is None, "context-receipt-diagnostic-slot-changed")
+            else:
+                need(entry is not None and signature(after) == entry["identity"],
+                     "context-receipt-diagnostic-slot-changed")
+                self.protected.check_one(entry)
+        need(len(package_entries) == len(CONTEXT_PACKAGE_LABELS) and set(packages) == set(CONTEXT_PACKAGE_LABELS),
+             "context-receipt-diagnostic-packages")
+        for label, entry in zip(CONTEXT_PACKAGE_LABELS, package_entries):
+            need(list(entry["identity"]) == packages[label]["original"]
+                 and digest(self.outputs.read(entry)) == packages[label]["sha256"], "context-packages-changed")
+        self.source.book.check()
+        self.outputs.check()
+        self.protected.check()
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        def command_data(result, role):
+            return {"role": role, "returncode": result.returncode, "stdoutBytes": len(result.stdout),
+                    "stderrBytes": len(result.stderr), "stdoutSha256": digest(result.stdout),
+                    "stderrSha256": digest(result.stderr)}
+        value = {"schemaVersion": 1, "type": "mrk-e2-context-receipt-diagnostic-v1",
+                 "sourceCommit": self.environment["GITHUB_SHA"], "case": "component",
+                 "observerSourceSha256": self.installer_context["observerSourceSha256"],
+                 "deadlineNs": self.installer_context["deadlineNs"], "observer": observed,
+                 "receiptSlots": slots,
+                 "query": dict(command_data(query, CONTEXT_RECEIPT_ROLES[0]), classification=classification),
+                 "census": dict(command_data(census, CONTEXT_RECEIPT_ROLES[1]), count=len(identifiers),
+                                identifierListed=identifier in identifiers),
+                 "slotPostKnown": True, "packagePostKnown": True, "deadlineKnown": True,
+                 "receiptAbsenceAdmitted": False, "nativeAccepted": False, "maintenanceQualified": False}
+        context_receipt_diagnostic_data(value, self.environment["GITHUB_SHA"])
+        context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
+        self.context_receipt_diagnostic = value  # Provisional until ALL original closes and writer return.
 
     def context_audit(self, entry, body, *, component=None, identifier=None, expected=None):
         """Pure archive/PackageInfo/scripts DATA after the original body read.
@@ -3089,7 +3308,19 @@ class Operation:
                                   "-target", "/"], 60)
             self.phase = "context-" + case + "-record"
             observed = self.context_read_output(original_outputs[case], case, packages)
-            observed["receiptOriginals"] = self.context_receipts(case, CONTEXT_IDENTIFIERS[index])
+            try:
+                observed["receiptOriginals"] = self.context_receipts(case, CONTEXT_IDENTIFIERS[index])
+            except Refused as error:
+                if (self.context_receipts_selected and case == "component"
+                        and type(error) is Refused and error.args == ("context-receipt-missing",)):
+                    original_phase = self.phase
+                    try:
+                        self.observe_missing_context_receipt(observed, package_entries, packages)
+                    except BaseException:
+                        self.context_receipt_diagnostic = None
+                    finally:
+                        self.phase = original_phase
+                raise  # The same original refusal, never diagnostic failure or receipt acceptance.
             need(all(self.outputs.read(entry) == components[n][0] for n, entry in enumerate(package_entries[:2]))
                  and digest(self.outputs.read(package_entries[2])) == packages[CONTEXT_PACKAGE_LABELS[2]]["sha256"],
                  "context-packages-changed")
@@ -3875,6 +4106,7 @@ class Operation:
                 "producerSigningRustTests": self.producer_signing_rust_tests,
                 "packageProducerRustTests": self.package_producer_rust_tests,
                 "installerContext": self.installer_context,
+                "contextReceiptDiagnostic": self.context_receipt_diagnostic,
                 "serviceLayoutObservation": self.service_layout,
                 "btmLogObservation": self.btm_log,
                 "installerEntered": self.installer_entered, "installationReturnedSuccess": self.installed,
@@ -3896,27 +4128,30 @@ class Operation:
         try:
             self.begin()
             self.scratch_identity = self.outputs.directories[self.scratch]["identity"]
-            if not self.service_layout["selected"]:
-                self.build_installer_worker_tests()
-                # Native DATA/client compilation is independent of Context.
-                # Keep this complete original graph/retirement before Context
-                # so a metadata refusal cannot hide a native compiler failure.
-                self.build_images()
+            if self.context_receipts_selected:
                 self.observe_installer_context()
-            self.compile_metadata_observer()
-            self.absence("initial")
-            if self.service_layout["selected"]:
-                self.build_images()  # Diagnostic layout retains its original order.
-            self.compile_facades()
-            if self.service_layout["selected"]:
-                self.compile_service_layout()
-            self.sign()
-            self.package_fixture()
-            self.install_fixture()
-            if self.service_layout["selected"]:
-                self.observe_service_layout()
             else:
-                self.run_native()
+                if not self.service_layout["selected"]:
+                    self.build_installer_worker_tests()
+                    # Native DATA/client compilation is independent of Context.
+                    # Keep this complete original graph/retirement before Context
+                    # so a metadata refusal cannot hide a native compiler failure.
+                    self.build_images()
+                    self.observe_installer_context()
+                self.compile_metadata_observer()
+                self.absence("initial")
+                if self.service_layout["selected"]:
+                    self.build_images()  # Diagnostic layout retains its original order.
+                self.compile_facades()
+                if self.service_layout["selected"]:
+                    self.compile_service_layout()
+                self.sign()
+                self.package_fixture()
+                self.install_fixture()
+                if self.service_layout["selected"]:
+                    self.observe_service_layout()
+                else:
+                    self.run_native()
         except BaseException as error:
             self.context_pure_audit_refused = (type(error) is Refused and error is self._context_audit_refusal)
             failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
@@ -3925,7 +4160,8 @@ class Operation:
         finally:
             original_phase = self.phase
             try:
-                self.observe_btm_logs()
+                if not self.context_receipts_selected:
+                    self.observe_btm_logs()
             except BaseException as error:
                 self.context_pure_audit_refused = False
                 if failure is None:
@@ -3957,7 +4193,8 @@ def main():
         owner = qualification.load_owner(CHECKOUT)
         book.check()
         operation = Operation(owner, source, stager, work, os.environ,
-                              service_layout=sys.argv[1:] == [LAYOUT_ARGUMENT])
+                              service_layout=sys.argv[1:] == [LAYOUT_ARGUMENT],
+                              context_receipts=sys.argv[1:] == [CONTEXT_RECEIPT_ARGUMENT])
         value = operation.execute()
     except BaseException:
         book.finish()
@@ -3965,6 +4202,15 @@ def main():
         return 1
     report = Originals()
     try:
+        receipt_diagnostic = None
+        if operation.context_receipts_selected:
+            try:
+                receipt_diagnostic = context_receipt_diagnostic_result(value, os.environ["GITHUB_SHA"])
+            except BaseException:
+                # A provisional observation cannot survive unknown original
+                # finality. Keep the original failure/call evidence, not success.
+                value["contextReceiptDiagnostic"] = None
+        diagnostic_captured = operation.context_receipts_selected and receipt_diagnostic is not None
         body = canonical(value)
         need(len(body) <= 65536, "owner-result-bound")
         report.publish(work / "e2-native-result.json", body)
@@ -3976,11 +4222,15 @@ def main():
                              "type": value["type"], "reportSha256": digest(body),
                              "nativeChecksPassed": value["passed"]})
         need(os.write(1, summary) == len(summary), "owner-summary-write")
+        if diagnostic_captured:
+            # Output publication cannot renew the original Context endpoint.
+            context_timeout(decimal(receipt_diagnostic["deadlineNs"]),
+                            time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
     except BaseException:
         report.finish()
         print("E2 fixture evidence finalization failed; do not accept a provisional result.", file=sys.stderr)
         return 1
-    return 0 if value["passed"] else 77 if value["outcome"] == "unavailable" else 1
+    return 0 if value["passed"] or diagnostic_captured else 77 if value["outcome"] == "unavailable" else 1
 
 
 if __name__ == "__main__":
