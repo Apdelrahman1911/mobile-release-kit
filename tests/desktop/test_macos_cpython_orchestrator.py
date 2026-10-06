@@ -169,7 +169,7 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
 
 
         # Only public, narrowly selected pkgutil facts may leave the task.
-        # A modern status is useful diagnostic DATA, NOT newly accepted trust.
+        # These arbitrary subjects remain diagnostics, not accepted trust.
         subject = "Developer ID Installer: Python Software Foundation (PUBLIC1234)"
         modern = "signed by a developer certificate issued by Apple for distribution"
         legacy = "signed by a certificate trusted by macOS"
@@ -219,19 +219,69 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             self.assertIsNone(row[key])
         self.assertEqual((row["statusShape"], row["psfSubjectShape"]), ("invalid-utf8", "invalid-utf8"))
 
-        # The same original result feeds observation before the unchanged
-        # authentication guard. Only original-known publication can export it.
+        # Synthetic parser DATA uses the genuine observed public status and
+        # subject, not a certificate or a native signature-verification receipt.
+        expected_subject = "Developer ID Installer: Python Software Foundation (BMM5U3QVKW)"
+        status_line = ("   Status: " + modern + "\n").encode()
+        subject_line = ("    1. " + expected_subject + "\n").encode()
+        signed = prefix + status_line + b"Certificate Chain:\n" + subject_line
+        self.assertTrue(PREP.package_signature_valid(signed))
+        self.assertTrue(PREP.package_signature_valid(status_line + expected_subject.encode()))
+        self.assertTrue(PREP.package_signature_valid(
+            ("\tStatus: " + modern + "  \n\t2. " + expected_subject + "  \n").encode()))
+
+        refused = [
+            None, signed.decode(), bytearray(signed), {}, b"", b" " * (PREP.MIB + 1),
+            signed + b"\xff", signed.decode().encode("utf-16"),
+            subject_line, status_line, status_line + b"Certificate Chain:\n",
+            signed.replace(modern.encode(), legacy.encode()),
+            signed.replace(modern.encode(), b"unsigned"),
+            signed.replace(modern.encode(), b""),
+            signed.replace(modern.encode(), b"unknown positive status"),
+            signed.replace(modern.encode(), modern.encode() + b" but untrusted"),
+            signed.replace(b"Status: ", b"Status:\t"),
+            signed.replace(b"   Status:", "\u00a0Status:".encode()),
+            signed.replace(modern.encode(), modern.replace("by a", "by\u00a0a").encode()),
+            signed.replace(modern.encode(), modern.encode() + b"\r"),
+            signed.replace(modern.encode(), b"\x1b[32m" + modern.encode()),
+            signed + b"\0Status: unsigned\n",
+            signed + status_line,
+            signed + b"Status: unsigned\n",
+            signed + b"\tStatus:\tMALFORMED\n",
+            signed + "\u00a0Status: unsigned\n".encode(),
+            signed.replace(b"BMM5U3QVKW", b"PUBLIC1234"),
+            signed.replace(b"Python Software Foundation", b"Another Foundation"),
+            signed.replace(subject_line, ("Comment: " + expected_subject + "\n").encode()),
+            signed.replace(subject_line, ("    1. " + expected_subject + " extra\n").encode()),
+            signed.replace(subject_line, ("    0001. " + expected_subject + "\n").encode()),
+            signed.replace(subject_line, ("    1000. " + expected_subject + "\n").encode()),
+            signed.replace(subject_line, ("\u00a0" + expected_subject + "\n").encode()),
+            signed + subject_line,
+            signed + b"    2. Developer ID Installer: Other (PUBLIC1234)\n",
+        ]
+        for number, body in enumerate(refused):
+            with self.subTest(refused_signature=number), self.assertRaisesRegex(
+                    PREP.PreparationRefused, r"^package-trusted-PSF-signature$"):
+                PREP.package_signature_valid(body)
+        # Publishing one public-looking PSF subject does not authenticate its
+        # arbitrary TeamID or authorize a public diagnostic dictionary as input.
+        diagnostic_only = prefix + status_line + suffix
+        self.assertEqual(PREP.package_signature_observation(diagnostic_only)["psfSubjectShape"], "single")
+        for value in (diagnostic_only, PREP.package_signature_observation(signed)):
+            with self.assertRaises(PREP.PreparationRefused):
+                PREP.package_signature_valid(value)
+
+        # The same successful original result feeds diagnostic observation and
+        # the raw validator. Only original-known publication can export it.
         source = Path(PREP.__file__).read_text()
         preparation = source[source.index("def prepare(ctx):"):source.index("\ndef main():")]
         original_call = 'signature = engine.run("package", ["--check-signature", str(package)], environment=env)'
         observation = ('package_signature = {"commandIndex": len(engine.records) - 1,\n'
                        '                                 **package_signature_observation(signature["stdout"])}')
-        original_guard = ('text = signature["stdout"].decode("utf-8", "strict")\n'
-                          '            need("signed by a certificate trusted by" in text\n'
-                          '                 and re.search(r"Developer ID Installer: Python Software Foundation \\([A-Z0-9]{10}\\)", text),\n'
-                          '                 "package-trusted-PSF-signature")')
+        original_guard = 'package_signature_valid(signature["stdout"])'
         self.assertIn("package_signature = None", preparation)
-        self.assertIn(original_guard, preparation)
+        self.assertEqual(preparation.count(original_guard), 1)
+        self.assertNotIn('need("signed by a certificate trusted by"', preparation)
         self.assertLess(preparation.index(original_call), preparation.index(observation))
         self.assertLess(preparation.index(observation), preparation.index(original_guard))
         self.assertLess(preparation.index(original_guard), preparation.index('["--expand-full"'))

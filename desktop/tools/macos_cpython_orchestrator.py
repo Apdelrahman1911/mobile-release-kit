@@ -80,6 +80,35 @@ def package_binding(size, sha256):
          and sha256 == PACKAGE_SHA256, "package-byte-authority")
 
 
+def package_signature_valid(body):
+    """Validate the original pkgutil result after fixed-byte and tool checks.
+
+    This raw-result parser is separate from the nonauthoritative public
+    diagnostic. Its positive sentence and PSF identity were observed on the
+    supported macOS26 tool; an unfamiliar future format must fail closed.
+    """
+    code = "package-trusted-PSF-signature"
+    need(type(body) is bytes and 0 < len(body) <= MIB, code)
+    try:
+        text = body.decode("utf-8", "strict")
+    except UnicodeError:
+        raise PreparationRefused(code) from None
+    need(all(character in "\n\t" or ord(character) >= 32 and ord(character) != 127
+             for character in text), code)
+    lines = text.split("\n")
+    # Count malformed anchored fields too. Unicode whitespace is recognized
+    # here only to refuse ambiguity, never to normalize an accepted field.
+    statuses = [line for line in lines if re.match(r"\s*Status:", line) is not None]
+    sentence = "signed by a developer certificate issued by Apple for distribution"
+    need(len(statuses) == 1
+         and re.fullmatch(r"[ \t]*Status: *" + re.escape(sentence) + r" *", statuses[0]) is not None, code)
+    subject = "Developer ID Installer: Python Software Foundation (BMM5U3QVKW)"
+    need(text.count("Developer ID Installer:") == 1
+         and any(re.fullmatch(r"[ \t]*(?:[1-9][0-9]{0,2}\. )?" + re.escape(subject) + r" *", line)
+                 is not None for line in lines), code)
+    return True
+
+
 def package_signature_observation(body):
     """Public-package diagnostic fields only; never signature authority.
 
@@ -1085,10 +1114,7 @@ def prepare(ctx):
             signature = engine.run("package", ["--check-signature", str(package)], environment=env)
             package_signature = {"commandIndex": len(engine.records) - 1,
                                  **package_signature_observation(signature["stdout"])}
-            text = signature["stdout"].decode("utf-8", "strict")
-            need("signed by a certificate trusted by" in text
-                 and re.search(r"Developer ID Installer: Python Software Foundation \([A-Z0-9]{10}\)", text),
-                 "package-trusted-PSF-signature")
+            package_signature_valid(signature["stdout"])
             expanded = root / "expanded"
             engine.run("package", ["--expand-full", str(package), str(expanded)], environment=env)
             inventory = scan_tree(expanded, deadline=engine.deadline - SETTLE_SECONDS)
