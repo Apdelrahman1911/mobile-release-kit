@@ -319,15 +319,34 @@ def inventory(body, source):
 
 
 def make_value(body, key):
-    # CPython's nominated Makefile uses a conditional default only for this
-    # regenerating interpreter. Every other admitted assignment stays plain '='.
+    # This fixed upstream uses the ordinary TAB recipe prefix. Do not interpret
+    # custom Make syntax or silently mistake a changed prefix for declarations.
+    need(b".RECIPEPREFIX" not in body, "make-assignment-missing-or-repeated")
     operator = b"?=" if key == "PYTHON_FOR_REGEN" else b"="
     name = re.escape(key.encode("ascii"))
     modifiers = rb"[ \t]*(?:(?:override|export|private)[ \t]+)*"
-    values = re.findall(rb"^(" + modifiers + rb")" + name + rb"[ \t]*([:+?!]*=)[ \t]*(.*)$", body, re.M)
+    matches = list(re.finditer(rb"^(" + modifiers + rb")" + name + rb"[ \t]*([:+?!]*=)[ \t]*(.*)$", body, re.M))
+    recipe_offsets = set()
+    if key == "CC":
+        # SOURCE-bound CPython 3.14.7 DTrace rules pass CC to the shell, not
+        # to Make. TAB alone is insufficient: prove these exact rule contexts.
+        contexts = (
+            (b"Include/pydtrace_probes.h: $(srcdir)/Include/pydtrace.d\n\t$(MKDIR_P) Include\n",
+             b'\tCC="$(CC)" CFLAGS="$(CFLAGS)" $(DTRACE) $(DFLAGS) -o $@ -h -s $(srcdir)/Include/pydtrace.d\n\t: sed in-place edit with POSIX-only tools\n\tsed \'s/PYTHON_/PyDTrace_/\' $@ > $@.tmp\n\tmv $@.tmp $@\n'),
+            (b"Python/pydtrace.o: $(srcdir)/Include/pydtrace.d $(DTRACE_DEPS)\n",
+             b'\tCC="$(CC)" CFLAGS="$(CFLAGS)" $(DTRACE) $(DFLAGS) -o $@ -G -s $(srcdir)/Include/pydtrace.d $(DTRACE_DEPS)\n'),
+        )
+        for prefix, command in contexts:
+            block = prefix + command
+            start = body.find(block)
+            if (start >= 0 and body.count(block) == 1
+                    and (start == 0 or body[start - 1:start] == b"\n")
+                    and (start < 2 or body[start - 2:start - 1] != b"\\")):
+                recipe_offsets.add(start + len(prefix))
+    values = [match.groups() for match in matches if match.start() not in recipe_offsets]
     defined = re.search(rb"^" + modifiers + rb"define[ \t]+" + name + rb"(?:[ \t:+?!=]|$)", body, re.M)
-    # Count all assignment operators/modifiers before selecting the exact form;
-    # a second override must not disappear merely because its syntax differs.
+    # Every unmatched recipe-like line and all modified/duplicate declarations
+    # remain counted. Missing DTrace blocks grant nothing, not an alternate value.
     need(defined is None and len(values) == 1 and values[0][0] == b"" and values[0][1] == operator,
          "make-assignment-missing-or-repeated")
     return values[0][2].decode("utf-8", "strict").strip()
